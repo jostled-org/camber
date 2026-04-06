@@ -79,7 +79,7 @@ fn build_go_binary() -> Result<PathBuf, Box<str>> {
     let output = Command::new("go")
         .args(["build", "-o"])
         .arg(&binary)
-        .arg(".")
+        .arg("main.go")
         .current_dir(&source_dir)
         .output()
         .map_err(|e| format!("go build failed: {e}").into_boxed_str())?;

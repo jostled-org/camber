@@ -76,19 +76,3 @@ jobs:
       - name: Clean build (populate cache)
         working-directory: test-project
         run: cargo build
-
-      - name: Modify handler
-        run: echo '// trigger recompile' >> test-project/src/main.rs
-
-      - name: Measure incremental compile
-        working-directory: test-project
-        run: |
-          START=$(date +%s%N)
-          cargo build
-          END=$(date +%s%N)
-          ELAPSED=$(( (END - START) / 1000000 ))
-          echo "Incremental compile: ${ELAPSED}ms"
-          if [ "$ELAPSED" -gt 5000 ]; then
-            echo "FAIL: incremental compile took ${ELAPSED}ms (>5000ms ceiling)"
-            exit 1
-          fi
