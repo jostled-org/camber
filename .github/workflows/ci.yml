@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Build
+        run: cargo build --workspace --features "profiling,ws,grpc,acme,dns01,nats,sqs"
+
+      - name: Test
+        run: cargo test --workspace --features "profiling,ws,grpc,acme,dns01,nats,sqs"
+
+      - name: Clippy
+        run: cargo clippy --workspace --features "profiling,ws,grpc,acme,dns01,nats,sqs" -- -D warnings
+
+      - name: cargo-deny
+        run: cargo install cargo-deny && cargo deny --workspace check
+
+  compile-time:
+    name: Incremental Compile Time
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        template: [http, fanout, advanced]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build camber-cli
+        run: cargo build --release -p camber-cli
+
+      - name: Generate ${{ matrix.template }} project
+        run: ./target/release/camber new test-project --template ${{ matrix.template }}
+
+      - name: Patch local crates
+        run: |
+          mkdir -p test-project/.cargo
+          WORKSPACE=$(pwd)
+          cat > test-project/.cargo/config.toml <<EOF
+          [patch.crates-io]
+          camber = { path = "${WORKSPACE}/crates/camber" }
+          camber-build = { path = "${WORKSPACE}/crates/camber-build" }
+          EOF
+
+      - name: Clean build (populate cache)
+        working-directory: test-project
+        run: cargo build
+
+      - name: Modify handler
+        run: echo '// trigger recompile' >> test-project/src/main.rs
+
+      - name: Measure incremental compile
+        working-directory: test-project
+        run: |
+          START=$(date +%s%N)
+          cargo build
+          END=$(date +%s%N)
+          ELAPSED=$(( (END - START) / 1000000 ))
+          echo "Incremental compile: ${ELAPSED}ms"
+          if [ "$ELAPSED" -gt 5000 ]; then
+            echo "FAIL: incremental compile took ${ELAPSED}ms (>5000ms ceiling)"
+            exit 1
+          fi

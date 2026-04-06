@@ -1,0 +1,18 @@
+[package]
+name = "camber-macros"
+version.workspace = true
+edition.workspace = true
+description = "Procedural macros for Camber"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jostled-org/camber"
+homepage = "https://github.com/jostled-org/camber"
+documentation = "https://docs.rs/camber-macros"
+readme = "../../README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

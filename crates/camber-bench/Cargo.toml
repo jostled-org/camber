@@ -1,0 +1,45 @@
+[package]
+name = "camber-bench"
+version.workspace = true
+edition.workspace = true
+publish = false
+license = "MIT OR Apache-2.0"
+readme = "../../README.md"
+
+[lints]
+workspace = true
+
+[lib]
+name = "camber_bench"
+path = "src/lib.rs"
+
+[[bin]]
+name = "camber-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "bench-upstream"
+path = "src/bin/bench_upstream.rs"
+
+[[bin]]
+name = "bench-camber"
+path = "src/bin/bench_camber.rs"
+
+[[bin]]
+name = "bench-axum"
+path = "src/bin/bench_axum.rs"
+
+[dependencies]
+axum = "0.8"
+camber = { version = "0.1.1", path = "../camber" }
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+http-body-util = "0.1"
+bytes = "1"

@@ -1,0 +1,32 @@
+[package]
+name = "camber-cli"
+version.workspace = true
+edition.workspace = true
+description = "CLI, project scaffolding, and config-driven proxy for Camber"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jostled-org/camber"
+homepage = "https://github.com/jostled-org/camber"
+documentation = "https://docs.rs/camber-cli"
+readme = "../../README.md"
+keywords = ["camber", "cli", "proxy", "tokio", "http"]
+categories = ["command-line-utilities", "network-programming", "web-programming::http-server"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "camber"
+path = "src/main.rs"
+
+[lib]
+name = "camber_cli"
+path = "src/lib.rs"
+
+[dependencies]
+camber = { version = "0.1.1", path = "../camber", features = ["acme", "dns01"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
