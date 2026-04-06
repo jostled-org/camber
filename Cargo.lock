@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "camber"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "arrayvec",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "camber-bench"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "bytes",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "camber-build"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "prost-build",
  "protoc-bin-vendored",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "camber-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camber",
  "clap",
@@ -961,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "camber-macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
