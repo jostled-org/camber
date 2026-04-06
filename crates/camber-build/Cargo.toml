@@ -1,0 +1,18 @@
+[package]
+name = "camber-build"
+version.workspace = true
+edition.workspace = true
+description = "Build helpers for Camber code generation"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jostled-org/camber"
+homepage = "https://github.com/jostled-org/camber"
+documentation = "https://docs.rs/camber-build"
+readme = "../../README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+prost-build = "0.13"
+protoc-bin-vendored = "3"
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
