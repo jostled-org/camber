@@ -1,0 +1,11 @@
+/target
+.mcp.json
+.manifest.toml
+docs/.codebase-snapshot.md
+docs/specs/
+docs/plans/
+docs/scripts/
+docs/internal/
+docs/planning_guidelines.md
+docs/introspection_guidelines.md
+logs/

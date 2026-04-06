@@ -1,0 +1,103 @@
+[package]
+name = "camber"
+version.workspace = true
+edition.workspace = true
+description = "Opinionated async Rust for IO-bound services on top of Tokio"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jostled-org/camber"
+homepage = "https://github.com/jostled-org/camber"
+documentation = "https://docs.rs/camber"
+readme = "../../README.md"
+keywords = ["tokio", "async", "http", "runtime", "middleware"]
+categories = ["asynchronous", "network-programming", "web-programming::http-server", "web-programming::http-client"]
+
+[lints]
+workspace = true
+
+[features]
+profiling = ["dep:pprof"]
+ws = ["dep:tokio-tungstenite"]
+grpc = ["dep:tonic", "dep:tonic-reflection", "dep:tonic-health", "dep:prost"]
+acme = ["dep:rustls-acme"]
+dns01 = ["dep:instant-acme"]
+jemalloc = ["dep:tikv-jemallocator"]
+mimalloc = ["dep:mimalloc-crate"]
+nats = ["dep:async-nats"]
+sqs = ["dep:aws-sdk-sqs", "dep:aws-config"]
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+
+[dependencies]
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["now"] }
+cron = "0.15"
+crossbeam-channel = "0.5"
+http-body-util = "0.1"
+itoa = "1"
+hyper = { version = "1", features = ["http1", "http2", "server"] }
+hyper-util = { version = "0.1", features = ["http1", "http2", "server", "tokio"] }
+metrics = "0.24.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal", "time"] }
+tokio-rustls = "0.26"
+webpki-roots = "1"
+tokio-tungstenite = { version = "0.24", optional = true }
+futures-util = "0.3"
+prost = { version = "0.13", optional = true }
+pprof = { version = "0.15", features = ["flamegraph"], optional = true }
+thiserror = "2"
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost"], optional = true }
+tonic-health = { version = "0.12", default-features = false, optional = true }
+tonic-reflection = { version = "0.12", default-features = false, features = ["server"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream", "json"] }
+tikv-jemallocator = { version = "0.6", optional = true }
+mimalloc-crate = { package = "mimalloc", version = "0.1", optional = true }
+async-nats = { version = "0.46", default-features = false, optional = true }
+aws-sdk-sqs = { version = "1.93", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
+aws-config = { version = "1", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
+flate2 = "1"
+arc-swap = "1"
+arrayvec = "0.7"
+metrics-exporter-prometheus = { version = "0.18.1", default-features = false }
+rustls-pemfile = "2"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+rustls-acme = { version = "0.15", optional = true, default-features = false, features = ["aws-lc-rs", "webpki-roots"] }
+instant-acme = { version = "0.8", optional = true, features = ["rcgen"] }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", optional = true, features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", optional = true, features = ["grpc-tonic"] }
+tracing-opentelemetry = { version = "0.32", optional = true }
+camber-macros = { version = "0.1.0", path = "../camber-macros" }
+
+[dev-dependencies]
+flate2 = "1"
+h2 = "0.4"
+http = "1"
+hyper = { version = "1", features = ["client"] }
+metrics = "0.24.3"
+prost = "0.13"
+rcgen = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.3"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal", "time", "test-util"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "channel"] }
+tonic-health = { version = "0.12" }
+tonic-reflection = { version = "0.12", features = ["server"] }
+tungstenite = "0.24"
+tracing-subscriber = { version = "0.3", features = ["registry"] }
+rustls-acme = { version = "0.15", default-features = false, features = ["aws-lc-rs", "webpki-roots"] }
+wiremock = "0.6"
+
+[[test]]
+name = "otel"
+required-features = ["otel"]
+
+[build-dependencies]
+camber-build = { version = "0.1.0", path = "../camber-build" }

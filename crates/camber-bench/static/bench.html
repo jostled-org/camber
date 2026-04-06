@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Benchmark</title></head>
+<body>
+<h1>Camber Benchmark Static File</h1>
+<p>This is a 1KB HTML file used for static file serving benchmarks. The content is deliberately padded to reach approximately one kilobyte in size, which provides a realistic baseline for measuring static file throughput across different web frameworks. Serving static content is a common operation and framework overhead matters here.</p>
+<p>The file is embedded at compile time via include_str! and served from memory. No disk IO is involved during the benchmark, isolating framework dispatch overhead from filesystem performance.</p>
+<footer>camber-bench</footer>
+</body>
+</html>
