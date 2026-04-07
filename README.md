@@ -2,7 +2,7 @@
 [![docs.rs](https://img.shields.io/docsrs/camber)](https://docs.rs/camber)
 [![CI](https://github.com/jostled-org/camber/actions/workflows/ci.yml/badge.svg)](https://github.com/jostled-org/camber/actions/workflows/ci.yml)
 [![Downloads](https://img.shields.io/crates/d/camber)](https://crates.io/crates/camber)
-[![deps.rs](https://deps.rs/repo/github/jostled-org/camber/status.svg)](https://deps.rs/repo/github/jostled-org/camber)
+[![deps.rs](https://deps.rs/crate/camber/latest/status.svg)](https://deps.rs/crate/camber/latest)
 [![License: MIT/Apache-2.0](https://img.shields.io/crates/l/camber)](LICENSE-MIT)
 
 **Camber** is opinionated async Rust for IO-bound services on top of Tokio.
