@@ -30,8 +30,8 @@ sqs = ["dep:aws-sdk-sqs", "dep:aws-config"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 
 [dependencies]
-bytes = "1"
-chrono = { version = "0.4", default-features = false, features = ["now"] }
+bytes = "1.11.1"
+chrono = { version = "0.4.20", default-features = false, features = ["now"] }
 cron = "0.16"
 crossbeam-channel = "0.5"
 http-body-util = "0.1"
@@ -41,8 +41,8 @@ hyper-util = { version = "0.1", features = ["http1", "http2", "server", "tokio"]
 metrics = "0.24.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal", "time"] }
+rustls = { version = "0.23.18", features = ["aws-lc-rs"] }
+tokio = { version = "1.23.1", features = ["rt-multi-thread", "net", "macros", "signal", "time"] }
 tokio-rustls = "0.26"
 webpki-roots = "1"
 tokio-tungstenite = { version = "0.29", optional = true }
@@ -66,7 +66,7 @@ arrayvec = "0.7"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false }
 toml = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json"] }
+tracing-subscriber = { version = "0.3.20", features = ["json"] }
 rustls-acme = { version = "0.15", optional = true, default-features = false, features = ["aws-lc-rs", "webpki-roots"] }
 instant-acme = { version = "0.8", optional = true, features = ["rcgen"] }
 opentelemetry = { version = "0.31", optional = true }
@@ -77,7 +77,7 @@ camber-macros = { version = "0.1.2", path = "../camber-macros" }
 
 [dev-dependencies]
 flate2 = "1"
-h2 = "0.4"
+h2 = "0.4.4"
 http = "1"
 hyper = { version = "1", features = ["client"] }
 metrics = "0.24.3"
@@ -87,14 +87,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 signal-hook = "0.4"
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal", "time", "test-util"] }
+tokio = { version = "1.23.1", features = ["rt-multi-thread", "net", "macros", "signal", "time", "test-util"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
 tonic = { version = "0.14", default-features = false, features = ["codegen", "channel"] }
 tonic-health = { version = "0.14" }
 tonic-reflection = { version = "0.14", features = ["server"] }
 tungstenite = "0.29"
-tracing-subscriber = { version = "0.3", features = ["registry"] }
+tracing-subscriber = { version = "0.3.20", features = ["registry"] }
 rustls-acme = { version = "0.15", default-features = false, features = ["aws-lc-rs", "webpki-roots"] }
 wiremock = "0.6"
 
