@@ -53,8 +53,25 @@ Use `http::serve(...)` by itself for the default case. Wrap it in `runtime::buil
 - [Proxy Quickstart](docs/guides/proxy-quickstart.md)
 - [Cross-Compilation](docs/guides/cross-compile.md)
 - [Reference](docs/reference/README.md)
+- [Runtime Reference](docs/reference/runtime.md)
+- [HTTP Reference](docs/reference/http.md)
+- [Middleware Reference](docs/reference/middleware.md)
+- [HTTP Client Reference](docs/reference/client.md)
+- [Tasks and Channels Reference](docs/reference/tasks-and-channels.md)
+- [Error Reference](docs/reference/error.md)
+- [Config Reference](docs/reference/config.md)
+- [TLS Reference](docs/reference/tls.md)
+- [Net Reference](docs/reference/net.md)
+- [Resource Reference](docs/reference/resource.md)
+- [Scheduling Reference](docs/reference/schedule.md)
+- [Secret Reference](docs/reference/secret.md)
+- [Signals and Shutdown Reference](docs/reference/signals.md)
+- [Time Reference](docs/reference/time.md)
+- [Logging Reference](docs/reference/logging.md)
 
 If you're evaluating Camber as a library, start with [Tokio/Axum to Camber](docs/guides/tokio-to-camber.md) or the [Reference](docs/reference/README.md).
+
+The README is the overview. `docs/reference/` and docs.rs are the exhaustive public surface.
 
 ## Reverse Proxy (Homelab / WIP)
 

@@ -2,6 +2,8 @@
 
 Build a static Linux binary from any platform.
 
+This guide covers build workflow only. For CLI command behavior, use the [CLI Reference](../reference/cli.md).
+
 ## Native Cross-Compile (musl)
 
 Install the target and build:

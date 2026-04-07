@@ -4,6 +4,12 @@ Config-driven reverse proxy for homelab and internal deployments. Auto-TLS, heal
 
 > **Status:** The proxy is functional for homelab use but is not yet a production edge replacement. Missing features include access logging, rate limiting at the proxy layer, and upstream connection pooling.
 
+This guide is the operator workflow. For field-by-field lookup, use:
+
+- [CLI Reference](../reference/cli.md)
+- [Config Reference](../reference/config.md)
+- [TLS Reference](../reference/tls.md)
+
 ## Install
 
 ```sh
@@ -106,42 +112,25 @@ Replace `203.0.113.50` with your server's public IP.
 
 Other DNS providers (Namecheap, Route 53, etc.) work for A record setup — create records pointing each subdomain to your server IP. However, DNS-01 ACME challenges (for servers behind NAT) currently require Cloudflare.
 
-## Config Reference
+## Config Shape
 
-### Top-Level
+The practical shape is small:
 
-| Field | Default | Description |
-|---|---|---|
-| `listen` | `0.0.0.0:8080` | Bind address |
-| `connection_limit` | unbounded | Maximum concurrent connections across all sites |
-| `[tls]` | — | TLS configuration block |
+- top-level `listen`
+- optional `connection_limit`
+- optional `[tls]`
+- one or more `[[site]]` blocks
 
-### TLS
+Each site needs at least one of:
 
-| Field | Default | Description |
-|---|---|---|
-| `auto` | `false` | Enable automatic Let's Encrypt certificates |
-| `email` | — | Required when `auto = true` |
-| `staging` | `false` | Use Let's Encrypt staging (for testing) |
-| `cert` | — | Path to PEM certificate (manual TLS) |
-| `key` | — | Path to PEM private key (manual TLS) |
-| `dns_provider` | — | DNS provider for DNS-01 challenges (`"cloudflare"` is the only supported provider) |
-| `dns_api_token_env` | — | Environment variable holding the DNS API token |
-| `dns_api_token_file` | — | File path containing the DNS API token |
+- `proxy`
+- `root`
 
-### Sites
+Use the reference docs for the complete field list and validation rules:
 
-Each `[[site]]` block defines a virtual host.
-
-| Field | Default | Description |
-|---|---|---|
-| `host` | — | Hostname to match (required) |
-| `proxy` | — | Backend URL to forward requests to |
-| `root` | — | Directory for static file serving |
-| `health_check` | — | Backend path to poll for health (e.g., `/health`) |
-| `health_interval` | `10` | Seconds between health check polls |
-
-A site needs at least `proxy` or `root`. Both can be set — `GET` and `HEAD` requests serve matching local files first, falling back to the proxy when the file does not exist. All other methods go straight to the proxy backend. Proxy sites use streaming response forwarding by default.
+- [CLI Reference](../reference/cli.md)
+- [Config Reference](../reference/config.md)
+- [TLS Reference](../reference/tls.md)
 
 ## Connection Limits
 
@@ -235,6 +224,8 @@ key = "/etc/tls/key.pem"
 ### No TLS
 
 Omit the `[tls]` block entirely. Useful behind a load balancer that terminates TLS upstream.
+
+For full TLS field semantics and validation rules, see [TLS Reference](../reference/tls.md).
 
 ## Systemd Deployment
 

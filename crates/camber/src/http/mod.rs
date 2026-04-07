@@ -1,10 +1,88 @@
+//! HTTP server and client surface for Camber.
+//!
+//! This module is the main entrypoint for building services: routing,
+//! middleware, request and response types, server startup, proxying, and a
+//! small built-in HTTP client all live here.
+//!
+//! # Start With a Router
+//!
+//! ```rust,no_run
+//! use camber::RuntimeError;
+//! use camber::http::{self, Response, Router};
+//!
+//! fn main() -> Result<(), RuntimeError> {
+//!     let mut router = Router::new();
+//!     router.get("/hello", |_req| async {
+//!         Response::text(200, "Hello, world!")
+//!     });
+//!     http::serve("0.0.0.0:8080", router)
+//! }
+//! ```
+//!
+//! Use [`self::serve`] for the normal blocking server case. Use the `serve_async*`
+//! or `serve_background*` variants when you need explicit handle management
+//! inside an existing runtime scope.
+//!
+//! # Core Types
+//!
+//! - [`self::Router`]: register routes, middleware, SSE, streams, proxy routes, and
+//!   feature-gated WebSocket or gRPC handlers
+//! - [`self::Request`]: inspect params, query strings, headers, cookies, form data,
+//!   multipart bodies, and raw bytes
+//! - [`self::Response`]: build text, JSON, bytes, headers, and cookies
+//! - [`self::IntoResponse`]: handler return conversion for `Response` and
+//!   `Result<Response, RuntimeError>`
+//!
+//! # HTTP Client
+//!
+//! For one-off calls, use the free functions like [`self::get`], [`self::post`],
+//! [`self::put`], and [`self::delete`]. For custom timeouts or retries, start
+//! with [`self::client`]:
+//!
+//! ```rust,no_run
+//! use camber::RuntimeError;
+//! use camber::http;
+//! use std::time::Duration;
+//!
+//! async fn fetch() -> Result<(), RuntimeError> {
+//!     let client = http::client()
+//!         .connect_timeout(Duration::from_secs(5))
+//!         .read_timeout(Duration::from_secs(10))
+//!         .retries(3)
+//!         .backoff(Duration::from_millis(100));
+//!
+//!     let response = client.get("https://example.com/health").await?;
+//!     let _status = response.status();
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Middleware and Handler Shape
+//!
+//! Handlers receive `&Request` and return an async block. Middleware receives
+//! `&Request` and a [`self::Next`] handle.
+//!
+//! If you need request data after an `.await`, move owned values into the
+//! future first instead of borrowing from `req` across the await boundary.
+//!
+//! # Related Modules
+//!
+//! - [`self::cors`]: CORS helpers
+//! - [`self::compression`]: response compression helpers
+//! - [`self::rate_limit`]: request rate limiting middleware
+//! - [`self::validate`]: request validation middleware
+//! - [`self::mock`]: HTTP client interception for tests
+//! - `otel`: OpenTelemetry propagation and spans when the feature is enabled
+
 mod async_proxy;
 mod body;
 mod buffer_config;
 mod client;
+/// Response compression helpers.
 pub mod compression;
 mod conn;
 mod cookie;
+/// CORS middleware builders and helpers.
 pub mod cors;
 mod dispatch;
 mod encoding;
@@ -16,10 +94,13 @@ mod host_router;
 mod internal_routes;
 mod method;
 mod middleware;
+/// HTTP client mocking for tests.
 pub mod mock;
 mod multipart;
 #[cfg(feature = "otel")]
+/// OpenTelemetry request propagation and tracing hooks.
 pub mod otel;
+/// Rate limiting middleware.
 pub mod rate_limit;
 mod request;
 mod response;
@@ -30,6 +111,7 @@ mod static_files;
 mod stream;
 mod trie;
 mod util;
+/// Request validation middleware.
 pub mod validate;
 #[cfg(feature = "ws")]
 mod websocket;

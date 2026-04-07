@@ -13,18 +13,22 @@ pub struct Part {
 }
 
 impl Part {
+    /// Return the multipart field name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Return the uploaded filename, if present.
     pub fn filename(&self) -> Option<&str> {
         self.filename.as_deref()
     }
 
+    /// Return the part content type, if present.
     pub fn content_type(&self) -> Option<&str> {
         self.content_type.as_deref()
     }
 
+    /// Return the raw part payload.
     pub fn data(&self) -> &[u8] {
         &self.data
     }
@@ -37,6 +41,7 @@ pub struct MultipartReader {
 }
 
 impl MultipartReader {
+    /// Return all parsed multipart parts.
     pub fn parts(&self) -> &[Part] {
         &self.parts
     }

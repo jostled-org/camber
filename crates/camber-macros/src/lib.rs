@@ -1,3 +1,8 @@
+//! Procedural macros for Camber.
+//!
+//! Currently this crate exposes the `#[camber::test]` attribute for async tests
+//! that need a Tokio runtime with Camber context installed.
+
 mod expand;
 
 use proc_macro::TokenStream;

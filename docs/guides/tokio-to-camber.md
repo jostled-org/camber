@@ -2,6 +2,15 @@
 
 You already know Rust. You already know Tokio. Camber removes the ceremony for services that don't need fine-grained async control.
 
+This guide is for migration and concept mapping. For API lookup, use the reference docs:
+
+- [Runtime Reference](../reference/runtime.md)
+- [HTTP Reference](../reference/http.md)
+- [Middleware Reference](../reference/middleware.md)
+- [HTTP Client Reference](../reference/client.md)
+- [Tasks and Channels Reference](../reference/tasks-and-channels.md)
+- [Error Reference](../reference/error.md)
+
 ## Side-by-Side: HTTP Service
 
 ### Axum
@@ -56,6 +65,8 @@ Handlers are async closures, but there's no `#[tokio::main]`, no extractor types
 Use `http::serve(...)` by itself for the normal server case. Reach for `runtime::builder().run(...)` only when you need Camber runtime configuration around the server or want to scope other structured work alongside it.
 
 ## Concept Mapping
+
+For exact method names and type behavior, use the reference docs. This table is a migration map, not the canonical API listing.
 
 | Tokio/Axum | Camber | Notes |
 |---|---|---|

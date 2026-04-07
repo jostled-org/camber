@@ -34,8 +34,11 @@ fn parse_one_cookie(trimmed: &str) -> Option<(Box<str>, Box<str>)> {
 /// SameSite attribute for cookies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SameSite {
+    /// Restrict the cookie to same-site requests only.
     Strict,
+    /// Allow the cookie on top-level navigations and same-site requests.
     Lax,
+    /// Allow the cookie on cross-site requests.
     None,
 }
 
@@ -69,6 +72,7 @@ impl Default for CookieOptions {
 }
 
 impl CookieOptions {
+    /// Create cookie options with no attributes set.
     pub fn new() -> Self {
         Self {
             path: None,
@@ -80,31 +84,37 @@ impl CookieOptions {
         }
     }
 
+    /// Set the cookie path attribute.
     pub fn path(mut self, path: &str) -> Self {
         self.path = Some(path.into());
         self
     }
 
+    /// Set the cookie domain attribute.
     pub fn domain(mut self, domain: &str) -> Self {
         self.domain = Some(domain.into());
         self
     }
 
+    /// Set the cookie max-age in seconds.
     pub fn max_age(mut self, seconds: u64) -> Self {
         self.max_age = Some(seconds);
         self
     }
 
+    /// Set the SameSite attribute.
     pub fn same_site(mut self, value: SameSite) -> Self {
         self.same_site = Some(value);
         self
     }
 
+    /// Mark the cookie as `Secure`.
     pub fn secure(mut self) -> Self {
         self.is_secure = true;
         self
     }
 
+    /// Mark the cookie as `HttpOnly`.
     pub fn http_only(mut self) -> Self {
         self.is_http_only = true;
         self

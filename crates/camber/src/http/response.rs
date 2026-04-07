@@ -43,6 +43,7 @@ enum BodyStore {
 /// Implemented for `Response` (passthrough) and `Result<Response, RuntimeError>`
 /// (maps `BadRequest` to 400, other errors to 500).
 pub trait IntoResponse {
+    /// Convert this value into a concrete [`Response`].
     fn into_response(self) -> Response;
 }
 
@@ -265,10 +266,14 @@ impl Response {
         }
     }
 
+    /// Return the HTTP status code.
     pub fn status(&self) -> u16 {
         self.status
     }
 
+    /// Return the response body as text.
+    ///
+    /// Invalid UTF-8 is decoded lossily on first access and cached.
     pub fn body(&self) -> &str {
         match &self.body {
             BodyStore::Text(text) => text,
@@ -286,6 +291,7 @@ impl Response {
         }
     }
 
+    /// Return all response headers.
     pub fn headers(&self) -> &[HeaderPair] {
         &self.headers
     }

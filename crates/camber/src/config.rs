@@ -7,18 +7,28 @@ use std::path::Path;
 /// Used by all suspension-stack tools (Camber, Kingpin, Damper).
 #[derive(Debug, Deserialize)]
 pub struct TlsConfig {
+    /// Path to a PEM-encoded certificate file for manual TLS.
     pub cert: Option<Box<str>>,
+    /// Path to a PEM-encoded private key file for manual TLS.
     pub key: Option<Box<str>>,
+    /// Enable automatic certificate provisioning.
     pub auto: Option<bool>,
+    /// Contact email for ACME registration.
     pub email: Option<Box<str>>,
+    /// Use the ACME staging environment instead of production.
     pub staging: Option<bool>,
+    /// Directory used to cache ACME account and certificate data.
     pub cache_dir: Option<Box<str>>,
+    /// DNS provider name for DNS-01 challenges.
     pub dns_provider: Option<Box<str>>,
+    /// Environment variable containing the DNS API token.
     pub dns_api_token_env: Option<Box<str>>,
+    /// File containing the DNS API token.
     pub dns_api_token_file: Option<Box<str>>,
 }
 
 impl TlsConfig {
+    /// Validate that the configured TLS mode is internally consistent.
     pub fn validate(&self) -> Result<(), RuntimeError> {
         let is_auto = self.auto.unwrap_or(false);
         let has_cert = self.cert.is_some();
@@ -61,38 +71,47 @@ impl TlsConfig {
         }
     }
 
+    /// Return whether automatic TLS is enabled.
     pub fn auto(&self) -> bool {
         self.auto.unwrap_or(false)
     }
 
+    /// Return the configured ACME contact email.
     pub fn email(&self) -> Option<&str> {
         self.email.as_deref()
     }
 
+    /// Return whether ACME staging mode is enabled.
     pub fn staging(&self) -> bool {
         self.staging.unwrap_or(false)
     }
 
+    /// Return the configured certificate path for manual TLS.
     pub fn cert(&self) -> Option<&str> {
         self.cert.as_deref()
     }
 
+    /// Return the configured private key path for manual TLS.
     pub fn key(&self) -> Option<&str> {
         self.key.as_deref()
     }
 
+    /// Return the configured ACME cache directory.
     pub fn cache_dir(&self) -> Option<&str> {
         self.cache_dir.as_deref()
     }
 
+    /// Return the configured DNS provider name.
     pub fn dns_provider(&self) -> Option<&str> {
         self.dns_provider.as_deref()
     }
 
+    /// Return the environment variable name holding the DNS API token.
     pub fn dns_api_token_env(&self) -> Option<&str> {
         self.dns_api_token_env.as_deref()
     }
 
+    /// Return the file path holding the DNS API token.
     pub fn dns_api_token_file(&self) -> Option<&str> {
         self.dns_api_token_file.as_deref()
     }

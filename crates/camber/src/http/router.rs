@@ -65,6 +65,7 @@ impl Default for Router {
 }
 
 impl Router {
+    /// Create an empty router with default buffer settings.
     pub fn new() -> Self {
         Self::default()
     }
@@ -133,6 +134,9 @@ impl Router {
             .push(Box::new(move |req, next| Box::pin(mw(req, next))));
     }
 
+    /// Register a GET handler for `path`.
+    ///
+    /// Path segments beginning with `:` are captured as named parameters.
     pub fn get<F, Fut, R>(&mut self, path: &str, handler: F)
     where
         F: Fn(&Request) -> Fut + Send + Sync + 'static,
@@ -142,6 +146,7 @@ impl Router {
         self.add(Method::Get, path, handler);
     }
 
+    /// Register a POST handler for `path`.
     pub fn post<F, Fut, R>(&mut self, path: &str, handler: F)
     where
         F: Fn(&Request) -> Fut + Send + Sync + 'static,
@@ -151,6 +156,7 @@ impl Router {
         self.add(Method::Post, path, handler);
     }
 
+    /// Register a PUT handler for `path`.
     pub fn put<F, Fut, R>(&mut self, path: &str, handler: F)
     where
         F: Fn(&Request) -> Fut + Send + Sync + 'static,
@@ -160,6 +166,7 @@ impl Router {
         self.add(Method::Put, path, handler);
     }
 
+    /// Register a DELETE handler for `path`.
     pub fn delete<F, Fut, R>(&mut self, path: &str, handler: F)
     where
         F: Fn(&Request) -> Fut + Send + Sync + 'static,
@@ -169,6 +176,7 @@ impl Router {
         self.add(Method::Delete, path, handler);
     }
 
+    /// Register a PATCH handler for `path`.
     pub fn patch<F, Fut, R>(&mut self, path: &str, handler: F)
     where
         F: Fn(&Request) -> Fut + Send + Sync + 'static,
@@ -178,6 +186,10 @@ impl Router {
         self.add(Method::Patch, path, handler);
     }
 
+    /// Register a HEAD handler for `path`.
+    ///
+    /// If you do not register one, Camber can still answer HEAD requests for
+    /// matching GET routes by stripping the response body automatically.
     pub fn head<F, Fut, R>(&mut self, path: &str, handler: F)
     where
         F: Fn(&Request) -> Fut + Send + Sync + 'static,
@@ -187,6 +199,7 @@ impl Router {
         self.add(Method::Head, path, handler);
     }
 
+    /// Register an OPTIONS handler for `path`.
     pub fn options<F, Fut, R>(&mut self, path: &str, handler: F)
     where
         F: Fn(&Request) -> Fut + Send + Sync + 'static,

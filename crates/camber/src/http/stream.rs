@@ -22,6 +22,7 @@ pub struct StreamSender {
 }
 
 impl StreamSender {
+    /// Send one response chunk to the client.
     pub async fn send(&self, data: impl Into<Bytes>) -> Result<(), RuntimeError> {
         self.tx
             .send(data.into())

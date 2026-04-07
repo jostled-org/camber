@@ -102,6 +102,9 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Set the number of Tokio worker threads.
+    ///
+    /// A value of `0` is rejected when the runtime starts.
     pub fn worker_threads(mut self, n: usize) -> Self {
         self.config.worker_threads = n;
         self
@@ -146,17 +149,20 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Enable tracing subscriber setup for the runtime.
     pub fn with_tracing(mut self) -> Self {
         self.config.tracing_enabled = true;
         self
     }
 
+    /// Enable metrics export endpoints for the runtime.
     pub fn with_metrics(mut self) -> Self {
         self.config.metrics_enabled = true;
         self
     }
 
     #[cfg(feature = "profiling")]
+    /// Enable profiling support for the runtime.
     pub fn with_profiling(mut self) -> Self {
         self.config.profiling_enabled = true;
         self

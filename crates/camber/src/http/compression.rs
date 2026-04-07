@@ -27,6 +27,10 @@ fn accepts_gzip(req: &Request) -> bool {
     }
 }
 
+/// Create middleware that applies gzip compression to eligible responses.
+///
+/// Compression is enabled only when the request advertises `gzip` support and
+/// the response is an unencoded text-like payload larger than 1 KB.
 pub fn auto()
 -> impl Fn(&Request, Next) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync + 'static
 {

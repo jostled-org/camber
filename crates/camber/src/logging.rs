@@ -5,17 +5,24 @@ use tracing_subscriber::util::SubscriberInitExt;
 /// Output format for the tracing subscriber.
 #[derive(Debug, Clone, Copy)]
 pub enum LogFormat {
+    /// Human-readable log lines.
     Text,
+    /// Structured JSON log events.
     Json,
 }
 
 /// Verbosity level for the tracing subscriber.
 #[derive(Debug, Clone, Copy)]
 pub enum LogLevel {
+    /// Emit only error events.
     Error,
+    /// Emit warnings and errors.
     Warn,
+    /// Emit informational events, warnings, and errors.
     Info,
+    /// Emit debug and higher-severity events.
     Debug,
+    /// Emit the most verbose trace output.
     Trace,
 }
 

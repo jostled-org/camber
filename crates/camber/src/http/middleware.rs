@@ -44,6 +44,7 @@ impl<'a> Next<'a> {
         }
     }
 
+    /// Run the next middleware layer or terminal handler.
     pub fn call(self, req: &Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
         match (self.remaining.split_first(), &self.terminal) {
             (Some((mw, rest)), _) => {

@@ -1,12 +1,19 @@
 /// HTTP method for route matching and request identification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Method {
+    /// GET
     Get,
+    /// POST
     Post,
+    /// PUT
     Put,
+    /// DELETE
     Delete,
+    /// PATCH
     Patch,
+    /// HEAD
     Head,
+    /// OPTIONS
     Options,
 }
 

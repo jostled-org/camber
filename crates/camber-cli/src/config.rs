@@ -1,7 +1,9 @@
+/// Re-export of the shared TLS config block used by the proxy config.
 pub use camber::config::TlsConfig;
 use serde::Deserialize;
 use std::path::Path;
 
+/// Top-level proxy configuration loaded from TOML.
 #[derive(Debug, Deserialize)]
 pub struct Config {
     listen: Option<Box<str>>,
@@ -11,6 +13,7 @@ pub struct Config {
     sites: Vec<SiteConfig>,
 }
 
+/// Per-site virtual host configuration.
 #[derive(Debug, Deserialize)]
 pub struct SiteConfig {
     host: Box<str>,
@@ -21,6 +24,7 @@ pub struct SiteConfig {
 }
 
 impl Config {
+    /// Load, parse, and validate a proxy config file.
     pub fn load(path: &Path) -> Result<Self, String> {
         let config: Config = camber::config::load_config(path).map_err(|e| e.to_string())?;
         config.validate()?;
@@ -58,18 +62,24 @@ impl Config {
         Ok(())
     }
 
+    /// Return the bind address for the proxy.
+    ///
+    /// Defaults to `0.0.0.0:8080` when not specified.
     pub fn listen(&self) -> &str {
         self.listen.as_deref().unwrap_or("0.0.0.0:8080")
     }
 
+    /// Return the configured global connection limit.
     pub fn connection_limit(&self) -> Option<usize> {
         self.connection_limit
     }
 
+    /// Return the configured TLS block, if any.
     pub fn tls(&self) -> Option<&TlsConfig> {
         self.tls.as_ref()
     }
 
+    /// Return all configured sites.
     pub fn sites(&self) -> &[SiteConfig] {
         &self.sites
     }
@@ -86,22 +96,27 @@ impl Config {
 }
 
 impl SiteConfig {
+    /// Return the host name matched by this site.
     pub fn host(&self) -> &str {
         &self.host
     }
 
+    /// Return the proxy upstream URL, if configured.
     pub fn proxy(&self) -> Option<&str> {
         self.proxy.as_deref()
     }
 
+    /// Return the local static file root, if configured.
     pub fn root(&self) -> Option<&str> {
         self.root.as_deref()
     }
 
+    /// Return the health check path, if configured.
     pub fn health_check(&self) -> Option<&str> {
         self.health_check.as_deref()
     }
 
+    /// Return the health check interval in seconds, if configured.
     pub fn health_interval(&self) -> Option<u64> {
         self.health_interval
     }

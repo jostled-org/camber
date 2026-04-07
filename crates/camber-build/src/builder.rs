@@ -23,6 +23,7 @@ pub fn configure() -> Builder {
     }
 }
 
+/// Builder for customizing `.proto` compilation.
 pub struct Builder {
     file_descriptor_set_path: Option<PathBuf>,
 }

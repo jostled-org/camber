@@ -38,6 +38,7 @@ fn listen_unix(path: &str) -> Result<Listener, RuntimeError> {
     })
 }
 
+/// Bound TCP or Unix listener used by Camber server entrypoints.
 pub struct Listener {
     pub(crate) inner: ListenerInner,
 }
@@ -88,7 +89,9 @@ fn cleanup_unix_socket(path: &std::path::Path) -> Result<(), RuntimeError> {
 
 /// Address of a bound listener.
 pub enum ListenerAddr {
+    /// TCP socket address.
     Tcp(std::net::SocketAddr),
+    /// Unix domain socket path.
     Unix(PathBuf),
 }
 

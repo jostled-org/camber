@@ -2,6 +2,15 @@
 
 Go concepts mapped to Camber equivalents. If you've written `net/http` services in Go, you already know the patterns — Camber uses the same model with Rust's type safety.
 
+This guide is for migration and workflow translation. For API lookup, use the reference docs:
+
+- [Runtime Reference](../reference/runtime.md)
+- [HTTP Reference](../reference/http.md)
+- [Middleware Reference](../reference/middleware.md)
+- [HTTP Client Reference](../reference/client.md)
+- [Tasks and Channels Reference](../reference/tasks-and-channels.md)
+- [Error Reference](../reference/error.md)
+
 ## HTTP Handler
 
 ### Go
@@ -42,6 +51,8 @@ fn main() -> Result<(), RuntimeError> {
 Use `http::serve(...)` directly for the normal server case. Use `runtime::builder().run(...)` only when you need runtime configuration or want to scope other work around the server.
 
 ## Concept Mapping
+
+For exact method names and type behavior, use the reference docs. This table is a migration map, not the canonical API listing.
 
 | Go | Camber | Notes |
 |---|---|---|

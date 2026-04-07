@@ -15,11 +15,13 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     (Sender { inner: tx }, Receiver { inner: rx })
 }
 
+/// Sending half of a bounded synchronous channel.
 pub struct Sender<T> {
     inner: cb::Sender<T>,
 }
 
 impl<T> Sender<T> {
+    /// Send a value, blocking until capacity is available or the channel closes.
     pub fn send(&self, value: T) -> Result<(), RuntimeError> {
         runtime::check_cancel()?;
         self.inner
@@ -41,11 +43,16 @@ impl<T> Clone for Sender<T> {
     }
 }
 
+/// Receiving half of a bounded synchronous channel.
 pub struct Receiver<T> {
     inner: cb::Receiver<T>,
 }
 
 impl<T> Receiver<T> {
+    /// Receive the next value.
+    ///
+    /// Returns `RuntimeError::Cancelled` if the current task is cancelled while
+    /// waiting.
     pub fn recv(&self) -> Result<T, RuntimeError> {
         runtime::check_cancel()?;
         match runtime::cancel_channel() {

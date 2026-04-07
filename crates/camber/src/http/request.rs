@@ -134,6 +134,7 @@ impl Request {
         })
     }
 
+    /// Return the uppercase HTTP method string.
     pub fn method(&self) -> &'static str {
         self.method.as_str()
     }
@@ -152,6 +153,7 @@ impl Request {
         self.method
     }
 
+    /// Return the request path without the query string.
     pub fn path(&self) -> &str {
         self.uri.path()
     }
@@ -163,6 +165,9 @@ impl Request {
         self.uri.path_and_query().map_or("/", |pq| pq.as_str())
     }
 
+    /// Iterate over all request headers as `(name, value)` pairs.
+    ///
+    /// Invalid header values are yielded as empty strings.
     pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
         self.raw_headers.iter().map(|(k, v)| {
             let name = k.as_str();
@@ -198,6 +203,9 @@ impl Request {
         self.is_tls = tls;
     }
 
+    /// Return the request body as text.
+    ///
+    /// Invalid UTF-8 is decoded lossily on first access and cached.
     pub fn body(&self) -> &str {
         match std::str::from_utf8(&self.body_raw) {
             Ok(text) => text,
@@ -329,6 +337,9 @@ pub struct RequestBuilder {
 }
 
 impl RequestBuilder {
+    /// Set the HTTP method.
+    ///
+    /// Accepts the standard uppercase method names supported by Camber.
     pub fn method(mut self, method: &str) -> Result<Self, RuntimeError> {
         self.method = Method::parse(method).ok_or_else(|| {
             RuntimeError::InvalidArgument(format!("unknown HTTP method: {method}").into_boxed_str())
@@ -336,26 +347,31 @@ impl RequestBuilder {
         Ok(self)
     }
 
+    /// Set the request path, including an optional query string.
     pub fn path(mut self, path: &str) -> Self {
         self.path = path.into();
         self
     }
 
+    /// Append a header to the request.
     pub fn header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.into(), value.into()));
         self
     }
 
+    /// Set a UTF-8 request body from text.
     pub fn body(mut self, body: &str) -> Self {
         self.body = Bytes::from(body.to_owned());
         self
     }
 
+    /// Set the raw request body bytes.
     pub fn body_raw(mut self, body: impl Into<Bytes>) -> Self {
         self.body = body.into();
         self
     }
 
+    /// Serialize `value` as JSON and set `Content-Type: application/json`.
     pub fn json(mut self, value: &impl serde::Serialize) -> Result<Self, RuntimeError> {
         let serialized = serde_json::to_string(value).map_err(|e| {
             RuntimeError::InvalidArgument(
@@ -368,6 +384,10 @@ impl RequestBuilder {
         Ok(self)
     }
 
+    /// Build the request value.
+    ///
+    /// Returns `RuntimeError::InvalidArgument` if the path, header names, or
+    /// header values are invalid.
     pub fn finish(self) -> Result<Request, RuntimeError> {
         let uri: hyper::Uri = self
             .path

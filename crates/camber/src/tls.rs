@@ -19,6 +19,7 @@ pub struct CertStore {
 }
 
 impl CertStore {
+    /// Create a certificate store from an initial certified key.
     pub fn new(key: CertifiedKey) -> Self {
         Self {
             inner: Arc::new(ArcSwap::from_pointee(key)),

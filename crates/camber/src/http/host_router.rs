@@ -22,6 +22,7 @@ pub struct HostRouter {
 }
 
 impl HostRouter {
+    /// Create an empty host router.
     pub fn new() -> Self {
         Self::default()
     }
@@ -58,12 +59,16 @@ impl HostRouter {
         self.buffers
     }
 
+    /// Register a router for a specific host name.
+    ///
+    /// Host matching is case-insensitive.
     pub fn add(&mut self, host: &str, router: Router) -> &mut Self {
         let normalized: Box<str> = host.to_ascii_lowercase().into_boxed_str();
         self.hosts.push((normalized, router));
         self
     }
 
+    /// Set the fallback router used when no host-specific router matches.
     pub fn set_default(&mut self, router: Router) -> &mut Self {
         self.default = Some(router);
         self

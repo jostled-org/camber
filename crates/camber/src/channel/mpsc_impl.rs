@@ -18,6 +18,7 @@ pub fn mpsc<T>(cap: usize) -> Result<(MpscSender<T>, MpscReceiver<T>), RuntimeEr
     }
 }
 
+/// Sending half of an async MPSC channel.
 pub struct MpscSender<T> {
     inner: tokio_mpsc::Sender<T>,
 }
@@ -53,6 +54,7 @@ impl<T> fmt::Debug for MpscSender<T> {
     }
 }
 
+/// Receiving half of an async MPSC channel.
 pub struct MpscReceiver<T> {
     inner: tokio_mpsc::Receiver<T>,
 }

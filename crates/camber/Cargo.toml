@@ -11,6 +11,9 @@ readme = "../../README.md"
 keywords = ["tokio", "async", "http", "runtime", "middleware"]
 categories = ["asynchronous", "network-programming", "web-programming::http-server", "web-programming::http-client"]
 
+[package.metadata.docs.rs]
+features = ["profiling", "ws", "grpc", "acme", "dns01", "nats", "sqs", "otel"]
+
 [lints]
 workspace = true
 
