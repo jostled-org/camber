@@ -34,6 +34,7 @@ fn patch_local_crates(project_dir: &Path) {
 
 // 4.T1: incremental compile time under 5 seconds
 #[test]
+#[ignore = "developer-loop timing check; not suitable for standard CI"]
 fn incremental_compile_under_5_seconds() {
     let dir = tempfile::tempdir().expect("create temp dir");
     let project_dir = dir.path().join("test-incremental");

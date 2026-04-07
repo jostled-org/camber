@@ -1,78 +1,50 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  push:
     branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  CAMBER_CI_FEATURES: profiling,ws,grpc,acme,dns01,nats,sqs,otel
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
+              - '.github/workflows/**'
+
   check:
-    name: Build & Test
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: rustfmt, clippy
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Format
-        run: cargo fmt --check
-
-      - name: Build
-        run: cargo build --workspace --features "profiling,ws,grpc,acme,dns01,nats,sqs"
-
-      - name: Test
-        run: cargo test --workspace --features "profiling,ws,grpc,acme,dns01,nats,sqs"
-
-      - name: Clippy
-        run: cargo clippy --workspace --features "profiling,ws,grpc,acme,dns01,nats,sqs" -- -D warnings
-
-      - name: cargo-deny
-        run: cargo install cargo-deny && cargo deny --workspace check
-
-  compile-time:
-    name: Incremental Compile Time
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        template: [http, fanout, advanced]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build camber-cli
-        run: cargo build --release -p camber-cli
-
-      - name: Generate ${{ matrix.template }} project
-        run: ./target/release/camber new test-project --template ${{ matrix.template }}
-
-      - name: Patch local crates
-        run: |
-          mkdir -p test-project/.cargo
-          WORKSPACE=$(pwd)
-          cat > test-project/.cargo/config.toml <<EOF
-          [patch.crates-io]
-          camber = { path = "${WORKSPACE}/crates/camber" }
-          camber-build = { path = "${WORKSPACE}/crates/camber-build" }
-          EOF
-
-      - name: Clean build (populate cache)
-        working-directory: test-project
-        run: cargo build
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --features "${CAMBER_CI_FEATURES}" -- -D warnings
+      - run: cargo install pedant && find . -path '*/src/*.rs' | xargs pedant
+      - run: cargo test --workspace --features "${CAMBER_CI_FEATURES}"
+      - run: cargo install cargo-deny && cargo deny --workspace check
