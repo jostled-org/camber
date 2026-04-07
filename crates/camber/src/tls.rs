@@ -1,5 +1,6 @@
 use crate::RuntimeError;
 use crate::net::TlsStream;
+use rustls::pki_types::pem::PemObject;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -49,13 +50,12 @@ impl ResolvesServerCert for CertStore {
 
 /// Parse a `CertifiedKey` from PEM-encoded certificate and key bytes.
 pub fn parse_certified_key(cert_pem: &[u8], key_pem: &[u8]) -> Result<CertifiedKey, RuntimeError> {
-    let certs: Vec<_> = rustls_pemfile::certs(&mut &*cert_pem)
+    let certs: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| RuntimeError::Tls(format!("failed to parse TLS cert PEM: {e}").into()))?;
 
-    let key = rustls_pemfile::private_key(&mut &*key_pem)
-        .map_err(|e| RuntimeError::Tls(format!("failed to parse TLS key PEM: {e}").into()))?
-        .ok_or_else(|| RuntimeError::Tls("no private key found in PEM data".into()))?;
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem)
+        .map_err(|e| RuntimeError::Tls(format!("failed to parse TLS key PEM: {e}").into()))?;
 
     let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
         .map_err(|e| RuntimeError::Tls(format!("unsupported private key type: {e}").into()))?;

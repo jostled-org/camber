@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use camber::http::{self, Router};
-use camber::{RuntimeError, runtime, spawn};
+use camber::{runtime, spawn, RuntimeError};
+use rustls::pki_types::pem::PemObject;
 
 pub fn test_runtime() -> runtime::RuntimeBuilder {
     runtime::builder()
@@ -108,12 +109,10 @@ fn parse_pem(
     Vec<rustls::pki_types::CertificateDer<'static>>,
     rustls::pki_types::PrivateKeyDer<'static>,
 ) {
-    let certs: Vec<_> = rustls_pemfile::certs(&mut &cert_pem[..])
+    let certs: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    let key = rustls_pemfile::private_key(&mut &key_pem[..])
-        .unwrap()
-        .unwrap();
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem).unwrap();
     (certs, key)
 }
 
@@ -151,7 +150,7 @@ pub fn server_tls_config(cert_pem: &[u8], key_pem: &[u8]) -> Arc<rustls::ServerC
 pub fn tls_client_config(cert_pems: &[&[u8]]) -> rustls::ClientConfig {
     let mut root_store = rustls::RootCertStore::empty();
     for pem in cert_pems {
-        let certs = rustls_pemfile::certs(&mut &pem[..])
+        let certs = rustls::pki_types::CertificateDer::pem_slice_iter(pem)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         for cert in certs {

@@ -60,7 +60,6 @@ flate2 = "1"
 arc-swap = "1"
 arrayvec = "0.7"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false }
-rustls-pemfile = "2"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }

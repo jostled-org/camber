@@ -1,6 +1,7 @@
 #![cfg(feature = "acme")]
 
 use camber::acme::AcmeConfig;
+use rustls::pki_types::pem::PemObject;
 use rustls_acme::CertCache;
 use rustls_acme::caches::DirCache;
 
@@ -136,7 +137,7 @@ fn cert_persists_across_restarts() {
 
             // Build a TLS client that trusts our self-signed cert.
             let mut root_store = rustls::RootCertStore::empty();
-            let certs = rustls_pemfile::certs(&mut &cert_pem_bytes[..])
+            let certs = rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem_bytes)
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
             for cert in certs {
