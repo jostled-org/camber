@@ -103,4 +103,4 @@ name = "otel"
 required-features = ["otel"]
 
 [build-dependencies]
-camber-build = { version = "0.1.2", path = "../camber-build" }
+camber-build = { version = "0.1.4", path = "../camber-build" }

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/jostled-org/camber/compare/camber-v0.1.3...camber-v0.1.4) - 2026-04-07
+
+### Fixed
+
+- upgrade all breaking dependencies to latest
+
+### Other
+
+- Update README.md
+
 ## [0.1.2](https://github.com/jostled-org/camber/compare/camber-v0.1.1...camber-v0.1.2) - 2026-04-07
 
 ### Fixed
