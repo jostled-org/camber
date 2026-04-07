@@ -69,7 +69,7 @@ opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.31", optional = true, features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", optional = true, features = ["grpc-tonic"] }
 tracing-opentelemetry = { version = "0.32", optional = true }
-camber-macros = { version = "0.1.1", path = "../camber-macros" }
+camber-macros = { version = "0.1.2", path = "../camber-macros" }
 
 [dev-dependencies]
 flate2 = "1"
@@ -99,4 +99,4 @@ name = "otel"
 required-features = ["otel"]
 
 [build-dependencies]
-camber-build = { version = "0.1.1", path = "../camber-build" }
+camber-build = { version = "0.1.2", path = "../camber-build" }
