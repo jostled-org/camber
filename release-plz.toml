@@ -2,3 +2,13 @@
 semver_check = true
 changelog_update = true
 git_release_enable = true
+
+# Ignore CI config, release config, and changelog-only changes when
+# determining whether a crate has unreleased work. Without this,
+# merging a release PR leaves CHANGELOG diffs after the tag, which
+# release-plz treats as new work and opens another PR in a loop.
+files_to_ignore = [
+    ".github/**",
+    "release-plz.toml",
+    "**/CHANGELOG.md",
+]
