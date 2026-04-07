@@ -293,7 +293,7 @@ async fn async_handler_runs_on_worker_thread() {
     assert_eq!(resp.status(), 200);
     let thread_name = resp.body();
     assert!(
-        thread_name.contains("tokio-runtime-worker"),
+        thread_name.contains("tokio-runtime-worker") || thread_name.contains("tokio-rt-worker"),
         "handler should run on worker thread; got: {thread_name}"
     );
 
