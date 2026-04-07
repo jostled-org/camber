@@ -23,7 +23,7 @@ name = "camber_cli"
 path = "src/lib.rs"
 
 [dependencies]
-camber = { version = "0.1.1", path = "../camber", features = ["acme", "dns01"] }
+camber = { version = "0.1.2", path = "../camber", features = ["acme", "dns01"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
