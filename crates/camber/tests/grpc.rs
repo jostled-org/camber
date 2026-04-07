@@ -188,7 +188,7 @@ fn grpc_health_check() {
         .run(|| {
             let greeter_service = greeter_service::serve(MyGreeter);
 
-            let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+            let (health_reporter, health_service) = tonic_health::server::health_reporter();
             common::block_on(async {
                 health_reporter
                     .set_service_status("greeter.Greeter", tonic_health::ServingStatus::Serving)

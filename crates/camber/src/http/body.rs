@@ -57,7 +57,7 @@ impl hyper::body::Body for HyperResponseBody {
 /// Body wrapper for gRPC responses (tonic's UnsyncBoxBody).
 #[cfg(feature = "grpc")]
 pub(super) struct GrpcBody {
-    pub(super) inner: tonic::body::BoxBody,
+    pub(super) inner: tonic::body::Body,
     pub(super) finished: bool,
 }
 

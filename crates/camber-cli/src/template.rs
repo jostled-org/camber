@@ -120,8 +120,9 @@ grpc = ["camber/grpc"]
 [dependencies]
 camber = "0.1"
 tokio = { version = "1", default-features = false }
-tonic = { version = "0.12", default-features = false }
-prost = "0.13"
+tonic = { version = "0.14", default-features = false }
+tonic-prost = "0.14"
+prost = "0.14"
 
 [build-dependencies]
 camber-build = "0.1"

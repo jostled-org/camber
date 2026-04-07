@@ -89,7 +89,7 @@ pub fn status_from_raw(raw: &str) -> u16 {
 pub fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
     let cert_pem = cert.cert.pem().into_bytes();
-    let key_pem = cert.key_pair.serialize_pem().into_bytes();
+    let key_pem = cert.signing_key.serialize_pem().into_bytes();
     (cert_pem, key_pem)
 }
 
@@ -97,7 +97,7 @@ pub fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
 pub fn generate_cert_with_san(san: &str) -> (Vec<u8>, Vec<u8>) {
     let cert = rcgen::generate_simple_self_signed(vec![san.to_owned()]).unwrap();
     let cert_pem = cert.cert.pem().into_bytes();
-    let key_pem = cert.key_pair.serialize_pem().into_bytes();
+    let key_pem = cert.signing_key.serialize_pem().into_bytes();
     (cert_pem, key_pem)
 }
 

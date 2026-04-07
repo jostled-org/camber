@@ -5,7 +5,7 @@ pub(crate) struct ServiceGenerator {
 }
 
 impl ServiceGenerator {
-    pub(crate) fn new(tonic_builder: tonic_build::Builder) -> Self {
+    pub(crate) fn new(tonic_builder: tonic_prost_build::Builder) -> Self {
         Self {
             tonic_gen: tonic_builder.service_generator(),
             service_code: String::new(),

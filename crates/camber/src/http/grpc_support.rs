@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 type GrpcRequest = hyper::Request<hyper::body::Incoming>;
-type GrpcResponse = hyper::Response<tonic::body::BoxBody>;
+type GrpcResponse = hyper::Response<tonic::body::Body>;
 type GrpcFuture =
     Pin<Box<dyn Future<Output = Result<GrpcResponse, std::convert::Infallible>> + Send>>;
 

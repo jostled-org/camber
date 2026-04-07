@@ -42,7 +42,7 @@ impl Builder {
         protos: &[impl AsRef<Path>],
         includes: &[impl AsRef<Path>],
     ) -> io::Result<()> {
-        let tonic = tonic_build::configure()
+        let tonic = tonic_prost_build::configure()
             .build_client(true)
             .build_server(true)
             .build_transport(false);

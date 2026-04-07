@@ -89,7 +89,7 @@ fn cert_persists_across_restarts() {
     // Generate an ECDSA P256 self-signed cert (same type rustls-acme uses).
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
     let cert_pem = cert.cert.pem();
-    let key_pem = cert.key_pair.serialize_pem();
+    let key_pem = cert.signing_key.serialize_pem();
 
     // rustls-acme expects: private key PEM first, then cert chain PEM.
     let cached_pem = format!("{key_pem}\n{cert_pem}");

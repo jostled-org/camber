@@ -270,7 +270,8 @@ mod acme_dns01 {
 
         std::fs::create_dir_all(cache_dir).expect("create cache dir");
         std::fs::write(cache_dir.join("cert.pem"), ck.cert.pem()).expect("write cert");
-        std::fs::write(cache_dir.join("key.pem"), ck.key_pair.serialize_pem()).expect("write key");
+        std::fs::write(cache_dir.join("key.pem"), ck.signing_key.serialize_pem())
+            .expect("write key");
 
         let expiry_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)

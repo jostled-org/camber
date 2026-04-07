@@ -52,7 +52,7 @@ impl WsConn {
         loop {
             let msg = self.rx.blocking_recv()?;
             match msg {
-                Message::Binary(data) => return Some(Bytes::from(data)),
+                Message::Binary(data) => return Some(data),
                 Message::Close(_) => return None,
                 _ => continue,
             }
@@ -68,7 +68,7 @@ impl WsConn {
                 Message::Text(text) => {
                     return Some(WsMessage::Text(Box::from(text.as_ref())));
                 }
-                Message::Binary(data) => return Some(WsMessage::Binary(Bytes::from(data))),
+                Message::Binary(data) => return Some(WsMessage::Binary(data)),
                 Message::Close(_) => return None,
                 _ => continue,
             }
@@ -82,7 +82,7 @@ impl WsConn {
 
     /// Send a binary message to the peer.
     pub fn send_binary(&mut self, data: &[u8]) -> Result<(), RuntimeError> {
-        self.send_message(Message::Binary(data.to_vec()))
+        self.send_message(Message::Binary(bytes::Bytes::copy_from_slice(data)))
     }
 
     fn send_message(&mut self, msg: Message) -> Result<(), RuntimeError> {
