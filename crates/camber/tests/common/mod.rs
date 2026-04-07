@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use camber::http::{self, Router};
-use camber::{runtime, spawn, RuntimeError};
+use camber::{RuntimeError, runtime, spawn};
 use rustls::pki_types::pem::PemObject;
 
 pub fn test_runtime() -> runtime::RuntimeBuilder {
