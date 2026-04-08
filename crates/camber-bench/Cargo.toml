@@ -31,7 +31,7 @@ path = "src/bin/bench_axum.rs"
 
 [dependencies]
 axum = "0.8"
-camber = { version = "0.1.4", path = "../camber" }
+camber = { version = "0.1.5", path = "../camber" }
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
 serde = { version = "1", features = ["derive"] }
