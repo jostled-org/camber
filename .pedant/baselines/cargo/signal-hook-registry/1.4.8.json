@@ -1,0 +1,162 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "4eed90e4441d2700ffc9063168aa439c171c6693cf01605b50b71af5e49d77ef",
+  "crate_name": "signal-hook-registry",
+  "crate_version": "1.4.8",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915113,
+  "profile": {
+    "findings": [
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/half_lock.rs",
+          "line": 42,
+          "column": 1
+        },
+        "evidence": "libc",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/half_lock.rs",
+          "line": 145,
+          "column": 22
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/half_lock.rs",
+          "line": 77,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/half_lock.rs",
+          "line": 86,
+          "column": 14
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/half_lock.rs",
+          "line": 145,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/half_lock.rs",
+          "line": 154,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/half_lock.rs",
+          "line": 209,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/half_lock.rs",
+          "line": 226,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/unregister_signal.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "libc::SIGINT",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/unregister_signal.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "libc::SIGTERM",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/unregister_signal.rs",
+          "line": 34,
+          "column": 9
+        },
+        "evidence": "libc::raise",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/unregister_signal.rs",
+          "line": 29,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/unregister_signal.rs",
+          "line": 42,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/unregister_signal.rs",
+          "line": 50,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/unregister_signal.rs",
+          "line": 54,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

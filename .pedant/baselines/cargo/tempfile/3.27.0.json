@@ -1,0 +1,592 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b54ed53e8c693631f4c48898134dd7758378d62974bae6f5d7ca734199f41956",
+  "crate_name": "tempfile",
+  "crate_version": "3.27.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915113,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/dir/imp/any.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/dir/imp/unix.rs",
+          "line": 11,
+          "column": 27
+        },
+        "evidence": "std::fs::DirBuilder::new",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/dir/mod.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "std::fs::remove_dir_all",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/file/imp/other.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/file/imp/other.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::fs::OpenOptions",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/file/imp/unix.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::fs::self",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/file/imp/unix.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/file/imp/unix.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::fs::OpenOptions",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/file/imp/unix.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "std::fs::hard_link",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::fs::OpenOptions",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Foundation::HANDLE",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Storage::FileSystem::MoveFileExW",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Storage::FileSystem::ReOpenFile",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Storage::FileSystem::SetFileAttributesW",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_TEMPORARY",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Storage::FileSystem::FILE_FLAG_DELETE_ON_CLOSE",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 66,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 82,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/file/imp/windows.rs",
+          "line": 93,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/file/mod.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs::self",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/file/mod.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/file/mod.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs::OpenOptions",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 198,
+          "column": 1
+        },
+        "evidence": "std::fs::OpenOptions",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 198,
+          "column": 1
+        },
+        "evidence": "std::fs::Permissions",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/spooled.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/env.rs",
+          "line": 11,
+          "column": 5
+        },
+        "evidence": "tempfile::env::override_temp_dir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/namedtempfile.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/namedtempfile.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tempfile::env",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/namedtempfile.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tempfile::tempdir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/namedtempfile.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tempfile::Builder",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/namedtempfile.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tempfile::NamedTempFile",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/namedtempfile.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tempfile::TempPath",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/namedtempfile.rs",
+          "line": 30,
+          "column": 5
+        },
+        "evidence": "std::fs::metadata",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/namedtempfile.rs",
+          "line": 37,
+          "column": 17
+        },
+        "evidence": "tempfile::env::override_temp_dir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/namedtempfile.rs",
+          "line": 110,
+          "column": 5
+        },
+        "evidence": "std::fs::remove_file",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/spooled.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "tempfile::env",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/spooled.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "tempfile::spooled_tempfile",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/spooled.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "tempfile::spooled_tempfile_in",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/spooled.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "tempfile::SpooledTempFile",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/spooled.rs",
+          "line": 11,
+          "column": 17
+        },
+        "evidence": "tempfile::env::override_temp_dir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/tempdir.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/tempdir.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "tempfile::Builder",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/tempdir.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "tempfile::TempDir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/tempdir.rs",
+          "line": 22,
+          "column": 17
+        },
+        "evidence": "tempfile::env::override_temp_dir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/tempfile.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/tempfile.rs",
+          "line": 16,
+          "column": 13
+        },
+        "evidence": "tempfile::env::override_temp_dir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/tempfile.rs",
+          "line": 18,
+          "column": 23
+        },
+        "evidence": "tempfile::tempfile",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/tempfile.rs",
+          "line": 33,
+          "column": 18
+        },
+        "evidence": "tempfile::tempdir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/tempfile.rs",
+          "line": 35,
+          "column": 27
+        },
+        "evidence": "tempfile::tempfile_in",
+        "origin": "import"
+      }
+    ]
+  }
+}

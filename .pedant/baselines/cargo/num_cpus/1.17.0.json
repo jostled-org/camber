@@ -1,0 +1,402 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "7f43b3fe50091c39deebc9d6b7dd6e7ea42a27cb17217c56474b48e8089c98c3",
+  "crate_name": "num_cpus",
+  "crate_version": "1.17.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915108,
+  "profile": {
+    "findings": [
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 246,
+          "column": 16
+        },
+        "evidence": "libc::sysconf",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 246,
+          "column": 30
+        },
+        "evidence": "libc::_SC_NPROCESSORS_ONLN",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 249,
+          "column": 24
+        },
+        "evidence": "libc::CTL_HW",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 249,
+          "column": 38
+        },
+        "evidence": "libc::HW_NCPU",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 251,
+          "column": 13
+        },
+        "evidence": "libc::sysctl",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 271,
+          "column": 34
+        },
+        "evidence": "libc::HW_NCPUONLINE",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 324,
+          "column": 17
+        },
+        "evidence": "libc::sysctlbyname",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 346,
+          "column": 9
+        },
+        "evidence": "libc::getsystemcfg",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 346,
+          "column": 28
+        },
+        "evidence": "libc::SC_SMT_TC",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 367,
+          "column": 36
+        },
+        "evidence": "libc::_SC_NPROCESSORS_CONF",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 459,
+          "column": 11
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 163,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 181,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 192,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 229,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 245,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 250,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 274,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 297,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 323,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 345,
+          "column": 15
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 371,
+          "column": 16
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 421,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 422,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 432,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 151,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 225,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 417,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/linux.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/linux.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "libc",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/linux.rs",
+          "line": 41,
+          "column": 17
+        },
+        "evidence": "libc::sched_getaffinity",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/linux.rs",
+          "line": 43,
+          "column": 21
+        },
+        "evidence": "libc::CPU_SETSIZE",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/linux.rs",
+          "line": 44,
+          "column": 25
+        },
+        "evidence": "libc::CPU_ISSET",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/linux.rs",
+          "line": 50,
+          "column": 29
+        },
+        "evidence": "libc::sysconf",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/linux.rs",
+          "line": 50,
+          "column": 43
+        },
+        "evidence": "libc::_SC_NPROCESSORS_ONLN",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/linux.rs",
+          "line": 40,
+          "column": 36
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/linux.rs",
+          "line": 41,
+          "column": 8
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/linux.rs",
+          "line": 44,
+          "column": 16
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/linux.rs",
+          "line": 50,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

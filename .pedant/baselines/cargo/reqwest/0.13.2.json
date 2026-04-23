@@ -1,0 +1,1682 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "604004e8683fdca2d3f83cf7b706ec31fe2827b1fa57e3e8389947227b3c8dd5",
+  "crate_name": "reqwest",
+  "crate_version": "0.13.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915111,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/async_impl/body.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "tokio::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/body.rs",
+          "line": 253,
+          "column": 41
+        },
+        "evidence": "hyper::body::Frame::data",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/client.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/client.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/async_impl/client.rs",
+          "line": 686,
+          "column": 40
+        },
+        "evidence": "rustls::ALL_VERSIONS",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/async_impl/client.rs",
+          "line": 714,
+          "column": 36
+        },
+        "evidence": "rustls::crypto::CryptoProvider::get_default",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/async_impl/client.rs",
+          "line": 721,
+          "column": 25
+        },
+        "evidence": "rustls::ClientConfig::builder_with_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/async_impl/client.rs",
+          "line": 791,
+          "column": 33
+        },
+        "evidence": "rustls::client::WebPkiServerVerifier::builder_with_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/async_impl/client.rs",
+          "line": 2464,
+          "column": 14
+        },
+        "evidence": "rustls::crypto::aws_lc_rs::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/client.rs",
+          "line": 2603,
+          "column": 23
+        },
+        "evidence": "hyper::Request::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/client.rs",
+          "line": 3124,
+          "column": 23
+        },
+        "evidence": "https://{{hostname}}/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/h3_client/connect.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/h3_client/connect.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/h3_client/dns.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/h3_client/pool.rs",
+          "line": 210,
+          "column": 9
+        },
+        "evidence": "hyper::body::Body",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/h3_client/pool.rs",
+          "line": 340,
+          "column": 52
+        },
+        "evidence": "hyper::body::Frame::data",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/h3_client/pool.rs",
+          "line": 350,
+          "column": 13
+        },
+        "evidence": "hyper::body::SizeHint::with_exact",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/h3_client/pool.rs",
+          "line": 352,
+          "column": 13
+        },
+        "evidence": "hyper::body::SizeHint::default",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/async_impl/multipart.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "tokio::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 675,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 689,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 708,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 730,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 749,
+          "column": 18
+        },
+        "evidence": "https://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 768,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 785,
+          "column": 19
+        },
+        "evidence": "http://httpbin.org/post",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 801,
+          "column": 34
+        },
+        "evidence": "http://httpbin.org/get",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 819,
+          "column": 18
+        },
+        "evidence": "http://httpbin.org/get",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 828,
+          "column": 24
+        },
+        "evidence": "https://Aladdin:open sesame@localhost/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 842,
+          "column": 24
+        },
+        "evidence": "https://localhost/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 861,
+          "column": 24
+        },
+        "evidence": "https://localhost/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 877,
+          "column": 24
+        },
+        "evidence": "https://localhost/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 897,
+          "column": 18
+        },
+        "evidence": "http://localhost/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 915,
+          "column": 18
+        },
+        "evidence": "http://localhost/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/request.rs",
+          "line": 935,
+          "column": 24
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/response.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/response.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "hyper::HeaderMap",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/response.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "hyper::StatusCode",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/response.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "hyper::Version",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/response.rs",
+          "line": 43,
+          "column": 19
+        },
+        "evidence": "hyper::Response::from_parts",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/response.rs",
+          "line": 91,
+          "column": 9
+        },
+        "evidence": "hyper::body::Body",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/response.rs",
+          "line": 465,
+          "column": 55
+        },
+        "evidence": "http://no.url.provided.local",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/response.rs",
+          "line": 494,
+          "column": 30
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/async_impl/upgrade.rs",
+          "line": 70,
+          "column": 9
+        },
+        "evidence": "hyper::upgrade::on",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/blocking/body.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/blocking/body.rs",
+          "line": 313,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/blocking/body.rs",
+          "line": 318,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/blocking/body.rs",
+          "line": 327,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/client.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/client.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/blocking/multipart.rs",
+          "line": 41,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 707,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 717,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 727,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 737,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 747,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 757,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 767,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 782,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 800,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 824,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 840,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 854,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 873,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 895,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 908,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 932,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 966,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 984,
+          "column": 18
+        },
+        "evidence": "https://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 1003,
+          "column": 24
+        },
+        "evidence": "https://google.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 1019,
+          "column": 24
+        },
+        "evidence": "https://Aladdin:open sesame@localhost/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 1034,
+          "column": 18
+        },
+        "evidence": "http://localhost/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 1052,
+          "column": 18
+        },
+        "evidence": "http://localhost/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 1071,
+          "column": 24
+        },
+        "evidence": "https://localhost/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 1090,
+          "column": 24
+        },
+        "evidence": "https://localhost/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/request.rs",
+          "line": 1105,
+          "column": 53
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/response.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/blocking/response.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "hyper::header::HeaderMap",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "hyper::rt::ReadBufCursor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 709,
+          "column": 27
+        },
+        "evidence": "tokio::net::UnixStream::connect",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 718,
+          "column": 13
+        },
+        "evidence": "tokio::net::windows::named_pipe::ClientOptions",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1458,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1458,
+          "column": 5
+        },
+        "evidence": "hyper::rt::ReadBufCursor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1458,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1469,
+          "column": 5
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1644,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1644,
+          "column": 5
+        },
+        "evidence": "hyper::rt::ReadBufCursor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1644,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1655,
+          "column": 5
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1836,
+          "column": 5
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1946,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1946,
+          "column": 5
+        },
+        "evidence": "hyper::rt::ReadBufCursor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1946,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1993,
+          "column": 28
+        },
+        "evidence": "hyper::rt::ReadBuf::uninit",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 1993,
+          "column": 55
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 2000,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/cookie.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/dns/hickory.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/dns/resolve.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 477,
+          "column": 19
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 827,
+          "column": 22
+        },
+        "evidence": "http://example.domain/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 830,
+          "column": 20
+        },
+        "evidence": "http://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 831,
+          "column": 21
+        },
+        "evidence": "https://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 839,
+          "column": 22
+        },
+        "evidence": "http://example.domain/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 842,
+          "column": 20
+        },
+        "evidence": "http://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 843,
+          "column": 21
+        },
+        "evidence": "https://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 851,
+          "column": 22
+        },
+        "evidence": "http://example.domain/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 854,
+          "column": 20
+        },
+        "evidence": "http://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 855,
+          "column": 21
+        },
+        "evidence": "https://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 866,
+          "column": 23
+        },
+        "evidence": "http://example.domain/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 867,
+          "column": 23
+        },
+        "evidence": "https://example.domain/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 879,
+          "column": 20
+        },
+        "evidence": "http://seanmonstar.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 880,
+          "column": 21
+        },
+        "evidence": "https://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 890,
+          "column": 22
+        },
+        "evidence": "http://example.domain/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 896,
+          "column": 36
+        },
+        "evidence": "http://anywhere.local",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 903,
+          "column": 22
+        },
+        "evidence": "http://example.domain/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 908,
+          "column": 36
+        },
+        "evidence": "http://anywhere.local",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 915,
+          "column": 28
+        },
+        "evidence": "https://letme:in@yo.local",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 920,
+          "column": 28
+        },
+        "evidence": "http://letme:in@yo.local",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 925,
+          "column": 28
+        },
+        "evidence": "http://:in@yo.local",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 928,
+          "column": 28
+        },
+        "evidence": "http://letme:@yo.local",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 937,
+          "column": 24
+        },
+        "evidence": "http://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/proxy.rs",
+          "line": 938,
+          "column": 25
+        },
+        "evidence": "https://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/redirect.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "hyper::StatusCode",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/redirect.rs",
+          "line": 413,
+          "column": 5
+        },
+        "evidence": "hyper::header::HeaderValue",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/redirect.rs",
+          "line": 413,
+          "column": 5
+        },
+        "evidence": "hyper::header::ACCEPT",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/redirect.rs",
+          "line": 413,
+          "column": 5
+        },
+        "evidence": "hyper::header::AUTHORIZATION",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/redirect.rs",
+          "line": 413,
+          "column": 5
+        },
+        "evidence": "hyper::header::COOKIE",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/redirect.rs",
+          "line": 358,
+          "column": 27
+        },
+        "evidence": "http://x.y/z",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/redirect.rs",
+          "line": 368,
+          "column": 30
+        },
+        "evidence": "http://a.b.d/e/33",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/redirect.rs",
+          "line": 379,
+          "column": 27
+        },
+        "evidence": "http://x.y/z",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/redirect.rs",
+          "line": 398,
+          "column": 27
+        },
+        "evidence": "http://bar/baz",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/redirect.rs",
+          "line": 404,
+          "column": 27
+        },
+        "evidence": "http://foo/baz",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/redirect.rs",
+          "line": 420,
+          "column": 27
+        },
+        "evidence": "http://initial-domain.com/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/redirect.rs",
+          "line": 427,
+          "column": 26
+        },
+        "evidence": "http://new-domain.com/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/response.rs",
+          "line": 29,
+          "column": 30
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "rustls::client::danger::HandshakeSignatureValid",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "rustls::client::danger::ServerCertVerified",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "rustls::client::danger::ServerCertVerifier",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "rustls::crypto::WebPkiSupportedAlgorithms",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "rustls::server::ParsedCertificate",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "rustls::DigitallySignedStruct",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "rustls::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "rustls::RootCertStore",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "rustls::SignatureScheme",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 554,
+          "column": 13
+        },
+        "evidence": "rustls::ProtocolVersion::SSLv2",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 555,
+          "column": 13
+        },
+        "evidence": "rustls::ProtocolVersion::SSLv3",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 556,
+          "column": 13
+        },
+        "evidence": "rustls::ProtocolVersion::TLSv1_0",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 557,
+          "column": 13
+        },
+        "evidence": "rustls::ProtocolVersion::TLSv1_1",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 558,
+          "column": 13
+        },
+        "evidence": "rustls::ProtocolVersion::TLSv1_2",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 559,
+          "column": 13
+        },
+        "evidence": "rustls::ProtocolVersion::TLSv1_3",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 617,
+          "column": 31
+        },
+        "evidence": "rustls::RootCertStore::empty",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 731,
+          "column": 9
+        },
+        "evidence": "rustls::client::verify_server_cert_signed_by_trust_anchor",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 747,
+          "column": 9
+        },
+        "evidence": "rustls::crypto::verify_tls12_signature",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 756,
+          "column": 9
+        },
+        "evidence": "rustls::crypto::verify_tls13_signature",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 874,
+          "column": 26
+        },
+        "evidence": "std::fs::read",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/wasm/body.rs",
+          "line": 207,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/wasm/client.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/wasm/client.rs",
+          "line": 382,
+          "column": 18
+        },
+        "evidence": "https://www.example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/wasm/client.rs",
+          "line": 407,
+          "column": 18
+        },
+        "evidence": "https://www.example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/wasm/client.rs",
+          "line": 423,
+          "column": 18
+        },
+        "evidence": "https://www.example.com/x",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/wasm/client.rs",
+          "line": 445,
+          "column": 18
+        },
+        "evidence": "https://www.example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/wasm/client.rs",
+          "line": 463,
+          "column": 18
+        },
+        "evidence": "https://www.example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/wasm/mod.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "6ef6e560c37fc9ac3eb617d2b7d537826f51d021499c98eb3e9ba4aed9d75d25",
+  "crate_name": "jni-sys-macros",
+  "crate_version": "0.4.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915105,
+  "profile": {
+    "findings": [
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 187,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_attribute]",
+        "origin": "attribute"
+      }
+    ]
+  }
+}

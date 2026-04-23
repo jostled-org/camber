@@ -1,0 +1,42 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "535ce71d02136b24f903f74fd29590495c73b125b6cb5a36b20579c8372ca74a",
+  "crate_name": "urlencoding",
+  "crate_version": "2.1.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915116,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/enc.rs",
+          "line": 83,
+          "column": 30
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/enc.rs",
+          "line": 115,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/enc.rs",
+          "line": 124,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

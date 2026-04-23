@@ -1,0 +1,2836 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "d8b8c4ca2f56c9dbbc1cdc4c009e1ce6930c8daec9ee9b7bb99f9f99e17467ab",
+  "crate_name": "ring",
+  "crate_version": "0.17.14",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915111,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "std::fs::self",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "std::fs::DirEntry",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./build.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./build.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "std::process::Stdio",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/aes_gcm.rs",
+          "line": 86,
+          "column": 27
+        },
+        "evidence": "aes::hw::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/aes_gcm.rs",
+          "line": 136,
+          "column": 23
+        },
+        "evidence": "aes::vp::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/aes_gcm.rs",
+          "line": 164,
+          "column": 23
+        },
+        "evidence": "aes::fallback::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes_gcm/aarch64.rs",
+          "line": 43,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes_gcm/aarch64.rs",
+          "line": 82,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes_gcm/aeshwclmulmovbe.rs",
+          "line": 54,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes_gcm/aeshwclmulmovbe.rs",
+          "line": 110,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes_gcm/vaesclmulavx2.rs",
+          "line": 50,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes_gcm/vaesclmulavx2.rs",
+          "line": 81,
+          "column": 59
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/bs.rs",
+          "line": 29,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/bs.rs",
+          "line": 45,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/bs.rs",
+          "line": 57,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/fallback.rs",
+          "line": 25,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/fallback.rs",
+          "line": 32,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/fallback.rs",
+          "line": 42,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/ffi.rs",
+          "line": 39,
+          "column": 16
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/ffi.rs",
+          "line": 54,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/ffi.rs",
+          "line": 65,
+          "column": 16
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/ffi.rs",
+          "line": 73,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/ffi.rs",
+          "line": 115,
+          "column": 16
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/ffi.rs",
+          "line": 121,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/ffi.rs",
+          "line": 165,
+          "column": 16
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/ffi.rs",
+          "line": 199,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/hw.rs",
+          "line": 51,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/hw.rs",
+          "line": 64,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/hw.rs",
+          "line": 66,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/hw.rs",
+          "line": 93,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/vp.rs",
+          "line": 44,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/vp.rs",
+          "line": 70,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/vp.rs",
+          "line": 104,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/vp.rs",
+          "line": 117,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes/vp.rs",
+          "line": 124,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/algorithm.rs",
+          "line": 150,
+          "column": 14
+        },
+        "evidence": "aes::AES_128_KEY_LEN",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/algorithm.rs",
+          "line": 159,
+          "column": 14
+        },
+        "evidence": "aes::AES_256_KEY_LEN",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/algorithm.rs",
+          "line": 172,
+          "column": 9
+        },
+        "evidence": "aes::KeyBytes::AES_128",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/algorithm.rs",
+          "line": 183,
+          "column": 9
+        },
+        "evidence": "aes::KeyBytes::AES_256",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/chacha/ffi.rs",
+          "line": 46,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/chacha/ffi.rs",
+          "line": 64,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/clmul.rs",
+          "line": 42,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/clmul.rs",
+          "line": 59,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/clmul.rs",
+          "line": 71,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/clmulavxmovbe.rs",
+          "line": 32,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/clmulavxmovbe.rs",
+          "line": 49,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/ffi.rs",
+          "line": 87,
+          "column": 16
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/ffi.rs",
+          "line": 94,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/ffi.rs",
+          "line": 102,
+          "column": 16
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/ffi.rs",
+          "line": 107,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/ffi.rs",
+          "line": 110,
+          "column": 16
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/ffi.rs",
+          "line": 135,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/neon.rs",
+          "line": 33,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/neon.rs",
+          "line": 44,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/neon.rs",
+          "line": 50,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/vclmulavx2.rs",
+          "line": 32,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/gcm/vclmulavx2.rs",
+          "line": 44,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/overlapping/base.rs",
+          "line": 100,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/poly1305/ffi_arm_neon.rs",
+          "line": 72,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/poly1305/ffi_arm_neon.rs",
+          "line": 86,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/poly1305/ffi_arm_neon.rs",
+          "line": 95,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/poly1305/ffi_fallback.rs",
+          "line": 69,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/poly1305/ffi_fallback.rs",
+          "line": 84,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/poly1305/ffi_fallback.rs",
+          "line": 93,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/quic.rs",
+          "line": 148,
+          "column": 19
+        },
+        "evidence": "aes::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/quic.rs",
+          "line": 148,
+          "column": 33
+        },
+        "evidence": "aes::KeyBytes::AES_128",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/quic.rs",
+          "line": 154,
+          "column": 33
+        },
+        "evidence": "aes::KeyBytes::AES_256",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/bigint.rs",
+          "line": 308,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/bigint.rs",
+          "line": 538,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/bigint.rs",
+          "line": 759,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/bigint.rs",
+          "line": 778,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/bigint.rs",
+          "line": 783,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/bigint/modulus.rs",
+          "line": 100,
+          "column": 31
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/ffi.rs",
+          "line": 55,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/ffi.rs",
+          "line": 94,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/limbs/aarch64/mont.rs",
+          "line": 56,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/limbs/x86_64/mont.rs",
+          "line": 110,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/limbs/x86_64/mont.rs",
+          "line": 135,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/limbs/x86_64/mont.rs",
+          "line": 141,
+          "column": 29
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/limbs/x86_64/mont.rs",
+          "line": 160,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/limbs/x86_64/mont.rs",
+          "line": 166,
+          "column": 29
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/limbs/x86_64/mont.rs",
+          "line": 214,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/limbs/x86_64/mont.rs",
+          "line": 216,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/limbs/x86_64/mont.rs",
+          "line": 223,
+          "column": 29
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/limbs/x86_64/mont.rs",
+          "line": 266,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/limbs/x86_64/mont.rs",
+          "line": 268,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/montgomery.rs",
+          "line": 269,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/montgomery.rs",
+          "line": 295,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/arithmetic/montgomery.rs",
+          "line": 375,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/bb/mod.rs",
+          "line": 38,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/bb/mod.rs",
+          "line": 88,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/bb/mod.rs",
+          "line": 107,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/bb/mod.rs",
+          "line": 140,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cpu/arm.rs",
+          "line": 131,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cpu/arm.rs",
+          "line": 144,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/darwin.rs",
+          "line": 57,
+          "column": 9
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/darwin.rs",
+          "line": 57,
+          "column": 9
+        },
+        "evidence": "libc::c_void",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/darwin.rs",
+          "line": 64,
+          "column": 13
+        },
+        "evidence": "libc::sysctlbyname",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cpu/arm/darwin.rs",
+          "line": 63,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cpu/arm/fuchsia.rs",
+          "line": 35,
+          "column": 14
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/fuchsia.rs",
+          "line": 23,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/fuchsia.rs",
+          "line": 22,
+          "column": 5
+        },
+        "evidence": "#[link]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/linux.rs",
+          "line": 51,
+          "column": 5
+        },
+        "evidence": "libc::getauxval",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/linux.rs",
+          "line": 51,
+          "column": 5
+        },
+        "evidence": "libc::AT_HWCAP",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/linux.rs",
+          "line": 51,
+          "column": 5
+        },
+        "evidence": "libc::HWCAP_AES",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/linux.rs",
+          "line": 51,
+          "column": 5
+        },
+        "evidence": "libc::HWCAP_PMULL",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/linux.rs",
+          "line": 51,
+          "column": 5
+        },
+        "evidence": "libc::HWCAP_SHA2",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/linux.rs",
+          "line": 51,
+          "column": 5
+        },
+        "evidence": "libc::HWCAP_SHA512",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/linux.rs",
+          "line": 87,
+          "column": 5
+        },
+        "evidence": "libc::c_ulong",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cpu/arm/linux.rs",
+          "line": 58,
+          "column": 16
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cpu/arm/linux.rs",
+          "line": 97,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/linux.rs",
+          "line": 88,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/windows.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::System::Threading::IsProcessorFeaturePresent",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/cpu/arm/windows.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "windows_sys::Win32::System::Threading::PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cpu/arm/windows.rs",
+          "line": 28,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cpu/intel.rs",
+          "line": 56,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cpu/intel.rs",
+          "line": 68,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cpu/intel.rs",
+          "line": 251,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cpu/intel.rs",
+          "line": 325,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/digest.rs",
+          "line": 525,
+          "column": 61
+        },
+        "evidence": "sha2::CHAINING_WORDS",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/digest/dynstate.rs",
+          "line": 79,
+          "column": 5
+        },
+        "evidence": "sha2::block_data_order_32",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/digest/dynstate.rs",
+          "line": 80,
+          "column": 26
+        },
+        "evidence": "sha2::SHA256_BLOCK_LEN",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/digest/dynstate.rs",
+          "line": 96,
+          "column": 5
+        },
+        "evidence": "sha2::block_data_order_64",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/digest/dynstate.rs",
+          "line": 97,
+          "column": 26
+        },
+        "evidence": "sha2::SHA512_BLOCK_LEN",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/digest/sha2/ffi.rs",
+          "line": 51,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/digest/sha2/ffi.rs",
+          "line": 69,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/curve25519/ed25519/signing.rs",
+          "line": 216,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/curve25519/ed25519/verification.rs",
+          "line": 67,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/curve25519/ops.rs",
+          "line": 51,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/curve25519/ops.rs",
+          "line": 87,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/curve25519/ops.rs",
+          "line": 101,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/curve25519/ops.rs",
+          "line": 139,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/curve25519/scalar.rs",
+          "line": 52,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/curve25519/scalar.rs",
+          "line": 66,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/curve25519/scalar.rs",
+          "line": 32,
+          "column": 28
+        },
+        "evidence": "1000000000000000…d3ed",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/curve25519/x25519.rs",
+          "line": 90,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/curve25519/x25519.rs",
+          "line": 135,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/curve25519/x25519.rs",
+          "line": 146,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/curve25519/x25519.rs",
+          "line": 185,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops.rs",
+          "line": 251,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops.rs",
+          "line": 318,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops.rs",
+          "line": 359,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops.rs",
+          "line": 726,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops.rs",
+          "line": 736,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops.rs",
+          "line": 777,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops.rs",
+          "line": 827,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops.rs",
+          "line": 836,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops.rs",
+          "line": 944,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops.rs",
+          "line": 1039,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops.rs",
+          "line": 1094,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops/elem.rs",
+          "line": 126,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops/elem.rs",
+          "line": 137,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops/elem.rs",
+          "line": 147,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops/elem.rs",
+          "line": 157,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops/elem.rs",
+          "line": 166,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p256.rs",
+          "line": 106,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p256.rs",
+          "line": 171,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p256.rs",
+          "line": 205,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p256.rs",
+          "line": 213,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p256.rs",
+          "line": 220,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p256.rs",
+          "line": 26,
+          "column": 27
+        },
+        "evidence": "ffffffff00000001…ffff",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p256.rs",
+          "line": 29,
+          "column": 29
+        },
+        "evidence": "ffffffff00000000…2551",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p256.rs",
+          "line": 31,
+          "column": 29
+        },
+        "evidence": "fffffffc00000004…fffc",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p256.rs",
+          "line": 32,
+          "column": 29
+        },
+        "evidence": "dc30061d04874834…bddf",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p256.rs",
+          "line": 40,
+          "column": 26
+        },
+        "evidence": "18905f76a53755c6…143c",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p256.rs",
+          "line": 41,
+          "column": 26
+        },
+        "evidence": "8571ff1825885d85…560a",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p256.rs",
+          "line": 181,
+          "column": 9
+        },
+        "evidence": "66e12d94f3d95620…eea2",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p384.rs",
+          "line": 270,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p384.rs",
+          "line": 275,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p384.rs",
+          "line": 26,
+          "column": 27
+        },
+        "evidence": "ffffffffffffffff…ffff",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p384.rs",
+          "line": 29,
+          "column": 29
+        },
+        "evidence": "ffffffffffffffff…2973",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p384.rs",
+          "line": 31,
+          "column": 29
+        },
+        "evidence": "ffffffffffffffff…fffc",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p384.rs",
+          "line": 32,
+          "column": 29
+        },
+        "evidence": "cd08114b604fbff9…2dcc",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p384.rs",
+          "line": 39,
+          "column": 26
+        },
+        "evidence": "4d3aadc2299e1513…b528",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ec/suite_b/ops/p384.rs",
+          "line": 40,
+          "column": 26
+        },
+        "evidence": "2b78abc25a15c5e9…a4fe",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hkdf.rs",
+          "line": 37,
+          "column": 15
+        },
+        "evidence": "hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hkdf.rs",
+          "line": 40,
+          "column": 47
+        },
+        "evidence": "hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hkdf.rs",
+          "line": 43,
+          "column": 47
+        },
+        "evidence": "hmac::HMAC_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hkdf.rs",
+          "line": 46,
+          "column": 47
+        },
+        "evidence": "hmac::HMAC_SHA512",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hkdf.rs",
+          "line": 65,
+          "column": 14
+        },
+        "evidence": "hmac::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hkdf.rs",
+          "line": 79,
+          "column": 19
+        },
+        "evidence": "hmac::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hkdf.rs",
+          "line": 92,
+          "column": 14
+        },
+        "evidence": "hmac::Key::from",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hkdf.rs",
+          "line": 201,
+          "column": 19
+        },
+        "evidence": "hmac::Context::with_key",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hmac.rs",
+          "line": 429,
+          "column": 13
+        },
+        "evidence": "hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hmac.rs",
+          "line": 430,
+          "column": 13
+        },
+        "evidence": "hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hmac.rs",
+          "line": 431,
+          "column": 13
+        },
+        "evidence": "hmac::HMAC_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hmac.rs",
+          "line": 432,
+          "column": 13
+        },
+        "evidence": "hmac::HMAC_SHA512",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hmac.rs",
+          "line": 434,
+          "column": 23
+        },
+        "evidence": "hmac::Key::generate",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hmac.rs",
+          "line": 435,
+          "column": 23
+        },
+        "evidence": "hmac::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/limb.rs",
+          "line": 66,
+          "column": 8
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/limb.rs",
+          "line": 93,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/limb.rs",
+          "line": 142,
+          "column": 27
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/limb.rs",
+          "line": 164,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/limb.rs",
+          "line": 293,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/limb.rs",
+          "line": 305,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/limb.rs",
+          "line": 310,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/limb.rs",
+          "line": 341,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/limb.rs",
+          "line": 358,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/pbkdf2.rs",
+          "line": 128,
+          "column": 52
+        },
+        "evidence": "hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/pbkdf2.rs",
+          "line": 131,
+          "column": 54
+        },
+        "evidence": "hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/pbkdf2.rs",
+          "line": 134,
+          "column": 54
+        },
+        "evidence": "hmac::HMAC_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/pbkdf2.rs",
+          "line": 137,
+          "column": 54
+        },
+        "evidence": "hmac::HMAC_SHA512",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/pbkdf2.rs",
+          "line": 196,
+          "column": 9
+        },
+        "evidence": "hmac::Key::try_new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/pbkdf2.rs",
+          "line": 224,
+          "column": 19
+        },
+        "evidence": "hmac::Context::with_key",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/polyfill/cstr.rs",
+          "line": 37,
+          "column": 1
+        },
+        "evidence": "libc::c_char",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/polyfill/cstr.rs",
+          "line": 54,
+          "column": 11
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/polyfill/cstr.rs",
+          "line": 87,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/polyfill/once_cell/race.rs",
+          "line": 75,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/testutil.rs",
+          "line": 520,
+          "column": 27
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/testutil.rs",
+          "line": 525,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/aead_tests.rs",
+          "line": 24,
+          "column": 1
+        },
+        "evidence": "ring::aead",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/aead_tests.rs",
+          "line": 24,
+          "column": 1
+        },
+        "evidence": "ring::error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/aead_tests.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/aead_tests.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "ring::test_file",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/agreement_tests.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "ring::agreement",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/agreement_tests.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "ring::error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/agreement_tests.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "ring::rand",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/agreement_tests.rs",
+          "line": 27,
+          "column": 1
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/agreement_tests.rs",
+          "line": 27,
+          "column": 1
+        },
+        "evidence": "ring::test_file",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/agreement_tests.rs",
+          "line": 135,
+          "column": 19
+        },
+        "evidence": "0900000000000000…0000",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/agreement_tests.rs",
+          "line": 153,
+          "column": 9
+        },
+        "evidence": "422c8e7a6227d7bc…3079",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/agreement_tests.rs",
+          "line": 159,
+          "column": 9
+        },
+        "evidence": "684cf59ba8330955…2c51",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/agreement_tests.rs",
+          "line": 169,
+          "column": 9
+        },
+        "evidence": "2c125a20f639d504…1815",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/agreement_tests.rs",
+          "line": 177,
+          "column": 13
+        },
+        "evidence": "7c3911e0ab2586fd…5424",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/constant_time_tests.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "ring::constant_time",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/constant_time_tests.rs",
+          "line": 21,
+          "column": 1
+        },
+        "evidence": "ring::error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/constant_time_tests.rs",
+          "line": 21,
+          "column": 1
+        },
+        "evidence": "ring::rand",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/digest_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::digest",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/digest_tests.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/digest_tests.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "ring::test_file",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/ecdsa_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::rand",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/ecdsa_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::signature::self",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/ecdsa_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::signature::KeyPair",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/ecdsa_tests.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/ecdsa_tests.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "ring::test_file",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/ed25519_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/ed25519_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::rand",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/ed25519_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::signature::self",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/ed25519_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::signature::Ed25519KeyPair",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/ed25519_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::signature::KeyPair",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/ed25519_tests.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/ed25519_tests.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "ring::test_file",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/error_tests.rs",
+          "line": 6,
+          "column": 5
+        },
+        "evidence": "ring::error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/error_tests.rs",
+          "line": 8,
+          "column": 5
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hkdf_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::digest",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hkdf_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hkdf_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::hkdf",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hkdf_tests.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hkdf_tests.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "ring::test_file",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hmac_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::digest",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hmac_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::hmac",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hmac_tests.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hmac_tests.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "ring::test_file",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hmac_tests.rs",
+          "line": 44,
+          "column": 17
+        },
+        "evidence": "hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hmac_tests.rs",
+          "line": 46,
+          "column": 17
+        },
+        "evidence": "hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hmac_tests.rs",
+          "line": 48,
+          "column": 17
+        },
+        "evidence": "hmac::HMAC_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hmac_tests.rs",
+          "line": 50,
+          "column": 17
+        },
+        "evidence": "hmac::HMAC_SHA512",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hmac_tests.rs",
+          "line": 78,
+          "column": 15
+        },
+        "evidence": "hmac::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hmac_tests.rs",
+          "line": 82,
+          "column": 25
+        },
+        "evidence": "hmac::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/hmac_tests.rs",
+          "line": 89,
+          "column": 25
+        },
+        "evidence": "hmac::Context::with_key",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pbkdf2_tests.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "ring::digest",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pbkdf2_tests.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "ring::error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pbkdf2_tests.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "ring::pbkdf2",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pbkdf2_tests.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pbkdf2_tests.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "ring::test_file",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/quic_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::aead::quic",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/quic_tests.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/quic_tests.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "ring::test_file",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/rand_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::rand::self",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/rand_tests.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::rand::SecureRandom",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/rand_tests.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/rsa_tests.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "ring::error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/rsa_tests.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "ring::io::der",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/rsa_tests.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "ring::rand",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/rsa_tests.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "ring::rsa",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/rsa_tests.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "ring::signature::self",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/rsa_tests.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "ring::signature::KeyPair",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/rsa_tests.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/rsa_tests.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "ring::test_file",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/signature_tests.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "ring::signature",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/signature_tests.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "ring::test",
+        "origin": "import"
+      }
+    ]
+  }
+}

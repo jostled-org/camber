@@ -1,0 +1,194 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "c8725cb57deeb16d8ef36b2dd5781bd28eb93a2966b4a926926532b1d870088f",
+  "crate_name": "object",
+  "crate_version": "0.37.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915108,
+  "profile": {
+    "findings": [
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./build.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./build.rs",
+          "line": 19,
+          "column": 17
+        },
+        "evidence": "std::env::var",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/pod.rs",
+          "line": 40,
+          "column": 15
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/pod.rs",
+          "line": 63,
+          "column": 15
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/pod.rs",
+          "line": 83,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/pod.rs",
+          "line": 109,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/pod.rs",
+          "line": 153,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/pod.rs",
+          "line": 164,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/pod.rs",
+          "line": 175,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/pod.rs",
+          "line": 186,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/pod.rs",
+          "line": 199,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/read/read_cache.rs",
+          "line": 126,
+          "column": 12
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/read/read_cache.rs",
+          "line": 163,
+          "column": 12
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/parse_self.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/read/coff.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/read/elf.rs",
+          "line": 7,
+          "column": 16
+        },
+        "evidence": "std::fs::File::open",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/read/elf.rs",
+          "line": 54,
+          "column": 16
+        },
+        "evidence": "std::fs::read",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/read/macho.rs",
+          "line": 22,
+          "column": 20
+        },
+        "evidence": "std::fs::File::open",
+        "origin": "import"
+      }
+    ]
+  }
+}

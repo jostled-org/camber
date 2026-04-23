@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "e48a3f4551973282eaf41d8957fcf9517d55c9af2fc66dfe6ed9cb01ef7f2358",
+  "crate_name": "icu_properties",
+  "crate_version": "2.2.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915105,
+  "profile": {
+    "findings": []
+  }
+}

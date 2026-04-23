@@ -1,0 +1,22 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "5235f4de1afe913016859dd8d982021e9a94ff663deea56feeb4ccbabe020107",
+  "crate_name": "sketches-ddsketch",
+  "crate_version": "0.3.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915113,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/test_ddsketch.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      }
+    ]
+  }
+}

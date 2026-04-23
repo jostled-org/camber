@@ -1,0 +1,52 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "42a3b6043f481adf2add3813842e9839caab07127ca0e07834c85ab2421e1164",
+  "crate_name": "time-macros",
+  "crate_version": "0.2.27",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915114,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 20,
+          "column": 16
+        },
+        "evidence": "time::parse",
+        "origin": "import"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 186,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 210,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/utc_datetime.rs",
+          "line": 18,
+          "column": 16
+        },
+        "evidence": "time::parse",
+        "origin": "import"
+      }
+    ]
+  }
+}

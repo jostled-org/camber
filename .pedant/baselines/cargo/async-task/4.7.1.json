@@ -1,0 +1,462 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "7969b5617cb4883cbb9aa5965ec50b08ca9724c08bf81fe82e40c03b68b7acb3",
+  "crate_name": "async-task",
+  "crate_version": "4.7.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915098,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./examples/with-metadata.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/with-metadata.rs",
+          "line": 103,
+          "column": 28
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/header.rs",
+          "line": 67,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/header.rs",
+          "line": 122,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/header.rs",
+          "line": 133,
+          "column": 34
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 126,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 163,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 216,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 232,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 298,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 361,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 382,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 410,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 427,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 443,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 453,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 463,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 484,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 691,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 369,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 441,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 455,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 469,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 504,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 573,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 648,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 702,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 703,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 743,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 781,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 811,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 818,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 885,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 898,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/runnable.rs",
+          "line": 942,
+          "column": 30
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/task.rs",
+          "line": 57,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/task.rs",
+          "line": 58,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/task.rs",
+          "line": 187,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/task.rs",
+          "line": 235,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/task.rs",
+          "line": 325,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/task.rs",
+          "line": 415,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/task.rs",
+          "line": 425,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utils.rs",
+          "line": 68,
+          "column": 22
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/basic.rs",
+          "line": 310,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/metadata.rs",
+          "line": 34,
+          "column": 32
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

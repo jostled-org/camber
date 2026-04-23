@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "019071094ea72aa4d4e87d335a9c11d0f76d1f30096a6264cd69b95f417cb4f5",
+  "crate_name": "cfg_aliases",
+  "crate_version": "0.2.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915101,
+  "profile": {
+    "findings": []
+  }
+}

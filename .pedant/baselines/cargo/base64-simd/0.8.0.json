@@ -1,0 +1,362 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b8d42e95dc6a30c967f1a6c07e4312b69ea664326cbd5feaa8053b997dee54c7",
+  "crate_name": "base64-simd",
+  "crate_version": "0.8.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915101,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ascii.rs",
+          "line": 22,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ascii.rs",
+          "line": 49,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ascii.rs",
+          "line": 63,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ascii.rs",
+          "line": 68,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ascii.rs",
+          "line": 106,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ascii.rs",
+          "line": 111,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ascii.rs",
+          "line": 137,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/check.rs",
+          "line": 13,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/check.rs",
+          "line": 22,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/check.rs",
+          "line": 41,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/check.rs",
+          "line": 54,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/decode.rs",
+          "line": 35,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/decode.rs",
+          "line": 73,
+          "column": 14
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/decode.rs",
+          "line": 80,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/decode.rs",
+          "line": 106,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/decode.rs",
+          "line": 135,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/decode.rs",
+          "line": 175,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/decode.rs",
+          "line": 209,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/encode.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/encode.rs",
+          "line": 35,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/encode.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/encode.rs",
+          "line": 79,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/encode.rs",
+          "line": 119,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/forgiving.rs",
+          "line": 48,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/forgiving.rs",
+          "line": 84,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/heap.rs",
+          "line": 19,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/heap.rs",
+          "line": 41,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/heap.rs",
+          "line": 64,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/heap.rs",
+          "line": 86,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/heap.rs",
+          "line": 165,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 225,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 235,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 255,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 267,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 285,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

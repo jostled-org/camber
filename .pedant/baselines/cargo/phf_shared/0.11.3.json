@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "0b1c3bed2d0d85526c0271b0959aa7abcad8b3fdecd3b4354e9deef30e8cff83",
+  "crate_name": "phf_shared",
+  "crate_version": "0.11.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915109,
+  "profile": {
+    "findings": []
+  }
+}

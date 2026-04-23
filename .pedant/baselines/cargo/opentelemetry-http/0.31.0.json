@@ -1,0 +1,52 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "399b3b73ca024ecc97d4f8274dfe8961ed59ac36d0ec6b62872e25fff0c30b5b",
+  "crate_name": "opentelemetry-http",
+  "crate_version": "0.31.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915108,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 135,
+          "column": 5
+        },
+        "evidence": "hyper::body::Body",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 135,
+          "column": 5
+        },
+        "evidence": "hyper::body::Frame",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 197,
+          "column": 32
+        },
+        "evidence": "time::timeout",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 220,
+          "column": 30
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

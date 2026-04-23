@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "104cc13c4f374c57d5c2338c6083357e0bfa1c5920431cb8ca25a3887221375f",
+  "crate_name": "wasm-bindgen-futures",
+  "crate_version": "0.4.67",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915116,
+  "profile": {
+    "findings": []
+  }
+}

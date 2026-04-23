@@ -1,0 +1,322 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "83b3a817e640fbea095f55c7c01cb0691733fef8f9c0b873a7f9fdc631b247a7",
+  "crate_name": "aws-sdk-sts",
+  "crate_version": "1.101.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915100,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 949,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 967,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 986,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1002,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1576,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1595,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 35,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 50,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 65,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 80,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 95,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 110,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 125,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 140,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 155,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 170,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 185,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 200,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 215,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 230,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 245,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 260,
+          "column": 42
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 276,
+          "column": 50
+        },
+        "evidence": "https://sts.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 326,
+          "column": 50
+        },
+        "evidence": "https://sts-fips.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 348,
+          "column": 46
+        },
+        "evidence": "https://sts.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 359,
+          "column": 42
+        },
+        "evidence": "https://sts-fips.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 378,
+          "column": 42
+        },
+        "evidence": "https://sts.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 394,
+          "column": 26
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint/internals.rs",
+          "line": 410,
+          "column": 34
+        },
+        "evidence": "https://sts.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/endpoint_lib.rs",
+          "line": 5,
+          "column": 14
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/endpoint_lib.rs",
+          "line": 8,
+          "column": 38
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      }
+    ]
+  }
+}

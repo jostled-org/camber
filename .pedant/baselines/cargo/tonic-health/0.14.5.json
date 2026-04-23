@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "391c34dab512f5cfbcc7bebe3dd0e763e928a427bcdb2ccb95ecd1d9f8e982d7",
+  "crate_name": "tonic-health",
+  "crate_version": "0.14.5",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915115,
+  "profile": {
+    "findings": []
+  }
+}

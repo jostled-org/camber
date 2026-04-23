@@ -1,0 +1,1222 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "c9d49cf10fd9d7127ab6d60f954c39594eccb5914fef10a037edac36e4c521b5",
+  "crate_name": "aws-smithy-http-client",
+  "crate_version": "1.1.12",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915100,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/custom-dns.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/custom-dns.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 40,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 40,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 1053,
+          "column": 5
+        },
+        "evidence": "hyper::rt::ReadBufCursor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 1257,
+          "column": 9
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 1257,
+          "column": 9
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 1121,
+          "column": 36
+        },
+        "evidence": "https://socket-hangup.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 1204,
+          "column": 36
+        },
+        "evidence": "https://static-uri.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 1236,
+          "column": 36
+        },
+        "evidence": "https://fake-uri.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 1284,
+          "column": 36
+        },
+        "evidence": "http://static-uri:50227.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "hyper::rt::ReadBufCursor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/dns.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 457,
+          "column": 36
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 460,
+          "column": 46
+        },
+        "evidence": "https://",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 529,
+          "column": 40
+        },
+        "evidence": "http://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 536,
+          "column": 41
+        },
+        "evidence": "http://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 543,
+          "column": 39
+        },
+        "evidence": "http://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 557,
+          "column": 40
+        },
+        "evidence": "http://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 567,
+          "column": 40
+        },
+        "evidence": "http://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 594,
+          "column": 36
+        },
+        "evidence": "http://test-proxy:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 644,
+          "column": 36
+        },
+        "evidence": "http://test-proxy:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 662,
+          "column": 36
+        },
+        "evidence": "http://test-proxy:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 677,
+          "column": 19
+        },
+        "evidence": "http://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 684,
+          "column": 19
+        },
+        "evidence": "http://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 695,
+          "column": 19
+        },
+        "evidence": "http://existing:creds@proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 712,
+          "column": 36
+        },
+        "evidence": "http://test-proxy:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 718,
+          "column": 24
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 731,
+          "column": 40
+        },
+        "evidence": "http://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 735,
+          "column": 24
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 746,
+          "column": 25
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 753,
+          "column": 40
+        },
+        "evidence": "http://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 759,
+          "column": 24
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 780,
+          "column": 24
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 789,
+          "column": 45
+        },
+        "evidence": "http://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 793,
+          "column": 46
+        },
+        "evidence": "https://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 797,
+          "column": 48
+        },
+        "evidence": "http://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 801,
+          "column": 36
+        },
+        "evidence": "https://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy.rs",
+          "line": 807,
+          "column": 36
+        },
+        "evidence": "http://proxy.example.com:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/timeout.rs",
+          "line": 210,
+          "column": 5
+        },
+        "evidence": "hyper::rt::ReadBufCursor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/timeout.rs",
+          "line": 213,
+          "column": 5
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/timeout.rs",
+          "line": 220,
+          "column": 5
+        },
+        "evidence": "hyper::http",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/timeout.rs",
+          "line": 221,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/timeout.rs",
+          "line": 221,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "rustls::crypto::CryptoProvider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 27,
+          "column": 34
+        },
+        "evidence": "rustls::crypto::aws_lc_rs::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 30,
+          "column": 33
+        },
+        "evidence": "rustls::crypto::ring::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 34,
+          "column": 32
+        },
+        "evidence": "rustls::crypto::default_fips_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 58,
+          "column": 5
+        },
+        "evidence": "rustls::crypto::CryptoProvider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 87,
+          "column": 13
+        },
+        "evidence": "rustls::CipherSuite::TLS13_AES_256_GCM_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 88,
+          "column": 13
+        },
+        "evidence": "rustls::CipherSuite::TLS13_AES_128_GCM_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 90,
+          "column": 13
+        },
+        "evidence": "rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 91,
+          "column": 13
+        },
+        "evidence": "rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 92,
+          "column": 13
+        },
+        "evidence": "rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 93,
+          "column": 13
+        },
+        "evidence": "rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 94,
+          "column": 13
+        },
+        "evidence": "rustls::CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 113,
+          "column": 29
+        },
+        "evidence": "rustls::RootCertStore::empty",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 141,
+          "column": 9
+        },
+        "evidence": "rustls::ClientConfig::builder_with_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 173,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 173,
+          "column": 5
+        },
+        "evidence": "hyper::rt::ReadBufCursor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 173,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/tls/rustls_provider.rs",
+          "line": 187,
+          "column": 5
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 60,
+          "column": 29
+        },
+        "evidence": "rustls::RootCertStore::empty",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 67,
+          "column": 28
+        },
+        "evidence": "rustls::Certificate",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 88,
+          "column": 35
+        },
+        "evidence": "rustls::ClientConfig::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 91,
+          "column": 25
+        },
+        "evidence": "rustls::cipher_suite::TLS13_AES_256_GCM_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 92,
+          "column": 25
+        },
+        "evidence": "rustls::cipher_suite::TLS13_AES_128_GCM_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 94,
+          "column": 25
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 95,
+          "column": 25
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 96,
+          "column": 25
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 97,
+          "column": 25
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 98,
+          "column": 25
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 874,
+          "column": 9
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 980,
+          "column": 40
+        },
+        "evidence": "https://static-uri.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 1013,
+          "column": 40
+        },
+        "evidence": "https://fake-uri.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/hyper_legacy.rs",
+          "line": 1112,
+          "column": 36
+        },
+        "evidence": "https://socket-hangup.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/test_util/dvr.rs",
+          "line": 45,
+          "column": 24
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/test_util/dvr.rs",
+          "line": 52,
+          "column": 12
+        },
+        "evidence": "std::fs::write",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/test_util/dvr.rs",
+          "line": 348,
+          "column": 5
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/test_util/dvr.rs",
+          "line": 394,
+          "column": 43
+        },
+        "evidence": "https://www.example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/test_util/dvr/record.rs",
+          "line": 21,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/test_util/dvr/replay.rs",
+          "line": 239,
+          "column": 35
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/test_util/never.rs",
+          "line": 111,
+          "column": 5
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/test_util/never.rs",
+          "line": 218,
+          "column": 36
+        },
+        "evidence": "http://fakeuri.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/test_util/never.rs",
+          "line": 242,
+          "column": 36
+        },
+        "evidence": "http://fakeuri.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/test_util/replay.rs",
+          "line": 192,
+          "column": 32
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/test_util/wire.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "hyper::service::service_fn",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/test_util/wire.rs",
+          "line": 56,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/test_util/wire.rs",
+          "line": 59,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/test_util/wire.rs",
+          "line": 231,
+          "column": 42
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "hyper::body::Incoming",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "hyper::service::service_fn",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 27,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 30,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 223,
+          "column": 32
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 60,
+          "column": 42
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 329,
+          "column": 22
+        },
+        "evidence": "http://aws.amazon.com/api/data",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 378,
+          "column": 22
+        },
+        "evidence": "http://aws.amazon.com/api/data",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 404,
+          "column": 22
+        },
+        "evidence": "http://aws.amazon.com/protected/resource",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 437,
+          "column": 22
+        },
+        "evidence": "http://aws.amazon.com/api/test",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 472,
+          "column": 22
+        },
+        "evidence": "http://aws.amazon.com/precedence/test",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 507,
+          "column": 30
+        },
+        "evidence": "http://aws.amazon.com/v1/data",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 535,
+          "column": 21
+        },
+        "evidence": "127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 655,
+          "column": 22
+        },
+        "evidence": "http://aws.amazon.com/api/endpoint",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 678,
+          "column": 42
+        },
+        "evidence": "http://127.0.0.1:1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 681,
+          "column": 22
+        },
+        "evidence": "http://aws.amazon.com/api/test",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 718,
+          "column": 22
+        },
+        "evidence": "http://aws.amazon.com/secure/api",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 859,
+          "column": 22
+        },
+        "evidence": "https://secure.aws.amazon.com/api/secure",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy_tests.rs",
+          "line": 903,
+          "column": 22
+        },
+        "evidence": "https://secure.aws.amazon.com/api/secure",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/smoke_test_clients.rs",
+          "line": 117,
+          "column": 32
+        },
+        "evidence": "https://amazon.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/tls.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "hyper::body::Bytes",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/tls.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "hyper::body::Incoming",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/tls.rs",
+          "line": 24,
+          "column": 1
+        },
+        "evidence": "hyper::service::service_fn",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/tls.rs",
+          "line": 27,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/tls.rs",
+          "line": 29,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/tls.rs",
+          "line": 32,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/tls.rs",
+          "line": 33,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/tls.rs",
+          "line": 57,
+          "column": 13
+        },
+        "evidence": "rustls::crypto::aws_lc_rs::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/tls.rs",
+          "line": 59,
+          "column": 38
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

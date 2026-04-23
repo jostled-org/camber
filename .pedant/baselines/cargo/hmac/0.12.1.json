@@ -1,0 +1,72 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "c2060233ae1089751b80bda55f46ab81b3de1ad8318034134ff426c7fc876e39",
+  "crate_name": "hmac",
+  "crate_version": "0.12.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915104,
+  "profile": {
+    "findings": [
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/mod.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "hmac::Hmac",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/mod.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "hmac::SimpleHmac",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "sha2::Sha224",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "sha2::Sha256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "sha2::Sha384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "sha2::Sha512",
+        "origin": "import"
+      }
+    ]
+  }
+}

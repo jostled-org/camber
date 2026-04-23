@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "9310b08c686261841f6c3f9b8a2538fd881100a3ee5fbdfef06764836787bace",
+  "crate_name": "rustc-demangle",
+  "crate_version": "0.1.27",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915111,
+  "profile": {
+    "findings": []
+  }
+}

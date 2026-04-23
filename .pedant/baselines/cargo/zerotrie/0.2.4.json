@@ -1,0 +1,72 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "4783cf382d68c228d2ce805191dc47bddcf68c67ba1a01486c4746730ed4d029",
+  "crate_name": "zerotrie",
+  "crate_version": "0.2.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915125,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/first_weekday_for_region.rs",
+          "line": 206,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/byte_phf/mod.rs",
+          "line": 269,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/zerotrie.rs",
+          "line": 126,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/zerotrie.rs",
+          "line": 194,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/zerotrie.rs",
+          "line": 240,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/zerotrie.rs",
+          "line": 271,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

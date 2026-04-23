@@ -1,0 +1,392 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b7a942adb2fac134f042d7d7f23d1a02e4e36d6750028b27ec62c725ace1a2f2",
+  "crate_name": "ipnet",
+  "crate_version": "2.12.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915105,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 751,
+          "column": 5
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 751,
+          "column": 5
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 751,
+          "column": 5
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 758,
+          "column": 32
+        },
+        "evidence": "10.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 759,
+          "column": 32
+        },
+        "evidence": "10.0.0.3",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 774,
+          "column": 32
+        },
+        "evidence": "255.255.255.254",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 775,
+          "column": 32
+        },
+        "evidence": "255.255.255.255",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 800,
+          "column": 32
+        },
+        "evidence": "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 801,
+          "column": 32
+        },
+        "evidence": "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 810,
+          "column": 32
+        },
+        "evidence": "10.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 811,
+          "column": 32
+        },
+        "evidence": "10.0.0.3",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 826,
+          "column": 32
+        },
+        "evidence": "255.255.255.254",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 827,
+          "column": 32
+        },
+        "evidence": "255.255.255.255",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 852,
+          "column": 32
+        },
+        "evidence": "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 853,
+          "column": 32
+        },
+        "evidence": "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 875,
+          "column": 32
+        },
+        "evidence": "10.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 876,
+          "column": 32
+        },
+        "evidence": "10.0.0.3",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 888,
+          "column": 32
+        },
+        "evidence": "10.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 889,
+          "column": 32
+        },
+        "evidence": "10.0.0.3",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 908,
+          "column": 32
+        },
+        "evidence": "10.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 909,
+          "column": 32
+        },
+        "evidence": "10.0.0.3",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 925,
+          "column": 32
+        },
+        "evidence": "10.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 926,
+          "column": 32
+        },
+        "evidence": "10.0.0.3",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 958,
+          "column": 32
+        },
+        "evidence": "10.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipext.rs",
+          "line": 959,
+          "column": 32
+        },
+        "evidence": "10.0.0.3",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipnet_serde.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipnet_serde.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipnet.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipnet.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipnet.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/mask.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/mask.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/mask.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/parser.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/parser.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      }
+    ]
+  }
+}

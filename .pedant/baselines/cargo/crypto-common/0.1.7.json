@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "f8c83a42357e2f17f21fefbbd3862ab40ee9272f50513d3719b1dd430104b216",
+  "crate_name": "crypto-common",
+  "crate_version": "0.1.7",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915102,
+  "profile": {
+    "findings": []
+  }
+}

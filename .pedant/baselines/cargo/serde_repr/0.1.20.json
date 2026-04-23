@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "d228cbce98fd8896cd1689ca5ddd58c2df898add0c977e937e4c47c4edb8aac4",
+  "crate_name": "serde_repr",
+  "crate_version": "0.1.20",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915112,
+  "profile": {
+    "findings": [
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 50,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 80,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      }
+    ]
+  }
+}

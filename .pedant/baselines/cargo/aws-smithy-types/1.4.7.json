@@ -1,0 +1,262 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "279dc19c48b6f48d0cad75e7d0c927e97b54ca4377ca8d3bb313f41cf3e16c24",
+  "crate_name": "aws-smithy-types",
+  "crate_version": "1.4.7",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915101,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/byte_stream.rs",
+          "line": 595,
+          "column": 5
+        },
+        "evidence": "tempfile::NamedTempFile",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/byte_stream/bytestream_util.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "tokio::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/byte_stream/bytestream_util.rs",
+          "line": 248,
+          "column": 27
+        },
+        "evidence": "tokio::fs::metadata",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/byte_stream/bytestream_util.rs",
+          "line": 269,
+          "column": 5
+        },
+        "evidence": "tempfile::NamedTempFile",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/byte_stream/bytestream_util/http_body_0_4_x.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "tokio::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/byte_stream/bytestream_util/http_body_0_4_x.rs",
+          "line": 95,
+          "column": 5
+        },
+        "evidence": "tempfile::NamedTempFile",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/byte_stream/bytestream_util/http_body_1_x.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "tokio::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/byte_stream/bytestream_util/http_body_1_x.rs",
+          "line": 88,
+          "column": 5
+        },
+        "evidence": "tempfile::NamedTempFile",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/byte_stream/http_body_0_4_x.rs",
+          "line": 58,
+          "column": 9
+        },
+        "evidence": "tempfile::NamedTempFile",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/format.rs",
+          "line": 137,
+          "column": 5
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/format.rs",
+          "line": 137,
+          "column": 5
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/format.rs",
+          "line": 137,
+          "column": 5
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/format.rs",
+          "line": 137,
+          "column": 5
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/format.rs",
+          "line": 137,
+          "column": 5
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/format.rs",
+          "line": 137,
+          "column": 5
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/format.rs",
+          "line": 137,
+          "column": 5
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/format.rs",
+          "line": 383,
+          "column": 5
+        },
+        "evidence": "time::format_description::well_known::Rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/format.rs",
+          "line": 384,
+          "column": 5
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/date_time/format.rs",
+          "line": 499,
+          "column": 5
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/mod.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/mod.rs",
+          "line": 395,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/mod.rs",
+          "line": 396,
+          "column": 5
+        },
+        "evidence": "time::format_description::well_known::Rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time/mod.rs",
+          "line": 397,
+          "column": 5
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/endpoint.rs",
+          "line": 146,
+          "column": 18
+        },
+        "evidence": "https://www.amazon.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/str_bytes.rs",
+          "line": 54,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

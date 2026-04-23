@@ -1,0 +1,342 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "60877985575b25462fbe11be6cd5fb4fa3abeebb961e3d71a81f920ab7cd0641",
+  "crate_name": "rustls",
+  "crate_version": "0.23.37",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915112,
+  "profile": {
+    "findings": [
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/benchmarks.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/benchmarks.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "rustls::crypto::ring",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/internal/test_ca.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs::self",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/internal/test_ca.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/internal/test_ca.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./examples/internal/test_ca.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/crypto/aws_lc_rs/hpke.rs",
+          "line": 1039,
+          "column": 5
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/aws_lc_rs/ticketer.rs",
+          "line": 89,
+          "column": 24
+        },
+        "evidence": "hmac::Key::generate",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/aws_lc_rs/ticketer.rs",
+          "line": 89,
+          "column": 44
+        },
+        "evidence": "hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/aws_lc_rs/ticketer.rs",
+          "line": 143,
+          "column": 19
+        },
+        "evidence": "hmac::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/aws_lc_rs/ticketer.rs",
+          "line": 201,
+          "column": 9
+        },
+        "evidence": "hmac::verify",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/aws_lc_rs/tls13.rs",
+          "line": 31,
+          "column": 50
+        },
+        "evidence": "hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/aws_lc_rs/tls13.rs",
+          "line": 51,
+          "column": 54
+        },
+        "evidence": "hmac::HMAC_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/aws_lc_rs/tls13.rs",
+          "line": 383,
+          "column": 32
+        },
+        "evidence": "hmac::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/aws_lc_rs/tls13.rs",
+          "line": 383,
+          "column": 44
+        },
+        "evidence": "hmac::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/mod.rs",
+          "line": 272,
+          "column": 25
+        },
+        "evidence": "ring::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/ring/mod.rs",
+          "line": 2,
+          "column": 12
+        },
+        "evidence": "ring",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/ring/tls13.rs",
+          "line": 30,
+          "column": 49
+        },
+        "evidence": "hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/ring/tls13.rs",
+          "line": 50,
+          "column": 53
+        },
+        "evidence": "hmac::HMAC_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/ring/tls13.rs",
+          "line": 294,
+          "column": 32
+        },
+        "evidence": "hmac::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/ring/tls13.rs",
+          "line": 294,
+          "column": 44
+        },
+        "evidence": "hmac::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/tls12.rs",
+          "line": 107,
+          "column": 15
+        },
+        "evidence": "hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/tls12.rs",
+          "line": 125,
+          "column": 15
+        },
+        "evidence": "hmac::HMAC_SHA512",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/tls12.rs",
+          "line": 143,
+          "column": 15
+        },
+        "evidence": "hmac::HMAC_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/tls13.rs",
+          "line": 15,
+          "column": 24
+        },
+        "evidence": "hmac::Tag::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/tls13.rs",
+          "line": 40,
+          "column": 29
+        },
+        "evidence": "hmac::Tag::MAX_LEN",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/tls13.rs",
+          "line": 286,
+          "column": 35
+        },
+        "evidence": "hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/tls13.rs",
+          "line": 369,
+          "column": 35
+        },
+        "evidence": "hmac::HMAC_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/error.rs",
+          "line": 1379,
+          "column": 9
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/key_log_file.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/key_log_file.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::fs::OpenOptions",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/msgs/message_test.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/stream.rs",
+          "line": 265,
+          "column": 5
+        },
+        "evidence": "std::net::TcpStream",
+        "origin": "import"
+      }
+    ]
+  }
+}

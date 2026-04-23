@@ -1,0 +1,132 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "4c223cb93e2437675119268a8358369f5ffc7921c4e601cc2e79c436d4d0d9b0",
+  "crate_name": "quanta",
+  "crate_version": "0.12.6",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915110,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benches/contention.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benches/timing.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/clocks/counter.rs",
+          "line": 7,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/clocks/counter.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/clocks/monotonic/unix.rs",
+          "line": 14,
+          "column": 13
+        },
+        "evidence": "libc::clock_gettime",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/clocks/monotonic/unix.rs",
+          "line": 14,
+          "column": 33
+        },
+        "evidence": "libc::CLOCK_MONOTONIC",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/clocks/monotonic/unix.rs",
+          "line": 13,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/clocks/monotonic/wasm_wasi.rs",
+          "line": 8,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/clocks/monotonic/windows.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "winapi::um::profileapi",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/clocks/monotonic/windows.rs",
+          "line": 11,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/clocks/monotonic/windows.rs",
+          "line": 27,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 554,
+          "column": 5
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      }
+    ]
+  }
+}

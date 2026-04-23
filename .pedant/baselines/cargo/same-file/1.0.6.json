@@ -1,0 +1,122 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "66fc5a30808d57997fafcce8aa84514f837ddf1c3fb28d7d59a5e5d4f032bc9b",
+  "crate_name": "same-file",
+  "crate_version": "1.0.6",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915112,
+  "profile": {
+    "findings": [
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./examples/is_stderr.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::process",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 74,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 382,
+          "column": 5
+        },
+        "evidence": "std::fs::self",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 382,
+          "column": 5
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/unix.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/unix.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::fs::OpenOptions",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/unix.rs",
+          "line": 82,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/unix.rs",
+          "line": 86,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/unix.rs",
+          "line": 90,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/unknown.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/win.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      }
+    ]
+  }
+}

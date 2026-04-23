@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "65b3cc53e47e209e782ebf60626cef9f857d5606c8f129a92539c9019e783a5a",
+  "crate_name": "futures-io",
+  "crate_version": "0.3.32",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915103,
+  "profile": {
+    "findings": []
+  }
+}

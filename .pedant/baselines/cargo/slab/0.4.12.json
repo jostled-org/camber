@@ -1,0 +1,72 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "437264746544d9f5db99501a4178d6b7aba9ae25d46df9c579b16f3a1eb68448",
+  "crate_name": "slab",
+  "crate_version": "0.4.12",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915113,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 844,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 849,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 855,
+          "column": 12
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 880,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 912,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 946,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

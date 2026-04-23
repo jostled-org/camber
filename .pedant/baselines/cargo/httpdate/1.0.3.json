@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "bf5ad39c6dafb4baac8d05b871c7c11fbe6277e999b507b107a4f509043b4e44",
+  "crate_name": "httpdate",
+  "crate_version": "1.0.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915104,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 24,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      }
+    ]
+  }
+}

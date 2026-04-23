@@ -1,0 +1,1512 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "d93b50214ffbf640ba901e27ec34298e28a5c97c6e5e0cf74c6f9a3157fb1ff1",
+  "crate_name": "js-sys",
+  "crate_version": "0.3.94",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915105,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/mod.rs",
+          "line": 115,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/queue.rs",
+          "line": 121,
+          "column": 9
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/queue.rs",
+          "line": 124,
+          "column": 9
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/futures/queue.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/multithread.rs",
+          "line": 40,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/multithread.rs",
+          "line": 51,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/multithread.rs",
+          "line": 52,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/multithread.rs",
+          "line": 57,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/multithread.rs",
+          "line": 62,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/multithread.rs",
+          "line": 67,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/multithread.rs",
+          "line": 93,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/futures/task/multithread.rs",
+          "line": 196,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/singlethread.rs",
+          "line": 58,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/singlethread.rs",
+          "line": 105,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/singlethread.rs",
+          "line": 106,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/singlethread.rs",
+          "line": 111,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/singlethread.rs",
+          "line": 116,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/futures/task/singlethread.rs",
+          "line": 121,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/futures/task/singlethread.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/futures/task/wait_async_polyfill.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 13139,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 13142,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 365,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 446,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1291,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 2034,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 2066,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 2245,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 2367,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 2426,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 2894,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 3147,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 3243,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 3536,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 3589,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 3604,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 3660,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 4797,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 4894,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 4935,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 5076,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 5129,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 5151,
+          "column": 9
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 5175,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 5429,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 5459,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 5711,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 6060,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 6561,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 6639,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 7220,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 7243,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 7262,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 7285,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 7613,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 7800,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 7835,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8009,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8061,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8082,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8101,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8120,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8209,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8266,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8297,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8403,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8424,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8456,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8477,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8498,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8541,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8623,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8640,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8681,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8709,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8756,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 8865,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 9695,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 9842,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10376,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10414,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10433,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10456,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10483,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10534,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10546,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10655,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10779,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10794,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10813,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10831,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 10985,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11124,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11139,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11158,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11176,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11338,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11416,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11435,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11558,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11701,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11739,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11754,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11773,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11881,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11914,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11929,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11956,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11973,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12056,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12106,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12121,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12193,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12335,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12358,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12444,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12587,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12606,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12679,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12702,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12762,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 12797,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 13160,
+          "column": 9
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 13200,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 256,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 291,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 326,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 364,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 399,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 451,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 486,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 540,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 577,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 609,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 658,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 695,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 755,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 803,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 873,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 915,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 949,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 983,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 1189,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 1613,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 2109,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 2333,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 2545,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 2783,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 2902,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/Temporal.rs",
+          "line": 3222,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

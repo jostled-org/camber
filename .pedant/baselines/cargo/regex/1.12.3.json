@@ -1,0 +1,22 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b1e46d4e33f7d82aaf215ac3174d544f4af88522e72fc7d4c9fdca936cd4bee1",
+  "crate_name": "regex",
+  "crate_version": "1.12.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915111,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/pattern.rs",
+          "line": 30,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

@@ -1,0 +1,182 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "78eb1d3476ae38018125656f45ca25bb6af88c2e793990e40d5b8a4ded60954c",
+  "crate_name": "combine",
+  "crate_version": "4.6.7",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915102,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./benches/json.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./benches/mp4.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/date.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/ini.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/number.rs",
+          "line": 28,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/parser/sequence.rs",
+          "line": 42,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/buf_reader.rs",
+          "line": 258,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/buf_reader.rs",
+          "line": 292,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/buf_reader.rs",
+          "line": 377,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/buf_reader.rs",
+          "line": 388,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/buf_reader.rs",
+          "line": 401,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/buf_reader.rs",
+          "line": 405,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/buf_reader.rs",
+          "line": 513,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/buf_reader.rs",
+          "line": 523,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/buf_reader.rs",
+          "line": 551,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/mod.rs",
+          "line": 862,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/async.rs",
+          "line": 809,
+          "column": 5
+        },
+        "evidence": "tokio::fs::File",
+        "origin": "import"
+      }
+    ]
+  }
+}

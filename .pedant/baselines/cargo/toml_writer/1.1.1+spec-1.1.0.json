@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "5ccd667fd71d4cc497740087503cd2f33929c3e1e3b3a141f25cacadfa1bb3e8",
+  "crate_name": "toml_writer",
+  "crate_version": "1.1.1+spec-1.1.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915114,
+  "profile": {
+    "findings": []
+  }
+}

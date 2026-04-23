@@ -1,0 +1,22 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "5347d2c47199055c32b8b266e776eb29295921d5a8a60925e06706efaa3435e5",
+  "crate_name": "toml",
+  "crate_version": "1.1.2+spec-1.1.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915114,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/toml2json.rs",
+          "line": 12,
+          "column": 9
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      }
+    ]
+  }
+}

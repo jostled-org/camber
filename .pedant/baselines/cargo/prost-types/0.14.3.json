@@ -1,0 +1,102 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "d8e22626eb4864524d6042fe2621e4b7c6ab28bc77ff406951155330347b72a8",
+  "crate_name": "prost-types",
+  "crate_version": "0.14.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915109,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 95,
+          "column": 16
+        },
+        "evidence": "time::Duration::new",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 179,
+          "column": 5
+        },
+        "evidence": "chrono::TimeDelta",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 226,
+          "column": 28
+        },
+        "evidence": "time::Duration::default",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 273,
+          "column": 17
+        },
+        "evidence": "chrono::TimeDelta::try_from",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/timestamp.rs",
+          "line": 199,
+          "column": 47
+        },
+        "evidence": "time::Duration::from_secs",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/timestamp.rs",
+          "line": 210,
+          "column": 37
+        },
+        "evidence": "time::Duration::from_nanos",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/timestamp.rs",
+          "line": 245,
+          "column": 34
+        },
+        "evidence": "std::time::SystemTime::try_from",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/timestamp.rs",
+          "line": 258,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/type_url.rs",
+          "line": 58,
+          "column": 26
+        },
+        "evidence": "https://type.googleapis.com/google.protobuf.Duration",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

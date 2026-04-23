@@ -1,0 +1,1612 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "406b992118b28e20dde5c6ad72d4551b2e2525c013cf174b4f1a8ad43225f192",
+  "crate_name": "url",
+  "crate_version": "2.5.8",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915116,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 202,
+          "column": 9
+        },
+        "evidence": "std::net",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/parser.rs",
+          "line": 1835,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 30,
+          "column": 9
+        },
+        "evidence": "std::net",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 674,
+          "column": 5
+        },
+        "evidence": "std::net::ToSocketAddrs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 254,
+          "column": 27
+        },
+        "evidence": "http://foobar.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 271,
+          "column": 9
+        },
+        "evidence": "http://testing.com/this?dont=clobberme",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 315,
+          "column": 22
+        },
+        "evidence": "https://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 316,
+          "column": 22
+        },
+        "evidence": "https://example.com:443/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 320,
+          "column": 22
+        },
+        "evidence": "http://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 321,
+          "column": 22
+        },
+        "evidence": "http://example.com:8080/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 325,
+          "column": 22
+        },
+        "evidence": "http://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 326,
+          "column": 22
+        },
+        "evidence": "https://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 330,
+          "column": 22
+        },
+        "evidence": "http://foo.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 331,
+          "column": 22
+        },
+        "evidence": "http://bar.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 335,
+          "column": 22
+        },
+        "evidence": "http://foo.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 336,
+          "column": 22
+        },
+        "evidence": "http://foo.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 345,
+          "column": 17
+        },
+        "evidence": "http://www.mozilla.org",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 347,
+          "column": 9
+        },
+        "evidence": "http://1.35.33.49",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 351,
+          "column": 9
+        },
+        "evidence": "http://[2001:0db8:85a3:08d3:1319:8a2e:0370:7344]",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 357,
+          "column": 9
+        },
+        "evidence": "http://[::]",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 361,
+          "column": 9
+        },
+        "evidence": "http://[::1]",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 365,
+          "column": 9
+        },
+        "evidence": "http://0x1.0X23.0x21.061",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 368,
+          "column": 17
+        },
+        "evidence": "http://0x1232131",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 369,
+          "column": 17
+        },
+        "evidence": "http://111",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 411,
+          "column": 10
+        },
+        "evidence": "http://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 411,
+          "column": 33
+        },
+        "evidence": "http://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 412,
+          "column": 10
+        },
+        "evidence": "http://addslash.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 412,
+          "column": 33
+        },
+        "evidence": "http://addslash.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 413,
+          "column": 10
+        },
+        "evidence": "http://@emptyuser.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 413,
+          "column": 36
+        },
+        "evidence": "http://emptyuser.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 414,
+          "column": 10
+        },
+        "evidence": "http://:@emptypass.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 414,
+          "column": 37
+        },
+        "evidence": "http://emptypass.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 415,
+          "column": 10
+        },
+        "evidence": "http://user@user.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 415,
+          "column": 35
+        },
+        "evidence": "http://user@user.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 417,
+          "column": 13
+        },
+        "evidence": "http://user:pass@userpass.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 418,
+          "column": 13
+        },
+        "evidence": "http://user:pass@userpass.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 421,
+          "column": 13
+        },
+        "evidence": "http://slashquery.com/path/?q=something",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 422,
+          "column": 13
+        },
+        "evidence": "http://slashquery.com/path/?q=something",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 425,
+          "column": 13
+        },
+        "evidence": "http://noslashquery.com/path?q=something",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 426,
+          "column": 13
+        },
+        "evidence": "http://noslashquery.com/path?q=something",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 476,
+          "column": 30
+        },
+        "evidence": "http://mozilla.org",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 508,
+          "column": 24
+        },
+        "evidence": "http://localhost:6767/foo/bar?a=b",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 518,
+          "column": 24
+        },
+        "evidence": "http://localhost:6767/foo/bar",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 537,
+          "column": 24
+        },
+        "evidence": "http://localhost:6767/foo/bar?a=b",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 547,
+          "column": 30
+        },
+        "evidence": "https://example.net/hello",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 588,
+          "column": 30
+        },
+        "evidence": "http://example.net/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 591,
+          "column": 20
+        },
+        "evidence": "http://example.net:80/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 592,
+          "column": 20
+        },
+        "evidence": "http://example.net:81/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 593,
+          "column": 20
+        },
+        "evidence": "http://example.net",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 594,
+          "column": 20
+        },
+        "evidence": "http://example.net/hello",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 595,
+          "column": 20
+        },
+        "evidence": "https://example.net",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 598,
+          "column": 20
+        },
+        "evidence": "http://user@example.net/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 599,
+          "column": 20
+        },
+        "evidence": "http://user:pass@example.net/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 622,
+          "column": 30
+        },
+        "evidence": "http://example.net/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 637,
+          "column": 10
+        },
+        "evidence": "http://😅.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 637,
+          "column": 26
+        },
+        "evidence": "http://😅.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 639,
+          "column": 10
+        },
+        "evidence": "https://user@😅.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 639,
+          "column": 32
+        },
+        "evidence": "https://😅.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 640,
+          "column": 10
+        },
+        "evidence": "http://😅.🙂:40",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 640,
+          "column": 27
+        },
+        "evidence": "http://😅.🙂:40",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 648,
+          "column": 20
+        },
+        "evidence": "http://example.net/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 649,
+          "column": 20
+        },
+        "evidence": "http://example.net:80/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 650,
+          "column": 20
+        },
+        "evidence": "http://example.net:81/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 651,
+          "column": 20
+        },
+        "evidence": "http://example.net",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 652,
+          "column": 20
+        },
+        "evidence": "http://example.net/hello",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 653,
+          "column": 20
+        },
+        "evidence": "https://example.net",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 656,
+          "column": 20
+        },
+        "evidence": "http://user@example.net/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 657,
+          "column": 20
+        },
+        "evidence": "http://user:pass@example.net/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 660,
+          "column": 20
+        },
+        "evidence": "http://127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 677,
+          "column": 10
+        },
+        "evidence": "https://127.0.0.1/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 677,
+          "column": 32
+        },
+        "evidence": "127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 678,
+          "column": 10
+        },
+        "evidence": "https://127.0.0.1:9742/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 678,
+          "column": 37
+        },
+        "evidence": "127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 679,
+          "column": 47
+        },
+        "evidence": "127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 680,
+          "column": 42
+        },
+        "evidence": "127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 681,
+          "column": 10
+        },
+        "evidence": "https://[::1]/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 682,
+          "column": 10
+        },
+        "evidence": "https://[::1]:9742/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 685,
+          "column": 10
+        },
+        "evidence": "https://localhost/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 686,
+          "column": 10
+        },
+        "evidence": "https://localhost:9742/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 724,
+          "column": 26
+        },
+        "evidence": "https://127.0.0.1/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 730,
+          "column": 26
+        },
+        "evidence": "https://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 736,
+          "column": 26
+        },
+        "evidence": "https://example.com/products?page=2#fragment",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 743,
+          "column": 26
+        },
+        "evidence": "https://example.com/products",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 747,
+          "column": 26
+        },
+        "evidence": "https://example.com/?country=español",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 754,
+          "column": 26
+        },
+        "evidence": "https://example.com/products?page=2&sort=desc",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 770,
+          "column": 26
+        },
+        "evidence": "https://example.com/#fragment",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 773,
+          "column": 26
+        },
+        "evidence": "https://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 779,
+          "column": 30
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 781,
+          "column": 21
+        },
+        "evidence": "127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 792,
+          "column": 30
+        },
+        "evidence": "https://existing.url",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 813,
+          "column": 10
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 831,
+          "column": 26
+        },
+        "evidence": "https://example.com/path/file.ext?key=val&key2=val2#fragment",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 884,
+          "column": 16
+        },
+        "evidence": "http:////mozilla.org:42",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 902,
+          "column": 16
+        },
+        "evidence": "http:////mozilla.org:42",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 909,
+          "column": 16
+        },
+        "evidence": "http://mozilla.org\\path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 920,
+          "column": 10
+        },
+        "evidence": "http://mozilla.org/\\foo",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 922,
+          "column": 10
+        },
+        "evidence": "http://user:pass@mozilla.org",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 923,
+          "column": 10
+        },
+        "evidence": "http:///mozilla.org",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 926,
+          "column": 10
+        },
+        "evidence": "http://mozilla.org/^",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 927,
+          "column": 10
+        },
+        "evidence": "http://mozilla.org/#\u00000",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 928,
+          "column": 10
+        },
+        "evidence": "http://mozilla.org/%1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 929,
+          "column": 10
+        },
+        "evidence": "http://mozilla.org\t/foo",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 930,
+          "column": 10
+        },
+        "evidence": "http://user@:pass@mozilla.org",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 954,
+          "column": 29
+        },
+        "evidence": "http:////mozilla.org",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1028,
+          "column": 24
+        },
+        "evidence": "http://localhost:6767/foo/bar",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1036,
+          "column": 24
+        },
+        "evidence": "http://localhost:6767/foo/bar",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1085,
+          "column": 19
+        },
+        "evidence": "https://user:pass@domain.com:9742/path/file.ext?key=val&key2=val2#fragment",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1096,
+          "column": 19
+        },
+        "evidence": "https://domain.com:9742/path/file.ext#fragment",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1105,
+          "column": 19
+        },
+        "evidence": "https://domain.com:9742/path/file.ext",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1148,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1149,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1153,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1154,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1158,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1159,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1163,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1164,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/?foo=bar#123",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1168,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1169,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/video",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1173,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1174,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/video",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1178,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1179,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/video",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1183,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1184,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test2/video",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1188,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1189,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test2/video",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1193,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/bla",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1194,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test2/video",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1198,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/bla/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1199,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test2/video",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1203,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/?foo=bar#123",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1204,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/video",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1208,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1209,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/video?baz=meh#456",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1213,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1214,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test?baz=meh#456",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1218,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1219,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test?baz=meh#456",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1223,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1224,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/?baz=meh#456",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1228,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/?foo=bar#123",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1229,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/video?baz=meh#456",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1233,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/file.txt",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1234,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/file.txt",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1238,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/not_equal.txt",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1239,
+          "column": 13
+        },
+        "evidence": "http://127.0.0.1:8080/test/file.txt",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1260,
+          "column": 10
+        },
+        "evidence": "http://127.0.0.1:8080/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1260,
+          "column": 36
+        },
+        "evidence": "https://127.0.0.1:8080/test/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1261,
+          "column": 10
+        },
+        "evidence": "http://127.0.0.1:8080/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1261,
+          "column": 36
+        },
+        "evidence": "http://127.0.0.1:8081/test/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1262,
+          "column": 10
+        },
+        "evidence": "http://127.0.0.1:8080/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1262,
+          "column": 36
+        },
+        "evidence": "http://127.0.0.2:8080/test/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1282,
+          "column": 26
+        },
+        "evidence": "http://example.com/tmp/foo",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1294,
+          "column": 26
+        },
+        "evidence": "http://example.com/tmp/foo",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1300,
+          "column": 26
+        },
+        "evidence": "https://:@example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1302,
+          "column": 26
+        },
+        "evidence": "https://:password@[::1]:8080/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1311,
+          "column": 26
+        },
+        "evidence": "https://àlex:àlex@àlex.рф.example.com:443/foo",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/unit.rs",
+          "line": 1365,
+          "column": 35
+        },
+        "evidence": "http://example.com:8000",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./tests/wpt.rs",
+          "line": 213,
+          "column": 9
+        },
+        "evidence": "std::process::exit",
+        "origin": "import"
+      }
+    ]
+  }
+}

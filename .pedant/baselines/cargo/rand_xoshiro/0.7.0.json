@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "8ff79d75ea54cfca3fd13cac52708de157fbe3668dfccb60a5df1ce3f7300ee1",
+  "crate_name": "rand_xoshiro",
+  "crate_version": "0.7.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915110,
+  "profile": {
+    "findings": []
+  }
+}

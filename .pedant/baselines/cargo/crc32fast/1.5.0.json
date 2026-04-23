@@ -1,0 +1,83 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "57b8da8b45f65da0739f6e4c1b45be2752e12c352579c2df9ddecf4c6f3c6b6f",
+  "crate_name": "crc32fast",
+  "crate_version": "1.5.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915102,
+  "profile": {
+    "findings": [
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./build.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/specialized/aarch64.rs",
+          "line": 34,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/specialized/aarch64.rs",
+          "line": 52,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/specialized/pclmulqdq.rs",
+          "line": 52,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/specialized/pclmulqdq.rs",
+          "line": 78,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/specialized/pclmulqdq.rs",
+          "line": 174,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/specialized/pclmulqdq.rs",
+          "line": 180,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

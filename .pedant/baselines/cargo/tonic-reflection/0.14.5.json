@@ -1,0 +1,82 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "0463f9c76ae48bf623c3b2c1425d7d56830ba071c827c046d1feadadb0fc66c0",
+  "crate_name": "tonic-reflection",
+  "crate_version": "0.14.5",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915115,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/server.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/server.rs",
+          "line": 100,
+          "column": 20
+        },
+        "evidence": "tokio::net::TcpListener::bind",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/server.rs",
+          "line": 99,
+          "column": 28
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/versions.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/versions.rs",
+          "line": 67,
+          "column": 20
+        },
+        "evidence": "tokio::net::TcpListener::bind",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/versions.rs",
+          "line": 66,
+          "column": 28
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/versions.rs",
+          "line": 123,
+          "column": 28
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

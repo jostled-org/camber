@@ -1,0 +1,23 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "4291e7c3e6fae66634ac26e79469970fa3903d6af27b3a8599c60ad4c0a92ead",
+  "crate_name": "winapi-i686-pc-windows-gnu",
+  "crate_version": "0.4.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915118,
+  "profile": {
+    "findings": [
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./build.rs",
+          "line": 8,
+          "column": 5
+        },
+        "evidence": "std::env::var",
+        "origin": "import",
+        "execution_context": "build_hook"
+      }
+    ]
+  }
+}

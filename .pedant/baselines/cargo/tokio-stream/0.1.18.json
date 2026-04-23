@@ -1,0 +1,192 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "e32366dcb462ea639ec2c97aeef69152959d5bb374257b93919e298332c2f50c",
+  "crate_name": "tokio-stream",
+  "crate_version": "0.1.18",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915114,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/empty.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/empty.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/pending.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/pending.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/wrappers/read_dir.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "tokio::fs::DirEntry",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/wrappers/read_dir.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "tokio::fs::ReadDir",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/wrappers/tcp_listener.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/wrappers/tcp_listener.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/wrappers/unix_listener.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "tokio::net::UnixListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/wrappers/unix_listener.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "tokio::net::UnixStream",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/chunks_timeout.rs",
+          "line": 19,
+          "column": 42
+        },
+        "evidence": "time::sleep",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/chunks_timeout.rs",
+          "line": 28,
+          "column": 5
+        },
+        "evidence": "time::advance",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/stream_chunks_timeout.rs",
+          "line": 14,
+          "column": 41
+        },
+        "evidence": "time::sleep",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/stream_chunks_timeout.rs",
+          "line": 27,
+          "column": 5
+        },
+        "evidence": "time::advance",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/stream_timeout.rs",
+          "line": 22,
+          "column": 5
+        },
+        "evidence": "time::pause",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/stream_timeout.rs",
+          "line": 38,
+          "column": 5
+        },
+        "evidence": "time::advance",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/time_throttle.rs",
+          "line": 12,
+          "column": 5
+        },
+        "evidence": "time::pause",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/time_throttle.rs",
+          "line": 19,
+          "column": 5
+        },
+        "evidence": "time::advance",
+        "origin": "import"
+      }
+    ]
+  }
+}

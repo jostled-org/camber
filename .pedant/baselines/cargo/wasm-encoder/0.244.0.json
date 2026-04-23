@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "a72e69107b517c7fbcc70f2c031aa568b494bbfb585d481c8db96e86b33fdfac",
+  "crate_name": "wasm-encoder",
+  "crate_version": "0.244.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915116,
+  "profile": {
+    "findings": []
+  }
+}

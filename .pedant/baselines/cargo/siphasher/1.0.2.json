@@ -1,0 +1,92 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "dfffb9ff19428cf7ac861ce5557f1b7b6cbededb3a9207b8be14f1cbb4f697ef",
+  "crate_name": "siphasher",
+  "crate_version": "1.0.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915113,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/common.rs",
+          "line": 44,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sip.rs",
+          "line": 432,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sip.rs",
+          "line": 450,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sip.rs",
+          "line": 459,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sip128.rs",
+          "line": 33,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sip128.rs",
+          "line": 511,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sip128.rs",
+          "line": 529,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sip128.rs",
+          "line": 538,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

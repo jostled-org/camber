@@ -1,0 +1,1022 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "8754d6ca223b21c5c5b12d459fc5513554ae0aa634b98a8a525bfe7ba5a2a0fd",
+  "crate_name": "quinn-proto",
+  "crate_version": "0.11.14",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915110,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/coding.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/coding.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/mod.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV4",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/mod.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV6",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/config/mod.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "rustls::client::WebPkiServerVerifier",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/config/mod.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::CertificateDer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/config/mod.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::PrivateKeyDer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/config/mod.rs",
+          "line": 184,
+          "column": 9
+        },
+        "evidence": "ring::hmac",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/config/mod.rs",
+          "line": 189,
+          "column": 28
+        },
+        "evidence": "hmac::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/config/mod.rs",
+          "line": 189,
+          "column": 43
+        },
+        "evidence": "hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/config/mod.rs",
+          "line": 401,
+          "column": 9
+        },
+        "evidence": "ring::hkdf",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/config/transport.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connection/mod.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connection/mod.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/connection/mod.rs",
+          "line": 3261,
+          "column": 32
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connection/paths.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/connection/send_buffer.rs",
+          "line": 99,
+          "column": 41
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/connection/send_buffer.rs",
+          "line": 118,
+          "column": 37
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/ring_like.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "ring::aead",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/ring_like.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "ring::error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/ring_like.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "ring::hkdf",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/ring_like.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "ring::hmac",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/ring_like.rs",
+          "line": 10,
+          "column": 29
+        },
+        "evidence": "hmac::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/ring_like.rs",
+          "line": 18,
+          "column": 12
+        },
+        "evidence": "hmac::verify",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "ring::aead",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 8,
+          "column": 5
+        },
+        "evidence": "rustls::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "rustls::NamedGroup",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::self",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::CipherSuite",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::client::danger::ServerCertVerifier",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::CertificateDer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::PrivateKeyDer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::ServerName",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::quic::Connection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::quic::HeaderProtectionKey",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::quic::KeyChange",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::quic::PacketKey",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::quic::Secrets",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::quic::Suite",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::quic::Version",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 300,
+          "column": 25
+        },
+        "evidence": "rustls::ClientConfig::builder_with_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 301,
+          "column": 40
+        },
+        "evidence": "rustls::version::TLS13",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 368,
+          "column": 20
+        },
+        "evidence": "rustls::quic::Connection::Client",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 369,
+          "column": 17
+        },
+        "evidence": "rustls::quic::ClientConnection::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 481,
+          "column": 25
+        },
+        "evidence": "rustls::ServerConfig::builder_with_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 524,
+          "column": 20
+        },
+        "evidence": "rustls::quic::Connection::Server",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 525,
+          "column": 17
+        },
+        "evidence": "rustls::quic::ServerConnection::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 574,
+          "column": 14
+        },
+        "evidence": "rustls::CipherSuite::TLS13_AES_128_GCM_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 584,
+          "column": 20
+        },
+        "evidence": "rustls::crypto::aws_lc_rs::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto/rustls.rs",
+          "line": 586,
+          "column": 20
+        },
+        "evidence": "rustls::crypto::ring::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/endpoint.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/endpoint.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 56,
+          "column": 5
+        },
+        "evidence": "rustls",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 108,
+          "column": 12
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 108,
+          "column": 12
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 280,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/packet.rs",
+          "line": 944,
+          "column": 9
+        },
+        "evidence": "rustls::crypto::aws_lc_rs::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/packet.rs",
+          "line": 946,
+          "column": 9
+        },
+        "evidence": "rustls::crypto::ring::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/packet.rs",
+          "line": 947,
+          "column": 9
+        },
+        "evidence": "rustls::quic::Version",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/shared.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "ring::hmac",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "rustls::crypto::aws_lc_rs::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "rustls::crypto::ring::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::AlertDescription",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::RootCertStore",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::CertificateDer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::PrivateKeyDer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::PrivatePkcs8KeyDer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::server::WebPkiClientVerifier",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 193,
+          "column": 21
+        },
+        "evidence": "hmac::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 193,
+          "column": 36
+        },
+        "evidence": "hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 458,
+          "column": 18
+        },
+        "evidence": "rustls::ServerConfig::builder_with_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 459,
+          "column": 36
+        },
+        "evidence": "rustls::version::TLS13",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 51,
+          "column": 23
+        },
+        "evidence": "[::2]:7890",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 83,
+          "column": 23
+        },
+        "evidence": "[::2]:7890",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 2232,
+          "column": 23
+        },
+        "evidence": "[::2]:7890",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 3348,
+          "column": 23
+        },
+        "evidence": "[::2]:7890",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tests/mod.rs",
+          "line": 3372,
+          "column": 45
+        },
+        "evidence": "[::1]:65535",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tests/util.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tests/util.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tests/util.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::UdpSocket",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/util.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "rustls::KeyLogFile",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/util.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "rustls::client::WebPkiServerVerifier",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/util.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::CertificateDer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/util.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::PrivateKeyDer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tests/util.rs",
+          "line": 647,
+          "column": 21
+        },
+        "evidence": "rustls::RootCertStore::empty",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/token.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/token.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/token.rs",
+          "line": 417,
+          "column": 5
+        },
+        "evidence": "ring::hkdf",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/token.rs",
+          "line": 437,
+          "column": 9
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/token.rs",
+          "line": 465,
+          "column": 9
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport_parameters.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport_parameters.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport_parameters.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV4",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport_parameters.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV6",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/varint.rs",
+          "line": 44,
+          "column": 15
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

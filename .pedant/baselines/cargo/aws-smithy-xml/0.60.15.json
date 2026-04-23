@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "5dadd2fcbb82afc369fd42e07fe523a538d6a77e4699306af6608a27550f3682",
+  "crate_name": "aws-smithy-xml",
+  "crate_version": "0.60.15",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915101,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/encode.rs",
+          "line": 212,
+          "column": 23
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/handwritten_serializers.rs",
+          "line": 39,
+          "column": 44
+        },
+        "evidence": "http://foo.com",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "5ef76169f242669c4546456800171496fa97702de1c91d5b550b1d02587399b5",
+  "crate_name": "tower-layer",
+  "crate_version": "0.3.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915115,
+  "profile": {
+    "findings": []
+  }
+}

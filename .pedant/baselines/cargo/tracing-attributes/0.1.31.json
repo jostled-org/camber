@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "01616a4bf79b497c58e57b4c8b406d0a5e415033544ac207f2378f6cecf3427a",
+  "crate_name": "tracing-attributes",
+  "crate_version": "0.1.31",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915115,
+  "profile": {
+    "findings": [
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 575,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_attribute]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/async_fn.rs",
+          "line": 38,
+          "column": 7
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "fefc537e019bc86cc773329956e5095cf97e12a95e96f9393d27749da3c28bdc",
+  "crate_name": "multimap",
+  "crate_version": "0.10.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915108,
+  "profile": {
+    "findings": []
+  }
+}

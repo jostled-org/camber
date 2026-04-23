@@ -1,0 +1,142 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "82428bf9536f5e24c8b3cc5f1e31733c86b7dc6d16690b0461dd19f94714e9d0",
+  "crate_name": "matchit",
+  "crate_version": "0.8.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915107,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/hyper.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "hyper::server::Server",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/hyper.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "hyper::service::make_service_fn",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/hyper.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "hyper::service::service_fn",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/hyper.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "hyper::Body",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/hyper.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "hyper::Method",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/hyper.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "hyper::Request",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/hyper.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "hyper::Response",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/router.rs",
+          "line": 62,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/router.rs",
+          "line": 92,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/tree.rs",
+          "line": 49,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/tree.rs",
+          "line": 50,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/tree.rs",
+          "line": 812,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/tree.rs",
+          "line": 850,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

@@ -53,8 +53,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -63,12 +61,3 @@ jobs:
         with:
           baseline-path: .pedant/baselines
           fail-on: hash-mismatch
-          update-baselines: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
-      - name: Commit updated baselines
-        if: github.ref == 'refs/heads/main'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .pedant/baselines/
-          git diff --cached --quiet || git commit -m "chore: update supply chain baselines [skip ci]"
-          git push

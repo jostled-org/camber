@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "173c5ceb7d3086a9cb1e5c148ccf00b350b1d63e8f67ae246ada5bacf1f86239",
+  "crate_name": "protoc-bin-vendored-macos-aarch_64",
+  "crate_version": "3.2.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915109,
+  "profile": {
+    "findings": []
+  }
+}

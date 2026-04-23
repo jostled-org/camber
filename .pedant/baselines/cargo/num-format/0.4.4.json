@@ -1,0 +1,512 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "6434d759b4d359af7de9ad2ca80b1a1c75dee593b051f224c8b6b918324ce813",
+  "crate_name": "num-format",
+  "crate_version": "0.4.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915108,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/buffer.rs",
+          "line": 62,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/impls/integers.rs",
+          "line": 214,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/impls/integers.rs",
+          "line": 218,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 29,
+          "column": 1
+        },
+        "evidence": "libc::c_char",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 29,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 29,
+          "column": 1
+        },
+        "evidence": "libc::c_void",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 121,
+          "column": 16
+        },
+        "evidence": "libc::LC_CTYPE_MASK",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 121,
+          "column": 38
+        },
+        "evidence": "libc::LC_MONETARY_MASK",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 121,
+          "column": 63
+        },
+        "evidence": "libc::LC_NUMERIC_MASK",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 111,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 122,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 138,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 217,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 230,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix.rs",
+          "line": 37,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix/bsd.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "libc::c_char",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix/bsd.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix/bsd.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "libc::c_void",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix/bsd.rs",
+          "line": 26,
+          "column": 47
+        },
+        "evidence": "libc::CODESET",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix/bsd.rs",
+          "line": 47,
+          "column": 16
+        },
+        "evidence": "libc::LC_CTYPE_MASK",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix/bsd.rs",
+          "line": 47,
+          "column": 38
+        },
+        "evidence": "libc::LC_MONETARY_MASK",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix/bsd.rs",
+          "line": 47,
+          "column": 63
+        },
+        "evidence": "libc::LC_NUMERIC_MASK",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/nix/bsd.rs",
+          "line": 26,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/nix/bsd.rs",
+          "line": 34,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/nix/bsd.rs",
+          "line": 41,
+          "column": 31
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/nix/bsd.rs",
+          "line": 48,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix/bsd.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix/linux.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "libc::c_char",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix/linux.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "libc::c_void",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix/linux.rs",
+          "line": 27,
+          "column": 45
+        },
+        "evidence": "libc::CODESET",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/nix/linux.rs",
+          "line": 27,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/nix/linux.rs",
+          "line": 35,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/nix/linux.rs",
+          "line": 42,
+          "column": 31
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/nix/linux.rs",
+          "line": 21,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/windows.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "winapi::ctypes::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/windows.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "winapi::shared::minwindef::BOOL",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/windows.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "winapi::shared::minwindef::DWORD",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/windows.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "winapi::shared::minwindef::LPARAM",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/windows.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "winapi::um::errhandlingapi::GetLastError",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/windows.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "winapi::um::winnls",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/system_locale/windows.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "winapi::um::winnt::WCHAR",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/windows.rs",
+          "line": 234,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/windows.rs",
+          "line": 269,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/windows.rs",
+          "line": 271,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/windows.rs",
+          "line": 302,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/system_locale/windows.rs",
+          "line": 305,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/write_formatted.rs",
+          "line": 64,
+          "column": 5
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/write_formatted.rs",
+          "line": 65,
+          "column": 5
+        },
+        "evidence": "std::net",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/write_formatted.rs",
+          "line": 66,
+          "column": 5
+        },
+        "evidence": "std::process",
+        "origin": "import"
+      }
+    ]
+  }
+}

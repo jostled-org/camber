@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "21d0685b016b0463d99a9b37c5a19a5677c796b954a43365e3e62e76375b3e8d",
+  "crate_name": "aws-smithy-json",
+  "crate_version": "0.62.5",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915101,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/deserialize.rs",
+          "line": 319,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/escape.rs",
+          "line": 91,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

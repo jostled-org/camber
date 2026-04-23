@@ -1,0 +1,2902 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b47f17a9e531aaf7232640a6edb6f369d293a28cf7855427618c4292f0df482b",
+  "crate_name": "zerocopy-derive",
+  "crate_version": "0.8.48",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915125,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/derive/try_from_bytes.rs",
+          "line": 683,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/derive/try_from_bytes.rs",
+          "line": 747,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 133,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 141,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_bytes_enum.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_bytes_enum.expected.rs",
+          "line": 48,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_bytes_enum.expected.rs",
+          "line": 65,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_bytes_struct.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_bytes_struct.expected.rs",
+          "line": 48,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_bytes_struct.expected.rs",
+          "line": 65,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_bytes_union.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_bytes_union.expected.rs",
+          "line": 64,
+          "column": 13
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_bytes_union.expected.rs",
+          "line": 83,
+          "column": 13
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_bytes_union.expected.rs",
+          "line": 99,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_bytes_union.expected.rs",
+          "line": 122,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_bytes_union.expected.rs",
+          "line": 142,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_zeros.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/from_zeros.expected.rs",
+          "line": 40,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/immutable.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(C).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(C).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(i128).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(i128).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(i16).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(i16).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(i32).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(i32).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(i64).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(i64).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(i8).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(i8).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(isize).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(isize).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(u128).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(u128).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(u16).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(u16).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(u32).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(u32).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(u64).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(u64).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(u8).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(u8).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(usize).expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_enum.repr(usize).expected.rs",
+          "line": 24,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_struct_basic.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_struct_empty.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_struct_trailing_generic.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/into_bytes_struct_trailing.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/known_layout_repr_c_struct.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/known_layout_repr_c_struct.expected.rs",
+          "line": 38,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/known_layout_repr_c_struct.expected.rs",
+          "line": 53,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/known_layout_repr_c_struct.expected.rs",
+          "line": 57,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/known_layout_repr_c_struct.expected.rs",
+          "line": 84,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/known_layout_repr_c_struct.expected.rs",
+          "line": 115,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/known_layout_struct.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/split_at_repr_c.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/split_at_repr_transparent.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 42,
+          "column": 13
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 94,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 236,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 264,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 290,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 310,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 349,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 373,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 393,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 432,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 456,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 476,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 515,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 539,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 559,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 598,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 622,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 642,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 681,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 705,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 725,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 764,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 790,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 810,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 870,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 987,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1015,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1041,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1061,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1100,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1124,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1144,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1183,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1207,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1227,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1266,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1290,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1310,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1349,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1375,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1395,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1462,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1486,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1509,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1530,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1553,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1574,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1595,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1609,
+          "column": 13
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1647,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1671,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1692,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1712,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1748,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1769,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1789,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1826,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1849,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1923,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 1961,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2035,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2073,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2147,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2185,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2259,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2297,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2371,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2409,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2483,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2521,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2595,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2633,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2707,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_1.expected.rs",
+          "line": 2733,
+          "column": 31
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 42,
+          "column": 13
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 94,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 236,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 264,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 290,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 310,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 349,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 373,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 393,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 432,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 456,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 476,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 515,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 539,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 559,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 598,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 622,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 642,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 681,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 705,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 725,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 764,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 790,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 810,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 870,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 987,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1015,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1041,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1061,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1100,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1124,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1144,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1183,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1207,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1227,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1266,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1290,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1310,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1349,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1375,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1395,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1462,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1486,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1509,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1530,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1553,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1574,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1595,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1609,
+          "column": 13
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1647,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1671,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1692,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1712,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1748,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1769,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1789,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1826,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1849,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1923,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 1961,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2035,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2073,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2147,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2185,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2259,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2297,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2371,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2409,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2483,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2521,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2595,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2633,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2707,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_2.expected.rs",
+          "line": 2733,
+          "column": 31
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 42,
+          "column": 13
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 94,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 236,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 264,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 290,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 310,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 349,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 373,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 393,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 432,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 456,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 476,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 515,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 539,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 559,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 598,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 622,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 642,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 681,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 705,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 725,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 764,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 790,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 810,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 870,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 987,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1015,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1041,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1061,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1100,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1124,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1144,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1183,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1207,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1227,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1266,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1290,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1310,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1349,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1375,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1395,
+          "column": 29
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1462,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1486,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1509,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1530,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1553,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1574,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1595,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1609,
+          "column": 13
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1647,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1671,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1692,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1712,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1748,
+          "column": 21
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1769,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1789,
+          "column": 25
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1826,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1849,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1923,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 1961,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2035,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2073,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2147,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2185,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2259,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2297,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2371,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2409,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2483,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2521,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2595,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2633,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2707,
+          "column": 17
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_enum_3.expected.rs",
+          "line": 2733,
+          "column": 31
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes_trivial_is_bit_valid_enum.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/try_from_bytes.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/output_tests/expected/unaligned.expected.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/include.rs",
+          "line": 125,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/struct_try_from_bytes.rs",
+          "line": 70,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/struct_try_from_bytes.rs",
+          "line": 78,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

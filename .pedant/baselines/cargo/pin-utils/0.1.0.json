@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "6732aa50ef790c96c634fe7326ef68b3c605ed059a17f2b20e74ce308ad8efdf",
+  "crate_name": "pin-utils",
+  "crate_version": "0.1.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915109,
+  "profile": {
+    "findings": []
+  }
+}

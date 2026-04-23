@@ -1,0 +1,222 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "64eb3282efd40af29cd826596f40c6e3255626e79b2a9f543f4f3219c7e65551",
+  "crate_name": "serde_json",
+  "crate_version": "1.0.149",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915112,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 123,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 127,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw.rs",
+          "line": 131,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/read.rs",
+          "line": 473,
+          "column": 30
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/read.rs",
+          "line": 714,
+          "column": 16
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/read.rs",
+          "line": 991,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ser.rs",
+          "line": 2106,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ser.rs",
+          "line": 2121,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ser.rs",
+          "line": 2127,
+          "column": 22
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ser.rs",
+          "line": 2250,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ser.rs",
+          "line": 2269,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/value/mod.rs",
+          "line": 231,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/lexical/parse.rs",
+          "line": 160,
+          "column": 340
+        },
+        "evidence": "9999999999999999…9999",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/lexical/parse.rs",
+          "line": 161,
+          "column": 32
+        },
+        "evidence": "4109846876186981…4999",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/lexical/parse.rs",
+          "line": 163,
+          "column": 32
+        },
+        "evidence": "4109846876186981…5001",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/lexical/parse.rs",
+          "line": 169,
+          "column": 31
+        },
+        "evidence": "0000000000000000…4375",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/lexical/parse.rs",
+          "line": 201,
+          "column": 27
+        },
+        "evidence": "7161052836441183…0000",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/lexical/parse.rs",
+          "line": 203,
+          "column": 27
+        },
+        "evidence": "3865296046123932…0000",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 1636,
+          "column": 5
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 1636,
+          "column": 5
+        },
+        "evidence": "std::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 780,
+          "column": 13
+        },
+        "evidence": "1000000000000000…0000",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

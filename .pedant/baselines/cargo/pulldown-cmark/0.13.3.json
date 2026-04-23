@@ -1,0 +1,124 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b67b7062a5c167591fdbefdc5f8c45e27c7372dfaeba46a239c04426be646884",
+  "crate_name": "pulldown-cmark",
+  "crate_version": "0.13.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915110,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 23,
+          "column": 5
+        },
+        "evidence": "std::fs::self",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 23,
+          "column": 5
+        },
+        "evidence": "std::fs::File",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/broken-link-callbacks.rs",
+          "line": 15,
+          "column": 19
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/firstpass.rs",
+          "line": 2644,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/firstpass.rs",
+          "line": 2693,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/firstpass.rs",
+          "line": 2703,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/firstpass.rs",
+          "line": 2733,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/main.rs",
+          "line": 28,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/main.rs",
+          "line": 115,
+          "column": 13
+        },
+        "evidence": "std::process::exit",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/html.rs",
+          "line": 241,
+          "column": 19
+        },
+        "evidence": "https://replaced.example.org",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/suite/spec.rs",
+          "line": 8041,
+          "column": 20
+        },
+        "evidence": "https://example.com\n",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

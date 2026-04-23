@@ -1,0 +1,992 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b5da34b543fc17ec846899fe9a07bdf1f3911c6d42ec0cd58fcbf5f56969dc74",
+  "crate_name": "hyper",
+  "crate_version": "0.14.32",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915104,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/client.rs",
+          "line": 1434,
+          "column": 23
+        },
+        "evidence": "http://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/client.rs",
+          "line": 1441,
+          "column": 23
+        },
+        "evidence": "http://hyper.rs/guides",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/client.rs",
+          "line": 1445,
+          "column": 23
+        },
+        "evidence": "http://hyper.rs/guides?foo=bar",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/client.rs",
+          "line": 1452,
+          "column": 23
+        },
+        "evidence": "http://hyper.rs/guides",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/client.rs",
+          "line": 1456,
+          "column": 23
+        },
+        "evidence": "https://hyper.rs/guides",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/client.rs",
+          "line": 1465,
+          "column": 23
+        },
+        "evidence": "http://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/dns.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/dns.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/dns.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/dns.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV4",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/dns.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV6",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/dns.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "std::net::ToSocketAddrs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/dns.rs",
+          "line": 368,
+          "column": 5
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/dns.rs",
+          "line": 368,
+          "column": 5
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpSocket",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 749,
+          "column": 9
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 749,
+          "column": 9
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 787,
+          "column": 9
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 787,
+          "column": 9
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 824,
+          "column": 9
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 824,
+          "column": 9
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 824,
+          "column": 9
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 824,
+          "column": 9
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 825,
+          "column": 9
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 1005,
+          "column": 17
+        },
+        "evidence": "std::net::TcpStream::connect_timeout",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 630,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 639,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 740,
+          "column": 19
+        },
+        "evidence": "https://example.domain/foo/bar?baz",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 791,
+          "column": 41
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connect/http.rs",
+          "line": 831,
+          "column": 41
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/pool.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/tests.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/tests.rs",
+          "line": 21,
+          "column": 14
+        },
+        "evidence": "http://example.local/and/a/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/common/date.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/common/sync_wrapper.rs",
+          "line": 110,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ext/h1_reason_phrase.rs",
+          "line": 57,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/ffi/body.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/ffi/body.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "libc::size_t",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/body.rs",
+          "line": 146,
+          "column": 31
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/body.rs",
+          "line": 178,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/body.rs",
+          "line": 179,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/body.rs",
+          "line": 225,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/ffi/client.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/client.rs",
+          "line": 85,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/ffi/error.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "libc::size_t",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/ffi/http_types.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/ffi/http_types.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "libc::size_t",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/http_types.rs",
+          "line": 376,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/http_types.rs",
+          "line": 511,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/http_types.rs",
+          "line": 581,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/http_types.rs",
+          "line": 645,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/ffi/io.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "libc::size_t",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/io.rs",
+          "line": 129,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/io.rs",
+          "line": 141,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/io.rs",
+          "line": 177,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/io.rs",
+          "line": 178,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/mod.rs",
+          "line": 83,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/mod.rs",
+          "line": 84,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/ffi/task.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/task.rs",
+          "line": 332,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/task.rs",
+          "line": 338,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ffi/task.rs",
+          "line": 382,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/conn.rs",
+          "line": 1083,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/io.rs",
+          "line": 274,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/io.rs",
+          "line": 280,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/role.rs",
+          "line": 172,
+          "column": 78
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/role.rs",
+          "line": 179,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/role.rs",
+          "line": 263,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/role.rs",
+          "line": 970,
+          "column": 82
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/role.rs",
+          "line": 977,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/role.rs",
+          "line": 1027,
+          "column": 34
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/role.rs",
+          "line": 1058,
+          "column": 30
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/role.rs",
+          "line": 1099,
+          "column": 30
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/role.rs",
+          "line": 2785,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h1/role.rs",
+          "line": 2833,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h2/client.rs",
+          "line": 305,
+          "column": 38
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h2/mod.rs",
+          "line": 417,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h2/mod.rs",
+          "line": 423,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h2/mod.rs",
+          "line": 427,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h2/mod.rs",
+          "line": 431,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h2/mod.rs",
+          "line": 436,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h2/mod.rs",
+          "line": 443,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h2/mod.rs",
+          "line": 456,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/proto/h2/ping.rs",
+          "line": 32,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/proto/h2/server.rs",
+          "line": 508,
+          "column": 50
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/server.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/server.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/tcp.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/tcp.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/tcp.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/tcp.rs",
+          "line": 301,
+          "column": 5
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/tcp.rs",
+          "line": 307,
+          "column": 5
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/upgrade.rs",
+          "line": 287,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

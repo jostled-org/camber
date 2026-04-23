@@ -1,0 +1,42 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "599ee9b042a071a94ed4576d656d12b6e58cd6da14423cd157a246c4257e70b8",
+  "crate_name": "anstyle-parse",
+  "crate_version": "1.0.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915097,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 176,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 183,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/state/definitions.rs",
+          "line": 116,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

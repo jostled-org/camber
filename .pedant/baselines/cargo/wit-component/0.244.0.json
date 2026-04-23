@@ -1,0 +1,72 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b60c3c1743313bea8d86ae5b214246b047cceffd6b1d329682227caabd0e00ee",
+  "crate_name": "wit-component",
+  "crate_version": "0.244.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915125,
+  "profile": {
+    "findings": [
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/printing.rs",
+          "line": 40,
+          "column": 34
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/components.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/components.rs",
+          "line": 88,
+          "column": 24
+        },
+        "evidence": "glob::glob",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/interfaces.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/merge.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/targets.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      }
+    ]
+  }
+}

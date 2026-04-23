@@ -1,0 +1,242 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b243add5a557cf571f07eb21b2fe2b18da38e7abd9fc9bd2239bbdf994af7b00",
+  "crate_name": "pem",
+  "crate_version": "3.0.6",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915109,
+  "profile": {
+    "findings": [
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/pem_benchmark.rs",
+          "line": 3,
+          "column": 22
+        },
+        "evidence": "-----BEGIN RSA PRIVATE KEY-----\r\nMIIBPQIBAAJBAOsfi5AGYhdRs/x6q5H7kScxA0Kzzqe6WI6gf6+tc6IvKQJo5rQc\r\ndWWSQ0nRGt2hOPDO+35NKhQEjBQxPh/v7n0CAwEAAQJBAOGaBAyuw0ICyENy5NsO\r\n2gkT00AWTSzM9Zns0HedY31yEabkuFvrMCHjscEF7u3Y6PB7An3IzooBHchsFDei\r\nAAECIQD/JahddzR5K3A6rzTidmAf1PBtqi7296EnWv8WvpfAAQIhAOvowIXZI4Un\r\nDXjgZ9ekuUjZN+GUQRAVlkEEohGLVy59AiEA90VtqDdQuWWpvJX0cM08V10tLXrT\r\nTTGsEtITid1ogAECIQDAaFl90ZgS5cMrL3wCeatVKzVUmuJmB/VAmlLFFGzK0QIh\r\nANJGc7AFk4fyFD/OezhwGHbWmo/S+bfeAiIh2Ss2FxKJ\r\n-----END RSA PRIVATE KEY-----\r\n\r\n-----BEGIN RSA PUBLIC KEY-----\r\nMIIBOgIBAAJBAMIeCnn9G/7g2Z6J+qHOE2XCLLuPoh5NHTO2Fm+PbzBvafBo0oYo\r\nQVVy7frzxmOqx6iIZBxTyfAQqBPO3Br59BMCAwEAAQJAX+PjHPuxdqiwF6blTkS0\r\nRFI1MrnzRbCmOkM6tgVO0cd6r5Z4bDGLusH9yjI9iI84gPRjK0AzymXFmBGuREHI\r\nsQIhAPKf4pp+Prvutgq2ayygleZChBr1DC4XnnufBNtaswyvAiEAzNGVKgNvzuhk\r\nijoUXIDruJQEGFGvZTsi1D2RehXiT90CIQC4HOQUYKCydB7oWi1SHDokFW2yFyo6\r\n/+lf3fgNjPI6OQIgUPmTFXciXxT1msh3gFLf3qt2Kv8wbr9Ad9SXjULVpGkCIB+g\r\nRzHX0lkJl9Stshd/7Gbt65/QYq+v+xvAeT0CoyIg\r\n-----END RSA PUBLIC KEY-----\r\n",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 38,
+          "column": 1
+        },
+        "evidence": " const SAMPLE: &'static str = \"-----BEGIN RSA PRIVATE KEY-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 63,
+          "column": 1
+        },
+        "evidence": " const SAMPLE: &'static str = \"-----BEGIN INTERMEDIATE CERT-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 73,
+          "column": 1
+        },
+        "evidence": " -----BEGIN CERTIFICATE-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 368,
+          "column": 1
+        },
+        "evidence": " const SAMPLE: &'static str = \"-----BEGIN RSA PRIVATE KEY-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 389,
+          "column": 1
+        },
+        "evidence": " const SAMPLE: &'static str = \"-----BEGIN RSA PRIVATE KEY-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 418,
+          "column": 1
+        },
+        "evidence": " const SAMPLE: &'static str = \"-----BEGIN INTERMEDIATE CERT-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 428,
+          "column": 1
+        },
+        "evidence": " -----BEGIN CERTIFICATE-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 452,
+          "column": 1
+        },
+        "evidence": " const SAMPLE: &'static str = \"-----BEGIN INTERMEDIATE CERT-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 462,
+          "column": 1
+        },
+        "evidence": " -----BEGIN CERTIFICATE-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 634,
+          "column": 31
+        },
+        "evidence": "-----BEGIN RSA PRIVATE KEY-----\r\nMIIBPQIBAAJBAOsfi5AGYhdRs/x6q5H7kScxA0Kzzqe6WI6gf6+tc6IvKQJo5rQc\r\ndWWSQ0nRGt2hOPDO+35NKhQEjBQxPh/v7n0CAwEAAQJBAOGaBAyuw0ICyENy5NsO\r\n2gkT00AWTSzM9Zns0HedY31yEabkuFvrMCHjscEF7u3Y6PB7An3IzooBHchsFDei\r\nAAECIQD/JahddzR5K3A6rzTidmAf1PBtqi7296EnWv8WvpfAAQIhAOvowIXZI4Un\r\nDXjgZ9ekuUjZN+GUQRAVlkEEohGLVy59AiEA90VtqDdQuWWpvJX0cM08V10tLXrT\r\nTTGsEtITid1ogAECIQDAaFl90ZgS5cMrL3wCeatVKzVUmuJmB/VAmlLFFGzK0QIh\r\nANJGc7AFk4fyFD/OezhwGHbWmo/S+bfeAiIh2Ss2FxKJ\r\n-----END RSA PRIVATE KEY-----\r\n\r\n-----BEGIN RSA PUBLIC KEY-----\r\nMIIBOgIBAAJBAMIeCnn9G/7g2Z6J+qHOE2XCLLuPoh5NHTO2Fm+PbzBvafBo0oYo\r\nQVVy7frzxmOqx6iIZBxTyfAQqBPO3Br59BMCAwEAAQJAX+PjHPuxdqiwF6blTkS0\r\nRFI1MrnzRbCmOkM6tgVO0cd6r5Z4bDGLusH9yjI9iI84gPRjK0AzymXFmBGuREHI\r\nsQIhAPKf4pp+Prvutgq2ayygleZChBr1DC4XnnufBNtaswyvAiEAzNGVKgNvzuhk\r\nijoUXIDruJQEGFGvZTsi1D2RehXiT90CIQC4HOQUYKCydB7oWi1SHDokFW2yFyo6\r\n/+lf3fgNjPI6OQIgUPmTFXciXxT1msh3gFLf3qt2Kv8wbr9Ad9SXjULVpGkCIB+g\r\nRzHX0lkJl9Stshd/7Gbt65/QYq+v+xvAeT0CoyIg\r\n-----END RSA PUBLIC KEY-----\r\n",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 655,
+          "column": 29
+        },
+        "evidence": "-----BEGIN RSA PRIVATE KEY-----\nMIIBPQIBAAJBAOsfi5AGYhdRs/x6q5H7kScxA0Kzzqe6WI6gf6+tc6IvKQJo5rQc\ndWWSQ0nRGt2hOPDO+35NKhQEjBQxPh/v7n0CAwEAAQJBAOGaBAyuw0ICyENy5NsO\n2gkT00AWTSzM9Zns0HedY31yEabkuFvrMCHjscEF7u3Y6PB7An3IzooBHchsFDei\nAAECIQD/JahddzR5K3A6rzTidmAf1PBtqi7296EnWv8WvpfAAQIhAOvowIXZI4Un\nDXjgZ9ekuUjZN+GUQRAVlkEEohGLVy59AiEA90VtqDdQuWWpvJX0cM08V10tLXrT\nTTGsEtITid1ogAECIQDAaFl90ZgS5cMrL3wCeatVKzVUmuJmB/VAmlLFFGzK0QIh\nANJGc7AFk4fyFD/OezhwGHbWmo/S+bfeAiIh2Ss2FxKJ\n-----END RSA PRIVATE KEY-----\n\n-----BEGIN RSA PUBLIC KEY-----\nMIIBOgIBAAJBAMIeCnn9G/7g2Z6J+qHOE2XCLLuPoh5NHTO2Fm+PbzBvafBo0oYo\nQVVy7frzxmOqx6iIZBxTyfAQqBPO3Br59BMCAwEAAQJAX+PjHPuxdqiwF6blTkS0\nRFI1MrnzRbCmOkM6tgVO0cd6r5Z4bDGLusH9yjI9iI84gPRjK0AzymXFmBGuREHI\nsQIhAPKf4pp+Prvutgq2ayygleZChBr1DC4XnnufBNtaswyvAiEAzNGVKgNvzuhk\nijoUXIDruJQEGFGvZTsi1D2RehXiT90CIQC4HOQUYKCydB7oWi1SHDokFW2yFyo6\n/+lf3fgNjPI6OQIgUPmTFXciXxT1msh3gFLf3qt2Kv8wbr9Ad9SXjULVpGkCIB+g\nRzHX0lkJl9Stshd/7Gbt65/QYq+v+xvAeT0CoyIg\n-----END RSA PUBLIC KEY-----\n",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 676,
+          "column": 29
+        },
+        "evidence": "-----BEGIN RSA PRIVATE KEY-----\nMIIBPQIBAAJBAOsfi5AGYhdRs/x6q5H7kScxA0Kzzqe6WI6gf6+tc6IvKQJo5rQc dWWSQ0nRGt2hOPDO+35NKhQEjBQxPh/v7n0CAwEAAQJBAOGaBAyuw0ICyENy5NsO 2gkT00AWTSzM9Zns0HedY31yEabkuFvrMCHjscEF7u3Y6PB7An3IzooBHchsFDei AAECIQD/JahddzR5K3A6rzTidmAf1PBtqi7296EnWv8WvpfAAQIhAOvowIXZI4Un DXjgZ9ekuUjZN+GUQRAVlkEEohGLVy59AiEA90VtqDdQuWWpvJX0cM08V10tLXrT TTGsEtITid1ogAECIQDAaFl90ZgS5cMrL3wCeatVKzVUmuJmB/VAmlLFFGzK0QIh ANJGc7AFk4fyFD/OezhwGHbWmo/S+bfeAiIh2Ss2FxKJ\n-----END RSA PRIVATE KEY-----\n\n-----BEGIN RSA PUBLIC KEY-----\nMIIBOgIBAAJBAMIeCnn9G/7g2Z6J+qHOE2XCLLuPoh5NHTO2Fm+PbzBvafBo0oYo QVVy7frzxmOqx6iIZBxTyfAQqBPO3Br59BMCAwEAAQJAX+PjHPuxdqiwF6blTkS0 RFI1MrnzRbCmOkM6tgVO0cd6r5Z4bDGLusH9yjI9iI84gPRjK0AzymXFmBGuREHI sQIhAPKf4pp+Prvutgq2ayygleZChBr1DC4XnnufBNtaswyvAiEAzNGVKgNvzuhk ijoUXIDruJQEGFGvZTsi1D2RehXiT90CIQC4HOQUYKCydB7oWi1SHDokFW2yFyo6 /+lf3fgNjPI6OQIgUPmTFXciXxT1msh3gFLf3qt2Kv8wbr9Ad9SXjULVpGkCIB+g RzHX0lkJl9Stshd/7Gbt65/QYq+v+xvAeT0CoyIg\n-----END RSA PUBLIC KEY-----\n",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 697,
+          "column": 44
+        },
+        "evidence": "-----BEGIN TEST-----\r\nAQIDBA==\r\n-----END TEST-----\r\n",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 702,
+          "column": 45
+        },
+        "evidence": "-----BEGIN TEST-----\r\nAQID\r\nBA==\r\n-----END TEST-----\r\n",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 729,
+          "column": 21
+        },
+        "evidence": "-----BEGIN -----\nMIIBOgIBAAJBAMIeCnn9G/7g2Z6J+qHOE2XCLLuPoh5NHTO2Fm+PbzBvafBo0oYo\nQVVy7frzxmOqx6iIZBxTyfAQqBPO3Br59BMCAwEAAQJAX+PjHPuxdqiwF6blTkS0\nRFI1MrnzRbCmOkM6tgVO0cd6r5Z4bDGLusH9yjI9iI84gPRjK0AzymXFmBGuREHI\nsQIhAPKf4pp+Prvutgq2ayygleZChBr1DC4XnnufBNtaswyvAiEAzNGVKgNvzuhk\nijoUXIDruJQEGFGvZTsi1D2RehXiT90CIQC4HOQUYKCydB7oWi1SHDokFW2yFyo6\n/+lf3fgNjPI6OQIgUPmTFXciXxT1msh3gFLf3qt2Kv8wbr9Ad9SXjULVpGkCIB+g\nRzHX0lkJl9Stshd/7Gbt65/QYq+v+xvAeT0CoyIg\n-----END RSA PUBLIC KEY-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 743,
+          "column": 21
+        },
+        "evidence": "-----BEGIN DATA-----\nMIIBOgIBAAJBAMIeCnn9G/7g2Z6J+qHOE2XCLLuPoh5NHTO2Fm+PbzBvafBo0oYo\nQVVy7frzxmOqx6iIZBxTyfAQqBPO3Br59BMCAwEAAQJAX+PjHPuxdqiwF6blTkS0\nRFI1MrnzRbCmOkM6tgVO0cd6r5Z4bDGLusH9yjI9iI84gPRjK0AzymXFmBGuREHI\nsQIhAPKf4pp+Prvutgq2ayygleZChBr1DC4XnnufBNtaswyvAiEAzNGVKgNvzuhk\nijoUXIDruJQEGFGvZTsi1D2RehXiT90CIQC4HOQUYKCydB7oWi1SHDokFW2yFyo6\n/+lf3fgNjPI6OQIgUPmTFXciXxT1msh3gFLf3qt2Kv8wbr9Ad9SXjULVpGkCIB+g\nRzHX0lkJl9Stshd/7Gbt65/QYq+v+xvAeT0CoyIg\n-----END -----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 757,
+          "column": 21
+        },
+        "evidence": "-----BEGIN DATA-----\nMIIBOgIBAAJBAMIeCnn9G/7g2Z6J+qHOE2XCLLuPoh5NHTO2Fm+PbzBvafBo0oY?\nQVVy7frzxmOqx6iIZBxTyfAQqBPO3Br59BMCAwEAAQJAX+PjHPuxdqiwF6blTkS0\nRFI1MrnzRbCmOkM6tgVO0cd6r5Z4bDGLusH9yjI9iI84gPRjK0AzymXFmBGuREHI\nsQIhAPKf4pp+Prvutgq2ayygleZChBr1DC4XnnufBNtaswyvAiEAzNGVKgNvzuhk\nijoUXIDruJQEGFGvZTsi1D2RehXiT90CIQC4HOQUYKCydB7oWi1SHDokFW2yFyo6\n/+lf3fgNjPI6OQIgUPmTFXciXxT1msh3gFLf3qt2Kv8wbr9Ad9SXjULVpGkCIB+g\nRzHX0lkJl9Stshd/7Gbt65/QYq+v+xvAeT0CoyIg\n-----END DATA-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 779,
+          "column": 21
+        },
+        "evidence": "-----BEGIN DATA-----\n-----END DATA-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 795,
+          "column": 44
+        },
+        "evidence": "-----BEGIN -----\n-----END -----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 870,
+          "column": 31
+        },
+        "evidence": "-----BEGIN CERTIFICATE-----\r\nMIIBPQIBAAJBAOsfi5AGYhdRs/x6q5H7kScxA0Kzzqe6WI6gf6+tc6IvKQJo5rQc\r\ndWWSQ0nRGt2hOPDO+35NKhQEjBQxPh/v7n0CAwEAAQJBAOGaBAyuw0ICyENy5NsO\r\n2gkT00AWTSzM9Zns0HedY31yEabkuFvrMCHjscEF7u3Y6PB7An3IzooBHchsFDei\r\nAAECIQD/JahddzR5K3A6rzTidmAf1PBtqi7296EnWv8WvpfAAQIhAOvowIXZI4Un\r\nDXjgZ9ekuUjZN+GUQRAVlkEEohGLVy59AiEA90VtqDdQuWWpvJX0cM08V10tLXrT\r\nTTGsEtITid1ogAECIQDAaFl90ZgS5cMrL3wCeatVKzVUmuJmB/VAmlLFFGzK0QIh\r\nANJGc7AFk4fyFD/OezhwGHbWmo/S+bfeAiIh2Ss2FxKJ\r\n-----END CERTIFICATE-----\r\n-----BEGIN RSA PRIVATE KEY-----\r\nProc-Type: 4,ENCRYPTED\r\nDEK-Info: AES-256-CBC,975C518B7D2CCD1164A3354D1F89C5A6\r\n\r\nMIIBOgIBAAJBAMIeCnn9G/7g2Z6J+qHOE2XCLLuPoh5NHTO2Fm+PbzBvafBo0oYo\r\nQVVy7frzxmOqx6iIZBxTyfAQqBPO3Br59BMCAwEAAQJAX+PjHPuxdqiwF6blTkS0\r\nRFI1MrnzRbCmOkM6tgVO0cd6r5Z4bDGLusH9yjI9iI84gPRjK0AzymXFmBGuREHI\r\nsQIhAPKf4pp+Prvutgq2ayygleZChBr1DC4XnnufBNtaswyvAiEAzNGVKgNvzuhk\r\nijoUXIDruJQEGFGvZTsi1D2RehXiT90CIQC4HOQUYKCydB7oWi1SHDokFW2yFyo6\r\n/+lf3fgNjPI6OQIgUPmTFXciXxT1msh3gFLf3qt2Kv8wbr9Ad9SXjULVpGkCIB+g\r\nRzHX0lkJl9Stshd/7Gbt65/QYq+v+xvAeT0CoyIg\r\n-----END RSA PRIVATE KEY-----\r\n",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 909,
+          "column": 29
+        },
+        "evidence": "-----BEGIN CERTIFICATE-----\nMIIBPQIBAAJBAOsfi5AGYhdRs/x6q5H7kScxA0Kzzqe6WI6gf6+tc6IvKQJo5rQc\ndWWSQ0nRGt2hOPDO+35NKhQEjBQxPh/v7n0CAwEAAQJBAOGaBAyuw0ICyENy5NsO\n2gkT00AWTSzM9Zns0HedY31yEabkuFvrMCHjscEF7u3Y6PB7An3IzooBHchsFDei\nAAECIQD/JahddzR5K3A6rzTidmAf1PBtqi7296EnWv8WvpfAAQIhAOvowIXZI4Un\nDXjgZ9ekuUjZN+GUQRAVlkEEohGLVy59AiEA90VtqDdQuWWpvJX0cM08V10tLXrT\nTTGsEtITid1ogAECIQDAaFl90ZgS5cMrL3wCeatVKzVUmuJmB/VAmlLFFGzK0QIh\nANJGc7AFk4fyFD/OezhwGHbWmo/S+bfeAiIh2Ss2FxKJ\n-----END CERTIFICATE-----\n-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,975C518B7D2CCD1164A3354D1F89C5A6\n\nMIIBOgIBAAJBAMIeCnn9G/7g2Z6J+qHOE2XCLLuPoh5NHTO2Fm+PbzBvafBo0oYo\nQVVy7frzxmOqx6iIZBxTyfAQqBPO3Br59BMCAwEAAQJAX+PjHPuxdqiwF6blTkS0\nRFI1MrnzRbCmOkM6tgVO0cd6r5Z4bDGLusH9yjI9iI84gPRjK0AzymXFmBGuREHI\nsQIhAPKf4pp+Prvutgq2ayygleZChBr1DC4XnnufBNtaswyvAiEAzNGVKgNvzuhk\nijoUXIDruJQEGFGvZTsi1D2RehXiT90CIQC4HOQUYKCydB7oWi1SHDokFW2yFyo6\n/+lf3fgNjPI6OQIgUPmTFXciXxT1msh3gFLf3qt2Kv8wbr9Ad9SXjULVpGkCIB+g\nRzHX0lkJl9Stshd/7Gbt65/QYq+v+xvAeT0CoyIg\n-----END RSA PRIVATE KEY-----\n",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1039,
+          "column": 30
+        },
+        "evidence": "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,975C518B7D2CCD1164A3354D1F89C5A6\nProc-Type: 42,DECRYPTED\n\nMIIBOgIBAAJBAMIeCnn9G/7g2Z6J+qHOE2XCLLuPoh5NHTO2Fm+PbzBvafBo0oYo\nQVVy7frzxmOqx6iIZBxTyfAQqBPO3Br59BMCAwEAAQJAX+PjHPuxdqiwF6blTkS0\nRFI1MrnzRbCmOkM6tgVO0cd6r5Z4bDGLusH9yjI9iI84gPRjK0AzymXFmBGuREHI\nsQIhAPKf4pp+Prvutgq2ayygleZChBr1DC4XnnufBNtaswyvAiEAzNGVKgNvzuhk\nijoUXIDruJQEGFGvZTsi1D2RehXiT90CIQC4HOQUYKCydB7oWi1SHDokFW2yFyo6\n/+lf3fgNjPI6OQIgUPmTFXciXxT1msh3gFLf3qt2Kv8wbr9Ad9SXjULVpGkCIB+g\nRzHX0lkJl9Stshd/7Gbt65/QYq+v+xvAeT0CoyIg\n-----END RSA PRIVATE KEY-----\n",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

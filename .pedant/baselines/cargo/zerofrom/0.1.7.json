@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "549a7886a611ca13998db3e152b4345a40227a92e37ad9a600d3ead4b6294451",
+  "crate_name": "zerofrom",
+  "crate_version": "0.1.7",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915125,
+  "profile": {
+    "findings": []
+  }
+}

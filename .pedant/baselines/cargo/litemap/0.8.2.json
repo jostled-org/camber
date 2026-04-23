@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "e8a051408a2290172079f12ac21b05b45408d139a2e3b496ebdfb17fd9eeea96",
+  "crate_name": "litemap",
+  "crate_version": "0.8.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915107,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/rkyv.rs",
+          "line": 79,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/rkyv.rs",
+          "line": 93,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

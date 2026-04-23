@@ -1,0 +1,4912 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "93ee8279cc06eb68524df6d521828cc2fc42d4fdea76311e0cb2a771e3ec8838",
+  "crate_name": "time",
+  "crate_version": "0.3.47",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915114,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/date.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/date.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/date.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/date.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/date.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/duration.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/duration.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/duration.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/formatting.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/formatting.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Rfc2822",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/formatting.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/formatting.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/formatting.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/formatting.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::macros::format_description",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/formatting.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/formatting.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/instant.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/instant.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/instant.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/instant.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/month.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/offset_date_time.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/offset_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/offset_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/offset_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/offset_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/offset_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/offset_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/offset_date_time.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/parsing.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/parsing.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Rfc2822",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/parsing.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/parsing.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::Component",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/parsing.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/parsing.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::parsing::Parsed",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/primitive_date_time.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/primitive_date_time.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/primitive_date_time.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/primitive_date_time.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand08.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand08.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand08.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand08.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand08.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand08.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand08.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand08.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand09.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand09.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand09.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand09.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand09.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand09.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand09.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/rand09.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/time.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/time.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/utc_date_time.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/utc_date_time.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::utc_datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/utc_offset.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/utc_offset.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/util.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::util",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benchmarks/weekday.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 71,
+          "column": 41
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 77,
+          "column": 27
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 83,
+          "column": 27
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 96,
+          "column": 11
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 105,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 121,
+          "column": 15
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 124,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 164,
+          "column": 12
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 200,
+          "column": 12
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 247,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 262,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 265,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 285,
+          "column": 12
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 295,
+          "column": 22
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 325,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 373,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 515,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 611,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 616,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 636,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 645,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 1119,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 1127,
+          "column": 28
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 1137,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 1141,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 1189,
+          "column": 12
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 1222,
+          "column": 12
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/date.rs",
+          "line": 1253,
+          "column": 12
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 364,
+          "column": 22
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 368,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 421,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 432,
+          "column": 27
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 440,
+          "column": 27
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 734,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 753,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 772,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 805,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 1018,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 1044,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 1068,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 1090,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 1152,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 1194,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/duration.rs",
+          "line": 1231,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/ext/instant.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/ext/systemtime.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ext/systemtime.rs",
+          "line": 78,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/formatting/component_provider.rs",
+          "line": 196,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/formatting/component_provider.rs",
+          "line": 225,
+          "column": 31
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/formatting/component_provider.rs",
+          "line": 248,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/formatting/component_provider.rs",
+          "line": 255,
+          "column": 31
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/formatting/formattable.rs",
+          "line": 233,
+          "column": 32
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/formatting/formattable.rs",
+          "line": 244,
+          "column": 32
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/formatting/mod.rs",
+          "line": 342,
+          "column": 53
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/formatting/mod.rs",
+          "line": 371,
+          "column": 55
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/instant.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/interop/offsetdatetime_systemtime.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/interop/utcdatetime_systemtime.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/offset_date_time.rs",
+          "line": 117,
+          "column": 9
+        },
+        "evidence": "std::time::SystemTime::now",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/offset_date_time.rs",
+          "line": 240,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/offset_date_time.rs",
+          "line": 307,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/offset_date_time.rs",
+          "line": 346,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/offset_date_time.rs",
+          "line": 395,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/offset_date_time.rs",
+          "line": 449,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/offset_date_time.rs",
+          "line": 457,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/offset_date_time.rs",
+          "line": 495,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/parsing/component.rs",
+          "line": 148,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/parsing/component.rs",
+          "line": 244,
+          "column": 27
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/parsing/component.rs",
+          "line": 286,
+          "column": 27
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/parsing/parsed.rs",
+          "line": 943,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/quickcheck.rs",
+          "line": 59,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rand08.rs",
+          "line": 27,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rand09.rs",
+          "line": 27,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/sys/local_offset_at/unix.rs",
+          "line": 21,
+          "column": 27
+        },
+        "evidence": "libc::localtime_r",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sys/local_offset_at/unix.rs",
+          "line": 21,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sys/local_offset_at/unix.rs",
+          "line": 27,
+          "column": 14
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sys/local_offset_at/windows.rs",
+          "line": 53,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sys/local_offset_at/windows.rs",
+          "line": 58,
+          "column": 14
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sys/local_offset_at/windows.rs",
+          "line": 96,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/sys/local_offset_at/windows.rs",
+          "line": 35,
+          "column": 8
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/sys/local_offset_at/windows.rs",
+          "line": 34,
+          "column": 1
+        },
+        "evidence": "#[link]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sys/refresh_tz/imp.rs",
+          "line": 5,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sys/refresh_tz/mod.rs",
+          "line": 8,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sys/refresh_tz/mod.rs",
+          "line": 10,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sys/refresh_tz/unix.rs",
+          "line": 23,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sys/refresh_tz/unix.rs",
+          "line": 30,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sys/refresh_tz/unix.rs",
+          "line": 49,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/sys/refresh_tz/unix.rs",
+          "line": 24,
+          "column": 12
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/time.rs",
+          "line": 120,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/time.rs",
+          "line": 156,
+          "column": 15
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/time.rs",
+          "line": 163,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/time.rs",
+          "line": 479,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/time.rs",
+          "line": 519,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/time.rs",
+          "line": 563,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/time.rs",
+          "line": 601,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/time.rs",
+          "line": 637,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/time.rs",
+          "line": 667,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/time.rs",
+          "line": 816,
+          "column": 27
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/time.rs",
+          "line": 860,
+          "column": 27
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/time.rs",
+          "line": 1159,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/utc_date_time.rs",
+          "line": 131,
+          "column": 9
+        },
+        "evidence": "std::time::SystemTime::now",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utc_date_time.rs",
+          "line": 199,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utc_date_time.rs",
+          "line": 207,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utc_date_time.rs",
+          "line": 244,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utc_date_time.rs",
+          "line": 320,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utc_date_time.rs",
+          "line": 353,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utc_offset.rs",
+          "line": 115,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utc_offset.rs",
+          "line": 168,
+          "column": 15
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utc_offset.rs",
+          "line": 170,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utc_offset.rs",
+          "line": 292,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/util.rs",
+          "line": 80,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/util.rs",
+          "line": 82,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/util.rs",
+          "line": 109,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/compile-fail/invalid_date.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/compile-fail/invalid_datetime.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/compile-fail/invalid_format_description.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::macros::format_description",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/compile-fail/invalid_offset.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/compile-fail/invalid_serializer.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::serde",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/compile-fail/invalid_time.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/compile-fail/invalid_utc_datetime.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::macros::utc_datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/convert.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::convert",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/date.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/date.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/date.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/date.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/date.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/date.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/date.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/date.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/date.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/date.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::util",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::error::self",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::error::ConversionRange",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::error::IndeterminateOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::error::TryFromParsed",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::self",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::Component",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::BorrowedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::OwnedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::macros::utc_datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "time::parsing::Parsed",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/derives.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/duration.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/duration.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/duration.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::error",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/duration.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::error::ComponentRange",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::error::ConversionRange",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::error::DifferentVariant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::error::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::error::Format",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::error::IndeterminateOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::error::InvalidFormatDescription",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::error::InvalidVariant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::error::Parse",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::error::ParseFromDescription",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::error::TryFromParsed",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::macros::format_description",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "time::parsing::Parsed",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/error.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::format_description",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/ext.rs",
+          "line": 2,
+          "column": 5
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/ext.rs",
+          "line": 3,
+          "column": 5
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/ext.rs",
+          "line": 63,
+          "column": 5
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/format_description.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/format_description.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::format_description::BorrowedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/format_description.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::format_description::Component",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/format_description.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::format_description::OwnedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::iso8601::DateKind",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::iso8601::OffsetPrecision",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::iso8601::TimePrecision",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Iso8601",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Rfc2822",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::iso8601",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::format_description::self",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::format_description::BorrowedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::format_description::OwnedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::macros::format_description",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::macros::utc_datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/formatting.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/instant.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/instant.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/instant.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/instant.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/instant.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::Day",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::End",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::Ignore",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::MonthRepr",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::OffsetMinute",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::OffsetSecond",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::Ordinal",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::Padding",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::Period",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::TrailingInput",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::UnixTimestamp",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::UnixTimestampPrecision",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::WeekNumber",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::WeekNumberRepr",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::WeekdayRepr",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::Year",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::YearRepr",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "time::format_description::BorrowedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "time::format_description::Component",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::macros::format_description",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/macros.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./tests/integration/main.rs",
+          "line": 38,
+          "column": 18
+        },
+        "evidence": "std::process::Command::new",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::iso8601",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "time::format_description::BorrowedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "time::format_description::Component",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 21,
+          "column": 1
+        },
+        "evidence": "time::formatting::Formattable",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "time::parsing::Parsable",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "time::parsing::Parsed",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "time::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "time::UtcDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "time::error",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/meta.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "time::ext",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/month.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::Month::self",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/month.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::utc_datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/offset_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parse_format_description.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::error::InvalidFormatDescription",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parse_format_description.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parse_format_description.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::self",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parse_format_description.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::BorrowedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parse_format_description.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::Component",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parse_format_description.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::OwnedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parse_format_description.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::StaticFormatDescription",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parse_format_description.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::macros::format_description",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsed.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::Hour",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsed.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::WeekNumber",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsed.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier::WeekNumberRepr",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsed.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::BorrowedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsed.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::Component",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsed.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::parsing::Parsed",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsed.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsed.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsed.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsed.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::error",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Iso8601",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Rfc2822",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::BorrowedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::Component",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::OwnedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::format_description::modifier",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::utc_datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::parsing::Parsed",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::UtcDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::error",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/integration/parsing.rs",
+          "line": 811,
+          "column": 13
+        },
+        "evidence": "13:02:03",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/primitive_date_time.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/primitive_date_time.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/primitive_date_time.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/primitive_date_time.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/primitive_date_time.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/primitive_date_time.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/primitive_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/primitive_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/primitive_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/primitive_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/quickcheck.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::format_description",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/quickcheck.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/quickcheck.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/quickcheck.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/quickcheck.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/quickcheck.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/quickcheck.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/quickcheck.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/quickcheck.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/quickcheck.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/quickcheck.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/rand.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/rand.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/rand.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/rand.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/rand.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/rand.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/rand.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/rand.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde_helpers.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde_helpers.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/error_conditions.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/error_conditions.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::macros::format_description",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/error_conditions.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::error",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/error_conditions.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/iso8601.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/iso8601.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::serde::iso8601",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/iso8601.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/json.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/json.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/json.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/json.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/json.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/json.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/json.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/json.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/json.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/json.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::iso8601",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Iso8601",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::format_description::BorrowedFormatItem",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::serde",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 280,
+          "column": 24
+        },
+        "evidence": "12:34:56",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/integration/serde/macros.rs",
+          "line": 282,
+          "column": 24
+        },
+        "evidence": "12:34:56",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/mod.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/mod.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/mod.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/mod.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/mod.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/mod.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/mod.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/mod.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/mod.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/mod.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/mod.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/mod.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/rfc2822.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::serde::rfc2822",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/rfc2822.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/rfc3339.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/rfc3339.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::serde::rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/rfc3339.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/timestamps.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/timestamps.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::serde::timestamp",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/serde/timestamps.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/time.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/time.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/time.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/time.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Result",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/time.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::ext::NumericalStdDuration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::utc_datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::UtcDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_date_time.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_offset.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "time::macros::offset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_offset.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/utc_offset.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/util.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/util.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::util",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/util.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/util.rs",
+          "line": 483,
+          "column": 5
+        },
+        "evidence": "time::util::local_offset",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/integration/util.rs",
+          "line": 488,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/integration/util.rs",
+          "line": 491,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/weekday.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::Weekday::self",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration/weekday.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "time::Weekday",
+        "origin": "import"
+      }
+    ]
+  }
+}

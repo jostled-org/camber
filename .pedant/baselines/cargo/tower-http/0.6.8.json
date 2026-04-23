@@ -1,0 +1,242 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "1cb4e43434211809c58ccc215b569f3f0f0f5cc3500997a6279a2a7798626f55",
+  "crate_name": "tower-http",
+  "crate_version": "0.6.8",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915115,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/compression/layer.rs",
+          "line": 130,
+          "column": 5
+        },
+        "evidence": "tokio::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/cors/tests.rs",
+          "line": 58,
+          "column": 49
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/cors/tests.rs",
+          "line": 68,
+          "column": 51
+        },
+        "evidence": "http://example.org",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 417,
+          "column": 18
+        },
+        "evidence": "http://example.com/42",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 435,
+          "column": 18
+        },
+        "evidence": "http://example.com/42",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 453,
+          "column": 18
+        },
+        "evidence": "http://example.com/42",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 115,
+          "column": 40
+        },
+        "evidence": "http://example.com/old",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 116,
+          "column": 44
+        },
+        "evidence": "http://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 117,
+          "column": 45
+        },
+        "evidence": "https://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/limited.rs",
+          "line": 45,
+          "column": 36
+        },
+        "evidence": "https://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/same_origin.rs",
+          "line": 42,
+          "column": 40
+        },
+        "evidence": "http://example.com/old",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/same_origin.rs",
+          "line": 43,
+          "column": 44
+        },
+        "evidence": "http://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/same_origin.rs",
+          "line": 44,
+          "column": 45
+        },
+        "evidence": "https://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/services/fs/serve_dir/headers.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/services/fs/serve_dir/open_file.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "std::fs::Metadata",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/services/fs/serve_dir/open_file.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "tokio::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/services/fs/serve_dir/open_file.rs",
+          "line": 265,
+          "column": 16
+        },
+        "evidence": "tokio::fs::metadata",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/services/fs/serve_dir/tests.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/services/fs/serve_dir/tests.rs",
+          "line": 31,
+          "column": 20
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/services/fs/serve_dir/tests.rs",
+          "line": 544,
+          "column": 25
+        },
+        "evidence": "std::fs::read",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/body.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/future.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/service.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      }
+    ]
+  }
+}

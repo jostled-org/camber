@@ -1,0 +1,22 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "d2c8fbb5a7e3805407f787f963647783c60e837313e4885de54b17d8055dc24f",
+  "crate_name": "futures",
+  "crate_version": "0.3.32",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915103,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/compat.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      }
+    ]
+  }
+}

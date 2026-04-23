@@ -1,0 +1,22 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b4d9e31ee599d1b32059336e31be7243df13e93ea27db61d16dbfa86cee2ed46",
+  "crate_name": "tonic-prost-build",
+  "crate_version": "0.14.5",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915115,
+  "profile": {
+    "findings": [
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 715,
+          "column": 27
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      }
+    ]
+  }
+}

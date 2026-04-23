@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "ddbe25814788c8f13d0f5e8bbfa2e96f4cbb51a0cf7642c4628288e37f68439a",
+  "crate_name": "rand_core",
+  "crate_version": "0.9.5",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915110,
+  "profile": {
+    "findings": []
+  }
+}

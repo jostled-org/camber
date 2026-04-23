@@ -1,0 +1,222 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "204dc4a5d989ea2f11787273e858cb4ccb47bdce886981bae8c6240ee6a5d6a4",
+  "crate_name": "opentelemetry-otlp",
+  "crate_version": "0.31.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915108,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 169,
+          "column": 21
+        },
+        "evidence": "reqwest::Client::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 184,
+          "column": 25
+        },
+        "evidence": "reqwest::blocking::Client::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 187,
+          "column": 49
+        },
+        "evidence": "reqwest::blocking::Client::new",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 1038,
+          "column": 13
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 622,
+          "column": 26
+        },
+        "evidence": "http://localhost:4317",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 650,
+          "column": 38
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 654,
+          "column": 38
+        },
+        "evidence": "https://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 658,
+          "column": 38
+        },
+        "evidence": "https://example.com/additional/path/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 835,
+          "column": 32
+        },
+        "evidence": "http://localhost:4318/v1/tracesbutnotreally",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 859,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 890,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 918,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 939,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 961,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 1023,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/exporter/mod.rs",
+          "line": 184,
+          "column": 37
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/mod.rs",
+          "line": 60,
+          "column": 56
+        },
+        "evidence": "http://localhost:4317",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/mod.rs",
+          "line": 61,
+          "column": 56
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/tonic/mod.rs",
+          "line": 763,
+          "column": 26
+        },
+        "evidence": "http://localhost:3456",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/smoke.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/smoke.rs",
+          "line": 50,
+          "column": 20
+        },
+        "evidence": "tokio::net::TcpListener::bind",
+        "origin": "import"
+      }
+    ]
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "dc0064b11ce9a7a7d7c23edef1153bc940e64698a08ce3c6f0fcf4e207487570",
+  "crate_name": "num-bigint",
+  "crate_version": "0.4.6",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915108,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/bigint.rs",
+          "line": 880,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/biguint.rs",
+          "line": 805,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/biguint/division.rs",
+          "line": 44,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/fuzzed.rs",
+          "line": 27,
+          "column": 16
+        },
+        "evidence": "4000000000000000…0007",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/fuzzed.rs",
+          "line": 92,
+          "column": 17
+        },
+        "evidence": "812cff04ff812cff…8b2c",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/fuzzed.rs",
+          "line": 103,
+          "column": 17
+        },
+        "evidence": "7ed300fb007ed300…e580",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/fuzzed.rs",
+          "line": 114,
+          "column": 17
+        },
+        "evidence": "7b00387ffff938ff…00fc",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/fuzzed.rs",
+          "line": 135,
+          "column": 22
+        },
+        "evidence": "1ebf6415da7ac71a…3800",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

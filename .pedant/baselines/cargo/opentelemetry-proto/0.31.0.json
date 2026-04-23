@@ -1,0 +1,102 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "09cbd05c8043569cb11101a1996f190e677d1b992d5becdde2ce1e36a675467f",
+  "crate_name": "opentelemetry-proto",
+  "crate_version": "0.31.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915108,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/transform/common.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/transform/trace.rs",
+          "line": 268,
+          "column": 25
+        },
+        "evidence": "std::time::SystemTime::now",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transform/trace.rs",
+          "line": 480,
+          "column": 38
+        },
+        "evidence": "http://resource-schema",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transform/trace.rs",
+          "line": 484,
+          "column": 30
+        },
+        "evidence": "http://instrumentation-schema",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/grpc_build.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "tempfile::TempDir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/grpc_build.rs",
+          "line": 147,
+          "column": 5
+        },
+        "evidence": "std::fs::read_dir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/grpc_build.rs",
+          "line": 156,
+          "column": 37
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./tests/grpc_build.rs",
+          "line": 185,
+          "column": 8
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/grpc_build.rs",
+          "line": 191,
+          "column": 9
+        },
+        "evidence": "std::fs::write",
+        "origin": "import"
+      }
+    ]
+  }
+}

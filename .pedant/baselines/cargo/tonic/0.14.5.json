@@ -1,0 +1,402 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "d6867ea41a02fa48094976b46e9854527c0b28af30a8aa335e8c2d0356ba241e",
+  "crate_name": "tonic",
+  "crate_version": "0.14.5",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915115,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/codec/buffer.rs",
+          "line": 73,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/codec/buffer.rs",
+          "line": 80,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/codec/buffer.rs",
+          "line": 140,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/codec/encode.rs",
+          "line": 148,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/metadata/encoding.rs",
+          "line": 144,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/metadata/key.rs",
+          "line": 127,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/metadata/value.rs",
+          "line": 87,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/metadata/value.rs",
+          "line": 215,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/metadata/value.rs",
+          "line": 223,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/metadata/value.rs",
+          "line": 848,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/metadata/value.rs",
+          "line": 950,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/metadata/value.rs",
+          "line": 957,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/request.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/service/interceptor.rs",
+          "line": 334,
+          "column": 35
+        },
+        "evidence": "hyper::Response::new",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/channel/endpoint.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "hyper::rt",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/channel/endpoint.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/channel/endpoint.rs",
+          "line": 106,
+          "column": 44
+        },
+        "evidence": "http://tonic",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/channel/mod.rs",
+          "line": 30,
+          "column": 1
+        },
+        "evidence": "hyper::rt",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/channel/service/connection.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "hyper::rt",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/channel/service/connection.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "hyper::client::conn::http2::Builder",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/channel/service/connection.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Executor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/channel/service/connector.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "hyper::rt",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/channel/service/executor.rs",
+          "line": 5,
+          "column": 12
+        },
+        "evidence": "hyper::rt::Executor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/channel/service/io.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "hyper::rt",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/transport/channel/service/tls.rs",
+          "line": 115,
+          "column": 30
+        },
+        "evidence": "time::timeout",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/channel/uds_connector.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "tokio::net::UnixStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/mod.rs",
+          "line": 111,
+          "column": 5
+        },
+        "evidence": "hyper::body::Body",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/mod.rs",
+          "line": 111,
+          "column": 5
+        },
+        "evidence": "hyper::Uri",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/server/conn.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/server/conn.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/server/incoming.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/server/incoming.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/server/incoming.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/server/incoming.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/server/incoming.rs",
+          "line": 232,
+          "column": 20
+        },
+        "evidence": "127.0.0.1:1322",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/server/mod.rs",
+          "line": 53,
+          "column": 1
+        },
+        "evidence": "hyper::body::Incoming",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/server/mod.rs",
+          "line": 53,
+          "column": 1
+        },
+        "evidence": "hyper::service::Service",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transport/server/mod.rs",
+          "line": 55,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/transport/server/service/tls.rs",
+          "line": 72,
+          "column": 30
+        },
+        "evidence": "time::timeout",
+        "origin": "import"
+      }
+    ]
+  }
+}

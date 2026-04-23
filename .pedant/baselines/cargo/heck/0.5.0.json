@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "7fec9b8da2d67a0b94f46f5d0785cc44e95fc25849f1faaf5a885fe0e13c86b3",
+  "crate_name": "heck",
+  "crate_version": "0.5.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915104,
+  "profile": {
+    "findings": []
+  }
+}

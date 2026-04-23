@@ -1,0 +1,22 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "a5b75300880e98e86dd5ba258f036fb2e55d3bd872d5e74f4b0e9daebbe91d21",
+  "crate_name": "clap",
+  "crate_version": "4.6.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915102,
+  "profile": {
+    "findings": [
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./examples/multicall-busybox.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::process::exit",
+        "origin": "import"
+      }
+    ]
+  }
+}

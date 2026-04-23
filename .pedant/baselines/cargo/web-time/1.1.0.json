@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b92e3d9f8dc71638e293958a03714c9582f8e12a2237007a22e9accbd6087759",
+  "crate_name": "web-time",
+  "crate_version": "1.1.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915118,
+  "profile": {
+    "findings": [
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/time/js.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/web.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      }
+    ]
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "69c588bc9545891c986b0b71d7bcb90f932bcc5a5f038e06fdf6458261801f7d",
+  "crate_name": "hermit-abi",
+  "crate_version": "0.5.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776915104,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 902,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 908,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 373,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}
