@@ -1,10 +1,10 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "82357e3715a2722af7f16d144ff1fa2e6290a2ecb79590cf8128619c4038d7ba",
+  "source_hash": "bd42cf7d55d374dfec4d08f7b21ab4373e80ee2f72f57c5bfb2ed8ca48eec7be",
   "crate_name": "cc",
-  "crate_version": "1.2.59",
+  "crate_version": "1.2.60",
   "analysis_tier": "syntactic",
-  "timestamp": 1776908691,
+  "timestamp": 1776911188,
   "profile": {
     "findings": [
       {
@@ -101,7 +101,7 @@
         "capability": "process_exec",
         "location": {
           "file": "./src/lib.rs",
-          "line": 4339,
+          "line": 4341,
           "column": 5
         },
         "evidence": "std::process::exit",
