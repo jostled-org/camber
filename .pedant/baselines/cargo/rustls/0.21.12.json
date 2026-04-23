@@ -1,0 +1,2842 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "431fa1b02b3769cb4d7e04a96de84eeb7ae6c5f9438436c78ffe6ae0f8de4cf9",
+  "crate_name": "rustls",
+  "crate_version": "0.21.12",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908706,
+  "profile": {
+    "findings": [
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/benchmarks.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "rustls::client::Resumption",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::server::AllowAnyAuthenticatedClient",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::server::NoClientAuth",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::server::NoServerSessionStorage",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::server::ServerSessionMemoryCache",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "rustls::RootCertStore",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "rustls::Ticketer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 21,
+          "column": 1
+        },
+        "evidence": "rustls::ConnectionCommon",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 21,
+          "column": 1
+        },
+        "evidence": "rustls::SideData",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 178,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 179,
+          "column": 10
+        },
+        "evidence": "rustls::version::TLS12",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 184,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 196,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 202,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 208,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 214,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 219,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 220,
+          "column": 10
+        },
+        "evidence": "rustls::version::TLS13",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 224,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS13_AES_256_GCM_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 229,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS13_AES_128_GCM_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 259,
+          "column": 18
+        },
+        "evidence": "rustls::Certificate",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bench.rs",
+          "line": 264,
+          "column": 9
+        },
+        "evidence": "rustls::PrivateKey",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "rustls::client::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "rustls::client::ClientConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "rustls::client::Resumption",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::codec::Codec",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::persist",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "rustls::server::ClientHello",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "rustls::server::ServerConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "rustls::server::ServerConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::self",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::client",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::kx_group",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::server",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::version",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::AlertDescription",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::Certificate",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::CertificateError",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::Connection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::DistinguishedName",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::InvalidMessage",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::NamedGroup",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::PeerIncompatible",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::PeerMisbehaved",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::PrivateKey",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::ProtocolVersion",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::ServerName",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::Side",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::SignatureAlgorithm",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::SignatureScheme",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::SupportedKxGroup",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::SupportedProtocolVersion",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::Ticketer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::ALL_KX_GROUPS",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "std::net",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "std::process",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 358,
+          "column": 9
+        },
+        "evidence": "time::SystemTime::now",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 359,
+          "column": 29
+        },
+        "evidence": "time::SystemTime::UNIX_EPOCH",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./examples/internal/bogo_shim.rs",
+          "line": 366,
+          "column": 23
+        },
+        "evidence": "time::Duration::from_millis",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/cipher.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "ring::aead",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/cipher.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "ring::hkdf",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/builder.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/client_conn.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls12.rs",
+          "line": 34,
+          "column": 1
+        },
+        "evidence": "ring::agreement::PublicKey",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls12.rs",
+          "line": 35,
+          "column": 1
+        },
+        "evidence": "ring::constant_time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/tls12.rs",
+          "line": 736,
+          "column": 19
+        },
+        "evidence": "std::time::SystemTime::now",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client/tls13.rs",
+          "line": 44,
+          "column": 1
+        },
+        "evidence": "ring::constant_time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/tls13.rs",
+          "line": 687,
+          "column": 19
+        },
+        "evidence": "std::time::SystemTime::now",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/dns_name.rs",
+          "line": 155,
+          "column": 10
+        },
+        "evidence": "127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/error.rs",
+          "line": 701,
+          "column": 9
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hash_hs.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "ring::digest",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/hash_hs.rs",
+          "line": 167,
+          "column": 5
+        },
+        "evidence": "ring::digest",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/key_log_file.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/key_log_file.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::fs::OpenOptions",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/key.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": " -----BEGIN PRIVATE KEY-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/key.rs",
+          "line": 58,
+          "column": 1
+        },
+        "evidence": " -----BEGIN CERTIFICATE-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/kx.rs",
+          "line": 30,
+          "column": 19
+        },
+        "evidence": "ring::rand::SystemRandom::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/kx.rs",
+          "line": 32,
+          "column": 13
+        },
+        "evidence": "ring::agreement::EphemeralPrivateKey::generate",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/kx.rs",
+          "line": 53,
+          "column": 24
+        },
+        "evidence": "ring::agreement::UnparsedPublicKey::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/kx.rs",
+          "line": 54,
+          "column": 9
+        },
+        "evidence": "ring::agreement::agree_ephemeral",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/kx.rs",
+          "line": 80,
+          "column": 27
+        },
+        "evidence": "ring::agreement::X25519",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/kx.rs",
+          "line": 86,
+          "column": 27
+        },
+        "evidence": "ring::agreement::ECDH_P256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/kx.rs",
+          "line": 92,
+          "column": 27
+        },
+        "evidence": "ring::agreement::ECDH_P384",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/msgs/handshake.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/msgs/message_test.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/quic.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "ring::aead",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/quic.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "ring::hkdf",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/rand.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "ring::rand::SecureRandom",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/rand.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "ring::rand::SystemRandom",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/server/tls12.rs",
+          "line": 27,
+          "column": 1
+        },
+        "evidence": "ring::constant_time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/server/tls12.rs",
+          "line": 550,
+          "column": 27
+        },
+        "evidence": "std::time::SystemTime::now",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/server/tls13.rs",
+          "line": 38,
+          "column": 1
+        },
+        "evidence": "ring::constant_time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/server/tls13.rs",
+          "line": 948,
+          "column": 19
+        },
+        "evidence": "std::time::SystemTime::now",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "ring::io::der",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "ring::rand::SecureRandom",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "ring::rand::SystemRandom",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "ring::signature::self",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "ring::signature::EcdsaKeyPair",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "ring::signature::Ed25519KeyPair",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "ring::signature::RsaKeyPair",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/stream.rs",
+          "line": 222,
+          "column": 5
+        },
+        "evidence": "std::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/ticketer.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "ring::aead",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/ticketer.rs",
+          "line": 21,
+          "column": 13
+        },
+        "evidence": "time::SystemTime::now",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/ticketer.rs",
+          "line": 21,
+          "column": 52
+        },
+        "evidence": "time::UNIX_EPOCH",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/ticketer.rs",
+          "line": 295,
+          "column": 39
+        },
+        "evidence": "time::Duration::from_secs",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls12/cipher.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "ring::aead",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls12/mod.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "ring::aead",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls12/mod.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "ring::digest::Digest",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls12/mod.rs",
+          "line": 36,
+          "column": 25
+        },
+        "evidence": "ring::hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls12/mod.rs",
+          "line": 84,
+          "column": 25
+        },
+        "evidence": "ring::hmac::HMAC_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls12/prf.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "ring::hmac",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls12/prf.rs",
+          "line": 4,
+          "column": 19
+        },
+        "evidence": "hmac::Context::with_key",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls12/prf.rs",
+          "line": 11,
+          "column": 20
+        },
+        "evidence": "hmac::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls12/prf.rs",
+          "line": 14,
+          "column": 25
+        },
+        "evidence": "hmac::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls12/prf.rs",
+          "line": 40,
+          "column": 5
+        },
+        "evidence": "ring::hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls12/prf.rs",
+          "line": 40,
+          "column": 5
+        },
+        "evidence": "ring::hmac::HMAC_SHA512",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls12/prf.rs",
+          "line": 79,
+          "column": 34
+        },
+        "evidence": "ring::hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls13/key_schedule.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "ring::aead",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls13/key_schedule.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "ring::digest::self",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls13/key_schedule.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "ring::digest::Digest",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls13/key_schedule.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "ring::hkdf::self",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls13/key_schedule.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "ring::hkdf::KeyType",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls13/key_schedule.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "ring::hmac",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls13/key_schedule.rs",
+          "line": 713,
+          "column": 9
+        },
+        "evidence": "hmac::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls13/key_schedule.rs",
+          "line": 837,
+          "column": 5
+        },
+        "evidence": "ring::aead",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls13/key_schedule.rs",
+          "line": 1012,
+          "column": 9
+        },
+        "evidence": "ring::aead",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls13/mod.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "ring::aead",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls13/mod.rs",
+          "line": 27,
+          "column": 21
+        },
+        "evidence": "ring::hkdf::HKDF_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls13/mod.rs",
+          "line": 42,
+          "column": 25
+        },
+        "evidence": "ring::hkdf::HKDF_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/verify.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "ring::digest::Digest",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/verify.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/verifybench.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/verifybench.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/x509.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "ring::io::der",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "rustls::client::ResolvesClientCert",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "rustls::client::Resumption",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::base::Payload",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::codec::Codec",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::handshake::ServerName",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "rustls::server::AllowAnyAnonymousOrAuthenticatedClient",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "rustls::server::ClientHello",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "rustls::server::ResolvesServerCert",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "rustls::ConnectionTrafficSecrets",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::CertificateError",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::ConnectionCommon",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::InvalidMessage",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::KeyLog",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::PeerIncompatible",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::PeerMisbehaved",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "rustls::SideData",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 24,
+          "column": 1
+        },
+        "evidence": "rustls::CipherSuite",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 24,
+          "column": 1
+        },
+        "evidence": "rustls::ProtocolVersion",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 24,
+          "column": 1
+        },
+        "evidence": "rustls::SignatureScheme",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 27,
+          "column": 1
+        },
+        "evidence": "rustls::Stream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 27,
+          "column": 1
+        },
+        "evidence": "rustls::StreamOwned",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 28,
+          "column": 1
+        },
+        "evidence": "rustls::SupportedCipherSuite",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 28,
+          "column": 1
+        },
+        "evidence": "rustls::ALL_CIPHER_SUITES",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 44,
+          "column": 20
+        },
+        "evidence": "rustls::ALL_VERSIONS",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 148,
+          "column": 12
+        },
+        "evidence": "rustls::version::TLS12",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 162,
+          "column": 49
+        },
+        "evidence": "rustls::version::TLS13",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 453,
+          "column": 36
+        },
+        "evidence": "rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 455,
+          "column": 33
+        },
+        "evidence": "rustls::kx_group::X25519",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 1971,
+          "column": 35
+        },
+        "evidence": "rustls::cipher_suite::TLS13_AES_256_GCM_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 2144,
+          "column": 20
+        },
+        "evidence": "rustls::server::ResolvesServerCertUsingSni::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 2918,
+          "column": 22
+        },
+        "evidence": "rustls::server::ServerSessionMemoryCache::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 2990,
+          "column": 31
+        },
+        "evidence": "rustls::client::ClientSessionMemoryCache::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3161,
+          "column": 30
+        },
+        "evidence": "rustls::Ticketer::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3314,
+          "column": 5
+        },
+        "evidence": "rustls::quic::self",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3314,
+          "column": 5
+        },
+        "evidence": "rustls::quic::ConnectionCommon",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3657,
+          "column": 9
+        },
+        "evidence": "ring::rand::SecureRandom",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3658,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::base::PayloadU16",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3659,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::enums::Compression",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3659,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::enums::NamedGroup",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3660,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::handshake::ClientHelloPayload",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3660,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::handshake::HandshakeMessagePayload",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3660,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::handshake::KeyShareEntry",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3660,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::handshake::Random",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3660,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::handshake::SessionId",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3663,
+          "column": 9
+        },
+        "evidence": "rustls::CipherSuite",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3663,
+          "column": 9
+        },
+        "evidence": "rustls::HandshakeType",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3663,
+          "column": 9
+        },
+        "evidence": "rustls::SignatureScheme",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3665,
+          "column": 19
+        },
+        "evidence": "ring::rand::SystemRandom::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3670,
+          "column": 18
+        },
+        "evidence": "ring::agreement::EphemeralPrivateKey::generate",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3670,
+          "column": 66
+        },
+        "evidence": "ring::agreement::X25519",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3712,
+          "column": 9
+        },
+        "evidence": "ring::rand::SecureRandom",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3713,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::base::PayloadU16",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3714,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::enums::Compression",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3714,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::enums::NamedGroup",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3715,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::handshake::ClientHelloPayload",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3715,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::handshake::HandshakeMessagePayload",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3715,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::handshake::KeyShareEntry",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3715,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::handshake::Random",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3715,
+          "column": 9
+        },
+        "evidence": "rustls::internal::msgs::handshake::SessionId",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3718,
+          "column": 9
+        },
+        "evidence": "rustls::CipherSuite",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3718,
+          "column": 9
+        },
+        "evidence": "rustls::HandshakeType",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3718,
+          "column": 9
+        },
+        "evidence": "rustls::SignatureScheme",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3768,
+          "column": 9
+        },
+        "evidence": "rustls::quic::Keys",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3768,
+          "column": 9
+        },
+        "evidence": "rustls::quic::Version",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3769,
+          "column": 9
+        },
+        "evidence": "rustls::Side",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3965,
+          "column": 5
+        },
+        "evidence": "rustls::internal::msgs::codec::Reader",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3965,
+          "column": 5
+        },
+        "evidence": "rustls::internal::msgs::handshake::HandshakePayload",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3965,
+          "column": 5
+        },
+        "evidence": "rustls::internal::msgs::message::MessagePayload",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3965,
+          "column": 5
+        },
+        "evidence": "rustls::internal::msgs::message::OpaqueMessage",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 3968,
+          "column": 5
+        },
+        "evidence": "rustls::HandshakeType",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 4006,
+          "column": 60
+        },
+        "evidence": "rustls::kx_group::SECP384R1",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 4123,
+          "column": 5
+        },
+        "evidence": "rustls::internal::msgs::handshake::SessionId",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 4417,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::handshake::HandshakeMessagePayload",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 4418,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::handshake::ClientExtension",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 4418,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::handshake::HandshakePayload",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 4418,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::message::Message",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 4418,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::message::MessagePayload",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 4595,
+          "column": 5
+        },
+        "evidence": "rustls::server::Acceptor",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 4771,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS13_AES_128_GCM_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 4774,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 4775,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/api.rs",
+          "line": 4776,
+          "column": 9
+        },
+        "evidence": "rustls::cipher_suite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./tests/bogo.rs",
+          "line": 8,
+          "column": 5
+        },
+        "evidence": "std::process::Command",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "rustls::client::WebPkiVerifier",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::handshake::DistinguishedName",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "rustls::server::ClientCertVerified",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "rustls::server::ClientCertVerifier",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::AlertDescription",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::Certificate",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::InvalidMessage",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::SignatureScheme",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 23,
+          "column": 8
+        },
+        "evidence": "rustls::server::ClientCertVerified::assertion",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/client_cert_verifier.rs",
+          "line": 65,
+          "column": 24
+        },
+        "evidence": "rustls::ALL_VERSIONS",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::codec::Reader",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::message::Message",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::message::OpaqueMessage",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "rustls::internal::msgs::message::PlainMessage",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "rustls::server::AllowAnyAnonymousOrAuthenticatedClient",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "rustls::server::AllowAnyAuthenticatedClient",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "rustls::server::UnparsedCertRevocationList",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "rustls::Connection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "rustls::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "rustls::RootCertStore",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::Certificate",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::PrivateKey",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "rustls::ConnectionCommon",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/common/mod.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "rustls::SideData",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/key_log_file_env.rs",
+          "line": 66,
+          "column": 24
+        },
+        "evidence": "rustls::ALL_VERSIONS",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/key_log_file_env.rs",
+          "line": 68,
+          "column": 46
+        },
+        "evidence": "rustls::KeyLogFile::new",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/key_log_file_env.rs",
+          "line": 47,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/key_log_file_env.rs",
+          "line": 50,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "rustls::client::HandshakeSignatureValid",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "rustls::client::ServerCertVerified",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "rustls::client::ServerCertVerifier",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "rustls::client::WebPkiVerifier",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "rustls::DigitallySignedStruct",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "rustls::AlertDescription",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "rustls::Certificate",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "rustls::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "rustls::InvalidMessage",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "rustls::SignatureScheme",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 24,
+          "column": 24
+        },
+        "evidence": "rustls::ALL_VERSIONS",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 72,
+          "column": 74
+        },
+        "evidence": "rustls::version::TLS12",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/server_cert_verifier.rs",
+          "line": 101,
+          "column": 74
+        },
+        "evidence": "rustls::version::TLS13",
+        "origin": "import"
+      }
+    ]
+  }
+}

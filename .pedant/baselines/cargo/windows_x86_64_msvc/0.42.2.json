@@ -1,0 +1,23 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "c7590f41853d19204a760e19fa725f5047cfc0c39b3286b94f1ab9f7399bbf34",
+  "crate_name": "windows_x86_64_msvc",
+  "crate_version": "0.42.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908716,
+  "profile": {
+    "findings": [
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./build.rs",
+          "line": 2,
+          "column": 18
+        },
+        "evidence": "std::env::var",
+        "origin": "import",
+        "execution_context": "build_hook"
+      }
+    ]
+  }
+}

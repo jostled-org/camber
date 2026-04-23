@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "abc43ece1958e1fbb9f9dcd9bfd8e18289b660c7e4bb7f3999bf52585f79d3a1",
+  "crate_name": "regex-lite",
+  "crate_version": "0.1.9",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908705,
+  "profile": {
+    "findings": []
+  }
+}

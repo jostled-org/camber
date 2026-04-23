@@ -1,0 +1,132 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "1ced1dd0cba8f2645d7dd4bfbd304945331daac4d00e5e41dc16b63eb0643837",
+  "crate_name": "rand",
+  "crate_version": "0.8.5",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908704,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/distributions/other.rs",
+          "line": 91,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/distributions/other.rs",
+          "line": 130,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/distributions/other.rs",
+          "line": 199,
+          "column": 45
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/distributions/other.rs",
+          "line": 205,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/distributions/slice.rs",
+          "line": 98,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/distributions/uniform.rs",
+          "line": 786,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/rngs/adapter/reseeding.rs",
+          "line": 321,
+          "column": 32
+        },
+        "evidence": "libc::pthread_atfork",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rngs/adapter/reseeding.rs",
+          "line": 321,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rngs/thread.rs",
+          "line": 104,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rngs/thread.rs",
+          "line": 112,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rngs/thread.rs",
+          "line": 119,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rngs/thread.rs",
+          "line": 126,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

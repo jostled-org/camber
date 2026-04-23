@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "2177b8ced7749412af1e21546b475e0b867cc7674925e65bef67fe10233fd3ed",
+  "crate_name": "tinyvec_macros",
+  "crate_version": "0.1.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908708,
+  "profile": {
+    "findings": []
+  }
+}

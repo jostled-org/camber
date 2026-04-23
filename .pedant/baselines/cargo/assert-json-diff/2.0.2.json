@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "f3dedee7528582cafbab72141c5474efb83b4a64b624ef8e3241c4ea3e0e8ec5",
+  "crate_name": "assert-json-diff",
+  "crate_version": "2.0.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908687,
+  "profile": {
+    "findings": []
+  }
+}

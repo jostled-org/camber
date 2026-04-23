@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "49c088f6678b4fd7206205409e087ede1193f316077dec7f025706e5e101301e",
+  "crate_name": "rustc-hash",
+  "crate_version": "2.1.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908705,
+  "profile": {
+    "findings": []
+  }
+}

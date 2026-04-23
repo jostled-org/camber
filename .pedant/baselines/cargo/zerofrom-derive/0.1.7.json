@@ -1,0 +1,22 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "1ed5e8c5923cab68b9b537755997a17aafc7ad1882c2d0cf4daacbdd14bf7be7",
+  "crate_name": "zerofrom-derive",
+  "crate_version": "0.1.7",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908723,
+  "profile": {
+    "findings": [
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 49,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      }
+    ]
+  }
+}

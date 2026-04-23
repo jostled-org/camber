@@ -1,0 +1,62 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "e18c1e94bb0240fafddd272545cd931b3097ddd93cc327e9b6840b529d80ee22",
+  "crate_name": "sct",
+  "crate_version": "0.7.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908706,
+  "profile": {
+    "findings": [
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 164,
+          "column": 30
+        },
+        "evidence": "ring::signature::ECDSA_P256_SHA256_ASN1",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 165,
+          "column": 30
+        },
+        "evidence": "ring::signature::ECDSA_P384_SHA384_ASN1",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 166,
+          "column": 34
+        },
+        "evidence": "ring::signature::RSA_PKCS1_2048_8192_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 167,
+          "column": 34
+        },
+        "evidence": "ring::signature::RSA_PKCS1_2048_8192_SHA384",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 179,
+          "column": 19
+        },
+        "evidence": "ring::signature::UnparsedPublicKey::new",
+        "origin": "import"
+      }
+    ]
+  }
+}

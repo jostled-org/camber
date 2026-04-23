@@ -81,3 +81,94 @@ camber::select! {
 ```
 
 Use Tokio's own `tokio::select!` inside async code when you are waiting on futures.
+
+## Watch Channel
+
+Use `channel::watch` when multiple receivers need the latest value of a shared state
+(configuration, shutdown signal, view-model snapshot). Receivers never queue stale
+values — they always see the most recent write.
+
+```rust
+use camber::channel::watch;
+
+let (tx, rx) = watch(AppConfig::default());
+
+// Writer: update config
+tx.send(new_config)?;
+
+// Reader: get latest value (non-blocking)
+let current = rx.borrow().clone();
+```
+
+`WatchReceiver` supports async waiting:
+
+```rust
+let mut rx = rx.clone();
+camber::spawn_async(async move {
+    while rx.changed().await.is_ok() {
+        let config = rx.borrow().clone();
+        apply_config(&config);
+    }
+});
+```
+
+Methods:
+
+- `WatchSender::send(value)` — replace current value; returns `ChannelClosed` if all receivers dropped
+- `WatchSender::send_modify(|v| ...)` — mutate in place; always succeeds (sender owns the value)
+- `WatchSender::borrow()` — read current value
+- `WatchSender::clone()` — multiple senders can write to the same channel
+- `WatchReceiver::borrow()` — read current value (does not mark as seen)
+- `WatchReceiver::borrow_and_update()` — read and mark as seen
+- `WatchReceiver::changed().await` — wait for next update
+- `WatchReceiver::has_changed()` — check if value changed since last `changed()` or `borrow_and_update()`
+- `WatchReceiver::clone()` — each clone tracks "seen" state independently
+
+## Primitives That Stay Direct Tokio
+
+Two coordination primitives are intentionally left to Tokio because wrapping
+them adds indirection without meaningful DX improvement.
+
+### `tokio::sync::broadcast` — Multi-Subscriber Event Fanout
+
+Use `broadcast` when multiple subscribers each need their own copy of every event. Unlike
+`watch`, broadcast delivers all values — not just the latest. Subscribers that fall behind
+receive a `RecvError::Lagged` with the number of missed messages.
+
+```rust
+use tokio::sync::broadcast;
+
+let (tx, _) = broadcast::channel::<Event>(64);
+
+// Each subscriber gets its own receiver
+let mut rx1 = tx.subscribe();
+let mut rx2 = tx.subscribe();
+
+// Publisher
+tx.send(Event::Updated).ok();
+
+// Subscriber
+camber::spawn_async(async move {
+    while let Ok(event) = rx1.recv().await {
+        handle_event(event);
+    }
+});
+```
+
+### `tokio::sync::oneshot` — Single-Use Response Delivery
+
+Use `oneshot` for request/response coordination between tasks — one sender, one receiver,
+one value.
+
+```rust
+use tokio::sync::oneshot;
+
+let (tx, rx) = oneshot::channel();
+
+camber::spawn_async(async move {
+    let result = compute().await;
+    tx.send(result).ok();
+});
+
+let value = rx.await.map_err(|_| RuntimeError::ChannelClosed)?;
+```

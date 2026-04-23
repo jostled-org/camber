@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "d630c603faa1a01eb588d958aeffd814a920e894414a1fb8232337862b5d67f6",
+  "crate_name": "tonic-prost",
+  "crate_version": "0.14.5",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908710,
+  "profile": {
+    "findings": []
+  }
+}

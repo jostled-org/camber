@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "89412d859c1065c2dde5c35b93c7089e0f9d31687fa175f14bc6863e95675d6f",
+  "crate_name": "digest",
+  "crate_version": "0.10.7",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908693,
+  "profile": {
+    "findings": []
+  }
+}

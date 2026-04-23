@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "65e936a2d40dd8ebc1b7cef979c0752df7384de07a780deb8e8f122a1dc80e55",
+  "crate_name": "rand_core",
+  "crate_version": "0.6.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908704,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/impls.rs",
+          "line": 70,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/impls.rs",
+          "line": 81,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

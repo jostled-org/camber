@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b26ee8873b3302e92d0e02bc01e04a96909062d927cac4c45b12585532241e70",
+  "crate_name": "rustls-platform-verifier-android",
+  "crate_version": "0.1.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908706,
+  "profile": {
+    "findings": []
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "186ccf4c106d19a84a0ef8b58f34bb1ccc31f4deb58ec82dc3b7c134fed45d71",
+  "crate_name": "idna_adapter",
+  "crate_version": "1.2.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908697,
+  "profile": {
+    "findings": []
+  }
+}

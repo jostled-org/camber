@@ -1,0 +1,22 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "831f24c865c1f782bc07dca431b48623e0a5b033e4b5b34bd6e5e3f5bb7eedfc",
+  "crate_name": "thiserror-impl",
+  "crate_version": "1.0.69",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908708,
+  "profile": {
+    "findings": [
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 34,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      }
+    ]
+  }
+}

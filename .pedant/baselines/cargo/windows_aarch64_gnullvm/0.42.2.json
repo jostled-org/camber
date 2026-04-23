@@ -1,0 +1,23 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "7d4db8cacfaa4b8c797252f9207380d2a1caba18a07c5f0027662926d913f2bb",
+  "crate_name": "windows_aarch64_gnullvm",
+  "crate_version": "0.42.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908715,
+  "profile": {
+    "findings": [
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./build.rs",
+          "line": 2,
+          "column": 18
+        },
+        "evidence": "std::env::var",
+        "origin": "import",
+        "execution_context": "build_hook"
+      }
+    ]
+  }
+}

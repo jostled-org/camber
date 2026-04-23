@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "736875b45833f6dd1e3fe2ded7c63b677887c5768cbeaa2210eddf95f107080d",
+  "crate_name": "asn1-rs-impl",
+  "crate_version": "0.2.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908687,
+  "profile": {
+    "findings": [
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 73,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      }
+    ]
+  }
+}

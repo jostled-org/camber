@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b9ce513eb1917d67e5999861d7e59471256782fdabb626941651a6ee955b64a4",
+  "crate_name": "tracing-serde",
+  "crate_version": "0.2.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908710,
+  "profile": {
+    "findings": []
+  }
+}

@@ -1,0 +1,162 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "9338e819ba300db28f8d37f06bc521f2731e2951e5cb77fe5bef046de69e4069",
+  "crate_name": "tower",
+  "crate_version": "0.5.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908710,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./examples/tower-balance.rs",
+          "line": 129,
+          "column": 25
+        },
+        "evidence": "time::sleep_until",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/load/peak_ewma.rs",
+          "line": 337,
+          "column": 9
+        },
+        "evidence": "time::pause",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/load/peak_ewma.rs",
+          "line": 348,
+          "column": 9
+        },
+        "evidence": "time::advance",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/retry/backoff.rs",
+          "line": 95,
+          "column": 19
+        },
+        "evidence": "time::Duration::from_millis",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/retry/backoff.rs",
+          "line": 154,
+          "column": 13
+        },
+        "evidence": "time::Duration::default",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/retry/backoff.rs",
+          "line": 165,
+          "column": 13
+        },
+        "evidence": "time::Duration::new",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/retry/budget/tps_budget.rs",
+          "line": 214,
+          "column": 9
+        },
+        "evidence": "time::pause",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/retry/budget/tps_budget.rs",
+          "line": 219,
+          "column": 9
+        },
+        "evidence": "time::advance",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/hedge/main.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "time::pause",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/hedge/main.rs",
+          "line": 28,
+          "column": 5
+        },
+        "evidence": "time::advance",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/limit/rate.rs",
+          "line": 11,
+          "column": 5
+        },
+        "evidence": "time::pause",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/limit/rate.rs",
+          "line": 27,
+          "column": 5
+        },
+        "evidence": "time::advance",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/spawn_ready/main.rs",
+          "line": 13,
+          "column": 5
+        },
+        "evidence": "time::pause",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/spawn_ready/main.rs",
+          "line": 27,
+          "column": 5
+        },
+        "evidence": "time::sleep",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/spawn_ready/main.rs",
+          "line": 27,
+          "column": 17
+        },
+        "evidence": "time::Duration::from_millis",
+        "origin": "import"
+      }
+    ]
+  }
+}

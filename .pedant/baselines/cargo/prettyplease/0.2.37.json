@@ -1,0 +1,193 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "75119e45768c506a2497ce7abf52ff06090d81f08f15b701fa0b7538cef0147a",
+  "crate_name": "prettyplease",
+  "crate_version": "0.2.37",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908703,
+  "profile": {
+    "findings": [
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./build.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::process",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/input.rs",
+          "line": 1,
+          "column": 5674
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/input.rs",
+          "line": 1,
+          "column": 8261
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/input.rs",
+          "line": 1,
+          "column": 8566
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/input.rs",
+          "line": 1,
+          "column": 13067
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/output.prettyplease.rs",
+          "line": 196,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/output.prettyplease.rs",
+          "line": 313,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/output.prettyplease.rs",
+          "line": 320,
+          "column": 40
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/output.prettyplease.rs",
+          "line": 483,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/output.rustc.rs",
+          "line": 181,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/output.rustc.rs",
+          "line": 269,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/output.rustc.rs",
+          "line": 277,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/output.rustc.rs",
+          "line": 414,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/output.rustfmt.rs",
+          "line": 212,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/output.rustfmt.rs",
+          "line": 320,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/output.rustfmt.rs",
+          "line": 327,
+          "column": 40
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./examples/output.rustfmt.rs",
+          "line": 442,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./tests/test_precedence.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::process::ExitCode",
+        "origin": "import"
+      }
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "05b90d1b8809d0070eaa22fbbdf4d9952bee32cc2b5dd6c01ff60b42707e6ac2",
+  "crate_name": "blocking",
+  "crate_version": "1.6.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908691,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/ls.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/unblock.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      }
+    ]
+  }
+}

@@ -1,0 +1,1132 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "1895accf5025c2742d3b7d78a96f4a1efbd341401784228ec5499b129529b149",
+  "crate_name": "rustls-webpki",
+  "crate_version": "0.101.7",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908706,
+  "profile": {
+    "findings": [
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crl.rs",
+          "line": 267,
+          "column": 42
+        },
+        "evidence": "ring::io::der::positive_integer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/der.rs",
+          "line": 16,
+          "column": 12
+        },
+        "evidence": "ring::io::der::CONSTRUCTED",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/der.rs",
+          "line": 16,
+          "column": 12
+        },
+        "evidence": "ring::io::der::CONTEXT_SPECIFIC",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/der.rs",
+          "line": 350,
+          "column": 5
+        },
+        "evidence": "ring::io::der::small_nonnegative_integer",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 67,
+          "column": 5
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/signed_data.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "ring::signature",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1508,
+          "column": 9
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 813,
+          "column": 14
+        },
+        "evidence": "127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 822,
+          "column": 17
+        },
+        "evidence": "0000:0000:0000:0000:0000:0000:0000:0001",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 831,
+          "column": 17
+        },
+        "evidence": "0:0:0:0:0:0:0:1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1287,
+          "column": 52
+        },
+        "evidence": "127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1295,
+          "column": 17
+        },
+        "evidence": "0000:0000:0000:0000:0000:0000:0000:0001",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1308,
+          "column": 54
+        },
+        "evidence": "127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1316,
+          "column": 30
+        },
+        "evidence": "0000:0000:0000:0000:0000:0000:0000:0001",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1403,
+          "column": 10
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1403,
+          "column": 35
+        },
+        "evidence": "255.255.255.255",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1404,
+          "column": 21
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1409,
+          "column": 13
+        },
+        "evidence": "255.255.255.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1415,
+          "column": 13
+        },
+        "evidence": "255.255.0.255",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1421,
+          "column": 13
+        },
+        "evidence": "255.0.255.255",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1427,
+          "column": 13
+        },
+        "evidence": "0.255.255.255",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1433,
+          "column": 13
+        },
+        "evidence": "1.255.255.255",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1439,
+          "column": 13
+        },
+        "evidence": "128.128.128.128",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1443,
+          "column": 32
+        },
+        "evidence": "255.255.255.255",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1444,
+          "column": 32
+        },
+        "evidence": "255.255.255.255",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1445,
+          "column": 32
+        },
+        "evidence": "255.255.255.254",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1446,
+          "column": 10
+        },
+        "evidence": "8.8.8.10",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1446,
+          "column": 33
+        },
+        "evidence": "255.255.255.254",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1447,
+          "column": 10
+        },
+        "evidence": "8.8.8.10",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1447,
+          "column": 33
+        },
+        "evidence": "255.255.255.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1448,
+          "column": 10
+        },
+        "evidence": "8.8.15.10",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1448,
+          "column": 34
+        },
+        "evidence": "255.255.248.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1449,
+          "column": 10
+        },
+        "evidence": "8.8.16.10",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1449,
+          "column": 34
+        },
+        "evidence": "255.255.248.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1450,
+          "column": 10
+        },
+        "evidence": "8.8.16.10",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1450,
+          "column": 34
+        },
+        "evidence": "255.255.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1451,
+          "column": 10
+        },
+        "evidence": "8.31.16.10",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1451,
+          "column": 35
+        },
+        "evidence": "255.224.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1452,
+          "column": 10
+        },
+        "evidence": "8.32.16.10",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1452,
+          "column": 35
+        },
+        "evidence": "255.224.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1453,
+          "column": 10
+        },
+        "evidence": "8.32.16.10",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1453,
+          "column": 35
+        },
+        "evidence": "255.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1454,
+          "column": 10
+        },
+        "evidence": "63.32.16.10",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1454,
+          "column": 36
+        },
+        "evidence": "192.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1455,
+          "column": 10
+        },
+        "evidence": "64.32.16.10",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1455,
+          "column": 36
+        },
+        "evidence": "192.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1456,
+          "column": 10
+        },
+        "evidence": "64.32.16.10",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1459,
+          "column": 13
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1460,
+          "column": 13
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1461,
+          "column": 13
+        },
+        "evidence": "fffe:ffff::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1465,
+          "column": 13
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1466,
+          "column": 13
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1467,
+          "column": 13
+        },
+        "evidence": "ffff:fdff::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1471,
+          "column": 13
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1472,
+          "column": 13
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1473,
+          "column": 13
+        },
+        "evidence": "ffff:feff::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1477,
+          "column": 13
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1478,
+          "column": 13
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1479,
+          "column": 13
+        },
+        "evidence": "ffff:fcff::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1483,
+          "column": 13
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1484,
+          "column": 13
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1485,
+          "column": 13
+        },
+        "evidence": "7fff:ffff::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1489,
+          "column": 10
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1489,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1489,
+          "column": 38
+        },
+        "evidence": "ffff:ffff::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1490,
+          "column": 10
+        },
+        "evidence": "2001:db9::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1490,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1490,
+          "column": 38
+        },
+        "evidence": "ffff:ffff::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1491,
+          "column": 10
+        },
+        "evidence": "2001:db9::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1491,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1491,
+          "column": 38
+        },
+        "evidence": "ffff:fffe::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1492,
+          "column": 10
+        },
+        "evidence": "2001:dba::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1492,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1492,
+          "column": 38
+        },
+        "evidence": "ffff:fffe::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1493,
+          "column": 10
+        },
+        "evidence": "2001:dba::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1493,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1493,
+          "column": 38
+        },
+        "evidence": "ffff:ff00::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1494,
+          "column": 10
+        },
+        "evidence": "2001:dca::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1494,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1494,
+          "column": 38
+        },
+        "evidence": "ffff:fe00::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1495,
+          "column": 10
+        },
+        "evidence": "2001:fca::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1495,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1495,
+          "column": 38
+        },
+        "evidence": "ffff:fe00::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1496,
+          "column": 10
+        },
+        "evidence": "2001:fca::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1496,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1496,
+          "column": 38
+        },
+        "evidence": "ffff:0000::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1497,
+          "column": 10
+        },
+        "evidence": "2000:fca::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1497,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1497,
+          "column": 38
+        },
+        "evidence": "fffe:0000::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1498,
+          "column": 10
+        },
+        "evidence": "2003:fca::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1498,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1498,
+          "column": 38
+        },
+        "evidence": "fffe:0000::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1499,
+          "column": 10
+        },
+        "evidence": "2003:fca::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1499,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1499,
+          "column": 38
+        },
+        "evidence": "ff00:0000::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1500,
+          "column": 10
+        },
+        "evidence": "1003:fca::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1500,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1500,
+          "column": 38
+        },
+        "evidence": "e000:0000::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1501,
+          "column": 10
+        },
+        "evidence": "1003:fca::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1501,
+          "column": 24
+        },
+        "evidence": "2001:db8::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/subject_name/ip_address.rs",
+          "line": 1501,
+          "column": 38
+        },
+        "evidence": "0000:0000::",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/subject_name/verify.rs",
+          "line": 395,
+          "column": 9
+        },
+        "evidence": "ring::io::der::CONSTRUCTED",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/subject_name/verify.rs",
+          "line": 395,
+          "column": 9
+        },
+        "evidence": "ring::io::der::CONTEXT_SPECIFIC",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/integration.rs",
+          "line": 252,
+          "column": 68
+        },
+        "evidence": "std::time::SystemTime::now",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/integration.rs",
+          "line": 108,
+          "column": 16
+        },
+        "evidence": "162.159.36.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/integration.rs",
+          "line": 109,
+          "column": 16
+        },
+        "evidence": "162.159.46.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/integration.rs",
+          "line": 110,
+          "column": 16
+        },
+        "evidence": "2606:4700:4700:0000:0000:0000:0000:1111",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/integration.rs",
+          "line": 111,
+          "column": 16
+        },
+        "evidence": "2606:4700:4700:0000:0000:0000:0000:1001",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/integration.rs",
+          "line": 112,
+          "column": 16
+        },
+        "evidence": "2606:4700:4700:0000:0000:0000:0000:0064",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/integration.rs",
+          "line": 113,
+          "column": 16
+        },
+        "evidence": "2606:4700:4700:0000:0000:0000:0000:6400",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/name_tests.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "ring::test::compile_time_assert_send",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/name_tests.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "ring::test::compile_time_assert_sync",
+        "origin": "import"
+      }
+    ]
+  }
+}

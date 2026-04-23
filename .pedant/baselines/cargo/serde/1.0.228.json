@@ -1,0 +1,54 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "d36e8b3eab8498eb3d5403264698d259a394ac982a5622d2e2ec72a91b627602",
+  "crate_name": "serde",
+  "crate_version": "1.0.228",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908707,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./build.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/core/format.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/core/ser/impls.rs",
+          "line": 821,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

@@ -1,0 +1,392 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "dace015c552a107109029d5779cd5597ec5ea3cd6b7c02ed65f1d3ae960cb43e",
+  "crate_name": "tokio-util",
+  "crate_version": "0.7.18",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908709,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/io/read_arc.rs",
+          "line": 33,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/io/read_arc.rs",
+          "line": 43,
+          "column": 8
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/io/stream_reader.rs",
+          "line": 321,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/io/stream_reader.rs",
+          "line": 323,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sync/cancellation_token.rs",
+          "line": 367,
+          "column": 40
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sync/cancellation_token.rs",
+          "line": 375,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sync/cancellation_token.rs",
+          "line": 408,
+          "column": 48
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sync/mpsc.rs",
+          "line": 87,
+          "column": 14
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sync/mpsc.rs",
+          "line": 105,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sync/reusable_box.rs",
+          "line": 93,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sync/reusable_box.rs",
+          "line": 112,
+          "column": 37
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sync/reusable_box.rs",
+          "line": 118,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sync/reusable_box.rs",
+          "line": 124,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sync/reusable_box.rs",
+          "line": 130,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sync/reusable_box.rs",
+          "line": 147,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/sync/reusable_box.rs",
+          "line": 154,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/task/abort_on_drop.rs",
+          "line": 56,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/udp/frame.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "tokio::net::UdpSocket",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/udp/frame.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/udp/frame.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/udp/frame.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV4",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/udp/frame.rs",
+          "line": 86,
+          "column": 27
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/udp/frame.rs",
+          "line": 97,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/util/maybe_dangling.rs",
+          "line": 33,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/util/maybe_dangling.rs",
+          "line": 48,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/util/poll_buf.rs",
+          "line": 61,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/util/poll_buf.rs",
+          "line": 73,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/compat.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tempfile::NamedTempFile",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/compat.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "tokio::fs::OpenOptions",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/time_delay_queue.rs",
+          "line": 27,
+          "column": 5
+        },
+        "evidence": "time::pause",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/time_delay_queue.rs",
+          "line": 264,
+          "column": 5
+        },
+        "evidence": "time::sleep",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/time_delay_queue.rs",
+          "line": 276,
+          "column": 5
+        },
+        "evidence": "time::sleep_until",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/udp.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "tokio::net::UdpSocket",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/udp.rs",
+          "line": 30,
+          "column": 37
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/udp.rs",
+          "line": 31,
+          "column": 37
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/udp.rs",
+          "line": 105,
+          "column": 33
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/udp.rs",
+          "line": 106,
+          "column": 33
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/udp.rs",
+          "line": 126,
+          "column": 42
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

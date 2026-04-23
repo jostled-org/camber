@@ -1,0 +1,33 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "6b959120ec8ae9f8bdcd3fd2505786b51ef3e72d439006a4055ce3413eaaf95a",
+  "crate_name": "quote",
+  "crate_version": "1.0.45",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908704,
+  "profile": {
+    "findings": [
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./build.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/ui/not-quotable.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      }
+    ]
+  }
+}

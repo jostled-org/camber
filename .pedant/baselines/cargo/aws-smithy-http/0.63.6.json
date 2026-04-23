@@ -1,0 +1,72 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "78324179864ed110485dbe6f7b7d797072bc98388566836f3861f588ffab85cb",
+  "crate_name": "aws-smithy-http",
+  "crate_version": "0.63.6",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908690,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/query_writer.rs",
+          "line": 94,
+          "column": 36
+        },
+        "evidence": "http://www.example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/query_writer.rs",
+          "line": 106,
+          "column": 36
+        },
+        "evidence": "http://www.example.com/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/query_writer.rs",
+          "line": 118,
+          "column": 36
+        },
+        "evidence": "http://www.example.com/path?original=here",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/query_writer.rs",
+          "line": 132,
+          "column": 36
+        },
+        "evidence": "http://www.example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/query_writer.rs",
+          "line": 143,
+          "column": 36
+        },
+        "evidence": "http://www.example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/query_writer.rs",
+          "line": 171,
+          "column": 36
+        },
+        "evidence": "http://www.example.com/path?original=here&foo=1",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

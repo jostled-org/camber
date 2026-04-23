@@ -1,0 +1,62 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b041985df6ef44a9b117fc764a387469dcfc86ee62aba22790dd3511f8cefecd",
+  "crate_name": "deadpool",
+  "crate_version": "0.12.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908693,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/managed/metrics.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/managed/pool.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/managed_deadlock.rs",
+          "line": 108,
+          "column": 24
+        },
+        "evidence": "time::timeout",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/managed.rs",
+          "line": 123,
+          "column": 17
+        },
+        "evidence": "time::sleep",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/unmanaged.rs",
+          "line": 167,
+          "column": 18
+        },
+        "evidence": "time::interval",
+        "origin": "import"
+      }
+    ]
+  }
+}

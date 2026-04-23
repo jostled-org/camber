@@ -1,0 +1,1382 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "9960667edf6a05e598aa3cc1668f67d3eb733642b0e889b64beda1bbfc3f7a0c",
+  "crate_name": "signal-hook",
+  "crate_version": "0.4.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908707,
+  "profile": {
+    "findings": [
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./examples/print.rs",
+          "line": 10,
+          "column": 5
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/flag.rs",
+          "line": 144,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/flag.rs",
+          "line": 144,
+          "column": 1
+        },
+        "evidence": "libc::EINVAL",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/flag.rs",
+          "line": 234,
+          "column": 5
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/flag.rs",
+          "line": 158,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/flag.rs",
+          "line": 163,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/flag.rs",
+          "line": 196,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/flag.rs",
+          "line": 228,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/backend.rs",
+          "line": 30,
+          "column": 1
+        },
+        "evidence": "libc::self",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/backend.rs",
+          "line": 30,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/backend.rs",
+          "line": 313,
+          "column": 31
+        },
+        "evidence": "libc::MSG_NONBLOCK",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/backend.rs",
+          "line": 315,
+          "column": 31
+        },
+        "evidence": "libc::MSG_DONTWAIT",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/backend.rs",
+          "line": 316,
+          "column": 19
+        },
+        "evidence": "libc::recv",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/iterator/backend.rs",
+          "line": 86,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/iterator/backend.rs",
+          "line": 95,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/iterator/backend.rs",
+          "line": 146,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/iterator/backend.rs",
+          "line": 307,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/exfiltrator/mod.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/exfiltrator/mod.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "libc::siginfo_t",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/exfiltrator/mod.rs",
+          "line": 30,
+          "column": 5
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/exfiltrator/mod.rs",
+          "line": 30,
+          "column": 5
+        },
+        "evidence": "libc::siginfo_t",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/iterator/exfiltrator/mod.rs",
+          "line": 131,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/exfiltrator/origin.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/exfiltrator/origin.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "libc::siginfo_t",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/iterator/exfiltrator/origin.rs",
+          "line": 46,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/iterator/exfiltrator/origin.rs",
+          "line": 60,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/exfiltrator/raw.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/exfiltrator/raw.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "libc::siginfo_t",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/iterator/exfiltrator/raw.rs",
+          "line": 27,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/iterator/exfiltrator/raw.rs",
+          "line": 63,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/iterator/exfiltrator/raw.rs",
+          "line": 76,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/iterator/exfiltrator/raw.rs",
+          "line": 82,
+          "column": 20
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/mod.rs",
+          "line": 67,
+          "column": 1
+        },
+        "evidence": "libc::self",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/iterator/mod.rs",
+          "line": 67,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 363,
+          "column": 5
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGABRT",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGALRM",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGBUS",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGCHLD",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGCONT",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGFPE",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGHUP",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGILL",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGINT",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGKILL",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGPIPE",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGPROF",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGQUIT",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGSEGV",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGSTOP",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGSYS",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGTERM",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGTRAP",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGTSTP",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGTTIN",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGTTOU",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGURG",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGUSR1",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGUSR2",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGVTALRM",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGWINCH",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGXCPU",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 372,
+          "column": 13
+        },
+        "evidence": "libc::SIGXFSZ",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 379,
+          "column": 13
+        },
+        "evidence": "libc::SIGIO",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 388,
+          "column": 13
+        },
+        "evidence": "libc::SIGINFO",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 391,
+          "column": 13
+        },
+        "evidence": "libc::SIGABRT",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 391,
+          "column": 13
+        },
+        "evidence": "libc::SIGFPE",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 391,
+          "column": 13
+        },
+        "evidence": "libc::SIGILL",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 391,
+          "column": 13
+        },
+        "evidence": "libc::SIGINT",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 391,
+          "column": 13
+        },
+        "evidence": "libc::SIGSEGV",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 391,
+          "column": 13
+        },
+        "evidence": "libc::SIGTERM",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/channel.rs",
+          "line": 138,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/channel.rs",
+          "line": 148,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/channel.rs",
+          "line": 163,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/channel.rs",
+          "line": 167,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/mod.rs",
+          "line": 28,
+          "column": 27
+        },
+        "evidence": "libc::raise",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/mod.rs",
+          "line": 43,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/mod.rs",
+          "line": 57,
+          "column": 9
+        },
+        "evidence": "libc::_exit",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/mod.rs",
+          "line": 28,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/mod.rs",
+          "line": 42,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/mod.rs",
+          "line": 55,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 82,
+          "column": 1
+        },
+        "evidence": "libc::self",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 82,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 87,
+          "column": 25
+        },
+        "evidence": "libc::MSG_NONBLOCK",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 89,
+          "column": 25
+        },
+        "evidence": "libc::MSG_DONTWAIT",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 106,
+          "column": 25
+        },
+        "evidence": "libc::fcntl",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 106,
+          "column": 58
+        },
+        "evidence": "libc::F_GETFL",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 110,
+          "column": 33
+        },
+        "evidence": "libc::O_NONBLOCK",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 110,
+          "column": 52
+        },
+        "evidence": "libc::O_CLOEXEC",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 111,
+          "column": 49
+        },
+        "evidence": "libc::F_SETFL",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 143,
+          "column": 34
+        },
+        "evidence": "libc::write",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 144,
+          "column": 33
+        },
+        "evidence": "libc::send",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 218,
+          "column": 33
+        },
+        "evidence": "libc::SIGUSR1",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 105,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 130,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 173,
+          "column": 15
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 189,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 255,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 256,
+          "column": 46
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/pipe.rs",
+          "line": 259,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/siginfo.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/siginfo.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "libc::pid_t",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/siginfo.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "libc::siginfo_t",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/siginfo.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "libc::uid_t",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/siginfo.rs",
+          "line": 80,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/siginfo.rs",
+          "line": 240,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/siginfo.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "libc::c_int",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "libc::EINVAL",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "libc::sigset_t",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "libc::SIG_UNBLOCK",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 119,
+          "column": 31
+        },
+        "evidence": "libc::SIG_DFL",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 120,
+          "column": 12
+        },
+        "evidence": "libc::sigaction",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 132,
+          "column": 12
+        },
+        "evidence": "libc::signal",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 220,
+          "column": 25
+        },
+        "evidence": "libc::sigemptyset",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 221,
+          "column": 25
+        },
+        "evidence": "libc::sigaddset",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 229,
+          "column": 21
+        },
+        "evidence": "libc::sigprocmask",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 235,
+          "column": 22
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 116,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 130,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 191,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 207,
+          "column": 21
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 219,
+          "column": 21
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/low_level/signal_details.rs",
+          "line": 235,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/default.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "libc::sighandler_t",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/default.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "libc::signal",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/default.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "libc::SIGTERM",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/default.rs",
+          "line": 15,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/shutdown.rs",
+          "line": 26,
+          "column": 9
+        },
+        "evidence": "libc::alarm",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/shutdown.rs",
+          "line": 27,
+          "column": 15
+        },
+        "evidence": "libc::fork",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/shutdown.rs",
+          "line": 40,
+          "column": 17
+        },
+        "evidence": "libc::kill",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/shutdown.rs",
+          "line": 40,
+          "column": 33
+        },
+        "evidence": "libc::SIGTERM",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/shutdown.rs",
+          "line": 45,
+          "column": 34
+        },
+        "evidence": "libc::waitpid",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/shutdown.rs",
+          "line": 45,
+          "column": 70
+        },
+        "evidence": "libc::WNOHANG",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/shutdown.rs",
+          "line": 25,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/shutdown.rs",
+          "line": 61,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

@@ -1,0 +1,262 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "8030307abb2cd0e9c8c90e36ab98d072b4a57f3de19eb2ecb2ba7d5023a441d4",
+  "crate_name": "async-net",
+  "crate_version": "2.0.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908687,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/addr.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/addr.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/addr.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/addr.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/addr.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV4",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/addr.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV6",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/addr.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::ToSocketAddrs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/addr.rs",
+          "line": 179,
+          "column": 38
+        },
+        "evidence": "std::net::ToSocketAddrs::to_socket_addrs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 53,
+          "column": 5
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 53,
+          "column": 5
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 53,
+          "column": 5
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 53,
+          "column": 5
+        },
+        "evidence": "std::net::Shutdown",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 53,
+          "column": 5
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 53,
+          "column": 5
+        },
+        "evidence": "std::net::SocketAddrV4",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 53,
+          "column": 5
+        },
+        "evidence": "std::net::SocketAddrV6",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 56,
+          "column": 5
+        },
+        "evidence": "std::net::AddrParseError",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tcp.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::net::Shutdown",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tcp.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tcp.rs",
+          "line": 254,
+          "column": 24
+        },
+        "evidence": "std::net::TcpListener::from",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tcp.rs",
+          "line": 620,
+          "column": 24
+        },
+        "evidence": "std::net::TcpStream::from",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/udp.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/udp.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/udp.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/udp.rs",
+          "line": 637,
+          "column": 24
+        },
+        "evidence": "std::net::UdpSocket::from",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/unix.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::net::Shutdown",
+        "origin": "import"
+      }
+    ]
+  }
+}

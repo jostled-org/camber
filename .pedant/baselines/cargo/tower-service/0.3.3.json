@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "3acdef5078f7a1cd148daabbc6d180a7df0b68372d7159aea2687aa182e1f40f",
+  "crate_name": "tower-service",
+  "crate_version": "0.3.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908710,
+  "profile": {
+    "findings": []
+  }
+}

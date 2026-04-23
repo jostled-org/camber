@@ -1,0 +1,132 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "649b607262fa3949beca147d63794c8f51c12690b874fa3d19cb347736edb07c",
+  "crate_name": "wasm-metadata",
+  "crate_version": "0.244.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908712,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/oci_annotations/homepage.rs",
+          "line": 95,
+          "column": 37
+        },
+        "evidence": "https://github.com/bytecodealliance/wasm-tools",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/oci_annotations/homepage.rs",
+          "line": 114,
+          "column": 41
+        },
+        "evidence": "https://github.com/bytecodealliance/wasm-tools",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/oci_annotations/source.rs",
+          "line": 94,
+          "column": 40
+        },
+        "evidence": "https://github.com/bytecodealliance/wasm-tools",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/oci_annotations/source.rs",
+          "line": 113,
+          "column": 39
+        },
+        "evidence": "https://github.com/bytecodealliance/wasm-tools",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/component.rs",
+          "line": 20,
+          "column": 21
+        },
+        "evidence": "https://github.com/bytecodealliance/wasm-tools",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/component.rs",
+          "line": 23,
+          "column": 23
+        },
+        "evidence": "https://github.com/bytecodealliance/wasm-tools",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/component.rs",
+          "line": 107,
+          "column": 21
+        },
+        "evidence": "https://github.com/bytecodealliance/wasm-tools",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/component.rs",
+          "line": 110,
+          "column": 23
+        },
+        "evidence": "https://github.com/bytecodealliance/wasm-tools",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/component.rs",
+          "line": 230,
+          "column": 21
+        },
+        "evidence": "https://github.com/bytecodealliance/wasm-tools",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/component.rs",
+          "line": 233,
+          "column": 23
+        },
+        "evidence": "https://github.com/bytecodealliance/wasm-tools",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/module.rs",
+          "line": 20,
+          "column": 21
+        },
+        "evidence": "https://github.com/bytecodealliance/wasm-tools",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/module.rs",
+          "line": 23,
+          "column": 23
+        },
+        "evidence": "https://github.com/bytecodealliance/wasm-tools",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

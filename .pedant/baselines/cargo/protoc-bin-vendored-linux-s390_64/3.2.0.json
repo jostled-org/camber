@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "2bebf58fef30e7222183e03088e27a927c046a23e8eb9c70d519745f6f8dbc8d",
+  "crate_name": "protoc-bin-vendored-linux-s390_64",
+  "crate_version": "3.2.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908703,
+  "profile": {
+    "findings": []
+  }
+}

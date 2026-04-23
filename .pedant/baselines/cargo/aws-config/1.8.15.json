@@ -1,0 +1,672 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "95636ca21ed339f21f42161c59b5cb406103fb271346fd7e6fac61c1b7105e92",
+  "crate_name": "aws-config",
+  "crate_version": "1.8.15",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908687,
+  "profile": {
+    "findings": [
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/credential_process.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/credential_process.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/credential_process.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/credential_process.rs",
+          "line": 21,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/credential_process.rs",
+          "line": 97,
+          "column": 22
+        },
+        "evidence": "tokio::process::Command::from",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/credential_process.rs",
+          "line": 272,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/credential_process.rs",
+          "line": 273,
+          "column": 5
+        },
+        "evidence": "time::format_description::well_known::Rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/credential_process.rs",
+          "line": 274,
+          "column": 5
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/default_provider/endpoint_url.rs",
+          "line": 88,
+          "column": 61
+        },
+        "evidence": "http://localhost",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 72,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 72,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 72,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 514,
+          "column": 5
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 549,
+          "column": 26
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 80,
+          "column": 25
+        },
+        "evidence": "http://169.254.170.2",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 582,
+          "column": 46
+        },
+        "evidence": "http://amazon.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 608,
+          "column": 37
+        },
+        "evidence": "http://192.168.10.120/creds",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 644,
+          "column": 37
+        },
+        "evidence": "http://169.254.171.23/creds",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 655,
+          "column": 37
+        },
+        "evidence": "http://[fd00:ec2::2]/creds",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 678,
+          "column": 38
+        },
+        "evidence": "http://localhost:8888",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 693,
+          "column": 38
+        },
+        "evidence": "http://localhost:8888",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 767,
+          "column": 17
+        },
+        "evidence": "http://169.254.170.23/v1/credentials",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 802,
+          "column": 17
+        },
+        "evidence": "http://169.254.170.23/v1/credentials",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 874,
+          "column": 17
+        },
+        "evidence": "http://169.254.170.23/v1/credentials",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 943,
+          "column": 37
+        },
+        "evidence": "http://www.amazon.com/creds",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 957,
+          "column": 27
+        },
+        "evidence": "http://localhost:8888/creds",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 960,
+          "column": 27
+        },
+        "evidence": "http://169.254.170.2.backname.io:8888/creds",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 963,
+          "column": 27
+        },
+        "evidence": "http://169.254.170.23.backname.io:8888/creds",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ecs.rs",
+          "line": 966,
+          "column": 27
+        },
+        "evidence": "http://fd00-ec2--23.backname.io:8888/creds",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/http_credential_provider.rs",
+          "line": 250,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_credential_provider.rs",
+          "line": 258,
+          "column": 28
+        },
+        "evidence": "http://localhost:1234/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_credential_provider.rs",
+          "line": 265,
+          "column": 39
+        },
+        "evidence": "http://localhost:1234/some-creds",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/imds/client.rs",
+          "line": 670,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/imds/client.rs",
+          "line": 1200,
+          "column": 26
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/imds/client.rs",
+          "line": 314,
+          "column": 52
+        },
+        "evidence": "http://169.254.169.254",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/imds/client.rs",
+          "line": 315,
+          "column": 52
+        },
+        "evidence": "http://[fd00:ec2::254]",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/imds/client.rs",
+          "line": 1123,
+          "column": 23
+        },
+        "evidence": "http://240.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/imds/client.rs",
+          "line": 1162,
+          "column": 23
+        },
+        "evidence": "http://240.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/imds/client/token.rs",
+          "line": 41,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/imds/credentials.rs",
+          "line": 24,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/imds/credentials.rs",
+          "line": 431,
+          "column": 23
+        },
+        "evidence": "http://240.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/imds/credentials.rs",
+          "line": 450,
+          "column": 23
+        },
+        "evidence": "http://240.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/imds/credentials.rs",
+          "line": 472,
+          "column": 23
+        },
+        "evidence": "http://240.0.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/json_credentials.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1134,
+          "column": 31
+        },
+        "evidence": "http://localhost:1111",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1143,
+          "column": 62
+        },
+        "evidence": "http://localhost:7878",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1366,
+          "column": 62
+        },
+        "evidence": "http://environment",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1404,
+          "column": 31
+        },
+        "evidence": "http://localhost",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/login.rs",
+          "line": 31,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/login.rs",
+          "line": 524,
+          "column": 26
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/login/cache.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "sha2::Digest",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/login/cache.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "sha2::Sha256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/login/cache.rs",
+          "line": 329,
+          "column": 29
+        },
+        "evidence": "{\n            \"accessToken\": {\n                \"accessKeyId\": \"AKIAIOSFODNN7EXAMPLE\",\n                \"secretAccessKey\": \"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\",\n                \"sessionToken\": \"session-token\",\n                \"accountId\": \"012345678901\",\n                \"expiresAt\": \"2021-12-25T21:30:00Z\"\n            },\n            \"tokenType\": \"aws_sigv4\",\n            \"refreshToken\": \"refresh-token-value\",\n            \"idToken\": \"identity-token-value\",\n            \"clientId\": \"arn:aws:signin:::devtools/same-device\",\n            \"dpopKey\": \"-----BEGIN EC PRIVATE KEY-----\\ntest\\n-----END EC PRIVATE KEY-----\\n\"\n        }",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/login/cache.rs",
+          "line": 426,
+          "column": 26
+        },
+        "evidence": "{\n            \"accessToken\": {\n                \"accessKeyId\": \"AKIAIOSFODNN7EXAMPLE\",\n                \"secretAccessKey\": \"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\",\n                \"sessionToken\": \"session-token\",\n                \"accountId\": \"012345678901\",\n                \"expiresAt\": \"2021-12-25T21:30:00Z\"\n            },\n            \"tokenType\": \"aws_sigv4\",\n            \"refreshToken\": \"refresh-token-value\",\n            \"idToken\": \"identity-token-value\",\n            \"clientId\": \"arn:aws:signin:::devtools/same-device\",\n            \"dpopKey\": \"-----BEGIN EC PRIVATE KEY-----\\ntest\\n-----END EC PRIVATE KEY-----\\n\"\n        }",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/login/dpop.rs",
+          "line": 27,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/login/dpop.rs",
+          "line": 259,
+          "column": 28
+        },
+        "evidence": "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIBMB/RwQERsVoqWRQG4zK8CnaAa5dfrpbm+9tFdBh3z4oAoGCCqGSM49\nAwEHoUQDQgAEWb1VLi1EA2hJaTz4yYuxSELvY+1GAfL+8rUTCAdiFid87Bf6GY+s\n2+1RpqDv0RpZiDIMCrZrsAh+RK9S3QCaGA==\n-----END EC PRIVATE KEY-----\n",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/login/dpop.rs",
+          "line": 278,
+          "column": 13
+        },
+        "evidence": "https://example.com/token",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/login/dpop.rs",
+          "line": 305,
+          "column": 24
+        },
+        "evidence": "https://signin.aws.amazon.com/v1/token",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/login/token.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/profile/credentials/repr.rs",
+          "line": 520,
+          "column": 63
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/sso/cache.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/sso/token.rs",
+          "line": 36,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/sso/token.rs",
+          "line": 454,
+          "column": 32
+        },
+        "evidence": "https://d-123.awsapps.com/start",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/sts/util.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/test_case.rs",
+          "line": 267,
+          "column": 19
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/test_case.rs",
+          "line": 345,
+          "column": 9
+        },
+        "evidence": "std::fs::write",
+        "origin": "import"
+      }
+    ]
+  }
+}

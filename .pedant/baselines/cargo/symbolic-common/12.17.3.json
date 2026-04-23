@@ -1,0 +1,112 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "522b5d59d7a2e26c46b89df2039ccde3ccda5ef01ea43ec9364d4d8b2fa93dc5",
+  "crate_name": "symbolic-common",
+  "crate_version": "12.17.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908708,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/byteview.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/byteview.rs",
+          "line": 335,
+          "column": 5
+        },
+        "evidence": "tempfile::NamedTempFile",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/byteview.rs",
+          "line": 157,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/byteview.rs",
+          "line": 289,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cell.rs",
+          "line": 110,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cell.rs",
+          "line": 316,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cell.rs",
+          "line": 378,
+          "column": 73
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cell.rs",
+          "line": 384,
+          "column": 75
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cell.rs",
+          "line": 387,
+          "column": 84
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/path.rs",
+          "line": 303,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

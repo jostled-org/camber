@@ -1,0 +1,22 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "3d288124ece6389253c162ab4cd5de9d1e958f52eac50365aad779a1faa3b035",
+  "crate_name": "aws-credential-types",
+  "crate_version": "1.2.14",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908687,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/credentials_impl.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      }
+    ]
+  }
+}

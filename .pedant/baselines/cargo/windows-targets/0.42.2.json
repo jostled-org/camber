@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "ea19f4419aa74e81f5f1ac1103a5fadf0adb27fb260fcfcb2e1ded5ed9390c4b",
+  "crate_name": "windows-targets",
+  "crate_version": "0.42.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908722,
+  "profile": {
+    "findings": []
+  }
+}

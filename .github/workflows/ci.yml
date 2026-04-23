@@ -48,3 +48,17 @@ jobs:
       - run: cargo install pedant && find . -path '*/src/*.rs' | xargs pedant
       - run: cargo test --workspace --features "${CAMBER_CI_FEATURES}"
       - run: cargo install cargo-deny && cargo deny --workspace check
+
+  supply-chain:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: jostled-org/pedant/.github/actions/supply-chain-check@47a9bb080199b4a13ee062b4581686373ef436f8
+        with:
+          baseline-path: .pedant/baselines
+          fail-on: hash-mismatch
+          update-baselines: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}

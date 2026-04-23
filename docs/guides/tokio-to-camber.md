@@ -96,6 +96,7 @@ For exact method names and type behavior, use the reference docs. This table is 
 | `tokio::time::sleep` | `tokio::time::sleep` | Use directly in async handlers |
 | `tokio::time::timeout` | `camber::timeout` | Maps `Elapsed` to `RuntimeError::Timeout` for `?` propagation |
 | `tokio::time::interval` | `tokio::time::interval` | Use directly in async contexts (schedule callbacks) |
+| `tokio::sync::watch` | `camber::channel::watch` | Last-value state propagation; error maps to `RuntimeError` |
 | `tokio::sync::Notify` | `tokio::sync::Notify` | Use directly — no wrapper needed |
 | `tokio::select!` | `tokio::select!` | Use directly in async contexts; `camber::select!` is for sync crossbeam channels |
 | `tokio::sync::mpsc` (async) | `camber::channel::mpsc` | Async `.recv()` for future composition |
@@ -675,6 +676,59 @@ router.get("/fan-out", |_req| async {
     Response::text(200, &format!("{results:?}"))
 });
 ```
+
+## Direct Tokio Boundaries
+
+Camber runs on Tokio. It wraps the parts where opinionated defaults reduce ceremony. It
+leaves the rest alone. This section is the explicit boundary.
+
+### Wrapped by Camber
+
+| Area | Camber API | What it replaces |
+|------|-----------|-----------------|
+| Runtime bootstrap | `runtime::run`, `RuntimeBuilder` | `#[tokio::main]`, manual runtime config |
+| Task spawning | `spawn`, `spawn_async` | `tokio::spawn`, `tokio::task::spawn_blocking` |
+| Shutdown coordination | `on_shutdown`, `on_cancel`, `request_shutdown` | Manual signal handling + cancellation tokens |
+| Sync channels | `channel::bounded`, `channel::new`, `select!` | `crossbeam-channel` (same underneath) |
+| Async MPSC | `channel::mpsc` | `tokio::sync::mpsc` (same underneath) |
+| Watch channel | `channel::watch` | `tokio::sync::watch` (same underneath) |
+| HTTP server | `Router`, `serve`, `serve_async` | axum/warp/actix, hyper directly |
+| HTTP client | `http::get/post/put/delete`, `http::client()` | reqwest directly |
+| Scheduling | `schedule::every`, `schedule::cron` | Manual `tokio::time::interval` loops |
+| Timeout | `camber::timeout` | `tokio::time::timeout` (maps to `RuntimeError`) |
+| Resource lifecycle | `Resource` trait | Manual init/health/shutdown wiring |
+| TLS | `CertStore`, `tls::connect` | Manual rustls config |
+
+### Use Tokio Directly
+
+| Area | Use this | Why no wrapper |
+|------|----------|---------------|
+| Sleep | `tokio::time::sleep` | One-liner with no lifecycle concern |
+| Interval (async) | `tokio::time::interval` | Covered by `schedule::every_async` for the common case; raw interval for custom async loops |
+| `select!` (async) | `tokio::select!` | `camber::select!` is for sync crossbeam channels; async select stays Tokio |
+| `Notify` | `tokio::sync::Notify` | Low-level wake primitive; wrapping adds nothing |
+| `broadcast` channel | `tokio::sync::broadcast` | Multi-subscriber event distribution |
+| `oneshot` channel | `tokio::sync::oneshot` | Single-use response delivery between tasks |
+| Async mutex/RwLock | `tokio::sync::Mutex`, `tokio::sync::RwLock` | Foundational concurrency primitives |
+| Subprocess IO | `tokio::process::Command`, `tokio::io::*` | Protocol-specific, below service layer |
+| Stream adapters | `tokio_stream::wrappers::*` | Glue types for tonic streaming RPCs |
+| Runtime handle | `camber::runtime::tokio_handle()` | Explicit escape hatch for direct Tokio access |
+
+### Testing
+
+`#[tokio::test]` works inside Camber projects. No migration needed for tests that don't use
+Camber runtime features.
+
+Use `runtime::test()` or `RuntimeBuilder` when the test needs:
+- structured concurrency tracking (spawned tasks)
+- resource lifecycle (health checks, shutdown hooks)
+- Camber channels or scheduling
+
+For gRPC tests, use `common::test_runtime()` + `common::spawn_server()` + `common::block_on()`.
+See [HTTP Reference: Testing gRPC Services](../reference/http.md#testing-grpc-services) for examples.
+
+Tests that only use `tokio::time::sleep`, `tokio::sync::*`, or direct async IO stay on
+`#[tokio::test]` with no changes.
 
 ## When to Stay with Camber
 

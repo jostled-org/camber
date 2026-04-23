@@ -1,0 +1,632 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "9340c1c1112ff80b0a43bcee0a6646882de5b612244382bee1ce1b85f2fd18dd",
+  "crate_name": "aws-sigv4",
+  "crate_version": "1.4.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908690,
+  "profile": {
+    "findings": [
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/hmac.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "hmac::digest::FixedOutput",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/hmac.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "hmac::Hmac",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/hmac.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "hmac::Mac",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/hmac.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "ring::hmac::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/hmac.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "ring::hmac::Context",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/hmac.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "ring::hmac::Key",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/hmac.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "ring::hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/hmac.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "sha2::Sha256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./benches/sigv4a.rs",
+          "line": 14,
+          "column": 27
+        },
+        "evidence": "AKIAIOSFODNN7EXAMPLE",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time.rs",
+          "line": 51,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time.rs",
+          "line": 52,
+          "column": 5
+        },
+        "evidence": "time::format_description",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time.rs",
+          "line": 53,
+          "column": 5
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time.rs",
+          "line": 53,
+          "column": 5
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time.rs",
+          "line": 53,
+          "column": 5
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/date_time.rs",
+          "line": 96,
+          "column": 5
+        },
+        "evidence": "time::format_description::well_known::Rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/event_stream.rs",
+          "line": 58,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/http_request.rs",
+          "line": 79,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/http_request/canonical_request.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/canonical_request.rs",
+          "line": 765,
+          "column": 58
+        },
+        "evidence": "http://localhost:80",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/canonical_request.rs",
+          "line": 769,
+          "column": 60
+        },
+        "evidence": "http://localhost:1234",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/canonical_request.rs",
+          "line": 773,
+          "column": 60
+        },
+        "evidence": "https://localhost:443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/canonical_request.rs",
+          "line": 777,
+          "column": 61
+        },
+        "evidence": "https://localhost:1234",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/http_request/canonical_request.rs",
+          "line": 829,
+          "column": 28
+        },
+        "evidence": "44ce7dd67c959e0d…b072",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/http_request/canonical_request.rs",
+          "line": 872,
+          "column": 24
+        },
+        "evidence": "816cd5b414d05604…19e0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/canonical_request.rs",
+          "line": 907,
+          "column": 18
+        },
+        "evidence": "https://s3.us-east-1.amazonaws.com/my-bucket?list-type=2&prefix=~objprefix&single&k=&unreserved=-_.~",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/canonical_request.rs",
+          "line": 921,
+          "column": 36
+        },
+        "evidence": "https://s3.us-east-1.amazonaws.com/my-bucket",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/canonical_request.rs",
+          "line": 977,
+          "column": 18
+        },
+        "evidence": "https://some-endpoint.some-region.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/canonical_request.rs",
+          "line": 1010,
+          "column": 18
+        },
+        "evidence": "https://some-endpoint.some-region.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/http_request/sign.rs",
+          "line": 106,
+          "column": 40
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/sign.rs",
+          "line": 802,
+          "column": 18
+        },
+        "evidence": "https://some-endpoint.some-region.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/sign.rs",
+          "line": 818,
+          "column": 18
+        },
+        "evidence": "https://some-endpoint.some-region.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/sign.rs",
+          "line": 856,
+          "column": 18
+        },
+        "evidence": "https://some-endpoint.some-region.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/sign.rs",
+          "line": 879,
+          "column": 18
+        },
+        "evidence": "https://some-endpoint.some-region.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/sign.rs",
+          "line": 917,
+          "column": 18
+        },
+        "evidence": "https://some-endpoint.some-region.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/sign.rs",
+          "line": 936,
+          "column": 18
+        },
+        "evidence": "https://some-endpoint.some-region.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/sign.rs",
+          "line": 999,
+          "column": 18
+        },
+        "evidence": "https://some-endpoint.some-region.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/sign.rs",
+          "line": 1019,
+          "column": 18
+        },
+        "evidence": "https://some-endpoint.some-region.amazonaws.com/some/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http_request/sign.rs",
+          "line": 1040,
+          "column": 18
+        },
+        "evidence": "https://some-endpoint.some-region.amazonaws.com/some/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/http_request/test.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/http_request/test.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/http_request/test.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/http_request/test.rs",
+          "line": 316,
+          "column": 5
+        },
+        "evidence": "time::format_description::well_known::Rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/http_request/test.rs",
+          "line": 317,
+          "column": 5
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/http_request/test.rs",
+          "line": 433,
+          "column": 15
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign/v4.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "hmac::digest::FixedOutput",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign/v4.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "hmac::Hmac",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign/v4.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "hmac::Mac",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign/v4.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "sha2::Digest",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign/v4.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "sha2::Sha256",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/sign/v4.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/sign/v4.rs",
+          "line": 123,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign/v4.rs",
+          "line": 304,
+          "column": 24
+        },
+        "evidence": "5d672d79c15b1316…b5d7",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign/v4.rs",
+          "line": 310,
+          "column": 24
+        },
+        "evidence": "e3b0c44298fc1c14…b855",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/sign/v4a.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign/v4a.rs",
+          "line": 56,
+          "column": 19
+        },
+        "evidence": "ring::hmac::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign/v4a.rs",
+          "line": 56,
+          "column": 40
+        },
+        "evidence": "ring::hmac::HMAC_SHA256",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign/v4a.rs",
+          "line": 61,
+          "column": 19
+        },
+        "evidence": "ring::hmac::sign",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/sign/v4a.rs",
+          "line": 136,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/sign/v4a.rs",
+          "line": 22,
+          "column": 27
+        },
+        "evidence": "ffffffff00000000…2551",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

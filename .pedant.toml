@@ -1,1 +1,5 @@
-disable = ["mixed-concerns", "dyn-field", "dyn-param", "clone-in-loop", "vec-box-dyn"]
+check_mixed_concerns = false
+check_dyn_field = false
+check_dyn_param = false
+check_clone_in_loop = false
+check_vec_box_dyn = false

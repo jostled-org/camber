@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "5dc967c0eb454df9d6b8f551952788350e2be62ee2ebd3863e759f9cd138bc23",
+  "crate_name": "hex",
+  "crate_version": "0.4.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908696,
+  "profile": {
+    "findings": []
+  }
+}

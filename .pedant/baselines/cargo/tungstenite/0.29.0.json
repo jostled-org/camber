@@ -1,0 +1,682 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b7a147bacdab3393f94037bbf037782cb16ebe892ea3e6feae9ea2d944b77bf1",
+  "crate_name": "tungstenite",
+  "crate_version": "0.29.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908711,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/buffer.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "tungstenite::buffer::ReadBuffer",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/e2e.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/e2e.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "tungstenite::accept_hdr_with_config",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/e2e.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "tungstenite::protocol::WebSocketConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/e2e.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "tungstenite::Message",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/e2e.rs",
+          "line": 39,
+          "column": 31
+        },
+        "evidence": "tungstenite::client::connect_with_config",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/e2e.rs",
+          "line": 20,
+          "column": 40
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/read.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tungstenite::protocol::Role",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/read.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tungstenite::Message",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/read.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tungstenite::WebSocket",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./benches/write.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/write.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tungstenite::protocol::Role",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/write.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tungstenite::Message",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./benches/write.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tungstenite::WebSocket",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-client.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "tungstenite::connect",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-client.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "tungstenite::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-client.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "tungstenite::Message",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-client.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "tungstenite::Result",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-client.rs",
+          "line": 8,
+          "column": 35
+        },
+        "evidence": "ws://localhost:9001/getCaseCount",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-server.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-server.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-server.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tungstenite::accept",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-server.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::HandshakeRole",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-server.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tungstenite::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-server.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tungstenite::HandshakeError",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-server.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tungstenite::Message",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-server.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "tungstenite::Result",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/autobahn-server.rs",
+          "line": 32,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:9002",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/callback-error.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/callback-error.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "tungstenite::accept_hdr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/callback-error.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::server::Request",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/callback-error.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::server::Response",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/callback-error.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "tungstenite::http::StatusCode",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/callback-error.rs",
+          "line": 10,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:3012",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/client.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "tungstenite::connect",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/client.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "tungstenite::Message",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/client.rs",
+          "line": 6,
+          "column": 42
+        },
+        "evidence": "ws://localhost:3012/socket",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "tungstenite::accept_hdr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::server::Request",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::server::Response",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 10,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:3012",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/srv_accept_unmasked_frames.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/srv_accept_unmasked_frames.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "tungstenite::accept_hdr_with_config",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/srv_accept_unmasked_frames.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::server::Request",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/srv_accept_unmasked_frames.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::server::Response",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/srv_accept_unmasked_frames.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "tungstenite::protocol::WebSocketConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/srv_accept_unmasked_frames.rs",
+          "line": 10,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:3012",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::net::ToSocketAddrs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake/client.rs",
+          "line": 373,
+          "column": 23
+        },
+        "evidence": "ws://localhost/getCaseCount",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake/client.rs",
+          "line": 381,
+          "column": 23
+        },
+        "evidence": "wss://localhost:9001/getCaseCount",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake/client.rs",
+          "line": 389,
+          "column": 23
+        },
+        "evidence": "wss://user:pass@localhost:9001/getCaseCount",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake/client.rs",
+          "line": 413,
+          "column": 27
+        },
+        "evidence": "ws://localhost/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake/client.rs",
+          "line": 437,
+          "column": 27
+        },
+        "evidence": "ws://localhost/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/protocol/frame/mask.rs",
+          "line": 26,
+          "column": 35
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/protocol/frame/utf8.rs",
+          "line": 20,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/protocol/frame/utf8.rs",
+          "line": 28,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/stream.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "std::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/stream.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "rustls::StreamOwned",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 73,
+          "column": 9
+        },
+        "evidence": "rustls::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 73,
+          "column": 9
+        },
+        "evidence": "rustls::ClientConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 73,
+          "column": 9
+        },
+        "evidence": "rustls::RootCertStore",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 73,
+          "column": 9
+        },
+        "evidence": "rustls::StreamOwned",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utf8.rs",
+          "line": 59,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utf8.rs",
+          "line": 99,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

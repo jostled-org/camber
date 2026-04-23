@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "70233a706ca16e629007610d1ff1ea7601b5a5265921d7b251ee84b90080df89",
+  "crate_name": "is_terminal_polyfill",
+  "crate_version": "1.70.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908698,
+  "profile": {
+    "findings": []
+  }
+}

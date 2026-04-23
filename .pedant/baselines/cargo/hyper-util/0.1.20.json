@@ -1,0 +1,2102 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "91a134807ebf65760ce47f19641f81189f587617a74bab1f4f9250193f706895",
+  "crate_name": "hyper-util",
+  "crate_version": "0.1.20",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908696,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/client.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "hyper::Request",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server_graceful.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server_graceful.rs",
+          "line": 9,
+          "column": 38
+        },
+        "evidence": "127.0.0.1:8080",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "hyper::body::Incoming",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "hyper::service::service_fn",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 39,
+          "column": 23
+        },
+        "evidence": "127.0.0.1:8000",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/client.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "hyper::client::conn::TrySendError",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/client.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "hyper::header::HeaderValue",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/client.rs",
+          "line": 17,
+          "column": 1
+        },
+        "evidence": "hyper::header::HOST",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/client.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Timer",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/client.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "hyper::body::Body",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/client.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "hyper::Method",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/client.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "hyper::Request",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/client.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "hyper::Response",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/client.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "hyper::Uri",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/client.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "hyper::Version",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/client.rs",
+          "line": 1040,
+          "column": 25
+        },
+        "evidence": "hyper::client::conn::http1::Builder::new",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/client.rs",
+          "line": 1042,
+          "column": 25
+        },
+        "evidence": "hyper::client::conn::http2::Builder::new",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/dns.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/dns.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/dns.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/dns.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV4",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/dns.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV6",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/dns.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "std::net::ToSocketAddrs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/dns.rs",
+          "line": 301,
+          "column": 5
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/dns.rs",
+          "line": 301,
+          "column": 5
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpSocket",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 883,
+          "column": 32
+        },
+        "evidence": "libc::if_nametoindex",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1002,
+          "column": 5
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1034,
+          "column": 9
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1034,
+          "column": 9
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1081,
+          "column": 9
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1081,
+          "column": 9
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1120,
+          "column": 9
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1169,
+          "column": 9
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1169,
+          "column": 9
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1169,
+          "column": 9
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1169,
+          "column": 9
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1170,
+          "column": 9
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1371,
+          "column": 17
+        },
+        "evidence": "std::net::TcpStream::connect_timeout",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 883,
+          "column": 23
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1025,
+          "column": 19
+        },
+        "evidence": "https://example.domain/foo/bar?baz",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1084,
+          "column": 41
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1124,
+          "column": 41
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/http.rs",
+          "line": 1175,
+          "column": 41
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/mod.rs",
+          "line": 308,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/mod.rs",
+          "line": 308,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/mod.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v4/messages.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV4",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v4/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v4/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v4/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddrV4",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v4/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::net::ToSocketAddrs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v4/mod.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v4/mod.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v5/messages.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v5/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v5/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v5/mod.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::net::ToSocketAddrs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v5/mod.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/socks/v5/mod.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/tunnel.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/connect/proxy/tunnel.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/legacy/pool.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/legacy/pool.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Timer",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 325,
+          "column": 26
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 604,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 605,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 606,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 616,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 617,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 618,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 749,
+          "column": 13
+        },
+        "evidence": "10.43.1.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 751,
+          "column": 13
+        },
+        "evidence": "10.124.7.7",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 753,
+          "column": 13
+        },
+        "evidence": "[ffff:db8:a0b:12f0::1]",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 755,
+          "column": 13
+        },
+        "evidence": "[2005:db8:a0b:12f0::1]",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 772,
+          "column": 13
+        },
+        "evidence": "10.42.1.100",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 776,
+          "column": 13
+        },
+        "evidence": "[2001:db8:a0b:12f0::1]",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 778,
+          "column": 13
+        },
+        "evidence": "10.124.7.8",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 841,
+          "column": 35
+        },
+        "evidence": "https://example.local",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 854,
+          "column": 35
+        },
+        "evidence": "https://example.local",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 868,
+          "column": 35
+        },
+        "evidence": "https://example.local",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/proxy/matcher.rs",
+          "line": 880,
+          "column": 24
+        },
+        "evidence": "http://never.gonna.let.you.go",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/common/exec.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Executor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/common/rewind.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/common/rewind.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "hyper::rt::ReadBufCursor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/common/rewind.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/common/sync.rs",
+          "line": 67,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/common/timer.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/common/timer.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Sleep",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/io.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/io.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "hyper::rt::ReadBuf",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/io.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 54,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 61,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Executor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 61,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Sleep",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 61,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Timer",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 222,
+          "column": 27
+        },
+        "evidence": "hyper::rt::ReadBuf::uninit",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 224,
+          "column": 19
+        },
+        "evidence": "hyper::rt::Read::poll_read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 251,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::poll_write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 255,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::poll_flush",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 262,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::poll_shutdown",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 266,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::is_write_vectored",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 274,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::poll_write_vectored",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 330,
+          "column": 5
+        },
+        "evidence": "hyper::rt::Executor",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 159,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 167,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 221,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rt/tokio.rs",
+          "line": 233,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rt/tokio/with_hyper_io.rs",
+          "line": 56,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rt/tokio/with_hyper_io.rs",
+          "line": 64,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio/with_tokio_io.rs",
+          "line": 37,
+          "column": 27
+        },
+        "evidence": "hyper::rt::ReadBuf::uninit",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio/with_tokio_io.rs",
+          "line": 39,
+          "column": 19
+        },
+        "evidence": "hyper::rt::Read::poll_read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio/with_tokio_io.rs",
+          "line": 70,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::poll_write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio/with_tokio_io.rs",
+          "line": 74,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::poll_flush",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio/with_tokio_io.rs",
+          "line": 81,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::poll_shutdown",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio/with_tokio_io.rs",
+          "line": 85,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::is_write_vectored",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/rt/tokio/with_tokio_io.rs",
+          "line": 93,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::poll_write_vectored",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rt/tokio/with_tokio_io.rs",
+          "line": 36,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/rt/tokio/with_tokio_io.rs",
+          "line": 48,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "hyper::service::HttpService",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "hyper::body::Incoming",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "hyper::rt::ReadBuf",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Timer",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "hyper::service::Service",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "hyper::server::conn::http1",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "hyper::rt::bounds::Http2ServerConnExec",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "hyper::server::conn::http2",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 1136,
+          "column": 5
+        },
+        "evidence": "hyper::body",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 1136,
+          "column": 5
+        },
+        "evidence": "hyper::body::Bytes",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 1136,
+          "column": 5
+        },
+        "evidence": "hyper::client",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 1136,
+          "column": 5
+        },
+        "evidence": "hyper::service::service_fn",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 1137,
+          "column": 5
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 1138,
+          "column": 5
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 1138,
+          "column": 5
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/server/conn/auto/mod.rs",
+          "line": 346,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/upgrade.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/upgrade.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "hyper::rt::Write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/conn/auto/upgrade.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "hyper::upgrade::Upgraded",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/graceful.rs",
+          "line": 177,
+          "column": 9
+        },
+        "evidence": "hyper::server::conn::http1::Connection::graceful_shutdown",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/server/graceful.rs",
+          "line": 194,
+          "column": 9
+        },
+        "evidence": "hyper::server::conn::http2::Connection::graceful_shutdown",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "hyper::body::Bytes",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 21,
+          "column": 1
+        },
+        "evidence": "hyper::body::Frame",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 22,
+          "column": 1
+        },
+        "evidence": "hyper::Request",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 93,
+          "column": 18
+        },
+        "evidence": "tokio::net::TcpListener::bind",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 790,
+          "column": 32
+        },
+        "evidence": "hyper::upgrade::on",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 806,
+          "column": 5
+        },
+        "evidence": "hyper::service::service_fn",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 808,
+          "column": 5
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 865,
+          "column": 20
+        },
+        "evidence": "hyper::ext::Protocol::from_static",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 888,
+          "column": 5
+        },
+        "evidence": "hyper::service::service_fn",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 889,
+          "column": 5
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 906,
+          "column": 9
+        },
+        "evidence": "hyper::server::conn::http2::Builder::new",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 938,
+          "column": 22
+        },
+        "evidence": "hyper::Version::HTTP_2",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 1351,
+          "column": 19
+        },
+        "evidence": "hyper::Request::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 46,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 93,
+          "column": 48
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 157,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 206,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 263,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 316,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 371,
+          "column": 14
+        },
+        "evidence": "http://hyper.local/a",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 384,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 451,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 514,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 588,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 669,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 706,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 746,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 962,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 995,
+          "column": 36
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 1352,
+          "column": 14
+        },
+        "evidence": "http://mocked",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 1405,
+          "column": 14
+        },
+        "evidence": "http://mocked",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/legacy_client.rs",
+          "line": 1471,
+          "column": 14
+        },
+        "evidence": "http://mocked",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 426,
+          "column": 23
+        },
+        "evidence": "std::net::SocketAddr::new",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 11,
+          "column": 33
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 18,
+          "column": 19
+        },
+        "evidence": "https://hyper.rs",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 43,
+          "column": 39
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 47,
+          "column": 40
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 126,
+          "column": 39
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 130,
+          "column": 40
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 219,
+          "column": 39
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 233,
+          "column": 19
+        },
+        "evidence": "https://hyper.rs:443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 285,
+          "column": 39
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 299,
+          "column": 19
+        },
+        "evidence": "https://hyper.rs:443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 346,
+          "column": 39
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 350,
+          "column": 40
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/proxy.rs",
+          "line": 422,
+          "column": 39
+        },
+        "evidence": "127.0.0.1:0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test_utils/mod.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "hyper::Uri",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test_utils/mod.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test_utils/mod.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "hyper::rt::ReadBufCursor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test_utils/mod.rs",
+          "line": 106,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Read::poll_read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test_utils/mod.rs",
+          "line": 116,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::poll_write",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test_utils/mod.rs",
+          "line": 123,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::poll_flush",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test_utils/mod.rs",
+          "line": 130,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::poll_shutdown",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test_utils/mod.rs",
+          "line": 134,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::is_write_vectored",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test_utils/mod.rs",
+          "line": 142,
+          "column": 9
+        },
+        "evidence": "hyper::rt::Write::poll_write_vectored",
+        "origin": "import"
+      }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "467f803e2102315329a14505d2bf956500e98f56a0ed9d3c068be9eafc85c5b0",
+  "crate_name": "event-listener-strategy",
+  "crate_version": "0.5.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908693,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 310,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

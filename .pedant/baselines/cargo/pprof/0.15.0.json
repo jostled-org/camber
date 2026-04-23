@@ -1,0 +1,978 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "e51cca68c7489a04ecbb34ef0a9dea1737610f14bf779e4f49fe7f702c0faf50",
+  "crate_name": "pprof",
+  "crate_version": "0.15.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908703,
+  "profile": {
+    "findings": [
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./build.rs",
+          "line": 8,
+          "column": 19
+        },
+        "evidence": "std::env::var",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 19,
+          "column": 17
+        },
+        "evidence": "std::fs::File::create",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./build.rs",
+          "line": 25,
+          "column": 5
+        },
+        "evidence": "sha2::Digest",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./build.rs",
+          "line": 25,
+          "column": 5
+        },
+        "evidence": "sha2::Sha256",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 26,
+          "column": 5
+        },
+        "evidence": "std::fs::self",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 26,
+          "column": 5
+        },
+        "evidence": "std::fs::File",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/backtrace_while_sampling.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/flamegraph.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/multithread_flamegraph.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/profile_proto_with_prost.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/profile_proto_with_protobuf_codec.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/addr_validate.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "nix::errno::Errno",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/addr_validate.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "nix::unistd::close",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/addr_validate.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "nix::unistd::read",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/addr_validate.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "nix::unistd::write",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/addr_validate.rs",
+          "line": 24,
+          "column": 5
+        },
+        "evidence": "nix::fcntl::OFlag",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/addr_validate.rs",
+          "line": 25,
+          "column": 5
+        },
+        "evidence": "nix::unistd::pipe2",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/addr_validate.rs",
+          "line": 33,
+          "column": 5
+        },
+        "evidence": "nix::fcntl::fcntl",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/addr_validate.rs",
+          "line": 33,
+          "column": 5
+        },
+        "evidence": "nix::fcntl::FcntlArg",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/addr_validate.rs",
+          "line": 33,
+          "column": 5
+        },
+        "evidence": "nix::fcntl::FdFlag",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/addr_validate.rs",
+          "line": 33,
+          "column": 5
+        },
+        "evidence": "nix::fcntl::OFlag",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/addr_validate.rs",
+          "line": 34,
+          "column": 5
+        },
+        "evidence": "nix::unistd::pipe",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/addr_validate.rs",
+          "line": 99,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/backtrace_rs.rs",
+          "line": 23,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "libc::c_void",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 65,
+          "column": 52
+        },
+        "evidence": "libc::REG_RBP",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 91,
+          "column": 70
+        },
+        "evidence": "libc::REG_S0",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 34,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 45,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 65,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 68,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 78,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 81,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 91,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 94,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 121,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 127,
+          "column": 29
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 163,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/backtrace/frame_pointer.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "libc::c_void",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "libc::ucontext_t",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 74,
+          "column": 18
+        },
+        "evidence": "libc::REG_RIP",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 75,
+          "column": 18
+        },
+        "evidence": "libc::REG_RSP",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 76,
+          "column": 18
+        },
+        "evidence": "libc::REG_RBP",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 15,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 37,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 59,
+          "column": 16
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 60,
+          "column": 14
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 70,
+          "column": 16
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 120,
+          "column": 12
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 147,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 165,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder.rs",
+          "line": 132,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder/shlib.rs",
+          "line": 51,
+          "column": 16
+        },
+        "evidence": "std::fs::File::open",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/backtrace/framehop_unwinder/shlib.rs",
+          "line": 52,
+          "column": 16
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/backtrace/mod.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "libc::c_void",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/collector.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "tempfile::NamedTempFile",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/collector.rs",
+          "line": 175,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/collector.rs",
+          "line": 204,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/collector.rs",
+          "line": 235,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/criterion.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/criterion.rs",
+          "line": 57,
+          "column": 9
+        },
+        "evidence": "std::fs::create_dir_all",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/frames.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/frames.rs",
+          "line": 148,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/perfmap.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/perfmap.rs",
+          "line": 62,
+          "column": 5
+        },
+        "evidence": "std::fs::OpenOptions::new",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "nix::sys::signal",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 224,
+          "column": 24
+        },
+        "evidence": "libc::pthread_getname_np",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 238,
+          "column": 30
+        },
+        "evidence": "libc::__errno",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 243,
+          "column": 30
+        },
+        "evidence": "libc::__errno_location",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 248,
+          "column": 30
+        },
+        "evidence": "libc::__error",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 305,
+          "column": 60
+        },
+        "evidence": "libc::REG_RIP",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 340,
+          "column": 69
+        },
+        "evidence": "libc::REG_PC",
+        "origin": "import"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 373,
+          "column": 43
+        },
+        "evidence": "libc::pthread_self",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 224,
+          "column": 15
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 235,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 257,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 305,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 308,
+          "column": 28
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 311,
+          "column": 28
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 324,
+          "column": 28
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 327,
+          "column": 28
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 330,
+          "column": 28
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 340,
+          "column": 28
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 343,
+          "column": 28
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 373,
+          "column": 34
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 379,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 460,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/profiler.rs",
+          "line": 467,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/report.rs",
+          "line": 220,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/timer.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/timer.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/timer.rs",
+          "line": 42,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/timer.rs",
+          "line": 78,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/timer.rs",
+          "line": 21,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

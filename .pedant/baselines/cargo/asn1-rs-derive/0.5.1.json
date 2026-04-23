@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "bd4aa0e42757d30932a7274886791d36db1b0cb1742e6ea6f64adf809c3f7bd3",
+  "crate_name": "asn1-rs-derive",
+  "crate_version": "0.5.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908687,
+  "profile": {
+    "findings": []
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "7dc35f27e9df3068bda681ea3c522315ced4979404d81bf6c8cc0a4858fb4523",
+  "crate_name": "cpp_demangle",
+  "crate_version": "0.5.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908692,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./examples/cppfilt.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "std::process",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ast.rs",
+          "line": 8383,
+          "column": 16
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "3580939a7fca7f15a17a21e21df1749f0402aa0eaaf457e48f304a270769d7ad",
+  "crate_name": "id-arena",
+  "crate_version": "2.3.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908697,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/readme_up_to_date.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./tests/readme_up_to_date.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import"
+      }
+    ]
+  }
+}

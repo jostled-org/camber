@@ -1,0 +1,82 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "dc9775d9003f180906f7fdd7ff8adbf6de674e38164146af49c9ab522da9b495",
+  "crate_name": "autocfg",
+  "crate_version": "1.5.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908687,
+  "profile": {
+    "findings": [
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/error.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::process",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 66,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 69,
+          "column": 1
+        },
+        "evidence": "std::process::Stdio",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/rustc.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/version.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/tests.rs",
+          "line": 143,
+          "column": 5
+        },
+        "evidence": "std::fs::create_dir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/tests.rs",
+          "line": 150,
+          "column": 5
+        },
+        "evidence": "std::fs::remove_dir",
+        "origin": "import"
+      }
+    ]
+  }
+}

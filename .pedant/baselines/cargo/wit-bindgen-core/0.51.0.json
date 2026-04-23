@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "0045704a7ee96528998a4b2aef97c76971879d0e8d859f6551ea7eb597d88d8f",
+  "crate_name": "wit-bindgen-core",
+  "crate_version": "0.51.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908722,
+  "profile": {
+    "findings": []
+  }
+}

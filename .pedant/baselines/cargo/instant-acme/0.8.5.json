@@ -1,0 +1,342 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "516ddf09999df937423b31d283d10c77f33f9037b000f9fafbe24779c21a50f1",
+  "crate_name": "instant-acme",
+  "crate_version": "0.8.5",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908697,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/certgen.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/certgen.rs",
+          "line": 25,
+          "column": 9
+        },
+        "evidence": "127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/account.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/account.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "rustls::RootCertStore",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "hyper::body::Incoming",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 214,
+          "column": 17
+        },
+        "evidence": "rustls::ClientConfig::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 376,
+          "column": 16
+        },
+        "evidence": "ring",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/order.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/order.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/types.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/types.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/types.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/types.rs",
+          "line": 772,
+          "column": 33
+        },
+        "evidence": "https://acme-v02.api.letsencrypt.org/directory",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/types.rs",
+          "line": 773,
+          "column": 30
+        },
+        "evidence": "https://acme-staging-v02.api.letsencrypt.org/directory",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/types.rs",
+          "line": 789,
+          "column": 33
+        },
+        "evidence": "https://acme.zerossl.com/v2/DV90",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::process::Child",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 33,
+          "column": 1
+        },
+        "evidence": "rustls::RootCertStore",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 34,
+          "column": 1
+        },
+        "evidence": "rustls::client::verify_server_cert_signed_by_trust_anchor",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 34,
+          "column": 1
+        },
+        "evidence": "rustls::client::verify_server_name",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 35,
+          "column": 1
+        },
+        "evidence": "rustls::crypto::CryptoProvider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 36,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::pem::PemObject",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 37,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::CertificateDer",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 37,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::ServerName",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 38,
+          "column": 1
+        },
+        "evidence": "rustls::server::ParsedCertificate",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 41,
+          "column": 1
+        },
+        "evidence": "tempfile::NamedTempFile",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 43,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 44,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 593,
+          "column": 21
+        },
+        "evidence": "rustls::ClientConfig::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/pebble.rs",
+          "line": 58,
+          "column": 54
+        },
+        "evidence": "127.0.0.1",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

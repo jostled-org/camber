@@ -1,0 +1,212 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b52fac169f00c0b9ba775b27ee4914753d0b125e26d6f29749e517d813547dae",
+  "crate_name": "opentelemetry_sdk",
+  "crate_version": "0.31.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908702,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/logs/batch_log_processor.rs",
+          "line": 30,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/logs/export.rs",
+          "line": 144,
+          "column": 36
+        },
+        "evidence": "time::Duration::from_secs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/logs/logger_provider.rs",
+          "line": 867,
+          "column": 46
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/logs/mod.rs",
+          "line": 130,
+          "column": 30
+        },
+        "evidence": "https://opentelemetry.io/schema/1.0.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/logs/record.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/metrics/data/mod.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/metrics/internal/aggregate.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/metrics/meter_provider.rs",
+          "line": 623,
+          "column": 30
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/metrics/meter_provider.rs",
+          "line": 635,
+          "column": 34
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/metrics/meter_provider.rs",
+          "line": 652,
+          "column": 34
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/metrics/meter_provider.rs",
+          "line": 683,
+          "column": 34
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/metrics/meter_provider.rs",
+          "line": 711,
+          "column": 46
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/metrics/mod.rs",
+          "line": 805,
+          "column": 34
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/metrics/periodic_reader.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/export.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/trace/provider.rs",
+          "line": 750,
+          "column": 46
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/sampler/jaeger_remote/rate_limit.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/trace/sampler/jaeger_remote/sampler.rs",
+          "line": 15,
+          "column": 47
+        },
+        "evidence": "http://localhost:5778/sampling",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/span_processor.rs",
+          "line": 50,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/span.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      }
+    ]
+  }
+}

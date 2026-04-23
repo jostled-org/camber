@@ -1,0 +1,262 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "7da7b4192a498c20e8c93a3015ed45055a83b7adcb9ee8d6ba7bb0e05e1df706",
+  "crate_name": "displaydoc",
+  "crate_version": "0.2.5",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908693,
+  "profile": {
+    "findings": [
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 177,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/no_std/enum_prefix_missing.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/no_std/enum_prefix_missing.rs",
+          "line": 15,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/no_std/enum_prefix.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/no_std/enum_prefix.rs",
+          "line": 15,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/no_std/multi_line_allow.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/no_std/multi_line_allow.rs",
+          "line": 15,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/no_std/multi_line.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/no_std/multi_line.rs",
+          "line": 15,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/no_std/with.rs",
+          "line": 19,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/no_std/with.rs",
+          "line": 18,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/no_std/without.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/no_std/without.rs",
+          "line": 15,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/std/enum_prefix_missing.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/std/enum_prefix_missing.rs",
+          "line": 15,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/std/enum_prefix.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/std/enum_prefix.rs",
+          "line": 15,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/std/multi_line_allow.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/std/multi_line_allow.rs",
+          "line": 15,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/std/multi_line.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/std/multi_line.rs",
+          "line": 15,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/std/multiple.rs",
+          "line": 19,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/std/multiple.rs",
+          "line": 18,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./tests/std/without.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "libc::abort",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./tests/std/without.rs",
+          "line": 15,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

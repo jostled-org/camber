@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "e81d4b8a677aa83345472076278f4abf71f074c89a4c1a63b8fe7ab497a0dbac",
+  "crate_name": "wit-bindgen-rust",
+  "crate_version": "0.51.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908722,
+  "profile": {
+    "findings": [
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 306,
+          "column": 23
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 312,
+          "column": 9
+        },
+        "evidence": "std::fs::write",
+        "origin": "import"
+      }
+    ]
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "29bdc142285dcdc24ae8a768f14f577edd13573dde561a18ac41241b237dccbf",
+  "crate_name": "aws-runtime",
+  "crate_version": "1.7.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908690,
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/auth/sigv4.rs",
+          "line": 31,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/auth/sigv4.rs",
+          "line": 446,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/auth/sigv4a.rs",
+          "line": 24,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/auth/sigv4a.rs",
+          "line": 235,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/content_encoding/body/http_body_1_x.rs",
+          "line": 701,
+          "column": 13
+        },
+        "evidence": "AKIAIOSFODNN7EXAMPLE",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/content_encoding/body/http_body_1_x.rs",
+          "line": 709,
+          "column": 13
+        },
+        "evidence": "4f232c4386841ef7…a0a9",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/content_encoding/body/http_body_1_x.rs",
+          "line": 767,
+          "column": 13
+        },
+        "evidence": "AKIAIOSFODNN7EXAMPLE",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/content_encoding/body/http_body_1_x.rs",
+          "line": 775,
+          "column": 13
+        },
+        "evidence": "106e2a8a18243abc…eb8e",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/env_config/section.rs",
+          "line": 283,
+          "column": 5
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/env_config/source.rs",
+          "line": 212,
+          "column": 5
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      }
+    ]
+  }
+}

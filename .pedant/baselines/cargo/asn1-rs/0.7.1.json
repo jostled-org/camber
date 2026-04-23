@@ -1,0 +1,192 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "4055b207dbfd3ce93bdfd62ba021c9e8f5c2115ce790b4eba8af77b8d28c873b",
+  "crate_name": "asn1-rs",
+  "crate_version": "0.7.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908687,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/dump-der.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/asn1_types/generalizedtime.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/asn1_types/utctime.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/asn1_types/utctime.rs",
+          "line": 118,
+          "column": 13
+        },
+        "evidence": "time::Date::from_calendar_date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 62,
+          "column": 9
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 62,
+          "column": 9
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 62,
+          "column": 9
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 62,
+          "column": 9
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 62,
+          "column": 9
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/ber.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/der.rs",
+          "line": 133,
+          "column": 9
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/der.rs",
+          "line": 153,
+          "column": 9
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/der.rs",
+          "line": 400,
+          "column": 9
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/der.rs",
+          "line": 412,
+          "column": 9
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/der.rs",
+          "line": 424,
+          "column": 9
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/der.rs",
+          "line": 435,
+          "column": 5
+        },
+        "evidence": "time::macros::datetime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./tests/krb5.rs",
+          "line": 107,
+          "column": 5
+        },
+        "evidence": "std::fs::write",
+        "origin": "import"
+      }
+    ]
+  }
+}

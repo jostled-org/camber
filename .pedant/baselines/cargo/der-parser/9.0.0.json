@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "509b706087f5a564948df3a7174a0631675b87e4c479d8e104a313facb38a060",
+  "crate_name": "der-parser",
+  "crate_version": "9.0.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908693,
+  "profile": {
+    "findings": []
+  }
+}

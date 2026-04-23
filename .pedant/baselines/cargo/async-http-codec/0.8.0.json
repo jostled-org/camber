@@ -1,0 +1,22 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "96e83a9f2353d2aee6c81c67e07faf430c8c0afa37ac011a553cafadf922390f",
+  "crate_name": "async-http-codec",
+  "crate_version": "0.8.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908687,
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/echo_server.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      }
+    ]
+  }
+}

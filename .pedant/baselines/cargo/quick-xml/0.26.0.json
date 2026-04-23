@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "081d0ca96a53b1583d9e80ff05b09e0fa1806d760300e63f8a010c7971d4bb18",
+  "crate_name": "quick-xml",
+  "crate_version": "0.26.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908703,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/reader/buffered_reader.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/reader/ns_reader.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      }
+    ]
+  }
+}

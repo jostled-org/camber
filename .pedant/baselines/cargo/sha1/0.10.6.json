@@ -1,0 +1,52 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "bc4f2e8c9a8c2bbe50bae92ce097ee7dee7c1d26f0df61e8c5b9c8339af02eb7",
+  "crate_name": "sha1",
+  "crate_version": "0.10.6",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908707,
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/compress.rs",
+          "line": 38,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/compress/loongarch64_asm.rs",
+          "line": 110,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/compress/x86.rs",
+          "line": 34,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/compress/x86.rs",
+          "line": 106,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

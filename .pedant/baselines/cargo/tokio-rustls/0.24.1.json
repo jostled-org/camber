@@ -1,0 +1,562 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "ebdbcd58e189aa8ec32a1ea087423f613c252cacf9375da924559ae8a2441928",
+  "crate_name": "tokio-rustls",
+  "crate_version": "0.24.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908709,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/client.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/client.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::ToSocketAddrs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/client.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/client.rs",
+          "line": 45,
+          "column": 31
+        },
+        "evidence": "rustls::RootCertStore::empty",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/client.rs",
+          "line": 70,
+          "column": 18
+        },
+        "evidence": "rustls::ClientConfig::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/client.rs",
+          "line": 80,
+          "column": 18
+        },
+        "evidence": "rustls::ServerName::try_from",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::net::ToSocketAddrs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./examples/server.rs",
+          "line": 58,
+          "column": 18
+        },
+        "evidence": "rustls::ServerConfig::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/handshake.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "rustls::ConnectionCommon",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/handshake.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "rustls::SideData",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/mod.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "rustls::ConnectionCommon",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/mod.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "rustls::SideData",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/test_stream.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/test_stream.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "rustls::Connection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/test_stream.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/test_stream.rs",
+          "line": 287,
+          "column": 18
+        },
+        "evidence": "rustls::ServerName::try_from",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 53,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 53,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 53,
+          "column": 1
+        },
+        "evidence": "rustls::CommonState",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 53,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 53,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 65,
+          "column": 5
+        },
+        "evidence": "rustls",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/badssl.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::net::ToSocketAddrs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/badssl.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/badssl.rs",
+          "line": 22,
+          "column": 18
+        },
+        "evidence": "rustls::ServerName::try_from",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/badssl.rs",
+          "line": 36,
+          "column": 26
+        },
+        "evidence": "rustls::RootCertStore::empty",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/badssl.rs",
+          "line": 44,
+          "column": 18
+        },
+        "evidence": "rustls::ClientConfig::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/badssl.rs",
+          "line": 47,
+          "column": 36
+        },
+        "evidence": "rustls::version::TLS12",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/early-data.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "rustls::RootCertStore",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/early-data.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./tests/early-data.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::process::Child",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./tests/early-data.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./tests/early-data.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::process::Stdio",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/early-data.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/early-data.rs",
+          "line": 51,
+          "column": 18
+        },
+        "evidence": "rustls::ServerName::try_from",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/early-data.rs",
+          "line": 146,
+          "column": 22
+        },
+        "evidence": "rustls::ClientConfig::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/early-data.rs",
+          "line": 149,
+          "column": 36
+        },
+        "evidence": "rustls::version::TLS13",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "rustls::OwnedTrustAnchor",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpListener",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 89,
+          "column": 18
+        },
+        "evidence": "rustls::ServerName::try_from",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 115,
+          "column": 26
+        },
+        "evidence": "rustls::RootCertStore::empty",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 125,
+          "column": 18
+        },
+        "evidence": "rustls::ClientConfig::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 180,
+          "column": 44
+        },
+        "evidence": "rustls::server::Acceptor::default",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./tests/test.rs",
+          "line": 207,
+          "column": 31
+        },
+        "evidence": "time::timeout",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/utils.rs",
+          "line": 5,
+          "column": 5
+        },
+        "evidence": "rustls::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/utils.rs",
+          "line": 5,
+          "column": 5
+        },
+        "evidence": "rustls::OwnedTrustAnchor",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/utils.rs",
+          "line": 5,
+          "column": 5
+        },
+        "evidence": "rustls::PrivateKey",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/utils.rs",
+          "line": 5,
+          "column": 5
+        },
+        "evidence": "rustls::RootCertStore",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/utils.rs",
+          "line": 5,
+          "column": 5
+        },
+        "evidence": "rustls::ServerConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./tests/utils.rs",
+          "line": 17,
+          "column": 18
+        },
+        "evidence": "rustls::Certificate",
+        "origin": "import"
+      }
+    ]
+  }
+}

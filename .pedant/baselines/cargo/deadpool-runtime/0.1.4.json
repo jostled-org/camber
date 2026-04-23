@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "ec304020456549910fc437228c58178e804366038462dfcab62713f4003742ab",
+  "crate_name": "deadpool-runtime",
+  "crate_version": "0.1.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908693,
+  "profile": {
+    "findings": []
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "44204ae0593bdea024400e05b9d646cea3bbfb0d26cb95bc5f53472c6b7ef4ff",
+  "crate_name": "serde_path_to_error",
+  "crate_version": "0.1.20",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908707,
+  "profile": {
+    "findings": []
+  }
+}

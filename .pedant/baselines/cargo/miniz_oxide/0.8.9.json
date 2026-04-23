@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "60a8a014490b7cc4396756a4af53db53246d5141583327536aa22fb2ced7188d",
+  "crate_name": "miniz_oxide",
+  "crate_version": "0.8.9",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908701,
+  "profile": {
+    "findings": []
+  }
+}

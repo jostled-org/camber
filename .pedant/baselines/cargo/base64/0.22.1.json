@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "a9308414a47698281807c233cab474514fe127a53f5d3a961f2718095819ce0c",
+  "crate_name": "base64",
+  "crate_version": "0.22.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908691,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./examples/base64.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./examples/base64.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::process",
+        "origin": "import"
+      }
+    ]
+  }
+}

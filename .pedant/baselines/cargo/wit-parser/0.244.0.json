@@ -1,0 +1,62 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "96a9ad35a16fddee418ffc5e9fd04be7001b3b16bf0e965b32f5dc5f27b6a51c",
+  "crate_name": "wit-parser",
+  "crate_version": "0.244.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1776908723,
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/ast.rs",
+          "line": 1715,
+          "column": 24
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/ast/lex.rs",
+          "line": 139,
+          "column": 23
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 356,
+          "column": 24
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/resolve.rs",
+          "line": 472,
+          "column": 24
+        },
+        "evidence": "std::fs::read",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./tests/all.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      }
+    ]
+  }
+}
