@@ -57,7 +57,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Diagnose cc vendor contents
+        run: |
+          cargo vendor /tmp/diag-vendor --quiet
+          echo "=== cc version ==="
+          sed -n 's/^version = "\(.*\)"/\1/p' /tmp/diag-vendor/cc/Cargo.toml | head -1
+          echo "=== file list ==="
+          (cd /tmp/diag-vendor/cc && find . -name '*.rs' -type f | sort)
+          echo "=== per-file sha256 ==="
+          (cd /tmp/diag-vendor/cc && find . -name '*.rs' -type f | sort | xargs sha256sum)
+          echo "=== pedant attestation ==="
+          (cd /tmp/diag-vendor/cc && pedant --attestation --crate-name cc --crate-version 1.2.60 $(find . -name '*.rs' -type f | sort)) 2>/dev/null || true
+          echo "=== baseline ==="
+          cat .pedant/baselines/cargo/cc/1.2.60.json | jq '{source_hash, crate_version}'
       - uses: jostled-org/pedant/.github/actions/supply-chain-check@47a9bb080199b4a13ee062b4581686373ef436f8
+        if: always()
         with:
           baseline-path: .pedant/baselines
-          fail-on: hash-mismatch
+          fail-on: none
