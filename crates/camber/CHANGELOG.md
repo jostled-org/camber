@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/jostled-org/camber/compare/camber-v0.1.5...camber-v0.1.6) - 2026-04-24
+
+### Added
+
+- *(channel)* add watch channel, supply chain CI, and Tokio boundary docs
+
 ## [0.1.5](https://github.com/jostled-org/camber/compare/camber-v0.1.4...camber-v0.1.5) - 2026-04-07
 
 ### Fixed
