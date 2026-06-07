@@ -55,9 +55,9 @@ tonic-prost = { version = "0.14", optional = true }
 tonic-health = { version = "0.14", default-features = false, optional = true }
 tonic-reflection = { version = "0.14", default-features = false, features = ["server"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "query"] }
-tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemallocator = { version = "0.7", optional = true }
 mimalloc-crate = { package = "mimalloc", version = "0.1", optional = true }
-async-nats = { version = "0.47", default-features = false, optional = true }
+async-nats = { version = "0.49", default-features = false, optional = true }
 aws-sdk-sqs = { version = "1.93", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
 aws-config = { version = "1", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
 flate2 = "1"
@@ -69,10 +69,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3.20", features = ["json"] }
 rustls-acme = { version = "0.15", optional = true, default-features = false, features = ["aws-lc-rs", "webpki-roots"] }
 instant-acme = { version = "0.8", optional = true, features = ["rcgen"] }
-opentelemetry = { version = "0.31", optional = true }
-opentelemetry_sdk = { version = "0.31", optional = true, features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", optional = true, features = ["grpc-tonic"] }
-tracing-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.32", optional = true }
+opentelemetry_sdk = { version = "0.32", optional = true, features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", optional = true, features = ["grpc-tonic"] }
+tracing-opentelemetry = { version = "0.33", optional = true }
 camber-macros = { version = "0.1.2", path = "../camber-macros" }
 
 [dev-dependencies]
