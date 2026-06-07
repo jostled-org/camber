@@ -7,4 +7,4 @@ git_release_enable = true
 # version bump. This prevents release-plz's own "chore: release"
 # commits from being treated as unreleased work, which otherwise
 # causes an infinite loop of release PRs.
-release_commits = "^(feat|fix|perf|refactor|build|test)[(:]"
+release_commits = "^(feat|fix|perf|refactor|build|test|chore\\(deps\\))[(:]"
