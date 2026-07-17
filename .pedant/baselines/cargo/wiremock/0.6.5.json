@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "f758d2b321aa36981485b5062cc431b8f08f331904ebc51c296012c95d02b0d1",
+  "source_hash": "e72864f8414c8c24f9cce5948891bce2fc9176124aad5f2d77dbcaa12fa92fb9",
   "crate_name": "wiremock",
   "crate_version": "0.6.5",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915124,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 16,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {
@@ -135,106 +139,6 @@
           "column": 1
         },
         "evidence": "hyper::body::Bytes",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/mocks.rs",
-          "line": 2,
-          "column": 1
-        },
-        "evidence": "reqwest::StatusCode",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/mocks.rs",
-          "line": 8,
-          "column": 1
-        },
-        "evidence": "std::net::TcpStream",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/mocks.rs",
-          "line": 28,
-          "column": 18
-        },
-        "evidence": "reqwest::get",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/mocks.rs",
-          "line": 192,
-          "column": 18
-        },
-        "evidence": "reqwest::Client::new",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/mocks.rs",
-          "line": 242,
-          "column": 41
-        },
-        "evidence": "https://domain.com/abcd",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/priority.rs",
-          "line": 22,
-          "column": 24
-        },
-        "evidence": "reqwest::get",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/request_header_matching.rs",
-          "line": 14,
-          "column": 18
-        },
-        "evidence": "reqwest::Client::new",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/request_header_matching.rs",
-          "line": 265,
-          "column": 35
-        },
-        "evidence": "reqwest::get",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/timeout.rs",
-          "line": 1,
-          "column": 1
-        },
-        "evidence": "reqwest::Client",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/tokio.rs",
-          "line": 1,
-          "column": 1
-        },
-        "evidence": "reqwest::Client",
         "origin": "import"
       }
     ]

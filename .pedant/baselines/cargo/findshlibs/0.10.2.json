@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "4e6de476b9b960e3399313a910753de4273423a0a92cbed37a9706f1b8c51315",
+  "source_hash": "3c6f8b8aa0c6180ca3cd9846a7b1eb53cea53c8b942fba53935f6c0bfc2d5a5c",
   "crate_name": "findshlibs",
   "crate_version": "0.10.2",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915103,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 6,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

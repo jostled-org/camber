@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "d8b8c4ca2f56c9dbbc1cdc4c009e1ce6930c8daec9ee9b7bb99f9f99e17467ab",
+  "source_hash": "e5b20da9b8a98865e6ccb671095e75c481f9244ca05c66dd4dda0f8e8103155b",
   "crate_name": "ring",
   "crate_version": "0.17.14",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915111,
+  "timestamp": 1784286764,
+  "analysis_completeness": {
+    "analyzed_files": 153,
+    "skipped_files": 0
+  },
+  "rust_version": "1.66.0",
   "profile": {
     "findings": [
       {
@@ -50,96 +55,6 @@
         "evidence": "std::process::Stdio",
         "origin": "import",
         "execution_context": "build_hook"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./src/aead/aes_gcm.rs",
-          "line": 86,
-          "column": 27
-        },
-        "evidence": "aes::hw::Key::new",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./src/aead/aes_gcm.rs",
-          "line": 136,
-          "column": 23
-        },
-        "evidence": "aes::vp::Key::new",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./src/aead/aes_gcm.rs",
-          "line": 164,
-          "column": 23
-        },
-        "evidence": "aes::fallback::Key::new",
-        "origin": "import"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/aead/aes_gcm/aarch64.rs",
-          "line": 43,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/aead/aes_gcm/aarch64.rs",
-          "line": 82,
-          "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/aead/aes_gcm/aeshwclmulmovbe.rs",
-          "line": 54,
-          "column": 21
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/aead/aes_gcm/aeshwclmulmovbe.rs",
-          "line": 110,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/aead/aes_gcm/vaesclmulavx2.rs",
-          "line": 50,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/aead/aes_gcm/vaesclmulavx2.rs",
-          "line": 81,
-          "column": 59
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
       },
       {
         "capability": "unsafe_code",
@@ -367,6 +282,96 @@
           "file": "./src/aead/aes/vp.rs",
           "line": 124,
           "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/aes_gcm.rs",
+          "line": 86,
+          "column": 27
+        },
+        "evidence": "aes::hw::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/aes_gcm.rs",
+          "line": 136,
+          "column": 23
+        },
+        "evidence": "aes::vp::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/aead/aes_gcm.rs",
+          "line": 164,
+          "column": 23
+        },
+        "evidence": "aes::fallback::Key::new",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes_gcm/aarch64.rs",
+          "line": 43,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes_gcm/aarch64.rs",
+          "line": 82,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes_gcm/aeshwclmulmovbe.rs",
+          "line": 54,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes_gcm/aeshwclmulmovbe.rs",
+          "line": 110,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes_gcm/vaesclmulavx2.rs",
+          "line": 50,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/aead/aes_gcm/vaesclmulavx2.rs",
+          "line": 81,
+          "column": 59
         },
         "evidence": "unsafe block",
         "origin": "code_site"
@@ -2094,16 +2099,6 @@
       {
         "capability": "unsafe_code",
         "location": {
-          "file": "./src/polyfill/once_cell/race.rs",
-          "line": 75,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
           "file": "./src/testutil.rs",
           "line": 520,
           "column": 27
@@ -2120,716 +2115,6 @@
         },
         "evidence": "unsafe block",
         "origin": "code_site"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/aead_tests.rs",
-          "line": 24,
-          "column": 1
-        },
-        "evidence": "ring::aead",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/aead_tests.rs",
-          "line": 24,
-          "column": 1
-        },
-        "evidence": "ring::error",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/aead_tests.rs",
-          "line": 26,
-          "column": 1
-        },
-        "evidence": "ring::test",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/aead_tests.rs",
-          "line": 26,
-          "column": 1
-        },
-        "evidence": "ring::test_file",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/agreement_tests.rs",
-          "line": 25,
-          "column": 1
-        },
-        "evidence": "ring::agreement",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/agreement_tests.rs",
-          "line": 25,
-          "column": 1
-        },
-        "evidence": "ring::error",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/agreement_tests.rs",
-          "line": 25,
-          "column": 1
-        },
-        "evidence": "ring::rand",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/agreement_tests.rs",
-          "line": 27,
-          "column": 1
-        },
-        "evidence": "ring::test",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/agreement_tests.rs",
-          "line": 27,
-          "column": 1
-        },
-        "evidence": "ring::test_file",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/agreement_tests.rs",
-          "line": 135,
-          "column": 19
-        },
-        "evidence": "0900000000000000…0000",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/agreement_tests.rs",
-          "line": 153,
-          "column": 9
-        },
-        "evidence": "422c8e7a6227d7bc…3079",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/agreement_tests.rs",
-          "line": 159,
-          "column": 9
-        },
-        "evidence": "684cf59ba8330955…2c51",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/agreement_tests.rs",
-          "line": 169,
-          "column": 9
-        },
-        "evidence": "2c125a20f639d504…1815",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/agreement_tests.rs",
-          "line": 177,
-          "column": 13
-        },
-        "evidence": "7c3911e0ab2586fd…5424",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/constant_time_tests.rs",
-          "line": 20,
-          "column": 1
-        },
-        "evidence": "ring::constant_time",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/constant_time_tests.rs",
-          "line": 21,
-          "column": 1
-        },
-        "evidence": "ring::error",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/constant_time_tests.rs",
-          "line": 21,
-          "column": 1
-        },
-        "evidence": "ring::rand",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/digest_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::digest",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/digest_tests.rs",
-          "line": 19,
-          "column": 1
-        },
-        "evidence": "ring::test",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/digest_tests.rs",
-          "line": 19,
-          "column": 1
-        },
-        "evidence": "ring::test_file",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/ecdsa_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::rand",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/ecdsa_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::signature::self",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/ecdsa_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::signature::KeyPair",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/ecdsa_tests.rs",
-          "line": 22,
-          "column": 1
-        },
-        "evidence": "ring::test",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/ecdsa_tests.rs",
-          "line": 22,
-          "column": 1
-        },
-        "evidence": "ring::test_file",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/ed25519_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::error",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/ed25519_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::rand",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/ed25519_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::signature::self",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/ed25519_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::signature::Ed25519KeyPair",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/ed25519_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::signature::KeyPair",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/ed25519_tests.rs",
-          "line": 22,
-          "column": 1
-        },
-        "evidence": "ring::test",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/ed25519_tests.rs",
-          "line": 22,
-          "column": 1
-        },
-        "evidence": "ring::test_file",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/error_tests.rs",
-          "line": 6,
-          "column": 5
-        },
-        "evidence": "ring::error",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/error_tests.rs",
-          "line": 8,
-          "column": 5
-        },
-        "evidence": "ring::test",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hkdf_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::digest",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hkdf_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::error",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hkdf_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::hkdf",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hkdf_tests.rs",
-          "line": 19,
-          "column": 1
-        },
-        "evidence": "ring::test",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hkdf_tests.rs",
-          "line": 19,
-          "column": 1
-        },
-        "evidence": "ring::test_file",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hmac_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::digest",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hmac_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::hmac",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hmac_tests.rs",
-          "line": 19,
-          "column": 1
-        },
-        "evidence": "ring::test",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hmac_tests.rs",
-          "line": 19,
-          "column": 1
-        },
-        "evidence": "ring::test_file",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hmac_tests.rs",
-          "line": 44,
-          "column": 17
-        },
-        "evidence": "hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hmac_tests.rs",
-          "line": 46,
-          "column": 17
-        },
-        "evidence": "hmac::HMAC_SHA256",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hmac_tests.rs",
-          "line": 48,
-          "column": 17
-        },
-        "evidence": "hmac::HMAC_SHA384",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hmac_tests.rs",
-          "line": 50,
-          "column": 17
-        },
-        "evidence": "hmac::HMAC_SHA512",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hmac_tests.rs",
-          "line": 78,
-          "column": 15
-        },
-        "evidence": "hmac::Key::new",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hmac_tests.rs",
-          "line": 82,
-          "column": 25
-        },
-        "evidence": "hmac::sign",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/hmac_tests.rs",
-          "line": 89,
-          "column": 25
-        },
-        "evidence": "hmac::Context::with_key",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/pbkdf2_tests.rs",
-          "line": 18,
-          "column": 1
-        },
-        "evidence": "ring::digest",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/pbkdf2_tests.rs",
-          "line": 18,
-          "column": 1
-        },
-        "evidence": "ring::error",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/pbkdf2_tests.rs",
-          "line": 18,
-          "column": 1
-        },
-        "evidence": "ring::pbkdf2",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/pbkdf2_tests.rs",
-          "line": 20,
-          "column": 1
-        },
-        "evidence": "ring::test",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/pbkdf2_tests.rs",
-          "line": 20,
-          "column": 1
-        },
-        "evidence": "ring::test_file",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/quic_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::aead::quic",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/quic_tests.rs",
-          "line": 19,
-          "column": 1
-        },
-        "evidence": "ring::test",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/quic_tests.rs",
-          "line": 19,
-          "column": 1
-        },
-        "evidence": "ring::test_file",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/rand_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::rand::self",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/rand_tests.rs",
-          "line": 17,
-          "column": 1
-        },
-        "evidence": "ring::rand::SecureRandom",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/rand_tests.rs",
-          "line": 19,
-          "column": 1
-        },
-        "evidence": "ring::test",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/rsa_tests.rs",
-          "line": 18,
-          "column": 1
-        },
-        "evidence": "ring::error",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/rsa_tests.rs",
-          "line": 18,
-          "column": 1
-        },
-        "evidence": "ring::io::der",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/rsa_tests.rs",
-          "line": 18,
-          "column": 1
-        },
-        "evidence": "ring::rand",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/rsa_tests.rs",
-          "line": 18,
-          "column": 1
-        },
-        "evidence": "ring::rsa",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/rsa_tests.rs",
-          "line": 18,
-          "column": 1
-        },
-        "evidence": "ring::signature::self",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/rsa_tests.rs",
-          "line": 18,
-          "column": 1
-        },
-        "evidence": "ring::signature::KeyPair",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/rsa_tests.rs",
-          "line": 25,
-          "column": 1
-        },
-        "evidence": "ring::test",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/rsa_tests.rs",
-          "line": 25,
-          "column": 1
-        },
-        "evidence": "ring::test_file",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/signature_tests.rs",
-          "line": 3,
-          "column": 1
-        },
-        "evidence": "ring::signature",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/signature_tests.rs",
-          "line": 5,
-          "column": 1
-        },
-        "evidence": "ring::test",
-        "origin": "import"
       }
     ]
   }

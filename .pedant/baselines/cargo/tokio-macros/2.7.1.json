@@ -1,0 +1,97 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "d5f95e66ae796d587c629e56b032c3f5cd4204b21dff63e8b511d4a49091725d",
+  "crate_name": "tokio-macros",
+  "crate_version": "2.7.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 3,
+    "skipped_files": 0
+  },
+  "rust_version": "1.71",
+  "profile": {
+    "findings": [
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 313,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_attribute]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 377,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_attribute]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 606,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_attribute]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 621,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_attribute]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 630,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_attribute]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 644,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_attribute]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 656,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 664,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      }
+    ]
+  }
+}

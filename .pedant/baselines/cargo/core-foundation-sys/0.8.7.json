@@ -4,7 +4,11 @@
   "crate_name": "core-foundation-sys",
   "crate_version": "0.8.7",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915102,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 40,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {
@@ -170,8 +174,8 @@
       {
         "capability": "ffi",
         "location": {
-          "file": "./src/date_formatter.rs",
-          "line": 47,
+          "file": "./src/date.rs",
+          "line": 22,
           "column": 1
         },
         "evidence": "extern block",
@@ -180,8 +184,8 @@
       {
         "capability": "ffi",
         "location": {
-          "file": "./src/date.rs",
-          "line": 22,
+          "file": "./src/date_formatter.rs",
+          "line": 47,
           "column": 1
         },
         "evidence": "extern block",
@@ -280,8 +284,8 @@
       {
         "capability": "ffi",
         "location": {
-          "file": "./src/number_formatter.rs",
-          "line": 58,
+          "file": "./src/number.rs",
+          "line": 46,
           "column": 1
         },
         "evidence": "extern block",
@@ -290,8 +294,8 @@
       {
         "capability": "ffi",
         "location": {
-          "file": "./src/number.rs",
-          "line": 46,
+          "file": "./src/number_formatter.rs",
+          "line": 58,
           "column": 1
         },
         "evidence": "extern block",
@@ -370,8 +374,8 @@
       {
         "capability": "ffi",
         "location": {
-          "file": "./src/string_tokenizer.rs",
-          "line": 40,
+          "file": "./src/string.rs",
+          "line": 209,
           "column": 1
         },
         "evidence": "extern block",
@@ -380,8 +384,8 @@
       {
         "capability": "ffi",
         "location": {
-          "file": "./src/string.rs",
-          "line": 209,
+          "file": "./src/string_tokenizer.rs",
+          "line": 40,
           "column": 1
         },
         "evidence": "extern block",
@@ -408,16 +412,6 @@
         "origin": "code_site"
       },
       {
-        "capability": "ffi",
-        "location": {
-          "file": "./src/url_enumerator.rs",
-          "line": 38,
-          "column": 1
-        },
-        "evidence": "extern block",
-        "origin": "code_site"
-      },
-      {
         "capability": "unsafe_code",
         "location": {
           "file": "./src/url.rs",
@@ -432,6 +426,16 @@
         "location": {
           "file": "./src/url.rs",
           "line": 85,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/url_enumerator.rs",
+          "line": 38,
           "column": 1
         },
         "evidence": "extern block",

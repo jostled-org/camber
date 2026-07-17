@@ -1,122 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "09de075f68896015f5f6dabc5f172d4177454131261b2c69c091c20cc8da6ffa",
+  "source_hash": "cdaff48c19009259b49061552a43d79e5c9549cbc5d7f9ced3e2427688b1e8a1",
   "crate_name": "event-listener",
   "crate_version": "5.4.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915103,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
+  "rust_version": "1.60",
   "profile": {
     "findings": [
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./examples/mutex.rs",
-          "line": 12,
-          "column": 5
-        },
-        "evidence": "std::time::Instant",
-        "origin": "import"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./examples/mutex.rs",
-          "line": 26,
-          "column": 5
-        },
-        "evidence": "unsafe impl",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./examples/mutex.rs",
-          "line": 27,
-          "column": 5
-        },
-        "evidence": "unsafe impl",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/intrusive.rs",
-          "line": 168,
-          "column": 29
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/intrusive.rs",
-          "line": 173,
-          "column": 32
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/intrusive.rs",
-          "line": 217,
-          "column": 25
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/intrusive.rs",
-          "line": 257,
-          "column": 21
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/intrusive.rs",
-          "line": 265,
-          "column": 24
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/intrusive.rs",
-          "line": 273,
-          "column": 24
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/intrusive.rs",
-          "line": 284,
-          "column": 21
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/intrusive.rs",
-          "line": 341,
-          "column": 33
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
       {
         "capability": "system_time",
         "location": {
@@ -293,86 +188,6 @@
           "file": "./src/notify.rs",
           "line": 597,
           "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/slab.rs",
-          "line": 497,
-          "column": 26
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/slab.rs",
-          "line": 517,
-          "column": 36
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/slab.rs",
-          "line": 821,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/slab.rs",
-          "line": 827,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/slab.rs",
-          "line": 831,
-          "column": 1
-        },
-        "evidence": "unsafe impl",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/slab.rs",
-          "line": 832,
-          "column": 1
-        },
-        "evidence": "unsafe impl",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/slab/node.rs",
-          "line": 42,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/slab/node.rs",
-          "line": 235,
-          "column": 18
         },
         "evidence": "unsafe block",
         "origin": "code_site"

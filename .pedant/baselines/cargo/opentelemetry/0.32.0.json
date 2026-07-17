@@ -1,0 +1,147 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "598c8b45da70b0bb56a1f0ac776350ae1aa7ce1343a6917c987b41336abdb655",
+  "crate_name": "opentelemetry",
+  "crate_version": "0.32.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 35,
+    "skipped_files": 0
+  },
+  "rust_version": "1.75.0",
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/common.rs",
+          "line": 708,
+          "column": 30
+        },
+        "evidence": "https://opentelemetry.io/schemas/1.17.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/common.rs",
+          "line": 713,
+          "column": 30
+        },
+        "evidence": "https://opentelemetry.io/schemas/1.17.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/common.rs",
+          "line": 723,
+          "column": 30
+        },
+        "evidence": "https://opentelemetry.io/schemas/1.17.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/common.rs",
+          "line": 728,
+          "column": 30
+        },
+        "evidence": "https://opentelemetry.io/schemas/1.17.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/common.rs",
+          "line": 745,
+          "column": 30
+        },
+        "evidence": "https://opentelemetry.io/schemas/1.17.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/common.rs",
+          "line": 750,
+          "column": 30
+        },
+        "evidence": "https://opentelemetry.io/schemas/1.17.0",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/global/trace.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 287,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/logs/noop.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/logs/record.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/noop.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/span.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/tracer.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      }
+    ]
+  }
+}

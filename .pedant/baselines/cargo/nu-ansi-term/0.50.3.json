@@ -1,22 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "7780f042a324078bf10183c6a0b904a1a7db249d5dc802f18eda25e61c885f36",
+  "source_hash": "b0129a5ad70f684dc3fb1d5ac2dc7602ca92d17ba7dcf674aa2334822d446fef",
   "crate_name": "nu-ansi-term",
   "crate_version": "0.50.3",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915108,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 11,
+    "skipped_files": 0
+  },
+  "rust_version": "1.62.1",
   "profile": {
     "findings": [
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/hyperlink.rs",
-          "line": 13,
-          "column": 20
-        },
-        "evidence": "https://example.com",
-        "origin": "string_literal"
-      },
       {
         "capability": "network",
         "location": {

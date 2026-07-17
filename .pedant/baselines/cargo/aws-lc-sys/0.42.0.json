@@ -1,0 +1,543 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "7ff2019fc8d75f3573bc2c0eabd27312483a8723bbd33f54eb5e8d8c8d79c0e1",
+  "crate_name": "aws-lc-sys",
+  "crate_version": "0.42.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 20,
+    "skipped_files": 0
+  },
+  "rust_version": "1.71.0",
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./builder/cc_builder.rs",
+          "line": 46,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./builder/cc_builder.rs",
+          "line": 832,
+          "column": 30
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/cmake_builder.rs",
+          "line": 132,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/cmake_builder.rs",
+          "line": 136,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/cmake_builder.rs",
+          "line": 680,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./builder/fips_probe.rs",
+          "line": 191,
+          "column": 17
+        },
+        "evidence": "std::fs::remove_file",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./builder/fips_probe.rs",
+          "line": 253,
+          "column": 17
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 466,
+          "column": 25
+        },
+        "evidence": "std::fs::File::create",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 1029,
+          "column": 13
+        },
+        "evidence": "std::fs::create_dir_all",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 1031,
+          "column": 8
+        },
+        "evidence": "std::fs::write",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 1039,
+          "column": 13
+        },
+        "evidence": "std::fs::remove_dir_all",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 1390,
+          "column": 22
+        },
+        "evidence": "std::fs::read_dir",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 1392,
+          "column": 17
+        },
+        "evidence": "std::fs::copy",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 162,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 229,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 244,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 578,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 620,
+          "column": 15
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 625,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 789,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 853,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 876,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 904,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 908,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 912,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 916,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 921,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 928,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 933,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 937,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 953,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 957,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 962,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 971,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 981,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 986,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 990,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 1051,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 1079,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 1083,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 1091,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./builder/main.rs",
+          "line": 608,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./builder/nasm_builder.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./builder/system_library.rs",
+          "line": 55,
+          "column": 13
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./builder/system_library.rs",
+          "line": 345,
+          "column": 9
+        },
+        "evidence": "std::fs::copy",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./builder/system_library.rs",
+          "line": 430,
+          "column": 19
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 103,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 107,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

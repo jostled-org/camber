@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "bf9781572a7ce98d83a539e0e0b0c3b6d27b5a68e2fcdb0cc0997c03d11efb56",
+  "source_hash": "ec398bb9a4a755493c65a89533ea0c597e6cd0f80d928ca9b6d6d9e720fe115a",
   "crate_name": "idna",
   "crate_version": "1.1.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915105,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 4,
+    "skipped_files": 0
+  },
+  "rust_version": "1.57",
   "profile": {
     "findings": [
       {

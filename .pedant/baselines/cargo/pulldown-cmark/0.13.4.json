@@ -1,0 +1,99 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "f42f7257800dc3936126fd42884f8c8fd0f135a3630709a06fb2224278c678f8",
+  "crate_name": "pulldown-cmark",
+  "crate_version": "0.13.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286764,
+  "analysis_completeness": {
+    "analyzed_files": 13,
+    "skipped_files": 0
+  },
+  "rust_version": "1.71.1",
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 23,
+          "column": 5
+        },
+        "evidence": "std::fs::self",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 23,
+          "column": 5
+        },
+        "evidence": "std::fs::File",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/firstpass.rs",
+          "line": 2644,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/firstpass.rs",
+          "line": 2693,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/firstpass.rs",
+          "line": 2703,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/firstpass.rs",
+          "line": 2733,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/main.rs",
+          "line": 28,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/main.rs",
+          "line": 115,
+          "column": 13
+        },
+        "evidence": "std::process::exit",
+        "origin": "import"
+      }
+    ]
+  }
+}

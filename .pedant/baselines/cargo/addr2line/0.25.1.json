@@ -4,7 +4,12 @@
   "crate_name": "addr2line",
   "crate_version": "0.25.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915097,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 8,
+    "skipped_files": 0
+  },
+  "rust_version": "1.81",
   "profile": {
     "findings": [
       {

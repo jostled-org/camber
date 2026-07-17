@@ -1,0 +1,126 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "3bad27a786a53e9e32238f3fc8fee81eb06ca1738b9dc7eec4a02c9899a9ed07",
+  "crate_name": "async-web-client",
+  "crate_version": "0.6.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 10,
+    "skipped_files": 0
+  },
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/body.rs",
+          "line": 77,
+          "column": 23
+        },
+        "evidence": "http://postman-echo.com/post",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/body.rs",
+          "line": 81,
+          "column": 23
+        },
+        "evidence": "http://postman-echo.com/post",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/body.rs",
+          "line": 88,
+          "column": 23
+        },
+        "evidence": "http://postman-echo.com/post",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/body.rs",
+          "line": 89,
+          "column": 23
+        },
+        "evidence": "http://postman-echo.com/post",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/body.rs",
+          "line": 93,
+          "column": 23
+        },
+        "evidence": "http://postman-echo.com/post",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/body.rs",
+          "line": 94,
+          "column": 23
+        },
+        "evidence": "http://postman-echo.com/post",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/body.rs",
+          "line": 98,
+          "column": 23
+        },
+        "evidence": "http://postman-echo.com/post",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/body.rs",
+          "line": 99,
+          "column": 23
+        },
+        "evidence": "http://postman-echo.com/post",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/body.rs",
+          "line": 103,
+          "column": 23
+        },
+        "evidence": "http://postman-echo.com/post",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/body.rs",
+          "line": 104,
+          "column": 23
+        },
+        "evidence": "http://postman-echo.com/post",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      }
+    ]
+  }
+}

@@ -4,7 +4,12 @@
   "crate_name": "futures-task",
   "crate_version": "0.3.32",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915103,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 7,
+    "skipped_files": 0
+  },
+  "rust_version": "1.71",
   "profile": {
     "findings": [
       {
@@ -470,26 +475,6 @@
       {
         "capability": "unsafe_code",
         "location": {
-          "file": "./src/waker_ref.rs",
-          "line": 25,
-          "column": 39
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/waker_ref.rs",
-          "line": 64,
-          "column": 27
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
           "file": "./src/waker.rs",
           "line": 25,
           "column": 5
@@ -593,6 +578,26 @@
           "file": "./src/waker.rs",
           "line": 59,
           "column": 10
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/waker_ref.rs",
+          "line": 25,
+          "column": 39
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/waker_ref.rs",
+          "line": 64,
+          "column": 27
         },
         "evidence": "unsafe block",
         "origin": "code_site"

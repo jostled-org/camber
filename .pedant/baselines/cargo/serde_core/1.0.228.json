@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "e7065cc93e88c8311b1db20f2d60ed7860993f079a80f6cffa089a5b13fc7f6c",
+  "source_hash": "59c205b5c160d21a186e83d79b8076e46e0365ed0914d47a346c83700150e9c1",
   "crate_name": "serde_core",
   "crate_version": "1.0.228",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915112,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 4,
+    "skipped_files": 0
+  },
+  "rust_version": "1.56",
   "profile": {
     "findings": [
       {
@@ -28,26 +33,6 @@
         "evidence": "std::process::Command",
         "origin": "import",
         "execution_context": "build_hook"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/format.rs",
-          "line": 16,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/ser/impls.rs",
-          "line": 821,
-          "column": 23
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
       }
     ]
   }

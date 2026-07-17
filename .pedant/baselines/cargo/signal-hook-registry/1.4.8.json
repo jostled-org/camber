@@ -1,10 +1,24 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "4eed90e4441d2700ffc9063168aa439c171c6693cf01605b50b71af5e49d77ef",
+  "source_hash": "f3bd1dc12d650cc8d464af722109b812cc331f08483e56618ae056044de3dfbc",
   "crate_name": "signal-hook-registry",
   "crate_version": "1.4.8",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915113,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 1,
+    "skipped_paths": [
+      "./src/lib.rs"
+    ],
+    "skipped_details": [
+      {
+        "path": "./src/lib.rs",
+        "error": "expected `;`"
+      }
+    ]
+  },
+  "rust_version": "1.26",
   "profile": {
     "findings": [
       {
@@ -83,76 +97,6 @@
           "file": "./src/half_lock.rs",
           "line": 226,
           "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/unregister_signal.rs",
-          "line": 15,
-          "column": 1
-        },
-        "evidence": "libc::SIGINT",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/unregister_signal.rs",
-          "line": 15,
-          "column": 1
-        },
-        "evidence": "libc::SIGTERM",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/unregister_signal.rs",
-          "line": 34,
-          "column": 9
-        },
-        "evidence": "libc::raise",
-        "origin": "import"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/unregister_signal.rs",
-          "line": 29,
-          "column": 5
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/unregister_signal.rs",
-          "line": 42,
-          "column": 5
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/unregister_signal.rs",
-          "line": 50,
-          "column": 5
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/unregister_signal.rs",
-          "line": 54,
-          "column": 5
         },
         "evidence": "unsafe block",
         "origin": "code_site"

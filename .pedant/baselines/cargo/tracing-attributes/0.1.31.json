@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "01616a4bf79b497c58e57b4c8b406d0a5e415033544ac207f2378f6cecf3427a",
+  "source_hash": "dea4376f60abf8a305280ae09f7937aaafd277ca80c089c7dadb72ef687afd3c",
   "crate_name": "tracing-attributes",
   "crate_version": "0.1.31",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915115,
+  "timestamp": 1784286766,
+  "analysis_completeness": {
+    "analyzed_files": 3,
+    "skipped_files": 0
+  },
+  "rust_version": "1.65.0",
   "profile": {
     "findings": [
       {
@@ -16,16 +21,6 @@
         },
         "evidence": "#[proc_macro_attribute]",
         "origin": "attribute"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/async_fn.rs",
-          "line": 38,
-          "column": 7
-        },
-        "evidence": "unsafe fn",
-        "origin": "code_site"
       }
     ]
   }

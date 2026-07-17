@@ -1,0 +1,47 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "0d88242e08c47c49e47117f8e0283924f56b8e713add9bd202fcfe46c639ccaa",
+  "crate_name": "tonic-types",
+  "crate_version": "0.14.6",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 15,
+    "skipped_files": 0
+  },
+  "rust_version": "1.88",
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/richer_error/std_messages/retry_info.rs",
+          "line": 29,
+          "column": 49
+        },
+        "evidence": "time::Duration::new",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/richer_error/std_messages/retry_info.rs",
+          "line": 87,
+          "column": 32
+        },
+        "evidence": "time::Duration::try_from",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/richer_error/std_messages/retry_info.rs",
+          "line": 87,
+          "column": 77
+        },
+        "evidence": "time::Duration::ZERO",
+        "origin": "import"
+      }
+    ]
+  }
+}

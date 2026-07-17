@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "e0247b6691c4a35c290a94da63ebf888578a88d7130b40ec76d7e0f3537d3913",
+  "source_hash": "e2828f98b86a59a66133f96aaf4506d9956e34efc78c56990115719b4c5e6dfd",
   "crate_name": "openssl-probe",
   "crate_version": "0.2.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915108,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.60.0",
   "profile": {
     "findings": [
       {

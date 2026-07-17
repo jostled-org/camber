@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "57b8da8b45f65da0739f6e4c1b45be2752e12c352579c2df9ddecf4c6f3c6b6f",
+  "source_hash": "e742f6778110b68df2c219cdf1be36809b3ef8f32135d8537eba4e4bded0dca0",
   "crate_name": "crc32fast",
   "crate_version": "1.5.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915102,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 8,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63",
   "profile": {
     "findings": [
       {

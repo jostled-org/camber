@@ -4,7 +4,12 @@
   "crate_name": "lock_api",
   "crate_version": "0.4.14",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915107,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 4,
+    "skipped_files": 0
+  },
+  "rust_version": "1.71.0",
   "profile": {
     "findings": [
       {

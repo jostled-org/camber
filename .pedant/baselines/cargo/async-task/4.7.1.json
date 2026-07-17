@@ -1,32 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "7969b5617cb4883cbb9aa5965ec50b08ca9724c08bf81fe82e40c03b68b7acb3",
+  "source_hash": "dd9447da8ae7eb612f06413340c53876425e46053b24a8dcd1e148c692b05211",
   "crate_name": "async-task",
   "crate_version": "4.7.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915098,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 7,
+    "skipped_files": 0
+  },
+  "rust_version": "1.57",
   "profile": {
     "findings": [
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./examples/with-metadata.rs",
-          "line": 8,
-          "column": 1
-        },
-        "evidence": "std::time::Instant",
-        "origin": "import"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./examples/with-metadata.rs",
-          "line": 103,
-          "column": 28
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
       {
         "capability": "unsafe_code",
         "location": {
@@ -435,26 +420,6 @@
           "column": 22
         },
         "evidence": "unsafe fn",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/basic.rs",
-          "line": 310,
-          "column": 20
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/metadata.rs",
-          "line": 34,
-          "column": 32
-        },
-        "evidence": "unsafe block",
         "origin": "code_site"
       }
     ]

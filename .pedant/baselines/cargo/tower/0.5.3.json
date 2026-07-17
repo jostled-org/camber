@@ -1,22 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "9338e819ba300db28f8d37f06bc521f2731e2951e5cb77fe5bef046de69e4069",
+  "source_hash": "d9433d14ce081296240d0bbc5ba65b248c70acfec816fa79a3bbe8eb2712ceff",
   "crate_name": "tower",
   "crate_version": "0.5.3",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915115,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 101,
+    "skipped_files": 0
+  },
+  "rust_version": "1.64.0",
   "profile": {
     "findings": [
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./examples/tower-balance.rs",
-          "line": 129,
-          "column": 25
-        },
-        "evidence": "time::sleep_until",
-        "origin": "import"
-      },
       {
         "capability": "system_time",
         "location": {
@@ -85,76 +80,6 @@
           "column": 9
         },
         "evidence": "time::advance",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/hedge/main.rs",
-          "line": 14,
-          "column": 5
-        },
-        "evidence": "time::pause",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/hedge/main.rs",
-          "line": 28,
-          "column": 5
-        },
-        "evidence": "time::advance",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/limit/rate.rs",
-          "line": 11,
-          "column": 5
-        },
-        "evidence": "time::pause",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/limit/rate.rs",
-          "line": 27,
-          "column": 5
-        },
-        "evidence": "time::advance",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/spawn_ready/main.rs",
-          "line": 13,
-          "column": 5
-        },
-        "evidence": "time::pause",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/spawn_ready/main.rs",
-          "line": 27,
-          "column": 5
-        },
-        "evidence": "time::sleep",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/spawn_ready/main.rs",
-          "line": 27,
-          "column": 17
-        },
-        "evidence": "time::Duration::from_millis",
         "origin": "import"
       }
     ]

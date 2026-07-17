@@ -1,0 +1,116 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "27dad84bcd0bf11c109063f548b574764e98994abfe82164b7bfe15fb74095d4",
+  "crate_name": "rustls-acme",
+  "crate_version": "0.15.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 20,
+    "skipped_files": 0
+  },
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/acme.rs",
+          "line": 18,
+          "column": 50
+        },
+        "evidence": "https://acme-staging-v02.api.letsencrypt.org/directory",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/acme.rs",
+          "line": 19,
+          "column": 53
+        },
+        "evidence": "https://acme-v02.api.letsencrypt.org/directory",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/caches/dir.rs",
+          "line": 19,
+          "column": 31
+        },
+        "evidence": "std::fs::read",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/caches/dir.rs",
+          "line": 29,
+          "column": 25
+        },
+        "evidence": "std::fs::create_dir_all",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/caches/dir.rs",
+          "line": 32,
+          "column": 25
+        },
+        "evidence": "std::fs::write",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 150,
+          "column": 1
+        },
+        "evidence": "ring",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/state.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "chrono::DateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/state.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "chrono::TimeZone",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/state.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "chrono::Utc",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/state.rs",
+          "line": 239,
+          "column": 18
+        },
+        "evidence": "chrono::Duration::zero",
+        "origin": "import"
+      }
+    ]
+  }
+}

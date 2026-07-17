@@ -4,7 +4,12 @@
   "crate_name": "windows-interface",
   "crate_version": "0.59.3",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915119,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.74",
   "profile": {
     "findings": [
       {

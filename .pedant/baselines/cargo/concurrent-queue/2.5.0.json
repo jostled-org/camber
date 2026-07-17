@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "7feb12fcddbf95d9aeb088a7ca17e70397bd11be18e6fab15be9d6e095938c3a",
+  "source_hash": "df1290b842f2fb776e16f5335bafd92f0ea0af1e60311c1b530df0ce7dddf4f2",
   "crate_name": "concurrent-queue",
   "crate_version": "2.5.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915102,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 5,
+    "skipped_files": 0
+  },
+  "rust_version": "1.60",
   "profile": {
     "findings": [
       {

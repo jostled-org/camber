@@ -1,22 +1,16 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "f68f2ab6ff5d85be400e3ba9ebe7d628cde557a9fd1bf1084dbe7cffbb97cac7",
+  "source_hash": "0792801b755f54ef8329a6df287f1697ec3efb8efb97f9faa20f7b6af4348666",
   "crate_name": "scopeguard",
   "crate_version": "1.2.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915112,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./examples/readme.rs",
-          "line": 13,
-          "column": 1
-        },
-        "evidence": "std::fs::File",
-        "origin": "import"
-      },
       {
         "capability": "unsafe_code",
         "location": {

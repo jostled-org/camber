@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "b7b80a7bf7a72e1022a918a1ad606df035c484a757ff5b5444c243a9a3f854cd",
+  "source_hash": "3e871157e10ae47acdcfc6588ab9fe34c47beaef5677d40c37145f1ba30c454d",
   "crate_name": "tracing",
   "crate_version": "0.1.44",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915115,
+  "timestamp": 1784286766,
+  "analysis_completeness": {
+    "analyzed_files": 8,
+    "skipped_files": 0
+  },
+  "rust_version": "1.65.0",
   "profile": {
     "findings": [
       {

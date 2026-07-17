@@ -1,22 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "bedae63dd4cce5680410b57ada78de18bc84c1e79d128da71f6d1e46f367e450",
+  "source_hash": "e02919cb30d521994b217b99cbb7aefb85e06b10ce6aa906f9c53517bf206beb",
   "crate_name": "xmlparser",
   "crate_version": "0.13.6",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915125,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 5,
+    "skipped_files": 0
+  },
   "profile": {
-    "findings": [
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./examples/parse.rs",
-          "line": 4,
-          "column": 1
-        },
-        "evidence": "std::fs",
-        "origin": "import"
-      }
-    ]
+    "findings": []
   }
 }

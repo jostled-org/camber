@@ -4,7 +4,12 @@
   "crate_name": "windows-strings",
   "crate_version": "0.5.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915119,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 13,
+    "skipped_files": 0
+  },
+  "rust_version": "1.82",
   "profile": {
     "findings": [
       {
@@ -73,6 +78,116 @@
           "file": "./src/decode.rs",
           "line": 50,
           "column": 39
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/hstring.rs",
+          "line": 19,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/hstring.rs",
+          "line": 35,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/hstring.rs",
+          "line": 47,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/hstring.rs",
+          "line": 53,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/hstring.rs",
+          "line": 61,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/hstring.rs",
+          "line": 70,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/hstring.rs",
+          "line": 101,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/hstring.rs",
+          "line": 110,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/hstring.rs",
+          "line": 111,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/hstring.rs",
+          "line": 131,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/hstring.rs",
+          "line": 157,
+          "column": 9
         },
         "evidence": "unsafe block",
         "origin": "code_site"
@@ -223,116 +338,6 @@
           "file": "./src/hstring_header.rs",
           "line": 64,
           "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/hstring.rs",
-          "line": 19,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/hstring.rs",
-          "line": 35,
-          "column": 5
-        },
-        "evidence": "unsafe fn",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/hstring.rs",
-          "line": 47,
-          "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/hstring.rs",
-          "line": 53,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/hstring.rs",
-          "line": 61,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/hstring.rs",
-          "line": 70,
-          "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/hstring.rs",
-          "line": 101,
-          "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/hstring.rs",
-          "line": 110,
-          "column": 1
-        },
-        "evidence": "unsafe impl",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/hstring.rs",
-          "line": 111,
-          "column": 1
-        },
-        "evidence": "unsafe impl",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/hstring.rs",
-          "line": 131,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/hstring.rs",
-          "line": 157,
-          "column": 9
         },
         "evidence": "unsafe block",
         "origin": "code_site"

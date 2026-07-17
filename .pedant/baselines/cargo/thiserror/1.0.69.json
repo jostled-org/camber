@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "1758b38bce632768ee8654207ed496f11040a135004593e5e6bb74dc61924242",
+  "source_hash": "60ce6548c67b9b1f64a7a35807e7a1d7a01a406592991a473f2f66439d0d870b",
   "crate_name": "thiserror",
   "crate_version": "1.0.69",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915113,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 5,
+    "skipped_files": 0
+  },
+  "rust_version": "1.61",
   "profile": {
     "findings": [
       {

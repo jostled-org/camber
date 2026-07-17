@@ -1,0 +1,47 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "fef6a7df0a75520997cf8dc9f2d63ec5b61e338599bbf32a1b8135d0b71b776e",
+  "crate_name": "async-compression",
+  "crate_version": "0.4.42",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 43,
+    "skipped_files": 0
+  },
+  "rust_version": "1.83",
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/tokio/bufread/generic/mod.rs",
+          "line": 20,
+          "column": 53
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/tokio/bufread/generic/mod.rs",
+          "line": 22,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/tokio/bufread/generic/mod.rs",
+          "line": 30,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

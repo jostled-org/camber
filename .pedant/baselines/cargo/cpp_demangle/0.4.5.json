@@ -1,0 +1,37 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "7ba924c89a7c6072f5e082e046125d3a61db0579efe9ec392abf773f325b3f11",
+  "crate_name": "cpp_demangle",
+  "crate_version": "0.4.5",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 8,
+    "skipped_files": 0
+  },
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/ast.rs",
+          "line": 8234,
+          "column": 16
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

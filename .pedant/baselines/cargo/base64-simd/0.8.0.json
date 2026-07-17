@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "b8d42e95dc6a30c967f1a6c07e4312b69ea664326cbd5feaa8053b997dee54c7",
+  "source_hash": "9857218c11b0b5551848cae81635e658843018c28cfe80f7429ad7a2258344e8",
   "crate_name": "base64-simd",
   "crate_version": "0.8.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915101,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 10,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63",
   "profile": {
     "findings": [
       {

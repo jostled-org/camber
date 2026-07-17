@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "1895accf5025c2742d3b7d78a96f4a1efbd341401784228ec5499b129529b149",
+  "source_hash": "6a6ce8ff8d9cd89a6fa983f2ecbe5f1c02feb6144c45ee13994f8a075fce37a3",
   "crate_name": "rustls-webpki",
   "crate_version": "0.101.7",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915112,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 17,
+    "skipped_files": 0
+  },
+  "rust_version": "1.61",
   "profile": {
     "findings": [
       {
@@ -1035,96 +1040,6 @@
           "column": 9
         },
         "evidence": "ring::io::der::CONTEXT_SPECIFIC",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/integration.rs",
-          "line": 252,
-          "column": 68
-        },
-        "evidence": "std::time::SystemTime::now",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/integration.rs",
-          "line": 108,
-          "column": 16
-        },
-        "evidence": "162.159.36.1",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/integration.rs",
-          "line": 109,
-          "column": 16
-        },
-        "evidence": "162.159.46.1",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/integration.rs",
-          "line": 110,
-          "column": 16
-        },
-        "evidence": "2606:4700:4700:0000:0000:0000:0000:1111",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/integration.rs",
-          "line": 111,
-          "column": 16
-        },
-        "evidence": "2606:4700:4700:0000:0000:0000:0000:1001",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/integration.rs",
-          "line": 112,
-          "column": 16
-        },
-        "evidence": "2606:4700:4700:0000:0000:0000:0000:0064",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/integration.rs",
-          "line": 113,
-          "column": 16
-        },
-        "evidence": "2606:4700:4700:0000:0000:0000:0000:6400",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/name_tests.rs",
-          "line": 1,
-          "column": 1
-        },
-        "evidence": "ring::test::compile_time_assert_send",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/name_tests.rs",
-          "line": 1,
-          "column": 1
-        },
-        "evidence": "ring::test::compile_time_assert_sync",
         "origin": "import"
       }
     ]

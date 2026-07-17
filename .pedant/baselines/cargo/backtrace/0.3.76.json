@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "c2ceec82f5bc06d14b50c4e1a13b5845af8ce542c21fc891c3bf2eb40fac44ec",
+  "source_hash": "80f6e1aa009316e8505e85cd0407b57e62eb5a07460aee289bd677e8e2bd169c",
   "crate_name": "backtrace",
   "crate_version": "0.3.76",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915101,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 31,
+    "skipped_files": 0
+  },
+  "rust_version": "1.82.0",
   "profile": {
     "findings": [
       {
@@ -1460,156 +1465,6 @@
       {
         "capability": "unsafe_code",
         "location": {
-          "file": "./src/symbolize/gimli/mmap_fake.rs",
-          "line": 11,
-          "column": 9
-        },
-        "evidence": "unsafe fn",
-        "origin": "code_site"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_unix.rs",
-          "line": 8,
-          "column": 1
-        },
-        "evidence": "libc::mmap",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_unix.rs",
-          "line": 10,
-          "column": 1
-        },
-        "evidence": "libc::mmap64",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_unix.rs",
-          "line": 23,
-          "column": 17
-        },
-        "evidence": "libc::PROT_READ",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_unix.rs",
-          "line": 24,
-          "column": 17
-        },
-        "evidence": "libc::MAP_PRIVATE",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_unix.rs",
-          "line": 29,
-          "column": 19
-        },
-        "evidence": "libc::MAP_FAILED",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_unix.rs",
-          "line": 47,
-          "column": 21
-        },
-        "evidence": "libc::munmap",
-        "origin": "import"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_unix.rs",
-          "line": 18,
-          "column": 9
-        },
-        "evidence": "unsafe fn",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_unix.rs",
-          "line": 19,
-          "column": 19
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_unix.rs",
-          "line": 40,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_unix.rs",
-          "line": 46,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_windows.rs",
-          "line": 19,
-          "column": 9
-        },
-        "evidence": "unsafe fn",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_windows.rs",
-          "line": 20,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_windows.rs",
-          "line": 56,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/symbolize/gimli/mmap_windows.rs",
-          "line": 62,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
           "file": "./src/symbolize/gimli/stash.rs",
           "line": 29,
           "column": 23
@@ -1735,76 +1590,6 @@
           "column": 5
         },
         "evidence": "unsafe fn",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/accuracy/main.rs",
-          "line": 41,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "process_exec",
-        "location": {
-          "file": "./tests/concurrent-panics.rs",
-          "line": 3,
-          "column": 1
-        },
-        "evidence": "std::process::Command",
-        "origin": "import"
-      },
-      {
-        "capability": "process_exec",
-        "location": {
-          "file": "./tests/current-exe-mismatch.rs",
-          "line": 10,
-          "column": 1
-        },
-        "evidence": "std::process::Command",
-        "origin": "import"
-      },
-      {
-        "capability": "env_access",
-        "location": {
-          "file": "./tests/current-exe-mismatch.rs",
-          "line": 22,
-          "column": 8
-        },
-        "evidence": "std::env::var",
-        "origin": "import"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/sgx-image-base.rs",
-          "line": 31,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/sgx-image-base.rs",
-          "line": 44,
-          "column": 5
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/smoke.rs",
-          "line": 18,
-          "column": 9
-        },
-        "evidence": "unsafe block",
         "origin": "code_site"
       }
     ]

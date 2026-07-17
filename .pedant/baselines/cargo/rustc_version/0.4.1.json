@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "fb8d55b9aecb54a09e5d626dda7eab5f2a8aa80acff6bf8ddc7dadcd56266f83",
+  "source_hash": "20ab3399a7f1dbf015b67216b415d83700f845fe1032dd1990603e5ea8b3f711",
   "crate_name": "rustc_version",
   "crate_version": "0.4.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915111,
+  "timestamp": 1784286764,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.32",
   "profile": {
     "findings": [
       {
@@ -12,16 +17,6 @@
         "location": {
           "file": "./src/lib.rs",
           "line": 60,
-          "column": 1
-        },
-        "evidence": "std::process::Command",
-        "origin": "import"
-      },
-      {
-        "capability": "process_exec",
-        "location": {
-          "file": "./tests/all.rs",
-          "line": 3,
           "column": 1
         },
         "evidence": "std::process::Command",

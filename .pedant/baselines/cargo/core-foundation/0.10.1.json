@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "46df4a649f7147925ccddbd6094dfcd49543768be65b0c4a82660c81afa2d6a2",
+  "source_hash": "a4a677a591ee4ddb5991ea45cf80f6dd417927f743cc468d6c1ae88055453de2",
   "crate_name": "core-foundation",
   "crate_version": "0.10.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915102,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 21,
+    "skipped_files": 0
+  },
+  "rust_version": "1.65",
   "profile": {
     "findings": [
       {
@@ -1895,16 +1900,6 @@
           "column": 9
         },
         "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/use_macro_outside_crate.rs",
-          "line": 12,
-          "column": 1
-        },
-        "evidence": "extern block",
         "origin": "code_site"
       }
     ]

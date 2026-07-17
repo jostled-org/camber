@@ -1,0 +1,77 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "1995ea6dc411b9b0e90f92abfbe1995acafd77da201647dcb5f43a9a6e62f738",
+  "crate_name": "time-macros",
+  "crate_version": "0.2.31",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 21,
+    "skipped_files": 0
+  },
+  "rust_version": "1.88.0",
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 20,
+          "column": 16
+        },
+        "evidence": "time::parse",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/format_description/lexer.rs",
+          "line": 170,
+          "column": 36
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/format_description/public/optimizing.rs",
+          "line": 68,
+          "column": 24
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 261,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 276,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/utc_datetime.rs",
+          "line": 47,
+          "column": 16
+        },
+        "evidence": "time::parse",
+        "origin": "import"
+      }
+    ]
+  }
+}

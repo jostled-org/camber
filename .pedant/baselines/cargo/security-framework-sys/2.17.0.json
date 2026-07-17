@@ -4,9 +4,24 @@
   "crate_name": "security-framework-sys",
   "crate_version": "2.17.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915112,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 24,
+    "skipped_files": 0
+  },
+  "rust_version": "1.70",
   "profile": {
     "findings": [
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/access.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
       {
         "capability": "ffi",
         "location": {
@@ -22,16 +37,6 @@
         "location": {
           "file": "./src/access_control.rs",
           "line": 35,
-          "column": 1
-        },
-        "evidence": "extern block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./src/access.rs",
-          "line": 3,
           "column": 1
         },
         "evidence": "extern block",
@@ -60,8 +65,8 @@
       {
         "capability": "ffi",
         "location": {
-          "file": "./src/certificate_oids.rs",
-          "line": 3,
+          "file": "./src/certificate.rs",
+          "line": 13,
           "column": 1
         },
         "evidence": "extern block",
@@ -70,8 +75,8 @@
       {
         "capability": "ffi",
         "location": {
-          "file": "./src/certificate.rs",
-          "line": 13,
+          "file": "./src/certificate_oids.rs",
+          "line": 3,
           "column": 1
         },
         "evidence": "extern block",
@@ -160,8 +165,8 @@
       {
         "capability": "ffi",
         "location": {
-          "file": "./src/keychain_item.rs",
-          "line": 10,
+          "file": "./src/keychain.rs",
+          "line": 146,
           "column": 1
         },
         "evidence": "extern block",
@@ -170,8 +175,8 @@
       {
         "capability": "ffi",
         "location": {
-          "file": "./src/keychain.rs",
-          "line": 146,
+          "file": "./src/keychain_item.rs",
+          "line": 10,
           "column": 1
         },
         "evidence": "extern block",
@@ -230,8 +235,8 @@
       {
         "capability": "ffi",
         "location": {
-          "file": "./src/trust_settings.rs",
-          "line": 19,
+          "file": "./src/trust.rs",
+          "line": 37,
           "column": 1
         },
         "evidence": "extern block",
@@ -240,8 +245,8 @@
       {
         "capability": "ffi",
         "location": {
-          "file": "./src/trust.rs",
-          "line": 37,
+          "file": "./src/trust_settings.rs",
+          "line": 19,
           "column": 1
         },
         "evidence": "extern block",

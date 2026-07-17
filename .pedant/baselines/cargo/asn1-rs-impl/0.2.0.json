@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "736875b45833f6dd1e3fe2ded7c63b677887c5768cbeaa2210eddf95f107080d",
+  "source_hash": "7c8bb62131e803a2ae03195520a85bd352efd8cf9450c719efc343d47668345b",
   "crate_name": "asn1-rs-impl",
   "crate_version": "0.2.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915097,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

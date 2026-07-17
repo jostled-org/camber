@@ -4,7 +4,11 @@
   "crate_name": "miniz_oxide",
   "crate_version": "0.8.9",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915107,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 14,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": []
   }

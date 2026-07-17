@@ -4,7 +4,11 @@
   "crate_name": "winapi-i686-pc-windows-gnu",
   "crate_version": "0.4.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915118,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

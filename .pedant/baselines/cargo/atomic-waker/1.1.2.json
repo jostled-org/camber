@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "d7dfe72607e26b088fd7e487dd7e929208e7ea376fa850cfc9a88c294da7b1b3",
+  "source_hash": "33d9bed1f48ad7970822d5095f18c7861844e458e4f28a0b5587225fc10375e9",
   "crate_name": "atomic-waker",
   "crate_version": "1.1.2",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915098,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.36",
   "profile": {
     "findings": [
       {

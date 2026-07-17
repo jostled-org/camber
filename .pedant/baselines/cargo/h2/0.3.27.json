@@ -1,102 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "2329bacb34e54f9482be2cd46ae3b731a9cd2a86b4199eadaaeabb157b52fa7e",
+  "source_hash": "32a056607ad2cab96f93c868e36b229d4c515727da9fab04d081865b50fdfdd7",
   "crate_name": "h2",
   "crate_version": "0.3.27",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915104,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 52,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63",
   "profile": {
     "findings": [
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/akamai.rs",
-          "line": 3,
-          "column": 1
-        },
-        "evidence": "tokio::net::TcpStream",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/akamai.rs",
-          "line": 10,
-          "column": 1
-        },
-        "evidence": "std::net::ToSocketAddrs",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/akamai.rs",
-          "line": 62,
-          "column": 14
-        },
-        "evidence": "https://http2.akamai.com/",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/client.rs",
-          "line": 6,
-          "column": 1
-        },
-        "evidence": "tokio::net::TcpStream",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/client.rs",
-          "line": 12,
-          "column": 34
-        },
-        "evidence": "127.0.0.1:5928",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/client.rs",
-          "line": 18,
-          "column": 14
-        },
-        "evidence": "https://http2.akamai.com/",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/server.rs",
-          "line": 7,
-          "column": 1
-        },
-        "evidence": "tokio::net::TcpListener",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/server.rs",
-          "line": 7,
-          "column": 1
-        },
-        "evidence": "tokio::net::TcpStream",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/server.rs",
-          "line": 13,
-          "column": 38
-        },
-        "evidence": "127.0.0.1:5928",
-        "origin": "string_literal"
-      },
       {
         "capability": "unsafe_code",
         "location": {

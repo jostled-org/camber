@@ -4,7 +4,12 @@
   "crate_name": "equivalent",
   "crate_version": "1.0.2",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915103,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.6",
   "profile": {
     "findings": []
   }

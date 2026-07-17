@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "f3dedee7528582cafbab72141c5474efb83b4a64b624ef8e3241c4ea3e0e8ec5",
+  "source_hash": "daec985b959c27af5fc900104c247ed9f5cbe2b8a29738e5ef0bbc1d2ed339c1",
   "crate_name": "assert-json-diff",
   "crate_version": "2.0.2",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915097,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 3,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": []
   }

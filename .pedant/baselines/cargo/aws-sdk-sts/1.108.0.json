@@ -1,0 +1,167 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "f0bdc62b393b7c07fe10d53dfb0caa172beabc05fa7606577d75c5c9e955cdec",
+  "crate_name": "aws-sdk-sts",
+  "crate_version": "1.108.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 146,
+    "skipped_files": 0
+  },
+  "rust_version": "1.94.1",
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 944,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 962,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 981,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 997,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1469,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1488,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1594,
+          "column": 38
+        },
+        "evidence": "https://sts.amazonaws.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1609,
+          "column": 54
+        },
+        "evidence": "https://sts.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1642,
+          "column": 54
+        },
+        "evidence": "https://sts-fips.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1662,
+          "column": 54
+        },
+        "evidence": "https://sts.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1678,
+          "column": 54
+        },
+        "evidence": "https://sts-fips.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1699,
+          "column": 54
+        },
+        "evidence": "https://sts.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1720,
+          "column": 54
+        },
+        "evidence": "https://sts.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/endpoint_lib.rs",
+          "line": 5,
+          "column": 14
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/endpoint_lib.rs",
+          "line": 8,
+          "column": 38
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      }
+    ]
+  }
+}

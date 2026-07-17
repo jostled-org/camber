@@ -1,0 +1,15 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "7499f9d63146c75fa7a2a95bca14b9ac951d7a9a33e3143c2e8513bc3bcad939",
+  "crate_name": "tinyvec",
+  "crate_version": "1.12.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 8,
+    "skipped_files": 0
+  },
+  "profile": {
+    "findings": []
+  }
+}

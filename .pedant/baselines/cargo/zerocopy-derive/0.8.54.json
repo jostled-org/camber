@@ -1,0 +1,66 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "f83441b8e967614f956d804a336c913c9774f4eb03f0c783a45add947d176d81",
+  "crate_name": "zerocopy-derive",
+  "crate_version": "0.8.54",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 10,
+    "skipped_files": 0
+  },
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/derive/try_from_bytes.rs",
+          "line": 685,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/derive/try_from_bytes.rs",
+          "line": 749,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 133,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 169,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 177,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      }
+    ]
+  }
+}

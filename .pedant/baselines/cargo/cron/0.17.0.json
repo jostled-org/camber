@@ -1,0 +1,196 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "723010b3fe41d9bfc78bf7f8a37c2eed69ec6969792e6361492a13ed2ac5f115",
+  "crate_name": "cron",
+  "crate_version": "0.17.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 15,
+    "skipped_files": 0
+  },
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/queries.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "chrono::offset::TimeZone",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/queries.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "chrono::DateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/queries.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "chrono::Datelike",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/queries.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "chrono::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/queries.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "chrono::Timelike",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "chrono::offset::LocalResult",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 1,
+          "column": 1
+        },
+        "evidence": "chrono::offset::TimeZone",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "chrono::DateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "chrono::Datelike",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "chrono::NaiveDate",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "chrono::Timelike",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "chrono::Utc",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 678,
+          "column": 5
+        },
+        "evidence": "chrono::Duration",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 872,
+          "column": 9
+        },
+        "evidence": "chrono::Local",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 919,
+          "column": 9
+        },
+        "evidence": "chrono::offset::TimeZone",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 926,
+          "column": 33
+        },
+        "evidence": "chrono::Duration::hours",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 935,
+          "column": 9
+        },
+        "evidence": "chrono::offset::TimeZone",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/schedule.rs",
+          "line": 951,
+          "column": 18
+        },
+        "evidence": "chrono::DateTime::parse_from_rfc3339",
+        "origin": "import"
+      }
+    ]
+  }
+}

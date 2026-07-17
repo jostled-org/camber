@@ -1,22 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "641c56cbc0c3febbcdaf200f3742a59768a240199afedd6d9b1add155c00c916",
+  "source_hash": "622b9fa7aa5c2d3b73c61b3a88d2aafc125cb23c67133c68d2d3e74b62057fc5",
   "crate_name": "asn1-rs",
   "crate_version": "0.6.2",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915097,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 64,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63",
   "profile": {
     "findings": [
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./examples/dump-der.rs",
-          "line": 8,
-          "column": 1
-        },
-        "evidence": "std::fs",
-        "origin": "import"
-      },
       {
         "capability": "system_time",
         "location": {
@@ -105,86 +100,6 @@
           "column": 9
         },
         "evidence": "time::UtcOffset",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/ber.rs",
-          "line": 5,
-          "column": 1
-        },
-        "evidence": "time::macros::datetime",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/der.rs",
-          "line": 133,
-          "column": 9
-        },
-        "evidence": "time::macros::datetime",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/der.rs",
-          "line": 153,
-          "column": 9
-        },
-        "evidence": "time::macros::datetime",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/der.rs",
-          "line": 400,
-          "column": 9
-        },
-        "evidence": "time::macros::datetime",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/der.rs",
-          "line": 412,
-          "column": 9
-        },
-        "evidence": "time::macros::datetime",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/der.rs",
-          "line": 424,
-          "column": 9
-        },
-        "evidence": "time::macros::datetime",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/der.rs",
-          "line": 435,
-          "column": 5
-        },
-        "evidence": "time::macros::datetime",
-        "origin": "import"
-      },
-      {
-        "capability": "file_write",
-        "location": {
-          "file": "./tests/krb5.rs",
-          "line": 105,
-          "column": 5
-        },
-        "evidence": "std::fs::write",
         "origin": "import"
       }
     ]

@@ -1,52 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "689d94170b70a47d2d04f5707a206c34a7b76a3a616494dcda729e88bfaf5b94",
+  "source_hash": "02029b4946427d5451405dd42f8837789948d72c3218ad988cb9e0a8888f52fd",
   "crate_name": "x509-parser",
   "crate_version": "0.16.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915125,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 28,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63.0",
   "profile": {
     "findings": [
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/print-cert.rs",
-          "line": 8,
-          "column": 1
-        },
-        "evidence": "std::net::Ipv4Addr",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/print-cert.rs",
-          "line": 8,
-          "column": 1
-        },
-        "evidence": "std::net::Ipv6Addr",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./examples/print-cert.rs",
-          "line": 396,
-          "column": 20
-        },
-        "evidence": "std::fs::read",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./examples/print-crl.rs",
-          "line": 140,
-          "column": 20
-        },
-        "evidence": "std::fs::read",
-        "origin": "import"
-      },
       {
         "capability": "system_time",
         "location": {
@@ -175,46 +140,6 @@
           "column": 5
         },
         "evidence": "ring::signature",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/readcert.rs",
-          "line": 1,
-          "column": 1
-        },
-        "evidence": "time::macros::datetime",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/readcert.rs",
-          "line": 2,
-          "column": 1
-        },
-        "evidence": "time::OffsetDateTime",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./tests/run_all_fuzz_files.rs",
-          "line": 1,
-          "column": 1
-        },
-        "evidence": "std::fs::self",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./tests/run_all_fuzz_files.rs",
-          "line": 1,
-          "column": 1
-        },
-        "evidence": "std::fs::DirEntry",
         "origin": "import"
       }
     ]

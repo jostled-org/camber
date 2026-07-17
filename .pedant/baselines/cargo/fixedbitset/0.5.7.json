@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "9cd6dffb2cc65811598fdc959e3f2ddb891613726e067db9d30abce8bc0e82c4",
+  "source_hash": "2b6ae78dbdf66ace9a31941cd100420e558cf8e43a6b6ff6d62cf058ff493d63",
   "crate_name": "fixedbitset",
   "crate_version": "0.5.7",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915103,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 9,
+    "skipped_files": 0
+  },
+  "rust_version": "1.56",
   "profile": {
     "findings": [
       {

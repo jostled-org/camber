@@ -1,22 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "9960667edf6a05e598aa3cc1668f67d3eb733642b0e889b64beda1bbfc3f7a0c",
+  "source_hash": "1af9f464a03dd315b94f58d14e425038abf6c2d784aa2e0c994334467863359d",
   "crate_name": "signal-hook",
   "crate_version": "0.4.4",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915113,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 13,
+    "skipped_files": 0
+  },
+  "rust_version": "1.66",
   "profile": {
     "findings": [
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./examples/print.rs",
-          "line": 10,
-          "column": 5
-        },
-        "evidence": "libc::c_int",
-        "origin": "import"
-      },
       {
         "capability": "ffi",
         "location": {
@@ -1253,126 +1248,6 @@
           "file": "./src/low_level/signal_details.rs",
           "line": 235,
           "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/default.rs",
-          "line": 9,
-          "column": 1
-        },
-        "evidence": "libc::sighandler_t",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/default.rs",
-          "line": 9,
-          "column": 1
-        },
-        "evidence": "libc::signal",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/default.rs",
-          "line": 9,
-          "column": 1
-        },
-        "evidence": "libc::SIGTERM",
-        "origin": "import"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/default.rs",
-          "line": 15,
-          "column": 5
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/shutdown.rs",
-          "line": 26,
-          "column": 9
-        },
-        "evidence": "libc::alarm",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/shutdown.rs",
-          "line": 27,
-          "column": 15
-        },
-        "evidence": "libc::fork",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/shutdown.rs",
-          "line": 40,
-          "column": 17
-        },
-        "evidence": "libc::kill",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/shutdown.rs",
-          "line": 40,
-          "column": 33
-        },
-        "evidence": "libc::SIGTERM",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/shutdown.rs",
-          "line": 45,
-          "column": 34
-        },
-        "evidence": "libc::waitpid",
-        "origin": "import"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/shutdown.rs",
-          "line": 45,
-          "column": 70
-        },
-        "evidence": "libc::WNOHANG",
-        "origin": "import"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/shutdown.rs",
-          "line": 25,
-          "column": 5
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/shutdown.rs",
-          "line": 61,
-          "column": 9
         },
         "evidence": "unsafe block",
         "origin": "code_site"

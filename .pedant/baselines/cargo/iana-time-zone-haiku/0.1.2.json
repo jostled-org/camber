@@ -4,7 +4,11 @@
   "crate_name": "iana-time-zone-haiku",
   "crate_version": "0.1.2",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915105,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

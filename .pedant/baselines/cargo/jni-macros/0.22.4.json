@@ -1,0 +1,116 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "f48f39277310c71d57933de57d0cc9694018c938665d28a98e98a2c5bbaaa62d",
+  "crate_name": "jni-macros",
+  "crate_version": "0.22.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 9,
+    "skipped_files": 0
+  },
+  "profile": {
+    "findings": [
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 32,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 55,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 80,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 106,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 115,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_attribute]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 125,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 134,
+          "column": 1
+        },
+        "evidence": "#[proc_macro]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/str.rs",
+          "line": 47,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

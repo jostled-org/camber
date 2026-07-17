@@ -1,0 +1,47 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "17918b9edb92e18ae1dd0a8dc4ab722f8b43b80523109f3bdf06be22d031a2c0",
+  "crate_name": "pkg-config",
+  "crate_version": "0.3.33",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.31",
+  "profile": {
+    "findings": [
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 96,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 96,
+          "column": 1
+        },
+        "evidence": "std::process::Output",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 302,
+          "column": 29
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      }
+    ]
+  }
+}

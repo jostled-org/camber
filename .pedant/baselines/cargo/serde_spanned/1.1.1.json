@@ -4,7 +4,12 @@
   "crate_name": "serde_spanned",
   "crate_version": "1.1.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915112,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 3,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
   "profile": {
     "findings": []
   }

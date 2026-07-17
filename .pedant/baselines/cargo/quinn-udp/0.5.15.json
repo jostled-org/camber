@@ -1,0 +1,117 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "97b7d045450bfe96ce7c5bfff5be02bfd73ce69650b56803f3c6c930c84feaa3",
+  "crate_name": "quinn-udp",
+  "crate_version": "0.5.15",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286764,
+  "analysis_completeness": {
+    "analyzed_files": 3,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cmsg/mod.rs",
+          "line": 32,
+          "column": 16
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cmsg/mod.rs",
+          "line": 60,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cmsg/mod.rs",
+          "line": 64,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cmsg/mod.rs",
+          "line": 84,
+          "column": 12
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cmsg/mod.rs",
+          "line": 101,
+          "column": 16
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/cmsg/mod.rs",
+          "line": 114,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 30,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 30,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 30,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 36,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      }
+    ]
+  }
+}

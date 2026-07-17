@@ -4,7 +4,12 @@
   "crate_name": "rand_chacha",
   "crate_version": "0.9.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915110,
+  "timestamp": 1784286764,
+  "analysis_completeness": {
+    "analyzed_files": 3,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63",
   "profile": {
     "findings": []
   }

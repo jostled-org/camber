@@ -1,0 +1,27 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "071b527b20703ae302c9d983b0d8cec6871e6cf0cce9e8b8c24164039525f215",
+  "crate_name": "clap_builder",
+  "crate_version": "4.6.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 57,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
+  "profile": {
+    "findings": [
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/error/mod.rs",
+          "line": 248,
+          "column": 9
+        },
+        "evidence": "std::process::exit",
+        "origin": "import"
+      }
+    ]
+  }
+}

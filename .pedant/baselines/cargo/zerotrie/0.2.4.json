@@ -1,22 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "4783cf382d68c228d2ce805191dc47bddcf68c67ba1a01486c4746730ed4d029",
+  "source_hash": "fff9bb558723c15d0208e7e89cae412f2ccf91859abf195e78d80647ebbeadde",
   "crate_name": "zerotrie",
   "crate_version": "0.2.4",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915125,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 24,
+    "skipped_files": 0
+  },
+  "rust_version": "1.82",
   "profile": {
     "findings": [
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./examples/first_weekday_for_region.rs",
-          "line": 206,
-          "column": 5
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
       {
         "capability": "unsafe_code",
         "location": {

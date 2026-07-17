@@ -1,22 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "5235f4de1afe913016859dd8d982021e9a94ff663deea56feeb4ccbabe020107",
+  "source_hash": "292620363946915f3c0c2ca7e8a9358b8a4219ce80c39f09d9336dd4004f1611",
   "crate_name": "sketches-ddsketch",
   "crate_version": "0.3.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915113,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 4,
+    "skipped_files": 0
+  },
   "profile": {
-    "findings": [
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/test_ddsketch.rs",
-          "line": 6,
-          "column": 1
-        },
-        "evidence": "std::time::Instant",
-        "origin": "import"
-      }
-    ]
+    "findings": []
   }
 }

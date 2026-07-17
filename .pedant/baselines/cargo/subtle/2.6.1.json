@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "4c8c6b40f94421848ad217a3ee2e312e5e3ae623d8af325ff2f57b86542d8c7f",
+  "source_hash": "13175cc00196401056876029d845435f4fe05a5baad8f440af7fdcfb91ef9858",
   "crate_name": "subtle",
   "crate_version": "2.6.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915113,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

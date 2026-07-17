@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "27a7b1c0a6a6524cd8b8bf6349d5ff2de77e5404b0a6c8234ad55877313b4399",
+  "source_hash": "6dad959c6e43c48b333ee81e686da2f47ef54fe6626dde30a916a855ed6ab814",
   "crate_name": "yoke-derive",
   "crate_version": "0.8.2",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915125,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 3,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "c7990699892ee48edd2afa7d45f3795212454a93ce3120f7dd717205c2837319",
+  "source_hash": "faaed4e33b716acdbf5dbf4c36271b3e24a64b6dfa562a7e09a1d7af54167b1b",
   "crate_name": "futures-util",
   "crate_version": "0.3.32",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915103,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 182,
+    "skipped_files": 0
+  },
+  "rust_version": "1.71",
   "profile": {
     "findings": [
       {

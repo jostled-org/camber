@@ -1,0 +1,27 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "0e28f8779744f2862642593aba8c71f5f75a9193f38b1931778d1f47870f5dec",
+  "crate_name": "http-body-util",
+  "crate_version": "0.1.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 19,
+    "skipped_files": 0
+  },
+  "rust_version": "1.61",
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/either.rs",
+          "line": 28,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

@@ -1,22 +1,16 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "3f8308eeafee64696c53e60a4e592cdaa6656f926e1c963ef54bc12c4e11a8c3",
+  "source_hash": "9237b235ef34685323a999526cd46012540e88dcff1543c1fb0c934af7f82099",
   "crate_name": "zerovec-derive",
   "crate_version": "0.11.3",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915125,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 6,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./examples/derives.rs",
-          "line": 63,
-          "column": 1
-        },
-        "evidence": "unsafe impl",
-        "origin": "code_site"
-      },
       {
         "capability": "proc_macro",
         "location": {

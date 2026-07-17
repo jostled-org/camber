@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "b2bb7c2d01c26f5139a349f41d17684e0869a98680ce8767416ef5542410345f",
+  "source_hash": "d3aaf81e4d52c9e694b0bf5e8a89513a196fefcbdf27f2dbc2ac7d0730cf422d",
   "crate_name": "adler2",
   "crate_version": "2.0.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915097,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": []
   }

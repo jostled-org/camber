@@ -1,62 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "a702b10f0a2b1993cf63844ed1c2aa3249dcf4fcd2303935fb80718ec7d562ea",
+  "source_hash": "e2cf759f96573bb16e0574c8dcd9fbae3bc60126880a50f4f44fc268e2c10696",
   "crate_name": "itertools",
   "crate_version": "0.14.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915105,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 50,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63.0",
   "profile": {
     "findings": [
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/bench1.rs",
-          "line": 243,
-          "column": 17
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/bench1.rs",
-          "line": 265,
-          "column": 17
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/bench1.rs",
-          "line": 287,
-          "column": 17
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/bench1.rs",
-          "line": 310,
-          "column": 17
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "process_exec",
-        "location": {
-          "file": "./examples/iris.rs",
-          "line": 69,
-          "column": 13
-        },
-        "evidence": "std::process::exit",
-        "origin": "import"
-      },
       {
         "capability": "unsafe_code",
         "location": {

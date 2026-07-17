@@ -4,7 +4,12 @@
   "crate_name": "tracing-serde",
   "crate_version": "0.2.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915115,
+  "timestamp": 1784286766,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63.0",
   "profile": {
     "findings": []
   }

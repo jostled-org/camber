@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "167dd20b14a542389ed2ac345f2934f337fde02c6882fcb2051f080d3502eb98",
+  "source_hash": "5a697e147a4db93601363fdd2855ee2a43efbda9db4c8d99c7fa1a764e4fb418",
   "crate_name": "equator",
   "crate_version": "0.4.2",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915103,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 8,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

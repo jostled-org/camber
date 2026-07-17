@@ -4,7 +4,11 @@
   "crate_name": "synstructure",
   "crate_version": "0.13.2",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915113,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": []
   }

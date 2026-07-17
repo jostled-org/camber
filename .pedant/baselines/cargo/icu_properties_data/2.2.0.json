@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "9526d86378259aa889c23768f1473f2938cb3635b428a7897a72affa1b4e1a39",
+  "source_hash": "484b7c4cd03edb3f2925750f4f6ba98e71e9fa185441070b8be7e8b8f0067642",
   "crate_name": "icu_properties_data",
   "crate_version": "2.2.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915105,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
+  "rust_version": "1.86",
   "profile": {
     "findings": [
       {

@@ -4,7 +4,11 @@
   "crate_name": "winapi-util",
   "crate_version": "0.1.11",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915118,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 5,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

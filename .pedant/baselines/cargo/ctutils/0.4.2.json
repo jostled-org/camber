@@ -1,0 +1,16 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "e81a90b89aa034ffc279fe0585dcb564bd7905e5c023dc3414b8dbf4a2ef7793",
+  "crate_name": "ctutils",
+  "crate_version": "0.4.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 12,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
+  "profile": {
+    "findings": []
+  }
+}

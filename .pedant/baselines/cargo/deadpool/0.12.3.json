@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "b041985df6ef44a9b117fc764a387469dcfc86ee62aba22790dd3511f8cefecd",
+  "source_hash": "645241b122159df729d279cc1725f48f1162c17227a877be2ce72deddf94024f",
   "crate_name": "deadpool",
   "crate_version": "0.12.3",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915102,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 16,
+    "skipped_files": 0
+  },
+  "rust_version": "1.75",
   "profile": {
     "findings": [
       {
@@ -25,36 +30,6 @@
           "column": 1
         },
         "evidence": "std::time::Instant",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/managed_deadlock.rs",
-          "line": 108,
-          "column": 24
-        },
-        "evidence": "time::timeout",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/managed.rs",
-          "line": 123,
-          "column": 17
-        },
-        "evidence": "time::sleep",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/unmanaged.rs",
-          "line": 167,
-          "column": 18
-        },
-        "evidence": "time::interval",
         "origin": "import"
       }
     ]

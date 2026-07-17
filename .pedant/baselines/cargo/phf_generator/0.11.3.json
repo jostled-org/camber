@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "e65d1af84927c5a5d8758b79665a12f40990fe2db4d058b999f4d50c01ee7fcc",
+  "source_hash": "e2f39d2d20b925d2511a087318b7e2970bde2fbcd39090a7e8ffc7df9ede75ad",
   "crate_name": "phf_generator",
   "crate_version": "0.11.3",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915109,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
+  "rust_version": "1.61",
   "profile": {
     "findings": []
   }

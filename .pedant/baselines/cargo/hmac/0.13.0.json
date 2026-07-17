@@ -1,0 +1,16 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "5291b3fb58b6c837fa3f8bc96da7b2c642c4922d644566d77c66eeb8d555bdfc",
+  "crate_name": "hmac",
+  "crate_version": "0.13.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 5,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
+  "profile": {
+    "findings": []
+  }
+}

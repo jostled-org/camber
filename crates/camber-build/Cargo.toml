@@ -15,5 +15,4 @@ workspace = true
 [dependencies]
 prost-build = "0.14"
 protoc-bin-vendored = "3"
-tonic-build = { version = "0.14", default-features = false }
 tonic-prost-build = "0.14"

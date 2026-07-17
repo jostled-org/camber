@@ -1,0 +1,16 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "104cc13c4f374c57d5c2338c6083357e0bfa1c5920431cb8ca25a3887221375f",
+  "crate_name": "wasm-bindgen-futures",
+  "crate_version": "0.4.76",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286766,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.77",
+  "profile": {
+    "findings": []
+  }
+}

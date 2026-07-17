@@ -1,0 +1,127 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "fd97c9002b40775334ddc6afe65e4bd2726ac5782b812a8c99113386bffebdcf",
+  "crate_name": "aws-sdk-sqs",
+  "crate_version": "1.103.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 294,
+    "skipped_files": 0
+  },
+  "rust_version": "1.94.1",
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 899,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 917,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 936,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 952,
+          "column": 23
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1082,
+          "column": 54
+        },
+        "evidence": "https://sqs-fips.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1102,
+          "column": 54
+        },
+        "evidence": "https://sqs.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1118,
+          "column": 54
+        },
+        "evidence": "https://sqs-fips.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1139,
+          "column": 54
+        },
+        "evidence": "https://sqs.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/config/endpoint.rs",
+          "line": 1160,
+          "column": 54
+        },
+        "evidence": "https://sqs.",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/endpoint_lib.rs",
+          "line": 5,
+          "column": 14
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/endpoint_lib.rs",
+          "line": 8,
+          "column": 38
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      }
+    ]
+  }
+}

@@ -1,52 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "c04fdfef4f49765ad927126a772a6792bd0dcf3431a3281c4af83d5c6274d791",
+  "source_hash": "b5f0409874b4b16cd426509c74fd364826fc2c30e669295bcb71bbb4171d0887",
   "crate_name": "getrandom",
   "crate_version": "0.3.4",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915103,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 30,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63",
   "profile": {
     "findings": [
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/buffer.rs",
-          "line": 40,
-          "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/buffer.rs",
-          "line": 42,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/buffer.rs",
-          "line": 64,
-          "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/buffer.rs",
-          "line": 66,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
       {
         "capability": "process_exec",
         "location": {
@@ -1202,6 +1167,26 @@
       {
         "capability": "unsafe_code",
         "location": {
+          "file": "./src/backends/windows.rs",
+          "line": 53,
+          "column": 18
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/backends/windows.rs",
+          "line": 44,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
           "file": "./src/backends/windows_legacy.rs",
           "line": 37,
           "column": 19
@@ -1228,26 +1213,6 @@
         },
         "evidence": "#[link]",
         "origin": "attribute"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/backends/windows.rs",
-          "line": 53,
-          "column": 18
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./src/backends/windows.rs",
-          "line": 44,
-          "column": 1
-        },
-        "evidence": "extern block",
-        "origin": "code_site"
       },
       {
         "capability": "unsafe_code",
@@ -1297,26 +1262,6 @@
           "column": 5
         },
         "evidence": "extern block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./src/util_libc.rs",
-          "line": 70,
-          "column": 47
-        },
-        "evidence": "libc::EINTR",
-        "origin": "import"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/util_libc.rs",
-          "line": 38,
-          "column": 22
-        },
-        "evidence": "unsafe block",
         "origin": "code_site"
       },
       {
@@ -1427,26 +1372,6 @@
           "column": 8
         },
         "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/mod.rs",
-          "line": 265,
-          "column": 9
-        },
-        "evidence": "std::time::SystemTime",
-        "origin": "import"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/mod.rs",
-          "line": 264,
-          "column": 5
-        },
-        "evidence": "unsafe fn",
         "origin": "code_site"
       }
     ]

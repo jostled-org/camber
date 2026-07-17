@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "e51cca68c7489a04ecbb34ef0a9dea1737610f14bf779e4f49fe7f702c0faf50",
+  "source_hash": "5b18268292c3e8b3ad7c315914e9cfcfd36182f66ed01b7258c168304ae54d40",
   "crate_name": "pprof",
   "crate_version": "0.15.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915109,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 16,
+    "skipped_files": 0
+  },
+  "rust_version": "1.74.0",
   "profile": {
     "findings": [
       {
@@ -72,56 +77,6 @@
         "evidence": "std::fs::File",
         "origin": "import",
         "execution_context": "build_hook"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./examples/backtrace_while_sampling.rs",
-          "line": 3,
-          "column": 1
-        },
-        "evidence": "std::fs::File",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./examples/flamegraph.rs",
-          "line": 3,
-          "column": 1
-        },
-        "evidence": "std::fs::File",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./examples/multithread_flamegraph.rs",
-          "line": 3,
-          "column": 1
-        },
-        "evidence": "std::fs::File",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./examples/profile_proto_with_prost.rs",
-          "line": 4,
-          "column": 1
-        },
-        "evidence": "std::fs::File",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./examples/profile_proto_with_protobuf_codec.rs",
-          "line": 4,
-          "column": 1
-        },
-        "evidence": "std::fs::File",
-        "origin": "import"
       },
       {
         "capability": "ffi",

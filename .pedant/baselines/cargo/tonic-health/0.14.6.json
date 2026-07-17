@@ -1,0 +1,16 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "5c7186fe08dc48a1d7eede53e629d5f534a3564388daf4f6f1f9871ed1d833ad",
+  "crate_name": "tonic-health",
+  "crate_version": "0.14.6",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
+  "rust_version": "1.88",
+  "profile": {
+    "findings": []
+  }
+}

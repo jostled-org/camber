@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "467f803e2102315329a14505d2bf956500e98f56a0ed9d3c068be9eafc85c5b0",
+  "source_hash": "0dab8494c057da7e8bd2f9e34a5f7697d1cbc1932191993d5407dbf558917694",
   "crate_name": "event-listener-strategy",
   "crate_version": "0.5.4",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915103,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.60",
   "profile": {
     "findings": [
       {

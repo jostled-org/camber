@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "82125d8f7e72638a66d2fcbca1bd7f89620f9cabf529e86fda0daeb25387cc6b",
+  "source_hash": "5595f1c003c86fb8217b8f58e8d6bfe47b3ead767e5b15831716850d917e2fa7",
   "crate_name": "petgraph",
   "crate_version": "0.8.3",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915109,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 64,
+    "skipped_files": 0
+  },
+  "rust_version": "1.64",
   "profile": {
     "findings": [
       {
@@ -166,16 +171,6 @@
         },
         "evidence": "unsafe block",
         "origin": "code_site"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./tests/iso.rs",
-          "line": 4,
-          "column": 1
-        },
-        "evidence": "std::fs::File",
-        "origin": "import"
       }
     ]
   }

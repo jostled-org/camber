@@ -1,22 +1,16 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "465eac39227effa18ed4676d830dd3f8da56dec05eaa8c76d8f99b2357e78355",
+  "source_hash": "7cfa598d4ca5f467774a866230890534308d8b270437a8c62ba11ca2ef03c30a",
   "crate_name": "wasm-streams",
   "crate_version": "0.5.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915116,
+  "timestamp": 1784286766,
+  "analysis_completeness": {
+    "analyzed_files": 21,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/fetch_as_stream.rs",
-          "line": 16,
-          "column": 15
-        },
-        "evidence": "https://drager.github.io/wasm-pack/public/img/wasm-ferris.png",
-        "origin": "string_literal"
-      },
       {
         "capability": "ffi",
         "location": {
@@ -46,46 +40,6 @@
         },
         "evidence": "extern block",
         "origin": "code_site"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/js/readable_stream.rs",
-          "line": 6,
-          "column": 1
-        },
-        "evidence": "extern block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/js/transform_stream.rs",
-          "line": 6,
-          "column": 1
-        },
-        "evidence": "extern block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./tests/js/writable_stream.rs",
-          "line": 10,
-          "column": 1
-        },
-        "evidence": "extern block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/tests/fetch_as_stream.rs",
-          "line": 13,
-          "column": 15
-        },
-        "evidence": "https://drager.github.io/wasm-pack/public/img/wasm-ferris.png",
-        "origin": "string_literal"
       }
     ]
   }

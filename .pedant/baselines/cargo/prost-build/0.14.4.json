@@ -1,0 +1,97 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "81469eef53001f97ba5340de52e5855b524197ff419579180750c5a39168bc24",
+  "crate_name": "prost-build",
+  "crate_version": "0.14.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286764,
+  "analysis_completeness": {
+    "analyzed_files": 13,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/config.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/config.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/config.rs",
+          "line": 933,
+          "column": 19
+        },
+        "evidence": "tempfile::Builder::new",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/extern_paths.rs",
+          "line": 136,
+          "column": 46
+        },
+        "evidence": "::abc::def",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/extern_paths.rs",
+          "line": 156,
+          "column": 30
+        },
+        "evidence": "::abc::def",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 384,
+          "column": 23
+        },
+        "evidence": "tempfile::tempdir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 393,
+          "column": 22
+        },
+        "evidence": "std::fs::read_dir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 517,
+          "column": 31
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      }
+    ]
+  }
+}

@@ -4,7 +4,12 @@
   "crate_name": "rand_core",
   "crate_version": "0.9.5",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915110,
+  "timestamp": 1784286764,
+  "analysis_completeness": {
+    "analyzed_files": 5,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63",
   "profile": {
     "findings": []
   }

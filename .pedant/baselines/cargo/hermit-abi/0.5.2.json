@@ -4,7 +4,11 @@
   "crate_name": "hermit-abi",
   "crate_version": "0.5.2",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915104,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

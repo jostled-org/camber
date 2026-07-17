@@ -4,7 +4,12 @@
   "crate_name": "windows-result",
   "crate_version": "0.4.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915119,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 8,
+    "skipped_files": 0
+  },
+  "rust_version": "1.82",
   "profile": {
     "findings": [
       {

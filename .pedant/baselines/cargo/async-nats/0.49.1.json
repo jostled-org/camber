@@ -1,0 +1,427 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "fd2e0492bea87376e02159ccb192ae96d08f80419709939f852561ae4fa15573",
+  "crate_name": "async-nats",
+  "crate_version": "0.49.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 32,
+    "skipped_files": 0
+  },
+  "rust_version": "1.88.0",
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/auth_utils.rs",
+          "line": 27,
+          "column": 5
+        },
+        "evidence": "tokio::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connector.rs",
+          "line": 52,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpSocket",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connector.rs",
+          "line": 52,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/crypto.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "ring",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/header.rs",
+          "line": 675,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/consumer/mod.rs",
+          "line": 24,
+          "column": 1
+        },
+        "evidence": "time::serde::rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/consumer/mod.rs",
+          "line": 27,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/consumer/pull.rs",
+          "line": 21,
+          "column": 1
+        },
+        "evidence": "time::serde::rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/consumer/pull.rs",
+          "line": 21,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/consumer/push.rs",
+          "line": 43,
+          "column": 1
+        },
+        "evidence": "time::serde::rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/consumer/push.rs",
+          "line": 43,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/kv/mod.rs",
+          "line": 30,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/message.rs",
+          "line": 25,
+          "column": 1
+        },
+        "evidence": "time::format_description::well_known::Rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/message.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/object_store/mod.rs",
+          "line": 41,
+          "column": 1
+        },
+        "evidence": "time::serde::rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/object_store/mod.rs",
+          "line": 41,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/stream.rs",
+          "line": 36,
+          "column": 1
+        },
+        "evidence": "time::serde::rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/jetstream/stream.rs",
+          "line": 36,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 211,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1690,
+          "column": 9
+        },
+        "evidence": "tokio::net::lookup_host",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1904,
+          "column": 21
+        },
+        "evidence": "ws://127.0.0.1:80",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1905,
+          "column": 21
+        },
+        "evidence": "ws://[::]:80",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1906,
+          "column": 21
+        },
+        "evidence": "ws://127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1907,
+          "column": 21
+        },
+        "evidence": "ws://[::]",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1913,
+          "column": 21
+        },
+        "evidence": "wss://127.0.0.1",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1914,
+          "column": 21
+        },
+        "evidence": "wss://[::]",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1915,
+          "column": 21
+        },
+        "evidence": "wss://127.0.0.1:443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 1916,
+          "column": 21
+        },
+        "evidence": "wss://[::]:443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/options.rs",
+          "line": 24,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/options.rs",
+          "line": 463,
+          "column": 5
+        },
+        "evidence": " let creds = \"-----BEGIN NATS USER JWT-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/options.rs",
+          "line": 471,
+          "column": 5
+        },
+        "evidence": " -----BEGIN USER NKEY SEED-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/options.rs",
+          "line": 497,
+          "column": 5
+        },
+        "evidence": " let creds = \"-----BEGIN NATS USER JWT-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/options.rs",
+          "line": 505,
+          "column": 5
+        },
+        "evidence": " -----BEGIN USER NKEY SEED-----",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/service/endpoint.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/service/mod.rs",
+          "line": 16,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/service/mod.rs",
+          "line": 33,
+          "column": 1
+        },
+        "evidence": "time::serde::rfc3339",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/service/mod.rs",
+          "line": 34,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/subject.rs",
+          "line": 48,
+          "column": 15
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/subject.rs",
+          "line": 124,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/subject.rs",
+          "line": 255,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 28,
+          "column": 20
+        },
+        "evidence": "std::fs::File::open",
+        "origin": "import"
+      }
+    ]
+  }
+}

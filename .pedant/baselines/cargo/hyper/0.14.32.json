@@ -4,7 +4,11 @@
   "crate_name": "hyper",
   "crate_version": "0.14.32",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915104,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 71,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

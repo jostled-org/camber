@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "50e33751f5a07316bfe9e6e39e313d7ab16714e1660d25729b11207f710d515f",
+  "source_hash": "5ba6f996666c6c278e75192b5cc896f62c25a12933b7d389ead3fda7684f23f5",
   "crate_name": "writeable",
   "crate_version": "0.6.3",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915125,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 10,
+    "skipped_files": 0
+  },
+  "rust_version": "1.82",
   "profile": {
     "findings": [
       {

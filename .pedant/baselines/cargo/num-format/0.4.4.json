@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "6434d759b4d359af7de9ad2ca80b1a1c75dee593b051f224c8b6b918324ce813",
+  "source_hash": "86418915096bcbe0e05a2d279014f31632cb8fb23066c6af7fd794cddf895c8b",
   "crate_name": "num-format",
   "crate_version": "0.4.4",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915108,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 24,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

@@ -1,0 +1,98 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "1e18c3ab51a24d031572a134551143810140a7b3bc344da2e0654c63724cd67b",
+  "crate_name": "aws-types",
+  "crate_version": "1.4.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 11,
+    "skipped_files": 0
+  },
+  "rust_version": "1.94.1",
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/os_shim_internal.rs",
+          "line": 132,
+          "column": 28
+        },
+        "evidence": "std::fs::read",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/os_shim_internal.rs",
+          "line": 165,
+          "column": 17
+        },
+        "evidence": "std::fs::write",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/os_shim_internal.rs",
+          "line": 170,
+          "column": 21
+        },
+        "evidence": "std::fs::set_permissions",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/os_shim_internal.rs",
+          "line": 170,
+          "column": 52
+        },
+        "evidence": "std::fs::Permissions::from_mode",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/os_shim_internal.rs",
+          "line": 240,
+          "column": 28
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "file_write",
+        "location": {
+          "file": "./src/os_shim_internal.rs",
+          "line": 321,
+          "column": 20
+        },
+        "evidence": "tempfile::tempdir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/os_shim_internal.rs",
+          "line": 346,
+          "column": 20
+        },
+        "evidence": "std::fs::metadata",
+        "origin": "import"
+      }
+    ]
+  }
+}

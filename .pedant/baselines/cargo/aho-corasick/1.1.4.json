@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "55039a4fb73fc14aaee4165c56956b9546c315c63f25ec75f6e395558ae52cde",
+  "source_hash": "45d65478a4a1556c930c62765e54cf90acac5bae0abd8f24628ebbb585987afb",
   "crate_name": "aho-corasick",
   "crate_version": "1.1.4",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915097,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 31,
+    "skipped_files": 0
+  },
+  "rust_version": "1.60.0",
   "profile": {
     "findings": [
       {

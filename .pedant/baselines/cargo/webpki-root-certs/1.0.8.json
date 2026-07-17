@@ -1,0 +1,16 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "74d8de36fa34b47684d0222d878b58c28a0bb1f3e8d40302bfbb9c3d4de1d270",
+  "crate_name": "webpki-root-certs",
+  "crate_version": "1.0.8",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.70",
+  "profile": {
+    "findings": []
+  }
+}

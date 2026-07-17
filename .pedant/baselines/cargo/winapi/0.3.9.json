@@ -4,7 +4,11 @@
   "crate_name": "winapi",
   "crate_version": "0.3.9",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915119,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 405,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {
@@ -1581,6 +1585,16 @@
       {
         "capability": "ffi",
         "location": {
+          "file": "./src/um/d2d1.rs",
+          "line": 955,
+          "column": 1
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
           "file": "./src/um/d2d1_1.rs",
           "line": 818,
           "column": 1
@@ -1593,16 +1607,6 @@
         "location": {
           "file": "./src/um/d2d1_3.rs",
           "line": 679,
-          "column": 1
-        },
-        "evidence": "extern block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "ffi",
-        "location": {
-          "file": "./src/um/d2d1.rs",
-          "line": 955,
           "column": 1
         },
         "evidence": "extern block",

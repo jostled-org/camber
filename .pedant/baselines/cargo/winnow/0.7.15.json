@@ -1,22 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "70354f12ccbf5feed4977458759aec33c857b51bbea5e00eb9d3fb5c171ac4b9",
+  "source_hash": "6bb83a165434cd8b687eb4a4c1a0c50192f4e8a0cae48a7ec5995435789c28bc",
   "crate_name": "winnow",
   "crate_version": "0.7.15",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915124,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 61,
+    "skipped_files": 0
+  },
+  "rust_version": "1.65.0",
   "profile": {
     "findings": [
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./examples/ndjson/main.rs",
-          "line": 17,
-          "column": 20
-        },
-        "evidence": "std::fs::File::open",
-        "origin": "import"
-      },
       {
         "capability": "unsafe_code",
         "location": {

@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "231e0cab78d6d9c20d50039cc9093f01483e4f144d41d0136cdff332b5a2f610",
+  "source_hash": "dd760695730b4ce1d347dabb4079ee4ba2e54bf68528ae125dfd25bc3df2fefa",
   "crate_name": "parking",
   "crate_version": "2.2.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915109,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.51",
   "profile": {
     "findings": [
       {
@@ -12,16 +17,6 @@
         "location": {
           "file": "./src/lib.rs",
           "line": 66,
-          "column": 1
-        },
-        "evidence": "std::time::Instant",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/parking.rs",
-          "line": 4,
           "column": 1
         },
         "evidence": "std::time::Instant",

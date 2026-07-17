@@ -1,0 +1,27 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "e9ab83059fdbb30200fc201b5cf8b924290f362100cfc0f8ea79ad35fe2fee5e",
+  "crate_name": "aws-smithy-runtime-api-macros",
+  "crate_version": "1.1.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.94.1",
+  "profile": {
+    "findings": [
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 62,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_attribute]",
+        "origin": "attribute"
+      }
+    ]
+  }
+}

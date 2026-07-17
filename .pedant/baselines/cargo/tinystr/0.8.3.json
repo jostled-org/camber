@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "71cbee375965bd9ecd8d816a8bfc6b9a065c62afef08c32ad08fecb50aec89d0",
+  "source_hash": "cd690a93d2498f2a02b78e9879ac90cb2416b8c97ea865c0723475d4b47e273b",
   "crate_name": "tinystr",
   "crate_version": "0.8.3",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915114,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 10,
+    "skipped_files": 0
+  },
+  "rust_version": "1.82",
   "profile": {
     "findings": [
       {

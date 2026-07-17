@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "401b251b27dc286b2cdbfbda3dfcd61ff8d553befad58567c5a82a3bd5e2b3a3",
+  "source_hash": "756a88ee49f11c6f20354d8cc51bf72348e25404dc4619d466950715cca42dcd",
   "crate_name": "semver",
   "crate_version": "1.0.28",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915112,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 8,
+    "skipped_files": 0
+  },
+  "rust_version": "1.68",
   "profile": {
     "findings": [
       {
@@ -476,16 +481,6 @@
         },
         "evidence": "unsafe block",
         "origin": "code_site"
-      },
-      {
-        "capability": "process_exec",
-        "location": {
-          "file": "./tests/node/mod.rs",
-          "line": 5,
-          "column": 1
-        },
-        "evidence": "std::process::Command",
-        "origin": "import"
       }
     ]
   }

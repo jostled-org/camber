@@ -4,7 +4,11 @@
   "crate_name": "unicase",
   "crate_version": "2.9.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915116,
+  "timestamp": 1784286766,
+  "analysis_completeness": {
+    "analyzed_files": 4,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": []
   }

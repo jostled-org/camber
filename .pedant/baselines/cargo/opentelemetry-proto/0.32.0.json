@@ -1,0 +1,57 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "ef0e4d6096423044e2355335bcca2a36c74b9ee58882cc7ce1f78d488616c3b3",
+  "crate_name": "opentelemetry-proto",
+  "crate_version": "0.32.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 9,
+    "skipped_files": 0
+  },
+  "rust_version": "1.75.0",
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/transform/common.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/transform/trace.rs",
+          "line": 268,
+          "column": 25
+        },
+        "evidence": "std::time::SystemTime::now",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transform/trace.rs",
+          "line": 480,
+          "column": 38
+        },
+        "evidence": "http://resource-schema",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/transform/trace.rs",
+          "line": 484,
+          "column": 30
+        },
+        "evidence": "http://instrumentation-schema",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

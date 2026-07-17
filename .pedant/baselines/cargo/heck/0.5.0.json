@@ -4,7 +4,12 @@
   "crate_name": "heck",
   "crate_version": "0.5.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915104,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 9,
+    "skipped_files": 0
+  },
+  "rust_version": "1.56",
   "profile": {
     "findings": []
   }

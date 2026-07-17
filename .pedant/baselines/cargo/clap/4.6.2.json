@@ -1,0 +1,16 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "51b0d2636f2aec8433967a1126f70575f2f51ede75a22170759fc294d38305e4",
+  "crate_name": "clap",
+  "crate_version": "4.6.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 22,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
+  "profile": {
+    "findings": []
+  }
+}

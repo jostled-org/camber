@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "dace015c552a107109029d5779cd5597ec5ea3cd6b7c02ed65f1d3ae960cb43e",
+  "source_hash": "404fd941a26321350f1c1d3c423a6a7601ad398055f732623c3150826e7363d6",
   "crate_name": "tokio-util",
   "crate_version": "0.7.18",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915114,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 58,
+    "skipped_files": 0
+  },
+  "rust_version": "1.71",
   "profile": {
     "findings": [
       {
@@ -276,116 +281,6 @@
         },
         "evidence": "unsafe block",
         "origin": "code_site"
-      },
-      {
-        "capability": "file_write",
-        "location": {
-          "file": "./tests/compat.rs",
-          "line": 7,
-          "column": 1
-        },
-        "evidence": "tempfile::NamedTempFile",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./tests/compat.rs",
-          "line": 8,
-          "column": 1
-        },
-        "evidence": "tokio::fs::OpenOptions",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/time_delay_queue.rs",
-          "line": 27,
-          "column": 5
-        },
-        "evidence": "time::pause",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/time_delay_queue.rs",
-          "line": 264,
-          "column": 5
-        },
-        "evidence": "time::sleep",
-        "origin": "import"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/time_delay_queue.rs",
-          "line": 276,
-          "column": 5
-        },
-        "evidence": "time::sleep_until",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/udp.rs",
-          "line": 6,
-          "column": 1
-        },
-        "evidence": "tokio::net::UdpSocket",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/udp.rs",
-          "line": 30,
-          "column": 37
-        },
-        "evidence": "127.0.0.1:0",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/udp.rs",
-          "line": 31,
-          "column": 37
-        },
-        "evidence": "127.0.0.1:0",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/udp.rs",
-          "line": 105,
-          "column": 33
-        },
-        "evidence": "127.0.0.1:0",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/udp.rs",
-          "line": 106,
-          "column": 33
-        },
-        "evidence": "127.0.0.1:0",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/udp.rs",
-          "line": 126,
-          "column": 42
-        },
-        "evidence": "127.0.0.1:0",
-        "origin": "string_literal"
       }
     ]
   }

@@ -4,7 +4,11 @@
   "crate_name": "rustls-platform-verifier-android",
   "crate_version": "0.1.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915112,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": []
   }

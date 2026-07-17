@@ -1,0 +1,67 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "87492f92456faddd44f4313f257f08e3040f9b4f9b173ea567899b556422eeb4",
+  "crate_name": "aws-smithy-json",
+  "crate_version": "0.63.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 12,
+    "skipped_files": 0
+  },
+  "rust_version": "1.94.1",
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/deserialize.rs",
+          "line": 319,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/escape.rs",
+          "line": 91,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/protocol/aws_json_rpc.rs",
+          "line": 157,
+          "column": 17
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/protocol/aws_json_rpc.rs",
+          "line": 173,
+          "column": 17
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/protocol/aws_json_rpc.rs",
+          "line": 187,
+          "column": 60
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

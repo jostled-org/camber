@@ -1,22 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "b243add5a557cf571f07eb21b2fe2b18da38e7abd9fc9bd2239bbdf994af7b00",
+  "source_hash": "e86288034d1522a1055c65328eb8dae1a2fa86abba57314b71ed30ca9f39c40b",
   "crate_name": "pem",
   "crate_version": "3.0.6",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915109,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 3,
+    "skipped_files": 0
+  },
+  "rust_version": "1.60.0",
   "profile": {
     "findings": [
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./benches/pem_benchmark.rs",
-          "line": 3,
-          "column": 22
-        },
-        "evidence": "-----BEGIN RSA PRIVATE KEY-----\r\nMIIBPQIBAAJBAOsfi5AGYhdRs/x6q5H7kScxA0Kzzqe6WI6gf6+tc6IvKQJo5rQc\r\ndWWSQ0nRGt2hOPDO+35NKhQEjBQxPh/v7n0CAwEAAQJBAOGaBAyuw0ICyENy5NsO\r\n2gkT00AWTSzM9Zns0HedY31yEabkuFvrMCHjscEF7u3Y6PB7An3IzooBHchsFDei\r\nAAECIQD/JahddzR5K3A6rzTidmAf1PBtqi7296EnWv8WvpfAAQIhAOvowIXZI4Un\r\nDXjgZ9ekuUjZN+GUQRAVlkEEohGLVy59AiEA90VtqDdQuWWpvJX0cM08V10tLXrT\r\nTTGsEtITid1ogAECIQDAaFl90ZgS5cMrL3wCeatVKzVUmuJmB/VAmlLFFGzK0QIh\r\nANJGc7AFk4fyFD/OezhwGHbWmo/S+bfeAiIh2Ss2FxKJ\r\n-----END RSA PRIVATE KEY-----\r\n\r\n-----BEGIN RSA PUBLIC KEY-----\r\nMIIBOgIBAAJBAMIeCnn9G/7g2Z6J+qHOE2XCLLuPoh5NHTO2Fm+PbzBvafBo0oYo\r\nQVVy7frzxmOqx6iIZBxTyfAQqBPO3Br59BMCAwEAAQJAX+PjHPuxdqiwF6blTkS0\r\nRFI1MrnzRbCmOkM6tgVO0cd6r5Z4bDGLusH9yjI9iI84gPRjK0AzymXFmBGuREHI\r\nsQIhAPKf4pp+Prvutgq2ayygleZChBr1DC4XnnufBNtaswyvAiEAzNGVKgNvzuhk\r\nijoUXIDruJQEGFGvZTsi1D2RehXiT90CIQC4HOQUYKCydB7oWi1SHDokFW2yFyo6\r\n/+lf3fgNjPI6OQIgUPmTFXciXxT1msh3gFLf3qt2Kv8wbr9Ad9SXjULVpGkCIB+g\r\nRzHX0lkJl9Stshd/7Gbt65/QYq+v+xvAeT0CoyIg\r\n-----END RSA PUBLIC KEY-----\r\n",
-        "origin": "string_literal"
-      },
       {
         "capability": "crypto",
         "location": {

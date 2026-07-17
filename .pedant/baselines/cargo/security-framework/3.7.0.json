@@ -1,22 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "f40a8b465e0dc66e4658afff20c3c767912e185454baad900a2fd0de3a7862f0",
+  "source_hash": "0150983998e1fd1848ae5221e03bf7b4bd3597b42fdb99fc39891e0f4ff540e5",
   "crate_name": "security-framework",
   "crate_version": "3.7.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915112,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 35,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
   "profile": {
     "findings": [
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/client.rs",
-          "line": 3,
-          "column": 1
-        },
-        "evidence": "std::net::TcpStream",
-        "origin": "import"
-      },
       {
         "capability": "unsafe_code",
         "location": {
@@ -2110,26 +2105,6 @@
       {
         "capability": "unsafe_code",
         "location": {
-          "file": "./src/os/macos/certificate_oids.rs",
-          "line": 16,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/os/macos/certificate_oids.rs",
-          "line": 32,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
           "file": "./src/os/macos/certificate.rs",
           "line": 39,
           "column": 9
@@ -2182,6 +2157,26 @@
         "location": {
           "file": "./src/os/macos/certificate.rs",
           "line": 121,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/os/macos/certificate_oids.rs",
+          "line": 16,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/os/macos/certificate_oids.rs",
+          "line": 32,
           "column": 9
         },
         "evidence": "unsafe block",
@@ -2678,26 +2673,6 @@
         "origin": "code_site"
       },
       {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/os/macos/keychain_item.rs",
-          "line": 19,
-          "column": 1
-        },
-        "evidence": "unsafe impl",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/os/macos/keychain_item.rs",
-          "line": 20,
-          "column": 1
-        },
-        "evidence": "unsafe impl",
-        "origin": "code_site"
-      },
-      {
         "capability": "file_write",
         "location": {
           "file": "./src/os/macos/keychain.rs",
@@ -2815,6 +2790,26 @@
           "column": 9
         },
         "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/os/macos/keychain_item.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/os/macos/keychain_item.rs",
+          "line": 20,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
         "origin": "code_site"
       },
       {
@@ -3050,126 +3045,6 @@
       {
         "capability": "unsafe_code",
         "location": {
-          "file": "./src/passwords_options.rs",
-          "line": 104,
-          "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/passwords_options.rs",
-          "line": 109,
-          "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/passwords_options.rs",
-          "line": 118,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/passwords_options.rs",
-          "line": 125,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/passwords_options.rs",
-          "line": 132,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/passwords_options.rs",
-          "line": 161,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/passwords_options.rs",
-          "line": 173,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/passwords_options.rs",
-          "line": 180,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/passwords_options.rs",
-          "line": 187,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/passwords_options.rs",
-          "line": 195,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/passwords_options.rs",
-          "line": 202,
-          "column": 16
-        },
-        "evidence": "unsafe fn",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/passwords_options.rs",
-          "line": 205,
-          "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
           "file": "./src/passwords.rs",
           "line": 54,
           "column": 5
@@ -3283,6 +3158,126 @@
           "file": "./src/passwords.rs",
           "line": 198,
           "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/passwords_options.rs",
+          "line": 104,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/passwords_options.rs",
+          "line": 109,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/passwords_options.rs",
+          "line": 118,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/passwords_options.rs",
+          "line": 125,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/passwords_options.rs",
+          "line": 132,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/passwords_options.rs",
+          "line": 161,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/passwords_options.rs",
+          "line": 173,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/passwords_options.rs",
+          "line": 180,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/passwords_options.rs",
+          "line": 187,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/passwords_options.rs",
+          "line": 195,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/passwords_options.rs",
+          "line": 202,
+          "column": 16
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/passwords_options.rs",
+          "line": 205,
+          "column": 13
         },
         "evidence": "unsafe block",
         "origin": "code_site"
@@ -3810,56 +3805,6 @@
       {
         "capability": "unsafe_code",
         "location": {
-          "file": "./src/trust_settings.rs",
-          "line": 99,
-          "column": 21
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/trust_settings.rs",
-          "line": 132,
-          "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/trust_settings.rs",
-          "line": 154,
-          "column": 30
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/trust_settings.rs",
-          "line": 169,
-          "column": 33
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/trust_settings.rs",
-          "line": 183,
-          "column": 32
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
           "file": "./src/trust.rs",
           "line": 57,
           "column": 1
@@ -4073,6 +4018,56 @@
           "file": "./src/trust.rs",
           "line": 272,
           "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/trust_settings.rs",
+          "line": 99,
+          "column": 21
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/trust_settings.rs",
+          "line": 132,
+          "column": 13
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/trust_settings.rs",
+          "line": 154,
+          "column": 30
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/trust_settings.rs",
+          "line": 169,
+          "column": 33
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/trust_settings.rs",
+          "line": 183,
+          "column": 32
         },
         "evidence": "unsafe block",
         "origin": "code_site"

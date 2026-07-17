@@ -4,7 +4,12 @@
   "crate_name": "ppv-lite86",
   "crate_version": "0.2.21",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915109,
+  "timestamp": 1784286764,
+  "analysis_completeness": {
+    "analyzed_files": 6,
+    "skipped_files": 0
+  },
+  "rust_version": "1.61",
   "profile": {
     "findings": [
       {

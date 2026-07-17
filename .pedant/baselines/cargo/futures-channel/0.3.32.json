@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "977e3daffbc78b64431f9b1ea92ee718a77c4fee77695c256a60da96a9f6104c",
+  "source_hash": "beeffbc6f74680bd43e53a059a8da851a1c990710936e2ff99b2a8aef65bc1fb",
   "crate_name": "futures-channel",
   "crate_version": "0.3.32",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915103,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 6,
+    "skipped_files": 0
+  },
+  "rust_version": "1.71",
   "profile": {
     "findings": [
       {
@@ -226,16 +231,6 @@
         },
         "evidence": "unsafe block",
         "origin": "code_site"
-      },
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./tests/mpsc-close.rs",
-          "line": 11,
-          "column": 1
-        },
-        "evidence": "std::time::Instant",
-        "origin": "import"
       }
     ]
   }

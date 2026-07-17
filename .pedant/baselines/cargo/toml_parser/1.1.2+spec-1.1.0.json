@@ -4,7 +4,12 @@
   "crate_name": "toml_parser",
   "crate_version": "1.1.2+spec-1.1.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915114,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 15,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
   "profile": {
     "findings": [
       {

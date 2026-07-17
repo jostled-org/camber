@@ -1,0 +1,147 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "b81e5d69108716965637701a5facb1c00b29269c2ee9728e558f50f4756f29fc",
+  "crate_name": "aws-smithy-runtime-api",
+  "crate_version": "1.13.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 35,
+    "skipped_files": 0
+  },
+  "rust_version": "1.94.1",
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connection.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connection.rs",
+          "line": 225,
+          "column": 5
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/connection.rs",
+          "line": 225,
+          "column": 5
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/dns.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "std::net::IpAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/identity.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/identity/http.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/interceptors/context.rs",
+          "line": 618,
+          "column": 35
+        },
+        "evidence": "https://www.amazon.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/request.rs",
+          "line": 425,
+          "column": 18
+        },
+        "evidence": "http://foo.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/request.rs",
+          "line": 440,
+          "column": 18
+        },
+        "evidence": "http://foo.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/request.rs",
+          "line": 445,
+          "column": 21
+        },
+        "evidence": "http://bar.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/request.rs",
+          "line": 455,
+          "column": 18
+        },
+        "evidence": "http://foo.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/request.rs",
+          "line": 469,
+          "column": 45
+        },
+        "evidence": "https://www.amazon.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/http/request.rs",
+          "line": 491,
+          "column": 49
+        },
+        "evidence": "https://www.amazon.com",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

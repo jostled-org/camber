@@ -1,22 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "9779d304b591f3ea7f8d0ee97434afdfbb28584f6b0e4fcec6152fa703258af5",
+  "source_hash": "444d643957dbc1af90f6cff0beffc965020004bfd6c92136ab69ff020950df53",
   "crate_name": "hashbrown",
   "crate_version": "0.16.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915104,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 28,
+    "skipped_files": 0
+  },
+  "rust_version": "1.65.0",
   "profile": {
     "findings": [
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/insert_unique_unchecked.rs",
-          "line": 28,
-          "column": 13
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
       {
         "capability": "unsafe_code",
         "location": {
@@ -1105,136 +1100,6 @@
           "column": 9
         },
         "evidence": "unsafe fn",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 401,
-          "column": 1
-        },
-        "evidence": "unsafe impl",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 409,
-          "column": 1
-        },
-        "evidence": "unsafe impl",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 921,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 952,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 986,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 1005,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 1030,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 1051,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 1070,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 1106,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 1147,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 1243,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./src/raw_entry.rs",
-          "line": 1284,
-          "column": 9
-        },
-        "evidence": "unsafe block",
         "origin": "code_site"
       },
       {
@@ -2765,6 +2630,136 @@
           "column": 13
         },
         "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 401,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 409,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 921,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 952,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 986,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 1005,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 1030,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 1051,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 1070,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 1106,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 1147,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 1243,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/raw_entry.rs",
+          "line": 1284,
+          "column": 9
+        },
+        "evidence": "unsafe block",
         "origin": "code_site"
       },
       {

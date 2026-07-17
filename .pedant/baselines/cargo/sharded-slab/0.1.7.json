@@ -1,22 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "231dcf48bb838f88a02e0f5a0ca7a97363c8a5a4dd5a4c8f4358ae780cbabb18",
+  "source_hash": "33cf0bf390d17a05709462381da90eede9ed9a3468530c8d7a9493cc803aa08e",
   "crate_name": "sharded-slab",
   "crate_version": "0.1.7",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915113,
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 18,
+    "skipped_files": 0
+  },
+  "rust_version": "1.42.0",
   "profile": {
     "findings": [
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./benches/bench.rs",
-          "line": 2,
-          "column": 1
-        },
-        "evidence": "std::time::Instant",
-        "origin": "import"
-      },
       {
         "capability": "unsafe_code",
         "location": {

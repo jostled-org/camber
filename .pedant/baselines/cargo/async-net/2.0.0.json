@@ -4,7 +4,12 @@
   "crate_name": "async-net",
   "crate_version": "2.0.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915098,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 5,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63",
   "profile": {
     "findings": [
       {

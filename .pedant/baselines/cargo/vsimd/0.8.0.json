@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "d8e070ebfe5601e461fc6ea2b80b9ad7a7fc891ee5f4a6f4c0b97f3c5015526f",
+  "source_hash": "5edfbf0be72e3d294c9bff92ef8d2b5744cfae290ee0c04ab033acf2edaf02b9",
   "crate_name": "vsimd",
   "crate_version": "0.8.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915116,
+  "timestamp": 1784286766,
+  "analysis_completeness": {
+    "analyzed_files": 21,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63",
   "profile": {
     "findings": [
       {

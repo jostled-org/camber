@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "9f1d8ab3ea55334af4f71bd4700916de78736a75d4f488bd47e46a8e139a629e",
+  "source_hash": "c4400d5e6f10c5fd9e78b1e9f8fc2fd1633c581a8b0c1ec32ca56b24f0192404",
   "crate_name": "itoa",
   "crate_version": "1.0.18",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915105,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
+  "rust_version": "1.68",
   "profile": {
     "findings": [
       {

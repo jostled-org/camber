@@ -1,0 +1,307 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "268b50ad568b4241cd08df09efe6bbc866fb01130053ca14c97cbd563c5333da",
+  "crate_name": "opentelemetry-otlp",
+  "crate_version": "0.32.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 15,
+    "skipped_files": 0
+  },
+  "rust_version": "1.75.0",
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 236,
+          "column": 21
+        },
+        "evidence": "reqwest::Client::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 257,
+          "column": 25
+        },
+        "evidence": "reqwest::blocking::Client::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 260,
+          "column": 49
+        },
+        "evidence": "reqwest::blocking::Client::new",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 1329,
+          "column": 13
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 899,
+          "column": 26
+        },
+        "evidence": "http://localhost:4317",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 927,
+          "column": 38
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 931,
+          "column": 38
+        },
+        "evidence": "https://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 935,
+          "column": 38
+        },
+        "evidence": "https://example.com/additional/path/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 1114,
+          "column": 32
+        },
+        "evidence": "http://localhost:4318/v1/tracesbutnotreally",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 1138,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 1171,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 1201,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 1224,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 1248,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 1312,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/http/mod.rs",
+          "line": 1603,
+          "column": 17
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/exporter/mod.rs",
+          "line": 189,
+          "column": 37
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/mod.rs",
+          "line": 46,
+          "column": 56
+        },
+        "evidence": "http://localhost:4317",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/mod.rs",
+          "line": 47,
+          "column": 56
+        },
+        "evidence": "http://localhost:4318",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/tonic/mod.rs",
+          "line": 1012,
+          "column": 26
+        },
+        "evidence": "http://localhost:3456",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/tonic/mod.rs",
+          "line": 1085,
+          "column": 28
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/tonic/mod.rs",
+          "line": 1114,
+          "column": 28
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/exporter/tonic/mod.rs",
+          "line": 1131,
+          "column": 28
+        },
+        "evidence": "http://localhost:4317",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 762,
+          "column": 24
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/metric.rs",
+          "line": 130,
+          "column": 22
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/retry.rs",
+          "line": 41,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/retry.rs",
+          "line": 416,
+          "column": 26
+        },
+        "evidence": "std::time::Instant::now",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/retry_classification.rs",
+          "line": 81,
+          "column": 9
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/retry_classification.rs",
+          "line": 227,
+          "column": 13
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      }
+    ]
+  }
+}

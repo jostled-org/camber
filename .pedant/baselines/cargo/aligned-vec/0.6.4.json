@@ -4,7 +4,11 @@
   "crate_name": "aligned-vec",
   "crate_version": "0.6.4",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915097,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

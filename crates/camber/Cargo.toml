@@ -20,7 +20,7 @@ workspace = true
 [features]
 profiling = ["dep:pprof"]
 ws = ["dep:tokio-tungstenite"]
-grpc = ["dep:tonic", "dep:tonic-prost", "dep:tonic-reflection", "dep:tonic-health", "dep:prost"]
+grpc = ["dep:tonic", "dep:tonic-reflection", "dep:tonic-health"]
 acme = ["dep:rustls-acme"]
 dns01 = ["dep:instant-acme"]
 jemalloc = ["dep:tikv-jemallocator"]
@@ -32,7 +32,7 @@ otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", 
 [dependencies]
 bytes = "1.11.1"
 chrono = { version = "0.4.20", default-features = false, features = ["now"] }
-cron = "0.16"
+cron = "0.17"
 crossbeam-channel = "0.5"
 http-body-util = "0.1"
 itoa = "1"
@@ -45,13 +45,11 @@ rustls = { version = "0.23.18", features = ["aws-lc-rs"] }
 tokio = { version = "1.23.1", features = ["rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
 tokio-rustls = "0.26"
 webpki-roots = "1"
-tokio-tungstenite = { version = "0.29", optional = true }
+tokio-tungstenite = { version = "0.30", optional = true }
 futures-util = "0.3"
-prost = { version = "0.14", optional = true }
 pprof = { version = "0.15", features = ["flamegraph"], optional = true }
 thiserror = "2"
 tonic = { version = "0.14", default-features = false, features = ["codegen"], optional = true }
-tonic-prost = { version = "0.14", optional = true }
 tonic-health = { version = "0.14", default-features = false, optional = true }
 tonic-reflection = { version = "0.14", default-features = false, features = ["server"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "query"] }
@@ -82,7 +80,7 @@ http = "1"
 hyper = { version = "1", features = ["client"] }
 metrics = "0.24.3"
 prost = "0.14"
-rcgen = "0.14"
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 signal-hook = "0.4"
@@ -92,8 +90,9 @@ tokio-stream = "0.1"
 tokio-util = "0.7"
 tonic = { version = "0.14", default-features = false, features = ["codegen", "channel"] }
 tonic-health = { version = "0.14" }
+tonic-prost = "0.14"
 tonic-reflection = { version = "0.14", features = ["server"] }
-tungstenite = "0.29"
+tungstenite = "0.30"
 tracing-subscriber = { version = "0.3.20", features = ["registry"] }
 rustls-acme = { version = "0.15", default-features = false, features = ["aws-lc-rs", "webpki-roots"] }
 wiremock = "0.6"

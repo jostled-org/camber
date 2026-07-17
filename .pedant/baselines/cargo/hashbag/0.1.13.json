@@ -1,0 +1,15 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "9d8a7fe641b51d1a9b5ee42dedc98041646dfb415374c378d7fe264ca71cf0aa",
+  "crate_name": "hashbag",
+  "crate_version": "0.1.13",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
+  "profile": {
+    "findings": []
+  }
+}

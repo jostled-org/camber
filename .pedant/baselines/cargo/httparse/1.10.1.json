@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "99f57b533575eb13b2f0eeb18ea7136ea8f8ded452d3cb318de1cfe9ed7e5171",
+  "source_hash": "d84127273a2649f682a3b20c99f4497730d4139827e47c4f229b8b347336143f",
   "crate_name": "httparse",
   "crate_version": "1.10.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915104,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 10,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

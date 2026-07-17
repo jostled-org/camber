@@ -1,62 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "b4be5ff5f952e1eec2ecb36549c8d567ec77bf7fbcc503730feaebac18c923f8",
+  "source_hash": "32a6d6b82b9650dc3eac35ef3b41e7b8c478d68bb2f6f540d60635920e5f9206",
   "crate_name": "zerovec",
   "crate_version": "0.11.6",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915125,
+  "timestamp": 1784286767,
+  "analysis_completeness": {
+    "analyzed_files": 50,
+    "skipped_files": 0
+  },
+  "rust_version": "1.83",
   "profile": {
     "findings": [
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/zeromap.rs",
-          "line": 142,
-          "column": 5
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/zeromap.rs",
-          "line": 380,
-          "column": 5
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/zerovec_iai.rs",
-          "line": 44,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/zerovec_iai.rs",
-          "line": 51,
-          "column": 9
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./benches/zerovec_iai.rs",
-          "line": 53,
-          "column": 5
-        },
-        "evidence": "unsafe block",
-        "origin": "code_site"
-      },
       {
         "capability": "unsafe_code",
         "location": {

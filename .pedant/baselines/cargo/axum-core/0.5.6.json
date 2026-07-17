@@ -4,7 +4,12 @@
   "crate_name": "axum-core",
   "crate_version": "0.5.6",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915101,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 18,
+    "skipped_files": 0
+  },
+  "rust_version": "1.78",
   "profile": {
     "findings": []
   }

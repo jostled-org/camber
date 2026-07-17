@@ -1,0 +1,47 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "a1e08156e299f5f27af72c7054575e4bef04cae2179428573e143fb511804c7c",
+  "crate_name": "prost-derive",
+  "crate_version": "0.14.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286764,
+  "analysis_completeness": {
+    "analyzed_files": 7,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
+  "profile": {
+    "findings": [
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 255,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 370,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      },
+      {
+        "capability": "proc_macro",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 524,
+          "column": 1
+        },
+        "evidence": "#[proc_macro_derive]",
+        "origin": "attribute"
+      }
+    ]
+  }
+}

@@ -4,7 +4,11 @@
   "crate_name": "tower-layer",
   "crate_version": "0.3.3",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915115,
+  "timestamp": 1784286766,
+  "analysis_completeness": {
+    "analyzed_files": 5,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": []
   }

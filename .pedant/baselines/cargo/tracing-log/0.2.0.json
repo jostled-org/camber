@@ -1,22 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "a71c2593bcee8a4f65c96370d2a66501256720fb8faf0aa90ac84e33b52ab9ce",
+  "source_hash": "bcf7deff1919025d8d54d99938d25ce6d4da75f13a10dcdebb4614dcd4ab9a32",
   "crate_name": "tracing-log",
   "crate_version": "0.2.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915115,
+  "timestamp": 1784286766,
+  "analysis_completeness": {
+    "analyzed_files": 3,
+    "skipped_files": 0
+  },
+  "rust_version": "1.56.0",
   "profile": {
     "findings": [
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./benches/logging.rs",
-          "line": 5,
-          "column": 1
-        },
-        "evidence": "std::time::Instant",
-        "origin": "import"
-      },
       {
         "capability": "unsafe_code",
         "location": {

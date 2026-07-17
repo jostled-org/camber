@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "2798f49cd32c8733b41240f417464e7c77ce0e31c10d79fb5ca0ec1004472b56",
+  "source_hash": "bb875931703a2f524c255f5363509ab6632a62f5e592a9a1d58e7bbda9c20529",
   "crate_name": "android_system_properties",
   "crate_version": "0.1.5",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915097,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {

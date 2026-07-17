@@ -1,0 +1,467 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "83ea8d0edd48c04c7870a0fb85d26629d051424ae09bc490d74436ad93d08b14",
+  "crate_name": "tokio-tungstenite",
+  "crate_version": "0.30.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286765,
+  "analysis_completeness": {
+    "analyzed_files": 6,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/compat.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "tungstenite::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 2,
+          "column": 1
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "tungstenite::error::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "tungstenite::error::UrlError",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::client::Request",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::client::Response",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connect.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "tungstenite::protocol::WebSocketConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "tungstenite::WebSocket",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::client::Response",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::server::Callback",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::HandshakeError",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::HandshakeRole",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::MidHandshake",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "tungstenite::ClientHandshake",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "tungstenite::ServerHandshake",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 13,
+          "column": 5
+        },
+        "evidence": "tungstenite",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 39,
+          "column": 1
+        },
+        "evidence": "tungstenite::client::IntoClientRequest",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 39,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::client::ClientHandshake",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 39,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::client::Response",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 39,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::server::Callback",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 39,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::server::NoCallback",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 39,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::HandshakeError",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "tungstenite::error::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "tungstenite::protocol::Message",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "tungstenite::protocol::Role",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "tungstenite::protocol::WebSocket",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 47,
+          "column": 1
+        },
+        "evidence": "tungstenite::protocol::WebSocketConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 66,
+          "column": 1
+        },
+        "evidence": "tungstenite::protocol::CloseFrame",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 174,
+          "column": 9
+        },
+        "evidence": "tungstenite::accept_hdr_with_config",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 422,
+          "column": 34
+        },
+        "evidence": "tungstenite::error::UrlError::NoHostName",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "tungstenite::client::uri_mode",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "tungstenite::error::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "tungstenite::handshake::client::Response",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "tungstenite::protocol::WebSocketConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 36,
+          "column": 9
+        },
+        "evidence": "tungstenite::error::TlsError",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 36,
+          "column": 9
+        },
+        "evidence": "tungstenite::stream::Mode",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 36,
+          "column": 9
+        },
+        "evidence": "tungstenite::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 67,
+          "column": 13
+        },
+        "evidence": "rustls::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 68,
+          "column": 9
+        },
+        "evidence": "rustls::RootCertStore",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 75,
+          "column": 9
+        },
+        "evidence": "tungstenite::error::TlsError",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 75,
+          "column": 9
+        },
+        "evidence": "tungstenite::stream::Mode",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 75,
+          "column": 9
+        },
+        "evidence": "tungstenite::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 150,
+          "column": 9
+        },
+        "evidence": "tungstenite::error::Error",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 150,
+          "column": 9
+        },
+        "evidence": "tungstenite::error::UrlError",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 150,
+          "column": 9
+        },
+        "evidence": "tungstenite::stream::Mode",
+        "origin": "import"
+      }
+    ]
+  }
+}

@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "49f19aa2677607e5bca8beaf0ad50925817fa942a67b02530a7d883dc6a8af85",
+  "source_hash": "029e1453887c47cdc3ce3b98e3bc0810d33be3d0a012e9f963bb5220f61323a4",
   "crate_name": "minimal-lexical",
   "crate_version": "0.2.1",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915107,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 19,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {
@@ -386,66 +390,6 @@
         },
         "evidence": "unsafe block",
         "origin": "code_site"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/parse_tests.rs",
-          "line": 145,
-          "column": 336
-        },
-        "evidence": "9999999999999999…9999",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/parse_tests.rs",
-          "line": 146,
-          "column": 28
-        },
-        "evidence": "4109846876186981…4999",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/parse_tests.rs",
-          "line": 148,
-          "column": 28
-        },
-        "evidence": "4109846876186981…5001",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/parse_tests.rs",
-          "line": 154,
-          "column": 27
-        },
-        "evidence": "0000000000000000…4375",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/parse_tests.rs",
-          "line": 186,
-          "column": 23
-        },
-        "evidence": "7161052836441183…0000",
-        "origin": "string_literal"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/parse_tests.rs",
-          "line": 188,
-          "column": 23
-        },
-        "evidence": "3865296046123932…0000",
-        "origin": "string_literal"
       }
     ]
   }

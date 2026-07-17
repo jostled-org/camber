@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "b168146946b36cd5937801df6e49c49b08b3b07646dfcdd91097bf4ce0afdbfb",
+  "source_hash": "69bb21f9c8a2c7a5c1379be9ae917cc3ec3512099dea9a670aa9ab7a02cf5449",
   "crate_name": "futures-rustls",
   "crate_version": "0.26.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915103,
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 6,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {
@@ -185,86 +189,6 @@
           "column": 5
         },
         "evidence": "rustls",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/badssl.rs",
-          "line": 3,
-          "column": 1
-        },
-        "evidence": "std::net::ToSocketAddrs",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/badssl.rs",
-          "line": 41,
-          "column": 22
-        },
-        "evidence": "rustls::ClientConfig::builder_with_protocol_versions",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/badssl.rs",
-          "line": 41,
-          "column": 78
-        },
-        "evidence": "rustls::version::TLS12",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/badssl.rs",
-          "line": 74,
-          "column": 22
-        },
-        "evidence": "rustls::ClientConfig::builder",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/test.rs",
-          "line": 5,
-          "column": 1
-        },
-        "evidence": "rustls::ClientConfig",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/test.rs",
-          "line": 11,
-          "column": 1
-        },
-        "evidence": "std::net::SocketAddr",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/test.rs",
-          "line": 108,
-          "column": 30
-        },
-        "evidence": "rustls::RootCertStore::empty",
-        "origin": "import"
-      },
-      {
-        "capability": "crypto",
-        "location": {
-          "file": "./tests/test.rs",
-          "line": 111,
-          "column": 22
-        },
-        "evidence": "rustls::ClientConfig::builder",
         "origin": "import"
       }
     ]

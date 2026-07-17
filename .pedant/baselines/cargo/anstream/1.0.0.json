@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "e822ff308223297c0e2b6aafd44255f6cc80710a1c34ed3ae0e1ef5430f59800",
+  "source_hash": "46f24f1b15e1c4e282c62d2d187d36c8462a51d68a51ad4e3f9c86d7bbc59d97",
   "crate_name": "anstream",
   "crate_version": "1.0.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915097,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 11,
+    "skipped_files": 0
+  },
+  "rust_version": "1.66.0",
   "profile": {
     "findings": [
       {

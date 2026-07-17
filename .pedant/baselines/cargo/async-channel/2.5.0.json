@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "75108adba9e1e4f6e897210c552f80c97f4e58b63c3c56c2717478dfbfb382b7",
+  "source_hash": "3cd18d3b13e12b3c427581c51fed3cb415ae6ee977e3c920a0bed55493dab679",
   "crate_name": "async-channel",
   "crate_version": "2.5.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915097,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.60",
   "profile": {
     "findings": [
       {

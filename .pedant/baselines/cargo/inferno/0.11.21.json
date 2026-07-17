@@ -1,32 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "4032deb372c1122ba622d3b859d7d73e2ae041419d0c89c0eac5eacdbb5ffa92",
+  "source_hash": "4109fbee6f63ccf1378d808f59af7e7c020a7b58b2942fcf096d13f7876c4557",
   "crate_name": "inferno",
   "crate_version": "0.11.21",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915105,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 31,
+    "skipped_files": 0
+  },
+  "rust_version": "1.71.0",
   "profile": {
     "findings": [
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./benches/collapse.rs",
-          "line": 1,
-          "column": 1
-        },
-        "evidence": "std::fs::File",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./benches/flamegraph.rs",
-          "line": 1,
-          "column": 1
-        },
-        "evidence": "std::fs::File",
-        "origin": "import"
-      },
       {
         "capability": "file_read",
         "location": {

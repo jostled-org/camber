@@ -1,22 +1,16 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "3a9f18cfd9f3928251cad6533018b3a2b4ab61f0a94db5eb5c39db6eeea9fef9",
+  "source_hash": "1c006c98abaea105147cc6ac6a6a8e8e41b5b742b0de561eeb0ebc9d8d448f89",
   "crate_name": "hyper-timeout",
   "crate_version": "0.5.2",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915104,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/client.rs",
-          "line": 5,
-          "column": 1
-        },
-        "evidence": "hyper::body::Bytes",
-        "origin": "import"
-      },
       {
         "capability": "network",
         "location": {
@@ -146,76 +140,6 @@
         },
         "evidence": "127.0.0.1:0",
         "origin": "string_literal"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/client_upload.rs",
-          "line": 2,
-          "column": 1
-        },
-        "evidence": "hyper::body::Bytes",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/client_upload.rs",
-          "line": 3,
-          "column": 1
-        },
-        "evidence": "hyper::server::conn::http1",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/client_upload.rs",
-          "line": 4,
-          "column": 1
-        },
-        "evidence": "hyper::service::service_fn",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/client_upload.rs",
-          "line": 5,
-          "column": 1
-        },
-        "evidence": "hyper::Request",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/client_upload.rs",
-          "line": 5,
-          "column": 1
-        },
-        "evidence": "hyper::Response",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/client_upload.rs",
-          "line": 7,
-          "column": 1
-        },
-        "evidence": "std::net::SocketAddr",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./tests/client_upload.rs",
-          "line": 9,
-          "column": 1
-        },
-        "evidence": "tokio::net::TcpListener",
-        "origin": "import"
       }
     ]
   }

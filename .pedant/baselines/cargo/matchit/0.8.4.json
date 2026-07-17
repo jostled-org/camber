@@ -1,82 +1,16 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "82428bf9536f5e24c8b3cc5f1e31733c86b7dc6d16690b0461dd19f94714e9d0",
+  "source_hash": "cf1884b69d9a07bd58943a348f59fdd20d8cb903be17d8a5bf1282af07c94297",
   "crate_name": "matchit",
   "crate_version": "0.8.4",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915107,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 6,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/hyper.rs",
-          "line": 5,
-          "column": 1
-        },
-        "evidence": "hyper::server::Server",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/hyper.rs",
-          "line": 6,
-          "column": 1
-        },
-        "evidence": "hyper::service::make_service_fn",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/hyper.rs",
-          "line": 6,
-          "column": 1
-        },
-        "evidence": "hyper::service::service_fn",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/hyper.rs",
-          "line": 7,
-          "column": 1
-        },
-        "evidence": "hyper::Body",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/hyper.rs",
-          "line": 7,
-          "column": 1
-        },
-        "evidence": "hyper::Method",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/hyper.rs",
-          "line": 7,
-          "column": 1
-        },
-        "evidence": "hyper::Request",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./examples/hyper.rs",
-          "line": 7,
-          "column": 1
-        },
-        "evidence": "hyper::Response",
-        "origin": "import"
-      },
       {
         "capability": "unsafe_code",
         "location": {

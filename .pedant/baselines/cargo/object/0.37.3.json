@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "c8725cb57deeb16d8ef36b2dd5781bd28eb93a2966b4a926926532b1d870088f",
+  "source_hash": "feee9b0b1e82f350f36e3735704ac209f62f94270d9ed1c19155ceeba4d635e6",
   "crate_name": "object",
   "crate_version": "0.37.3",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915108,
+  "timestamp": 1784286763,
+  "analysis_completeness": {
+    "analyzed_files": 81,
+    "skipped_files": 0
+  },
+  "rust_version": "1.65",
   "profile": {
     "findings": [
       {
@@ -138,56 +143,6 @@
         },
         "evidence": "unsafe block",
         "origin": "code_site"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./tests/parse_self.rs",
-          "line": 3,
-          "column": 1
-        },
-        "evidence": "std::fs",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./tests/read/coff.rs",
-          "line": 2,
-          "column": 1
-        },
-        "evidence": "std::fs",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./tests/read/elf.rs",
-          "line": 7,
-          "column": 16
-        },
-        "evidence": "std::fs::File::open",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./tests/read/elf.rs",
-          "line": 54,
-          "column": 16
-        },
-        "evidence": "std::fs::read",
-        "origin": "import"
-      },
-      {
-        "capability": "file_read",
-        "location": {
-          "file": "./tests/read/macho.rs",
-          "line": 22,
-          "column": 20
-        },
-        "evidence": "std::fs::File::open",
-        "origin": "import"
       }
     ]
   }

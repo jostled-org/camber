@@ -1,0 +1,16 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "36489930ae6c69b29f15200a33ece332ba141446f82b4c226cc9817940fd85f0",
+  "crate_name": "aws-smithy-query",
+  "crate_version": "0.61.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.94.1",
+  "profile": {
+    "findings": []
+  }
+}

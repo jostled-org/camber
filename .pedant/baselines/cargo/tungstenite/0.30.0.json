@@ -1,0 +1,207 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "f8d58cdde721d5c5f265421b22d94aa1cd1a55b9a099fad974681859218054f8",
+  "crate_name": "tungstenite",
+  "crate_version": "0.30.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286766,
+  "analysis_completeness": {
+    "analyzed_files": 21,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::net::SocketAddr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::net::ToSocketAddrs",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake/client.rs",
+          "line": 373,
+          "column": 23
+        },
+        "evidence": "ws://localhost/getCaseCount",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake/client.rs",
+          "line": 381,
+          "column": 23
+        },
+        "evidence": "wss://localhost:9001/getCaseCount",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake/client.rs",
+          "line": 389,
+          "column": 23
+        },
+        "evidence": "wss://user:pass@localhost:9001/getCaseCount",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake/client.rs",
+          "line": 413,
+          "column": 27
+        },
+        "evidence": "ws://localhost/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/handshake/client.rs",
+          "line": 437,
+          "column": 27
+        },
+        "evidence": "ws://localhost/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/protocol/frame/mask.rs",
+          "line": 26,
+          "column": 35
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/protocol/frame/utf8.rs",
+          "line": 20,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/protocol/frame/utf8.rs",
+          "line": 28,
+          "column": 9
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/stream.rs",
+          "line": 14,
+          "column": 1
+        },
+        "evidence": "std::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/stream.rs",
+          "line": 19,
+          "column": 1
+        },
+        "evidence": "rustls::StreamOwned",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 73,
+          "column": 9
+        },
+        "evidence": "rustls::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 73,
+          "column": 9
+        },
+        "evidence": "rustls::ClientConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 73,
+          "column": 9
+        },
+        "evidence": "rustls::RootCertStore",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/tls.rs",
+          "line": 73,
+          "column": 9
+        },
+        "evidence": "rustls::StreamOwned",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utf8.rs",
+          "line": 59,
+          "column": 17
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/utf8.rs",
+          "line": 99,
+          "column": 26
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

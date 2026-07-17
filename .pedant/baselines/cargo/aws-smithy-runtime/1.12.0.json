@@ -1,0 +1,187 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "c2533e6f76c6a8baefa171fa22b670a61aac0b1d7b6a3baefb4899d101c09368",
+  "crate_name": "aws-smithy-runtime",
+  "crate_version": "1.12.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784286761,
+  "analysis_completeness": {
+    "analyzed_files": 49,
+    "skipped_files": 0
+  },
+  "rust_version": "1.94.1",
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/auth/http.rs",
+          "line": 301,
+          "column": 18
+        },
+        "evidence": "http://example.com/Foobaz",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/auth/http.rs",
+          "line": 333,
+          "column": 18
+        },
+        "evidence": "http://example.com/Foobaz",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/dns.rs",
+          "line": 12,
+          "column": 5
+        },
+        "evidence": "std::net::ToSocketAddrs",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/http/body/minimum_throughput.rs",
+          "line": 41,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/http/body/minimum_throughput/throughput.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/identity/cache/lazy.rs",
+          "line": 451,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/metrics.rs",
+          "line": 18,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/orchestrator/endpoints.rs",
+          "line": 180,
+          "column": 48
+        },
+        "evidence": "https://s3.amazon.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./src/client/orchestrator/http.rs",
+          "line": 38,
+          "column": 12
+        },
+        "evidence": "std::env::var",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/orchestrator/operation.rs",
+          "line": 486,
+          "column": 27
+        },
+        "evidence": "http://localhost:1234",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/client/orchestrator/operation.rs",
+          "line": 538,
+          "column": 27
+        },
+        "evidence": "http://localhost:1234",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/retries/client_rate_limiter.rs",
+          "line": 423,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/retries/strategy/standard.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/retries/token_bucket.rs",
+          "line": 13,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/client/waiters.rs",
+          "line": 293,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/expiring_cache.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/expiring_cache.rs",
+          "line": 113,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      }
+    ]
+  }
+}

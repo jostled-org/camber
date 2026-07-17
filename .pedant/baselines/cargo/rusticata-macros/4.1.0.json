@@ -1,10 +1,14 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "cd35661a1f8475fd466453b62ccadfc9f466e9f919060f2bbc20d640131789fc",
+  "source_hash": "fc703fb441556fe201fce0ba9390c536012ab0e9333c88a03a7139dd350c2134",
   "crate_name": "rusticata-macros",
   "crate_version": "4.1.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915111,
+  "timestamp": 1784286764,
+  "analysis_completeness": {
+    "analyzed_files": 5,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": []
   }

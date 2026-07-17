@@ -1,22 +1,17 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "b7a5b0dc2956aa15639299a2b49e93003883513ae914c3bc849a620a1672b2ce",
+  "source_hash": "9d973c78acc5cd9e645489fcc3d6fcb072b74e2b4a79573ea7b55b00531e6a4b",
   "crate_name": "tracing-subscriber",
   "crate_version": "0.3.23",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915115,
+  "timestamp": 1784286766,
+  "analysis_completeness": {
+    "analyzed_files": 40,
+    "skipped_files": 0
+  },
+  "rust_version": "1.65.0",
   "profile": {
     "findings": [
-      {
-        "capability": "system_time",
-        "location": {
-          "file": "./benches/support/mod.rs",
-          "line": 1,
-          "column": 1
-        },
-        "evidence": "std::time::Instant",
-        "origin": "import"
-      },
       {
         "capability": "unsafe_code",
         "location": {
@@ -355,26 +350,6 @@
           "column": 13
         },
         "evidence": "unsafe block",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/layer_filters/downcast_raw.rs",
-          "line": 48,
-          "column": 9
-        },
-        "evidence": "unsafe fn",
-        "origin": "code_site"
-      },
-      {
-        "capability": "unsafe_code",
-        "location": {
-          "file": "./tests/registry_span_instrument_drop.rs",
-          "line": 77,
-          "column": 9
-        },
-        "evidence": "unsafe fn",
         "origin": "code_site"
       }
     ]

@@ -4,7 +4,11 @@
   "crate_name": "ipnet",
   "crate_version": "2.12.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915105,
+  "timestamp": 1784286762,
+  "analysis_completeness": {
+    "analyzed_files": 8,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": [
       {
@@ -290,26 +294,6 @@
       {
         "capability": "network",
         "location": {
-          "file": "./src/ipnet_serde.rs",
-          "line": 6,
-          "column": 1
-        },
-        "evidence": "std::net::Ipv4Addr",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
-          "file": "./src/ipnet_serde.rs",
-          "line": 6,
-          "column": 1
-        },
-        "evidence": "std::net::Ipv6Addr",
-        "origin": "import"
-      },
-      {
-        "capability": "network",
-        "location": {
           "file": "./src/ipnet.rs",
           "line": 15,
           "column": 1
@@ -332,6 +316,26 @@
         "location": {
           "file": "./src/ipnet.rs",
           "line": 15,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv6Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipnet_serde.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::net::Ipv4Addr",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/ipnet_serde.rs",
+          "line": 6,
           "column": 1
         },
         "evidence": "std::net::Ipv6Addr",

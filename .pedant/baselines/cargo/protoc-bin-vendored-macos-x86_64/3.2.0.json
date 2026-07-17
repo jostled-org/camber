@@ -4,7 +4,11 @@
   "crate_name": "protoc-bin-vendored-macos-x86_64",
   "crate_version": "3.2.0",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915110,
+  "timestamp": 1784286764,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
   "profile": {
     "findings": []
   }

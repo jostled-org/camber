@@ -1,10 +1,15 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "675dd78d26495b241040eee7900378d97689f175c72aee62f4d495c073b52173",
+  "source_hash": "18fc5ddddbff4ba6838ef590e8f2f118deeb8127b6cbe0c082bc61be1b94a3aa",
   "crate_name": "anstyle-wincon",
   "crate_version": "3.0.11",
   "analysis_tier": "syntactic",
-  "timestamp": 1776915097,
+  "timestamp": 1784286760,
+  "analysis_completeness": {
+    "analyzed_files": 4,
+    "skipped_files": 0
+  },
+  "rust_version": "1.66.0",
   "profile": {
     "findings": [
       {
