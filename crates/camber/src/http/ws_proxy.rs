@@ -617,10 +617,7 @@ fn build_ws_backend_request(url: &str, headers: &[HeaderPair]) -> Option<hyper::
             return None;
         }
     };
-    let host = match uri.authority() {
-        Some(auth) => auth.as_str(),
-        None => return None,
-    };
+    let host = uri.authority()?.as_str();
 
     let mut builder = hyper::Request::builder()
         .uri(url)
