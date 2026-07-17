@@ -1,6 +1,8 @@
 use crate::RuntimeError;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 
 /// Listener that can accept connections.
 ///
@@ -68,6 +70,76 @@ where
                 return Ok(());
             }
         }
+    }
+}
+
+/// Run the synchronous HTTP accept loop while transferring an acquired permit
+/// into the connection future. The lifecycle script can observe only the real
+/// pending semaphore acquisition.
+pub(crate) async fn accept_loop_with_permit<L, F, Fut>(
+    listener: &L,
+    shutdown_notify: &tokio::sync::Notify,
+    conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
+    script: Option<&Arc<crate::http::mock::LifecycleScript>>,
+    on_accept: F,
+) -> Result<(), RuntimeError>
+where
+    L: Acceptor,
+    F: Fn(L::Accepted, Option<tokio::sync::OwnedSemaphorePermit>) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok(accepted) => {
+                        let permit = match conn_limit {
+                            Some(_) => acquire_connection_permit(conn_limit, script).await.ok(),
+                            None => None,
+                        };
+                        if conn_limit.is_none() || permit.is_some() {
+                            tokio::spawn(on_accept(accepted, permit));
+                        }
+                    }
+                    Err(error) if crate::error::is_transient_accept_error(&error) => {
+                        tracing::warn!("accept: fd limit reached, backing off");
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            () = shutdown_notify.notified() => return Ok(()),
+        }
+    }
+}
+
+pub(crate) async fn acquire_connection_permit(
+    conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
+    script: Option<&Arc<crate::http::mock::LifecycleScript>>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError> {
+    let semaphore = match conn_limit {
+        Some(semaphore) => Arc::clone(semaphore),
+        None => return std::future::pending().await,
+    };
+    let future = semaphore.acquire_owned();
+    tokio::pin!(future);
+    let immediate =
+        std::future::poll_fn(
+            |context| match Future::poll(Pin::new(&mut future), context) {
+                Poll::Ready(result) => Poll::Ready(Some(result)),
+                Poll::Pending => Poll::Ready(None),
+            },
+        )
+        .await;
+    match (immediate, script) {
+        (Some(result), _) => result,
+        (None, Some(script)) => {
+            script
+                .pause(crate::http::mock::LifecycleCheckpoint::ConnectionPermitWaitPending)
+                .await;
+            future.await
+        }
+        (None, None) => future.await,
     }
 }
 

@@ -52,7 +52,7 @@ pub struct JoinHandle<T> {
     cancel_tx: Option<crossbeam_channel::Sender<()>>,
 }
 
-fn panic_to_error(payload: Box<dyn std::any::Any + Send>) -> RuntimeError {
+pub(crate) fn panic_to_error(payload: Box<dyn std::any::Any + Send>) -> RuntimeError {
     let msg = match (
         payload.downcast_ref::<&str>(),
         payload.downcast_ref::<String>(),
@@ -191,6 +191,14 @@ impl<T> Future for AsyncJoinFuture<T> {
             ))),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+impl<T> AsyncJoinFuture<T> {
+    pub(crate) fn closed() -> Self {
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        drop(sender);
+        Self { rx }
     }
 }
 

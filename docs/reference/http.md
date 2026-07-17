@@ -188,6 +188,50 @@ let listener = camber::net::listen("0.0.0.0:8080")?;
 http::serve_hosts(listener, hosts)?;
 ```
 
+## Background Server Lifecycle
+
+The four `serve_background*` functions return `ServerHandle`, an armed owner of
+the server lifecycle. Use the owner operations according to the transition you
+need:
+
+```rust
+let handle = http::serve_background(listener, router);
+
+// Stop admission gracefully, then retain a concrete completion proof.
+let completion: camber::http::ServerHandleFuture = handle.shutdown_and_join();
+completion.await?;
+```
+
+- `shutdown(&self)` requests graceful shutdown without consuming the handle.
+- `cancel(&self)` requests forced shutdown without consuming the handle.
+- `join(self)` transfers control into `ServerHandleFuture` without stopping admission.
+- `shutdown_and_join(self)` requests graceful shutdown, then returns that same concrete future.
+- `ServerHandleFuture::shutdown(&self)` and `ServerHandleFuture::cancel(&self)` keep control available after `join`.
+- Awaiting `ServerHandle` is the same concrete path as `join` and returns one flat `Result<(), RuntimeError>`.
+
+Both owner forms are armed. `Drop` records `Abort` before releasing the control
+sender. Dropping a handle or pending future therefore requests forced shutdown;
+the independently running supervisor retains and joins its owned tasks. Polling
+a ready `ServerHandleFuture` disarms this Drop behavior before returning the
+immutable result. A control request after result completion is a no-op.
+
+A successful join proves that each owned accepted transport, connection permit,
+and registered WebSocket bridge has completed. It is safe to release resources
+whose lifetime is tied to those transport owners after the join returns.
+
+The boundary is deliberately narrower than arbitrary application execution:
+
+- Tokio cancellation cannot preempt non-yielding async code, so the grace deadline bounds escalation to forced cancellation rather than execution time.
+- Join is not proof that a non-cooperative blocking callback has returned.
+- Join is not proof that a callback has released its callback-held `Request`, handler captures, or callback-side `WsConn`.
+- Join does not extend runtime teardown or restore a signal watcher after that watcher is gone.
+
+Graceful shutdown lets Hyper finish an in-flight HTTP/1 response, closes
+keep-alive progression, and sends HTTP/2 GOAWAY before draining accepted
+streams. Forced cancellation may close transports without graceful protocol
+completion, but the returned result still waits for cooperatively abortable
+owned transport tasks to be joined.
+
 ## gRPC
 
 With the `grpc` feature, register tonic-generated services via `GrpcRouter`:

@@ -1,26 +1,86 @@
 use super::BufferConfig;
-use super::conn::{accept_loop, accept_tcp};
+use super::conn::accept_loop;
 use super::handle::ConnCtx;
 use super::router::{Router, ServerDispatch};
-use crate::task::{AsyncJoinFuture, AsyncJoinHandle, spawn_async};
+use super::server_lifecycle::{
+    ServerContextSnapshot, ServerControl, ServerSupervisor, SupervisorJoin, poll_supervisor_join,
+};
+use crate::task::spawn_async;
 use crate::{RuntimeError, net, runtime};
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-/// Handle to a background server task with flattened error semantics.
+/// Armed lifecycle owner for a background HTTP server.
 ///
-/// Awaiting returns `Result<(), RuntimeError>` — the inner server error
-/// and outer task error (panic, cancellation) are merged into a single Result.
+/// [`shutdown`](Self::shutdown) requests graceful shutdown, while
+/// [`cancel`](Self::cancel) requests forced cancellation. `Drop` records
+/// `Abort` before releasing control, so discarding an unfinished owner forces
+/// shutdown while the independently running supervisor continues to join its
+/// work.
+///
+/// Awaiting this handle is equivalent to [`join`](Self::join) and returns one
+/// flat `Result<(), RuntimeError>`. A successful join proves that every owned
+/// accepted transport, connection permit, and registered WebSocket bridge has
+/// completed. It does not prove termination of non-yielding async execution.
+/// It is not proof that a non-cooperative callback has released its callback-held
+/// `Request`, handler captures, or `WsConn`. It also does not prove runtime
+/// teardown after the signal watcher is gone.
+///
+/// Under plain Tokio, only per-server methods trigger shutdown and standalone
+/// timeout defaults apply. Under Camber, runtime shutdown and active signal
+/// watcher notifications can also request graceful shutdown.
 pub struct ServerHandle {
-    inner: AsyncJoinHandle<Result<(), RuntimeError>>,
+    control: Option<tokio::sync::watch::Sender<ServerControl>>,
+    join: Option<SupervisorJoin>,
 }
 
 impl ServerHandle {
-    /// Request cancellation of the background server.
+    /// Request graceful shutdown without consuming the owner.
+    ///
+    /// Admission stops, active HTTP work receives graceful protocol shutdown,
+    /// and the aggregate grace deadline starts once. Call [`join`](Self::join)
+    /// or await the handle to observe completion.
+    pub fn shutdown(&self) {
+        if let Some(control) = self.control.as_ref() {
+            ServerControl::send_graceful(control);
+        }
+    }
+
+    /// Transfer lifecycle authority into the concrete join future.
+    ///
+    /// This does not initiate shutdown. The returned future retains
+    /// [`shutdown`](ServerHandleFuture::shutdown) and
+    /// [`cancel`](ServerHandleFuture::cancel) authority.
+    pub fn join(mut self) -> ServerHandleFuture {
+        ServerHandleFuture::new(self.control.take(), self.join.take())
+    }
+
+    /// Request graceful shutdown and transfer authority into the join future.
+    pub fn shutdown_and_join(self) -> ServerHandleFuture {
+        self.shutdown();
+        self.join()
+    }
+
+    /// Request forced cancellation of the background server.
+    ///
+    /// Cancellation is idempotent. The eventual result is
+    /// `RuntimeError::Cancelled` unless timeout or another immutable result was
+    /// already fixed. Awaiting still waits for cooperatively abortable owned
+    /// transports to be joined.
     pub fn cancel(&self) {
-        self.inner.cancel();
+        if let Some(control) = self.control.as_ref() {
+            ServerControl::send_abort(control);
+        }
+    }
+}
+
+impl Drop for ServerHandle {
+    fn drop(&mut self) {
+        if let Some(control) = self.control.take() {
+            ServerControl::send_abort(&control);
+        }
     }
 }
 
@@ -29,25 +89,81 @@ impl IntoFuture for ServerHandle {
     type IntoFuture = ServerHandleFuture;
 
     fn into_future(self) -> Self::IntoFuture {
-        ServerHandleFuture {
-            inner: self.inner.into_future(),
-        }
+        self.join()
     }
 }
 
-/// Future for awaiting a [`ServerHandle`].
+/// Armed concrete future for controlling and joining a background HTTP server.
+///
+/// `ServerHandleFuture` has the same flat `Result<(), RuntimeError>` output
+/// whether produced by [`ServerHandle::join`],
+/// [`ServerHandle::shutdown_and_join`], or `ServerHandle::into_future`. Polling
+/// a ready result disarms Drop before returning it; dropping a pending future
+/// requests forced cancellation and leaves the supervisor running to own and
+/// join its tasks.
+///
+/// Successful join proves completion of each owned accepted transport,
+/// connection permit, and registered WebSocket bridge. It does not prove
+/// termination of non-yielding async execution. It is not proof that a
+/// non-cooperative callback has released its callback-held `Request`, handler
+/// captures, or `WsConn`, nor does it prove runtime teardown after the signal
+/// watcher is gone.
 pub struct ServerHandleFuture {
-    inner: AsyncJoinFuture<Result<(), RuntimeError>>,
+    control: Option<tokio::sync::watch::Sender<ServerControl>>,
+    join: Option<SupervisorJoin>,
+}
+
+impl ServerHandleFuture {
+    fn new(
+        control: Option<tokio::sync::watch::Sender<ServerControl>>,
+        join: Option<SupervisorJoin>,
+    ) -> Self {
+        Self { control, join }
+    }
+
+    pub(super) fn from_join(join: SupervisorJoin) -> Self {
+        Self::new(None, Some(join))
+    }
+
+    /// Request graceful shutdown while retaining this join future.
+    pub fn shutdown(&self) {
+        if let Some(control) = self.control.as_ref() {
+            ServerControl::send_graceful(control);
+        }
+    }
+
+    /// Request forced cancellation while retaining this join future.
+    pub fn cancel(&self) {
+        if let Some(control) = self.control.as_ref() {
+            ServerControl::send_abort(control);
+        }
+    }
 }
 
 impl Future for ServerHandleFuture {
     type Output = Result<(), RuntimeError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match Pin::new(&mut self.inner).poll(cx) {
-            Poll::Ready(Ok(inner_result)) => Poll::Ready(inner_result),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+        let result = match self.join.as_mut() {
+            Some(join) => poll_supervisor_join(join, cx),
+            None => Poll::Ready(Err(RuntimeError::TaskPanicked(
+                "server supervisor join authority unavailable".into(),
+            ))),
+        };
+        match result {
             Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => {
+                self.control.take();
+                Poll::Ready(result)
+            }
+        }
+    }
+}
+
+impl Drop for ServerHandleFuture {
+    fn drop(&mut self) {
+        if let Some(control) = self.control.take() {
+            ServerControl::send_abort(&control);
         }
     }
 }
@@ -118,9 +234,9 @@ pub async fn serve_async_hosts_tls(
 /// Participates in Camber's structured concurrency. Awaiting the handle returns
 /// `Result<(), RuntimeError>` with flattened error semantics.
 pub fn serve_background(listener: tokio::net::TcpListener, router: Router) -> ServerHandle {
-    ServerHandle {
-        inner: spawn_async(serve_async(listener, router)),
-    }
+    let buffers = router.buffer_config();
+    let dispatch = ServerDispatch::Single(router.freeze());
+    serve_background_dispatch(listener, dispatch, None, buffers)
 }
 
 /// Spawn an HTTPS server as a background async task.
@@ -129,9 +245,10 @@ pub fn serve_background_tls(
     router: Router,
     tls_config: Arc<rustls::ServerConfig>,
 ) -> ServerHandle {
-    ServerHandle {
-        inner: spawn_async(serve_async_tls(listener, router, tls_config)),
-    }
+    let buffers = router.buffer_config();
+    let dispatch = ServerDispatch::Single(router.freeze());
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
+    serve_background_dispatch(listener, dispatch, Some(acceptor), buffers)
 }
 
 /// Spawn an HTTP server with host-based routing as a background async task.
@@ -139,9 +256,9 @@ pub fn serve_background_hosts(
     listener: tokio::net::TcpListener,
     host_router: super::host_router::HostRouter,
 ) -> ServerHandle {
-    ServerHandle {
-        inner: spawn_async(serve_async_hosts(listener, host_router)),
-    }
+    let buffers = host_router.buffer_config();
+    let dispatch = ServerDispatch::Host(host_router.freeze());
+    serve_background_dispatch(listener, dispatch, None, buffers)
 }
 
 /// Spawn an HTTPS server with host-based routing as a background async task.
@@ -150,8 +267,39 @@ pub fn serve_background_hosts_tls(
     host_router: super::host_router::HostRouter,
     tls_config: Arc<rustls::ServerConfig>,
 ) -> ServerHandle {
+    let buffers = host_router.buffer_config();
+    let dispatch = ServerDispatch::Host(host_router.freeze());
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
+    serve_background_dispatch(listener, dispatch, Some(acceptor), buffers)
+}
+
+fn serve_background_dispatch(
+    listener: tokio::net::TcpListener,
+    dispatch: ServerDispatch,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    buffers: BufferConfig,
+) -> ServerHandle {
+    if tokio::runtime::Handle::try_current().is_err() {
+        let (control, receiver) = tokio::sync::watch::channel(ServerControl::Running);
+        drop(receiver);
+        return ServerHandle {
+            control: Some(control),
+            join: Some(SupervisorJoin::Ready(std::future::ready(Err(
+                RuntimeError::InvalidArgument(
+                    "serve_background requires an active Tokio runtime".into(),
+                ),
+            )))),
+        };
+    }
+    let snapshot = ServerContextSnapshot::capture(buffers, tls_acceptor.is_some());
+    let (supervisor, control) = ServerSupervisor::new(listener, dispatch, tls_acceptor, snapshot);
+    let join = match runtime::has_runtime() {
+        true => SupervisorJoin::Camber(spawn_async(supervisor.run()).into_future()),
+        false => SupervisorJoin::Tokio(tokio::spawn(supervisor.run())),
+    };
     ServerHandle {
-        inner: spawn_async(serve_async_hosts_tls(listener, host_router, tls_config)),
+        control: Some(control),
+        join: Some(join),
     }
 }
 
@@ -162,34 +310,10 @@ async fn serve_async_dispatch(
     buffers: BufferConfig,
 ) -> Result<(), RuntimeError> {
     let is_tls = tls_acceptor.is_some();
-    let dispatch = Arc::new(dispatch);
-    let (ctx, shutdown, keepalive, conn_limit) = match runtime::has_runtime() {
-        true => {
-            let rt = runtime::current_runtime();
-            let shutdown = Arc::clone(&rt.shutdown_notify);
-            let keepalive = rt.config.keepalive_timeout;
-            let limit = make_conn_limit(rt.config.connection_limit);
-            let ctx = Arc::new(ConnCtx::from_runtime(&rt, buffers, is_tls));
-            drop(rt);
-            (ctx, shutdown, keepalive, limit)
-        }
-        false => {
-            let ctx = Arc::new(ConnCtx::without_runtime(buffers, is_tls));
-            let shutdown = Arc::new(tokio::sync::Notify::new());
-            let keepalive = std::time::Duration::from_secs(60);
-            (ctx, shutdown, keepalive, None)
-        }
-    };
-    accept_tcp(
-        &listener,
-        dispatch,
-        ctx,
-        shutdown,
-        keepalive,
-        tls_acceptor,
-        conn_limit,
-    )
-    .await
+    let snapshot = ServerContextSnapshot::capture(buffers, is_tls);
+    let (supervisor, control) = ServerSupervisor::new(listener, dispatch, tls_acceptor, snapshot);
+    drop(control);
+    supervisor.run().await
 }
 
 /// Bind an HTTP server and route requests until shutdown.

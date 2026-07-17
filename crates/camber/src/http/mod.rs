@@ -106,6 +106,7 @@ mod request;
 mod response;
 mod router;
 mod server;
+mod server_lifecycle;
 mod sse;
 mod static_files;
 mod stream;
@@ -135,9 +136,9 @@ pub use response::{HeaderPair, IntoResponse, Response};
 pub use router::GrpcRouter;
 pub use router::Router;
 pub use server::{
-    ServerHandle, serve, serve_async, serve_async_hosts, serve_async_hosts_tls, serve_async_tls,
-    serve_background, serve_background_hosts, serve_background_hosts_tls, serve_background_tls,
-    serve_hosts, serve_listener,
+    ServerHandle, ServerHandleFuture, serve, serve_async, serve_async_hosts, serve_async_hosts_tls,
+    serve_async_tls, serve_background, serve_background_hosts, serve_background_hosts_tls,
+    serve_background_tls, serve_hosts, serve_listener,
 };
 pub use sse::SseWriter;
 pub use static_files::serve_file;

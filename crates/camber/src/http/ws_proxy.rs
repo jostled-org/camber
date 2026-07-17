@@ -1,6 +1,9 @@
 use super::body::HyperResponseBody;
 use super::response::HeaderPair;
 use super::router::WsHandler;
+use super::server_lifecycle::{
+    ConnectionLifecycle, ConnectionPermit, ServerControl, UpgradeRegistrar, UpgradeRegistration,
+};
 use super::websocket::WsConn;
 use super::{Request, Response};
 use std::sync::Arc;
@@ -117,11 +120,12 @@ fn ws_upgrade_pair(ws_upgrade: WsUpgrade) -> Option<(hyper::upgrade::OnUpgrade, 
 }
 
 /// Validate the upgrade pair, spawn background work, return 101.
-pub(super) fn handle_ws_upgrade(
+pub(super) async fn handle_ws_upgrade(
     ws_upgrade: WsUpgrade,
     handler: WsHandler,
     req: Request,
     buffer_size: usize,
+    lifecycle: &ConnectionLifecycle,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let (on_upgrade, accept_key) = match ws_upgrade_pair(ws_upgrade) {
         Some(pair) => pair,
@@ -130,8 +134,54 @@ pub(super) fn handle_ws_upgrade(
 
     let subprotocol = extract_ws_subprotocol(&req);
     let response = ws_switching_protocols(accept_key.as_ref(), subprotocol);
-    let _task = crate::task::spawn_async(bridge_ws_handler(on_upgrade, handler, req, buffer_size));
-    Ok(response)
+    let permit = lifecycle.permit();
+    match lifecycle.upgrade_registrar() {
+        Some(registrar) => {
+            let control = registrar.control();
+            let script = lifecycle.script();
+            let (gate, start) = tokio::sync::oneshot::channel();
+            let handle = spawn_gated_bridge(
+                start,
+                bridge_ws_handler(
+                    on_upgrade,
+                    handler,
+                    req,
+                    buffer_size,
+                    Some(control),
+                    script,
+                    permit,
+                ),
+            );
+            complete_upgrade_registration(registrar, handle, gate, response).await
+        }
+        None => {
+            drop(crate::task::spawn_async(bridge_ws_handler(
+                on_upgrade,
+                handler,
+                req,
+                buffer_size,
+                None,
+                None,
+                permit,
+            )));
+            Ok(response)
+        }
+    }
+}
+
+fn spawn_gated_bridge<F>(
+    start: tokio::sync::oneshot::Receiver<()>,
+    bridge: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        match start.await {
+            Ok(()) => bridge.await,
+            Err(_) => {}
+        }
+    })
 }
 
 /// Await the hyper upgrade, logging on failure.
@@ -154,6 +204,9 @@ async fn bridge_ws_handler(
     handler: WsHandler,
     req: Request,
     buffer_size: usize,
+    mut control: Option<tokio::sync::watch::Receiver<ServerControl>>,
+    script: Option<Arc<super::mock::LifecycleScript>>,
+    permit: Arc<ConnectionPermit>,
 ) {
     let upgraded = match await_upgrade(on_upgrade, "WebSocket client upgrade failed").await {
         Some(u) => u,
@@ -167,56 +220,87 @@ async fn bridge_ws_handler(
     )
     .await;
 
+    if let Some(script) = &script {
+        script
+            .pause(super::mock::LifecycleCheckpoint::WebSocketOutgoingBufferConfigured(buffer_size))
+            .await;
+    }
     let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::channel::<
         tokio_tungstenite::tungstenite::protocol::Message,
     >(buffer_size);
+    if let Some(script) = &script {
+        script
+            .pause(super::mock::LifecycleCheckpoint::WebSocketIncomingBufferConfigured(buffer_size))
+            .await;
+    }
     let (incoming_tx, incoming_rx) = tokio::sync::mpsc::channel::<
         tokio_tungstenite::tungstenite::protocol::Message,
     >(buffer_size);
 
     use futures_util::{SinkExt, StreamExt};
-    let (mut ws_sink, mut ws_source) = ws_stream.split();
-
-    let read_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = ws_source.next().await {
-            if incoming_tx.send(msg).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    let write_task = tokio::spawn(async move {
-        while let Some(msg) = outgoing_rx.recv().await {
-            if ws_sink.send(msg).await.is_err() {
-                break;
-            }
-        }
-        let _ = ws_sink.close().await;
-    });
-
-    let join_result = tokio::task::spawn_blocking(move || {
+    let mut ws_stream = ws_stream;
+    drop(tokio::task::spawn_blocking(move || {
         let conn = WsConn::new(outgoing_tx, incoming_rx);
         if let Err(e) = handler(&req, conn) {
             tracing::warn!(error = %e, "WebSocket handler returned error");
         }
-    })
-    .await;
+    }));
 
-    if let Err(e) = join_result {
-        tracing::warn!(error = %e, "WebSocket handler task panicked");
+    loop {
+        tokio::select! {
+            biased;
+            mode = next_control(&mut control), if control.is_some() => {
+                match mode {
+                    ServerControl::Graceful => {
+                        let _ = ws_stream
+                            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+                            .await;
+                        drain_direct_close(&mut ws_stream).await;
+                    }
+                    ServerControl::Abort | ServerControl::Running => {}
+                }
+                break;
+            }
+            outgoing = outgoing_rx.recv() => match outgoing {
+                Some(message) => {
+                    if ws_stream.send(message).await.is_err() {
+                        break;
+                    }
+                }
+                None => {
+                    let _ = ws_stream.close(None).await;
+                    break;
+                }
+            },
+            incoming = ws_stream.next() => match incoming {
+                Some(Ok(message)) if message.is_close() => {
+                    let _ = ws_stream.flush().await;
+                    break;
+                }
+                Some(Ok(message)) => {
+                    if incoming_tx.send(message).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Err(error)) => {
+                    tracing::debug!(%error, "WebSocket client bridge closed");
+                    break;
+                }
+                None => break,
+            }
+        }
     }
-
-    read_task.abort();
-    // Let the write task drain remaining queued messages before closing.
-    let _ = write_task.await;
+    shutdown_client_transport(&mut ws_stream).await;
+    drop(permit);
 }
 
 /// Validate the upgrade pair, build the backend URL, spawn the bridge, return 101.
-pub(super) fn handle_proxy_ws(
+pub(super) async fn handle_proxy_ws(
     ws_upgrade: WsUpgrade,
     req: Request,
     backend: Arc<str>,
     prefix: Arc<str>,
+    lifecycle: &ConnectionLifecycle,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let (on_upgrade, accept_key) = match ws_upgrade_pair(ws_upgrade) {
         Some(pair) => pair,
@@ -230,12 +314,51 @@ pub(super) fn handle_proxy_ws(
 
     let subprotocol = extract_ws_subprotocol(&req);
     let forwarded_headers = collect_forwardable_ws_headers(&req);
-    let _task = crate::task::spawn_async(bridge_ws_proxy(
-        on_upgrade,
-        backend_ws_url,
-        forwarded_headers,
-    ));
-    Ok(ws_switching_protocols(accept_key.as_ref(), subprotocol))
+    let response = ws_switching_protocols(accept_key.as_ref(), subprotocol);
+    let permit = lifecycle.permit();
+    match lifecycle.upgrade_registrar() {
+        Some(registrar) => {
+            let control = registrar.control();
+            let (gate, start) = tokio::sync::oneshot::channel();
+            let handle = spawn_gated_bridge(
+                start,
+                bridge_ws_proxy(
+                    on_upgrade,
+                    backend_ws_url,
+                    forwarded_headers,
+                    Some(control),
+                    permit,
+                ),
+            );
+            complete_upgrade_registration(registrar, handle, gate, response).await
+        }
+        None => {
+            drop(crate::task::spawn_async(bridge_ws_proxy(
+                on_upgrade,
+                backend_ws_url,
+                forwarded_headers,
+                None,
+                permit,
+            )));
+            Ok(response)
+        }
+    }
+}
+
+async fn complete_upgrade_registration(
+    registrar: UpgradeRegistrar,
+    handle: tokio::task::JoinHandle<()>,
+    gate: tokio::sync::oneshot::Sender<()>,
+    response: hyper::Response<HyperResponseBody>,
+) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    match registrar.submit(handle).await {
+        UpgradeRegistration::Admitted => {
+            let _ = gate.send(());
+            Ok(response)
+        }
+        UpgradeRegistration::Rejected => Ok(super::server_lifecycle::rejected_response()),
+        UpgradeRegistration::Unavailable => Ok(super::server_lifecycle::unavailable_response()),
+    }
 }
 
 /// Extract the client's Sec-WebSocket-Protocol header for inclusion in the 101 response.
@@ -317,6 +440,8 @@ async fn bridge_ws_proxy(
     on_upgrade: hyper::upgrade::OnUpgrade,
     backend_ws_url: Box<str>,
     forwarded_headers: Box<[HeaderPair]>,
+    mut control: Option<tokio::sync::watch::Receiver<ServerControl>>,
+    permit: Arc<ConnectionPermit>,
 ) {
     let upgraded = match await_upgrade(on_upgrade, "WebSocket proxy client upgrade failed").await {
         Some(u) => u,
@@ -344,32 +469,142 @@ async fn bridge_ws_proxy(
     };
 
     use futures_util::{SinkExt, StreamExt};
-    let (mut client_sink, mut client_source) = client_ws.split();
-    let (mut backend_sink, mut backend_source) = backend_ws.split();
-
-    let c2b = tokio::spawn(async move {
-        while let Some(Ok(msg)) = client_source.next().await {
-            if backend_sink.send(msg).await.is_err() {
+    let mut client_ws = client_ws;
+    let mut backend_ws = backend_ws;
+    loop {
+        tokio::select! {
+            biased;
+            mode = next_control(&mut control), if control.is_some() => {
+                match mode {
+                    ServerControl::Graceful => {
+                        let close = tokio_tungstenite::tungstenite::Message::Close(None);
+                        let _ = client_ws.send(close.clone()).await;
+                        let _ = backend_ws.send(close).await;
+                        drain_proxy_close(&mut client_ws, &mut backend_ws).await;
+                    }
+                    ServerControl::Abort | ServerControl::Running => {}
+                }
                 break;
             }
-        }
-        let _ = backend_sink.close().await;
-    });
-    let c2b_abort = c2b.abort_handle();
-
-    let b2c = tokio::spawn(async move {
-        while let Some(Ok(msg)) = backend_source.next().await {
-            if client_sink.send(msg).await.is_err() {
-                break;
+            message = client_ws.next() => match message {
+                Some(Ok(message)) => {
+                    let closes = message.is_close();
+                    if backend_ws.send(message).await.is_err() {
+                        break;
+                    }
+                    if closes {
+                        forward_backend_close(&mut client_ws, &mut backend_ws).await;
+                        break;
+                    }
+                }
+                Some(Err(error)) => {
+                    tracing::debug!(%error, "WebSocket proxy client closed");
+                    break;
+                }
+                None => break,
+            },
+            message = backend_ws.next() => match message {
+                Some(Ok(message)) => {
+                    let closes = message.is_close();
+                    if client_ws.send(message).await.is_err() || closes {
+                        break;
+                    }
+                }
+                Some(Err(error)) => {
+                    tracing::debug!(%error, "WebSocket proxy backend closed");
+                    break;
+                }
+                None => break,
             }
         }
-        let _ = client_sink.close().await;
-    });
-    let b2c_abort = b2c.abort_handle();
+    }
+    let _ = client_ws.close(None).await;
+    let _ = backend_ws.close(None).await;
+    shutdown_client_transport(&mut client_ws).await;
+    drop(permit);
+}
 
-    tokio::select! {
-        _ = c2b => { b2c_abort.abort(); }
-        _ = b2c => { c2b_abort.abort(); }
+async fn forward_backend_close<C, B>(
+    client: &mut tokio_tungstenite::WebSocketStream<C>,
+    backend: &mut tokio_tungstenite::WebSocketStream<B>,
+) where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::{SinkExt, StreamExt};
+    while let Some(result) = backend.next().await {
+        match result {
+            Ok(message) if message.is_close() => {
+                let _ = client.flush().await;
+                return;
+            }
+            Ok(_) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+async fn shutdown_client_transport<S>(stream: &mut tokio_tungstenite::WebSocketStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let _ = stream.get_mut().shutdown().await;
+    tokio::task::yield_now().await;
+}
+
+async fn next_control(
+    control: &mut Option<tokio::sync::watch::Receiver<ServerControl>>,
+) -> ServerControl {
+    let receiver = match control {
+        Some(receiver) => receiver,
+        None => return std::future::pending().await,
+    };
+    loop {
+        let current = *receiver.borrow_and_update();
+        if current != ServerControl::Running {
+            return current;
+        }
+        match receiver.changed().await {
+            Ok(()) => {}
+            Err(_) => return current,
+        }
+    }
+}
+
+async fn drain_direct_close<S>(stream: &mut tokio_tungstenite::WebSocketStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::StreamExt;
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(message) if message.is_close() => return,
+            Ok(_) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+async fn drain_proxy_close<C, B>(
+    client: &mut tokio_tungstenite::WebSocketStream<C>,
+    backend: &mut tokio_tungstenite::WebSocketStream<B>,
+) where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::StreamExt;
+    loop {
+        tokio::select! {
+            client_message = client.next() => match client_message {
+                Some(Ok(message)) if !message.is_close() => {}
+                _ => return,
+            },
+            backend_message = backend.next() => match backend_message {
+                Some(Ok(message)) if !message.is_close() => {}
+                _ => return,
+            },
+        }
     }
 }
 

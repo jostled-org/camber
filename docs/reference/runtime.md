@@ -85,8 +85,45 @@ If you already have a Tokio runtime and want to run Camber servers inside it, us
 
 Background server APIs return `ServerHandle`, which:
 
-- can be cancelled with `.cancel()`
-- can be awaited for `Result<(), RuntimeError>`
+- requests graceful shutdown with `.shutdown()`
+- requests forced cancellation with `.cancel()`
+- transfers control without stopping admission with `.join()`
+- combines graceful shutdown and transfer with `.shutdown_and_join()`
+- can be awaited for a flat `Result<(), RuntimeError>`
+
+`join`, `shutdown_and_join`, and awaiting the handle use the same concrete
+`http::ServerHandleFuture`. That future retains `shutdown()` and `cancel()`
+methods, so a caller may join first, continue serving, and request shutdown
+later. Dropping either armed owner before completion requests forced shutdown;
+polling a ready result disarms that behavior.
+
+### Constructor Context
+
+Each `serve_background*` constructor first requires an active Tokio runtime. It
+then captures its Camber or plain-Tokio context synchronously before spawning.
+A Camber call site captures runtime shutdown, configured timeout, connection
+limit, keepalive, and observability state. A plain-Tokio call site uses
+per-server control and the standalone shutdown and keepalive defaults, with no
+Camber connection limit or task accounting.
+
+Direct `serve_async*` functions classify context at first poll, not when their
+future is created. Moving an unpolled direct future between contexts therefore
+selects the destination polling context. Dropping a direct future aborts its
+retained children but yields no join result; callers that need completion proof
+use `ServerHandleFuture`.
+
+### Runtime Shutdown Scope
+
+`runtime::request_shutdown`, `on_cancel` completion, and an OS signal observed
+by the active signal watcher request graceful server shutdown. Closure return
+from `RuntimeBuilder::run` is not itself a server shutdown event. Retain and
+await `ServerHandleFuture` before releasing resources when transport completion
+must be proved.
+
+The signal watcher belongs to the current Camber runtime and is aborted during
+closure return. A signal received after the signal watcher is gone has no
+server-lifecycle guarantee. Awaiting a server owner does not extend runtime
+task waiting or recreate that watcher.
 
 ## Resource Lifecycle
 

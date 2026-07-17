@@ -2,7 +2,389 @@ use super::Method;
 use super::Response;
 use super::response::HeaderPair;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+use crate::RuntimeError;
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecycleCheckpoint {
+    BeforeSupervisorSelect,
+    SupervisorSelectedDeadline,
+    SupervisorSelectedControl,
+    SupervisorSelectedRuntime,
+    SupervisorSelectedAccept,
+    SupervisorSelectedPermit,
+    SupervisorSelectedRegistration,
+    SupervisorSelectedTask,
+    AfterAccept,
+    AfterPermit,
+    AfterSupervisorResultSend,
+    AfterUpgradeTicketSubmitted,
+    ConnectionPermitWaitPending,
+    BeforeRuntimeWait,
+    BeforeUpgradeAcknowledge,
+    SseBufferConfigured(usize),
+    WebSocketOutgoingBufferConfigured(usize),
+    WebSocketIncomingBufferConfigured(usize),
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecycleFault {
+    Accept(std::io::ErrorKind),
+    PanicNextOwnedTask,
+    PanicNextOwnedTaskOpaque,
+    CancelNextOwnedTask,
+    PanicSupervisorCore,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SupervisorJoinProbe {
+    CamberCancelled,
+    CamberStringPanic,
+    CamberOpaquePanic,
+    CamberChannelClosed,
+    TokioSuccess,
+    TokioCancelled,
+    TokioStringPanic,
+    TokioOpaquePanic,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CheckpointPhase {
+    Armed,
+    Paused,
+    Released,
+}
+
+struct CheckpointState {
+    checkpoint: LifecycleCheckpoint,
+    phase: CheckpointPhase,
+    reached: Arc<tokio::sync::Notify>,
+    released: Arc<tokio::sync::Notify>,
+}
+
+struct ScriptState {
+    closed: bool,
+    checkpoints: Vec<CheckpointState>,
+    fault: Option<LifecycleFault>,
+}
+
+pub(crate) struct LifecycleScript {
+    state: Mutex<ScriptState>,
+    supervisor_wake: tokio::sync::Notify,
+}
+
+impl LifecycleScript {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ScriptState {
+                closed: false,
+                checkpoints: Vec::new(),
+                fault: None,
+            }),
+            supervisor_wake: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn invalid(message: &'static str) -> RuntimeError {
+        RuntimeError::InvalidArgument(message.into())
+    }
+
+    fn arm(&self, checkpoint: LifecycleCheckpoint) -> Result<(), RuntimeError> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let result = match (
+            state.closed,
+            state.checkpoints.iter().any(|entry| {
+                entry.checkpoint == checkpoint && entry.phase != CheckpointPhase::Released
+            }),
+        ) {
+            (true, _) => Err(Self::invalid("lifecycle controller is closed")),
+            (false, true) => Err(Self::invalid("lifecycle checkpoint is already armed")),
+            (false, false) => {
+                state
+                    .checkpoints
+                    .retain(|entry| entry.checkpoint != checkpoint);
+                state.checkpoints.push(CheckpointState {
+                    checkpoint,
+                    phase: CheckpointPhase::Armed,
+                    reached: Arc::new(tokio::sync::Notify::new()),
+                    released: Arc::new(tokio::sync::Notify::new()),
+                });
+                Ok(())
+            }
+        };
+        drop(state);
+        if result.is_ok() && checkpoint == LifecycleCheckpoint::BeforeSupervisorSelect {
+            self.supervisor_wake.notify_one();
+        }
+        result
+    }
+
+    async fn wait_until_paused(&self, checkpoint: LifecycleCheckpoint) -> Result<(), RuntimeError> {
+        loop {
+            let reached = {
+                let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                let entry = state
+                    .checkpoints
+                    .iter()
+                    .find(|entry| entry.checkpoint == checkpoint)
+                    .ok_or_else(|| Self::invalid("lifecycle checkpoint is not armed"))?;
+                match (state.closed, entry.phase) {
+                    (true, _) => return Err(Self::invalid("lifecycle controller is closed")),
+                    (false, CheckpointPhase::Paused) => return Ok(()),
+                    (false, CheckpointPhase::Released) => {
+                        return Err(Self::invalid("lifecycle checkpoint was already released"));
+                    }
+                    (false, CheckpointPhase::Armed) => Arc::clone(&entry.reached),
+                }
+            };
+            let notified = reached.notified();
+            tokio::pin!(notified);
+            let already_paused = {
+                let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                state.closed
+                    || state.checkpoints.iter().any(|entry| {
+                        entry.checkpoint == checkpoint && entry.phase == CheckpointPhase::Paused
+                    })
+            };
+            match already_paused {
+                true => continue,
+                false => notified.await,
+            }
+        }
+    }
+
+    fn release_checkpoint(&self, checkpoint: LifecycleCheckpoint) -> Result<(), RuntimeError> {
+        let released = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let entry = state
+                .checkpoints
+                .iter_mut()
+                .find(|entry| entry.checkpoint == checkpoint)
+                .ok_or_else(|| Self::invalid("lifecycle checkpoint is not armed"))?;
+            match entry.phase {
+                CheckpointPhase::Paused => {
+                    entry.phase = CheckpointPhase::Released;
+                    Arc::clone(&entry.released)
+                }
+                CheckpointPhase::Armed | CheckpointPhase::Released => {
+                    return Err(Self::invalid("lifecycle checkpoint is not paused"));
+                }
+            }
+        };
+        released.notify_waiters();
+        Ok(())
+    }
+
+    fn inject(&self, fault: LifecycleFault) -> Result<(), RuntimeError> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let result = match (state.closed, state.fault.is_some()) {
+            (true, _) => Err(Self::invalid("lifecycle controller is closed")),
+            (false, true) => Err(Self::invalid("lifecycle fault is already armed")),
+            (false, false) => {
+                state.fault = Some(fault);
+                Ok(())
+            }
+        };
+        drop(state);
+        if result.is_ok()
+            && matches!(
+                fault,
+                LifecycleFault::Accept(_) | LifecycleFault::PanicSupervisorCore
+            )
+        {
+            self.supervisor_wake.notify_one();
+        }
+        result
+    }
+
+    pub(crate) async fn pause(&self, checkpoint: LifecycleCheckpoint) {
+        let released = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.closed {
+                return;
+            }
+            let entry = match state.checkpoints.iter_mut().find(|entry| {
+                entry.checkpoint == checkpoint && entry.phase == CheckpointPhase::Armed
+            }) {
+                Some(entry) => entry,
+                None => return,
+            };
+            entry.phase = CheckpointPhase::Paused;
+            entry.reached.notify_waiters();
+            Arc::clone(&entry.released)
+        };
+        loop {
+            let notified = released.notified();
+            tokio::pin!(notified);
+            let done = {
+                let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                let generation = state
+                    .checkpoints
+                    .iter()
+                    .find(|entry| Arc::ptr_eq(&entry.released, &released));
+                state.closed
+                    || match generation {
+                        Some(entry) => entry.phase == CheckpointPhase::Released,
+                        None => true,
+                    }
+            };
+            match done {
+                true => return,
+                false => notified.await,
+            }
+        }
+    }
+
+    pub(crate) async fn wait_for_supervisor_wake(&self) {
+        self.supervisor_wake.notified().await;
+    }
+
+    pub(crate) fn take_accept_fault(&self) -> Option<std::io::ErrorKind> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        match state.fault {
+            Some(LifecycleFault::Accept(kind)) => {
+                state.fault = None;
+                Some(kind)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn take_owned_task_fault(&self) -> Option<LifecycleFault> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        match state.fault {
+            Some(
+                fault @ (LifecycleFault::PanicNextOwnedTask
+                | LifecycleFault::PanicNextOwnedTaskOpaque
+                | LifecycleFault::CancelNextOwnedTask),
+            ) => {
+                state.fault = None;
+                Some(fault)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn take_supervisor_fault(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        match state.fault {
+            Some(LifecycleFault::PanicSupervisorCore) => {
+                state.fault = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn close(&self) {
+        let notifications = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.closed = true;
+            state
+                .checkpoints
+                .iter()
+                .flat_map(|entry| [Arc::clone(&entry.reached), Arc::clone(&entry.released)])
+                .collect::<Vec<_>>()
+        };
+        notifications
+            .into_iter()
+            .for_each(|notification| notification.notify_waiters());
+    }
+}
+
+struct LifecycleRegistration {
+    addr: std::net::SocketAddr,
+    script: Weak<LifecycleScript>,
+}
+
+fn lifecycle_registry() -> &'static Mutex<Vec<LifecycleRegistration>> {
+    static REGISTRY: OnceLock<Mutex<Vec<LifecycleRegistration>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[doc(hidden)]
+pub struct LifecycleController {
+    addr: std::net::SocketAddr,
+    script: Arc<LifecycleScript>,
+}
+
+impl LifecycleController {
+    pub fn pause_once(&self, checkpoint: LifecycleCheckpoint) -> Result<(), RuntimeError> {
+        self.script.arm(checkpoint)
+    }
+
+    pub async fn wait_until_paused(
+        &self,
+        checkpoint: LifecycleCheckpoint,
+    ) -> Result<(), RuntimeError> {
+        self.script.wait_until_paused(checkpoint).await
+    }
+
+    pub fn release(&self, checkpoint: LifecycleCheckpoint) -> Result<(), RuntimeError> {
+        self.script.release_checkpoint(checkpoint)
+    }
+
+    pub fn inject_once(&self, fault: LifecycleFault) -> Result<(), RuntimeError> {
+        self.script.inject(fault)
+    }
+}
+
+impl Drop for LifecycleController {
+    fn drop(&mut self) {
+        self.script.close();
+        let mut registry = lifecycle_registry()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        registry.retain(|entry| {
+            entry.addr != self.addr
+                || entry
+                    .script
+                    .upgrade()
+                    .is_some_and(|script| !Arc::ptr_eq(&script, &self.script))
+        });
+    }
+}
+
+#[doc(hidden)]
+pub fn lifecycle(addr: std::net::SocketAddr) -> Result<LifecycleController, RuntimeError> {
+    let mut registry = lifecycle_registry()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    registry.retain(|entry| entry.script.strong_count() > 0);
+    match registry.iter().any(|entry| entry.addr == addr) {
+        true => Err(RuntimeError::InvalidArgument(
+            "lifecycle controller already exists for address".into(),
+        )),
+        false => {
+            let script = Arc::new(LifecycleScript::new());
+            registry.push(LifecycleRegistration {
+                addr,
+                script: Arc::downgrade(&script),
+            });
+            Ok(LifecycleController { addr, script })
+        }
+    }
+}
+
+pub(crate) fn lifecycle_script(addr: std::net::SocketAddr) -> Option<Arc<LifecycleScript>> {
+    let mut registry = lifecycle_registry()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    registry.retain(|entry| entry.script.strong_count() > 0);
+    registry
+        .iter()
+        .find(|entry| entry.addr == addr)
+        .and_then(|entry| entry.script.upgrade())
+}
+
+#[doc(hidden)]
+pub fn supervisor_join_probe(probe: SupervisorJoinProbe) -> super::server::ServerHandleFuture {
+    super::server_lifecycle::supervisor_join_probe(probe)
+}
 
 /// Global registry of mock HTTP responses.
 ///

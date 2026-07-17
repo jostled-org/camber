@@ -7,6 +7,7 @@ use super::internal_routes::{
 };
 use super::request::RequestHead;
 use super::router::{DispatchResult, GateCheck, ServerDispatch, gate_result};
+use super::server_lifecycle::ConnectionLifecycle;
 use super::sse::SseWriter;
 #[cfg(feature = "ws")]
 use super::ws_proxy::{self, WsUpgrade};
@@ -54,22 +55,6 @@ impl ConnCtx {
             #[cfg(feature = "ws")]
             ws_buffer_size: buffers.ws_buffer_size,
             health_state: rt.health_state.clone(),
-            is_tls,
-        }
-    }
-
-    /// Build without a Camber runtime (standalone async serving).
-    pub(super) fn without_runtime(buffers: BufferConfig, is_tls: bool) -> Self {
-        Self {
-            tracing_enabled: false,
-            metrics_handle: None,
-            #[cfg(feature = "profiling")]
-            profiling_enabled: false,
-            max_request_body: buffers.max_request_body,
-            sse_buffer_size: buffers.sse_buffer_size,
-            #[cfg(feature = "ws")]
-            ws_buffer_size: buffers.ws_buffer_size,
-            health_state: None,
             is_tls,
         }
     }
@@ -175,6 +160,7 @@ pub(super) async fn handle_request(
     dispatch: &ServerDispatch,
     ctx: &ConnCtx,
     remote_addr: Option<std::net::IpAddr>,
+    lifecycle: &ConnectionLifecycle,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     // gRPC bodies are streaming — skip body collection and dispatch directly to tonic.
     // Middleware runs as a gate check on the headers, then forwards to tonic.
@@ -325,17 +311,18 @@ pub(super) async fn handle_request(
         DispatchResult::Stream(fut, req) => handle_stream_response(fut.await, req, ctx, start),
         DispatchResult::Sse(handler, req) => {
             record_request(ctx, req.method(), req.path(), 200, start);
-            handle_sse(handler, req, ctx.sse_buffer_size)
+            handle_sse(handler, req, ctx.sse_buffer_size, lifecycle).await
         }
         #[cfg(feature = "ws")]
         DispatchResult::WebSocket(handler, req) => {
             record_request(ctx, req.method(), req.path(), 101, start);
-            ws_proxy::handle_ws_upgrade(ws_upgrade, handler, req, ctx.ws_buffer_size)
+            ws_proxy::handle_ws_upgrade(ws_upgrade, handler, req, ctx.ws_buffer_size, lifecycle)
+                .await
         }
         #[cfg(feature = "ws")]
         DispatchResult::ProxyWebSocket(req, backend, prefix) => {
             record_request(ctx, req.method(), req.path(), 101, start);
-            ws_proxy::handle_proxy_ws(ws_upgrade, req, backend, prefix)
+            ws_proxy::handle_proxy_ws(ws_upgrade, req, backend, prefix, lifecycle).await
         }
         DispatchResult::ProxyStream(req, backend, prefix) => {
             handle_proxy_stream_response(req, &backend, &prefix, ctx, start).await
@@ -416,11 +403,19 @@ async fn dispatch_internal_through_middleware(
     }
 }
 
-fn handle_sse(
+async fn handle_sse(
     handler: super::router::SseHandler,
     req: Request,
     buffer_size: usize,
+    lifecycle: &ConnectionLifecycle,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    if let Some(script) = lifecycle.script() {
+        script
+            .pause(super::mock::LifecycleCheckpoint::SseBufferConfigured(
+                buffer_size,
+            ))
+            .await;
+    }
     let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(buffer_size);
 
     let _task = crate::task::spawn(move || {

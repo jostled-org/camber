@@ -1,8 +1,18 @@
 use super::handle::{ConnCtx, handle_request};
 use super::router::ServerDispatch;
+use super::server_lifecycle::{ConnectionLifecycle, ServerControl};
 use crate::net::accept;
 use crate::{RuntimeError, net};
 use std::sync::Arc;
+
+struct SyncConnectionState {
+    router: Arc<ServerDispatch>,
+    ctx: Arc<ConnCtx>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
+    keepalive_timeout: std::time::Duration,
+    remote_ip: std::net::IpAddr,
+    lifecycle: ConnectionLifecycle,
+}
 
 pub(super) async fn accept_loop(
     listener: &net::Listener,
@@ -49,11 +59,16 @@ pub(super) async fn accept_tcp(
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     conn_limit: Option<Arc<tokio::sync::Semaphore>>,
 ) -> Result<(), RuntimeError> {
-    accept::accept_loop(
+    let script = listener
+        .local_addr()
+        .ok()
+        .and_then(super::mock::lifecycle_script);
+    accept::accept_loop_with_permit(
         listener,
         &shutdown_notify,
         conn_limit.as_ref(),
-        |(stream, addr)| {
+        script.as_ref(),
+        |(stream, addr), permit| {
             let router = Arc::clone(&router);
             let ctx = Arc::clone(&ctx);
             let shutdown = Arc::clone(&shutdown_notify);
@@ -62,16 +77,15 @@ pub(super) async fn accept_tcp(
             async move {
                 match acceptor {
                     Some(a) => {
-                        serve_tls_connection(
-                            stream,
-                            a,
+                        let state = SyncConnectionState {
                             router,
                             ctx,
-                            shutdown,
+                            shutdown_notify: shutdown,
                             keepalive_timeout,
                             remote_ip,
-                        )
-                        .await;
+                            lifecycle: ConnectionLifecycle::synchronous(permit),
+                        };
+                        serve_tls_connection(stream, a, state).await;
                     }
                     None => {
                         serve_stream(
@@ -81,6 +95,7 @@ pub(super) async fn accept_tcp(
                             shutdown,
                             keepalive_timeout,
                             Some(remote_ip),
+                            ConnectionLifecycle::synchronous(permit),
                         )
                         .await;
                     }
@@ -99,14 +114,29 @@ async fn accept_unix(
     keepalive_timeout: std::time::Duration,
     conn_limit: Option<Arc<tokio::sync::Semaphore>>,
 ) -> Result<(), RuntimeError> {
-    accept::accept_loop(listener, &shutdown_notify, conn_limit.as_ref(), |stream| {
-        let router = Arc::clone(&router);
-        let ctx = Arc::clone(&ctx);
-        let shutdown = Arc::clone(&shutdown_notify);
-        async move {
-            serve_stream(stream, router, ctx, shutdown, keepalive_timeout, None).await;
-        }
-    })
+    accept::accept_loop_with_permit(
+        listener,
+        &shutdown_notify,
+        conn_limit.as_ref(),
+        None,
+        |stream, permit| {
+            let router = Arc::clone(&router);
+            let ctx = Arc::clone(&ctx);
+            let shutdown = Arc::clone(&shutdown_notify);
+            async move {
+                serve_stream(
+                    stream,
+                    router,
+                    ctx,
+                    shutdown,
+                    keepalive_timeout,
+                    None,
+                    ConnectionLifecycle::synchronous(permit),
+                )
+                .await;
+            }
+        },
+    )
     .await
 }
 
@@ -117,6 +147,7 @@ async fn serve_stream<S>(
     shutdown_notify: Arc<tokio::sync::Notify>,
     keepalive_timeout: std::time::Duration,
     remote_addr: Option<std::net::IpAddr>,
+    lifecycle: ConnectionLifecycle,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -128,6 +159,7 @@ async fn serve_stream<S>(
         shutdown_notify,
         keepalive_timeout,
         remote_addr,
+        lifecycle,
     )
     .await;
 }
@@ -135,11 +167,7 @@ async fn serve_stream<S>(
 async fn serve_tls_connection(
     stream: tokio::net::TcpStream,
     acceptor: tokio_rustls::TlsAcceptor,
-    router: Arc<ServerDispatch>,
-    ctx: Arc<ConnCtx>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
-    keepalive_timeout: std::time::Duration,
-    remote_ip: std::net::IpAddr,
+    state: SyncConnectionState,
 ) {
     let tls_stream = match accept::tls_handshake(stream, &acceptor).await {
         Some(s) => s,
@@ -147,11 +175,12 @@ async fn serve_tls_connection(
     };
     serve_stream(
         tls_stream,
-        router,
-        ctx,
-        shutdown_notify,
-        keepalive_timeout,
-        Some(remote_ip),
+        state.router,
+        state.ctx,
+        state.shutdown_notify,
+        state.keepalive_timeout,
+        Some(state.remote_ip),
+        state.lifecycle,
     )
     .await;
 }
@@ -163,13 +192,15 @@ async fn serve_io<I>(
     shutdown_notify: Arc<tokio::sync::Notify>,
     keepalive_timeout: std::time::Duration,
     remote_addr: Option<std::net::IpAddr>,
+    lifecycle: ConnectionLifecycle,
 ) where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
         let router = Arc::clone(&router);
         let ctx = Arc::clone(&ctx);
-        async move { handle_request(req, &router, &ctx, remote_addr).await }
+        let lifecycle = lifecycle.clone();
+        async move { handle_request(req, &router, &ctx, remote_addr, &lifecycle).await }
     });
 
     let mut builder =
@@ -200,6 +231,175 @@ async fn serve_io<I>(
                 Err(_) => tracing::debug!("connection timed out during graceful shutdown"),
             }
         }
+    }
+}
+
+pub(super) async fn serve_owned_connection(
+    stream: tokio::net::TcpStream,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    router: Arc<ServerDispatch>,
+    ctx: Arc<ConnCtx>,
+    lifecycle: ConnectionLifecycle,
+    keepalive_timeout: std::time::Duration,
+    remote_addr: std::net::IpAddr,
+) {
+    match tls_acceptor {
+        Some(acceptor) => {
+            serve_owned_tls(
+                stream,
+                acceptor,
+                router,
+                ctx,
+                lifecycle,
+                keepalive_timeout,
+                remote_addr,
+            )
+            .await;
+        }
+        None => {
+            serve_owned_stream(
+                stream,
+                router,
+                ctx,
+                lifecycle,
+                keepalive_timeout,
+                remote_addr,
+            )
+            .await;
+        }
+    }
+}
+
+async fn serve_owned_tls(
+    stream: tokio::net::TcpStream,
+    acceptor: tokio_rustls::TlsAcceptor,
+    router: Arc<ServerDispatch>,
+    ctx: Arc<ConnCtx>,
+    lifecycle: ConnectionLifecycle,
+    keepalive_timeout: std::time::Duration,
+    remote_addr: std::net::IpAddr,
+) {
+    let mut control = match lifecycle.control() {
+        Some(control) => control,
+        None => return,
+    };
+    let handshake = accept::tls_handshake(stream, &acceptor);
+    tokio::pin!(handshake);
+    let tls_stream = tokio::select! {
+        biased;
+        _ = wait_for_shutdown(&mut control) => return,
+        stream = &mut handshake => match stream {
+            Some(stream) => stream,
+            None => return,
+        },
+    };
+    serve_owned_stream(
+        tls_stream,
+        router,
+        ctx,
+        lifecycle,
+        keepalive_timeout,
+        remote_addr,
+    )
+    .await;
+}
+
+async fn serve_owned_stream<S>(
+    stream: S,
+    router: Arc<ServerDispatch>,
+    ctx: Arc<ConnCtx>,
+    lifecycle: ConnectionLifecycle,
+    keepalive_timeout: std::time::Duration,
+    remote_addr: std::net::IpAddr,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let io = hyper_util::rt::TokioIo::new(stream);
+    serve_owned_io(
+        io,
+        router,
+        ctx,
+        lifecycle,
+        keepalive_timeout,
+        Some(remote_addr),
+    )
+    .await;
+}
+
+async fn serve_owned_io<I>(
+    io: hyper_util::rt::TokioIo<I>,
+    router: Arc<ServerDispatch>,
+    ctx: Arc<ConnCtx>,
+    lifecycle: ConnectionLifecycle,
+    keepalive_timeout: std::time::Duration,
+    remote_addr: Option<std::net::IpAddr>,
+) where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let service_lifecycle = lifecycle.clone();
+    let service = hyper::service::service_fn(move |request| {
+        let router = Arc::clone(&router);
+        let ctx = Arc::clone(&ctx);
+        let lifecycle = service_lifecycle.clone();
+        async move { handle_request(request, &router, &ctx, remote_addr, &lifecycle).await }
+    });
+    let builder = connection_builder(keepalive_timeout);
+    let connection = builder.serve_connection_with_upgrades(io, service);
+    tokio::pin!(connection);
+    let mut control = match lifecycle.control() {
+        Some(control) => control,
+        None => return,
+    };
+    tokio::select! {
+        biased;
+        mode = wait_for_shutdown(&mut control) => match mode {
+            ServerControl::Graceful | ServerControl::Abort => {
+                connection.as_mut().graceful_shutdown();
+                log_connection_result(connection.await, true);
+            }
+            ServerControl::Running => {}
+        },
+        result = &mut connection => log_connection_result(result, false),
+    }
+}
+
+fn connection_builder(
+    keepalive_timeout: std::time::Duration,
+) -> hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor> {
+    let mut builder =
+        hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+    builder
+        .http1()
+        .keep_alive(true)
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(Some(keepalive_timeout));
+    builder
+}
+
+async fn wait_for_shutdown(
+    control: &mut tokio::sync::watch::Receiver<ServerControl>,
+) -> ServerControl {
+    loop {
+        let current = *control.borrow_and_update();
+        if current != ServerControl::Running {
+            return current;
+        }
+        match control.changed().await {
+            Ok(()) => {}
+            Err(_) => return current,
+        }
+    }
+}
+
+fn log_connection_result<E>(result: Result<(), E>, draining: bool)
+where
+    E: AsRef<dyn std::error::Error + Send + Sync> + std::fmt::Display,
+{
+    match (result, draining) {
+        (Ok(()), _) => {}
+        (Err(ref error), _) if is_benign_hyper_error(error.as_ref()) => {}
+        (Err(error), true) => tracing::warn!("connection error during shutdown: {error}"),
+        (Err(error), false) => tracing::warn!("connection error: {error}"),
     }
 }
 
