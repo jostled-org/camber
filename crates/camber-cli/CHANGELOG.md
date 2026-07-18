@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/jostled-org/camber/compare/camber-cli-v0.1.7...camber-cli-v0.1.8) - 2026-07-18
+
+### Fixed
+
+- *(ci)* stabilize warning-clean test suite
+
 ## [0.1.7](https://github.com/jostled-org/camber/compare/camber-cli-v0.1.6...camber-cli-v0.1.7) - 2026-06-07
 
 ### Other
