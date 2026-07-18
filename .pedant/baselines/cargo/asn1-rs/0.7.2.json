@@ -1,0 +1,107 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "c8e7555a7a4ada8ff068729e5846b87199bc05f076cac9b884104a4a04fb1ff2",
+  "crate_name": "asn1-rs",
+  "crate_version": "0.7.2",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784342225,
+  "analysis_completeness": {
+    "analyzed_files": 65,
+    "skipped_files": 0
+  },
+  "rust_version": "1.68",
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/asn1_types/generalizedtime.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/asn1_types/utctime.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/asn1_types/utctime.rs",
+          "line": 118,
+          "column": 13
+        },
+        "evidence": "time::Date::from_calendar_date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 62,
+          "column": 9
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 62,
+          "column": 9
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 62,
+          "column": 9
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 62,
+          "column": 9
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/datetime.rs",
+          "line": 62,
+          "column": 9
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      }
+    ]
+  }
+}

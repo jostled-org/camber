@@ -1,0 +1,1217 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "725e1d841d5d7c1ad0816f2760245ed88cbf9ad2570dc730d9ff4db0dce89be2",
+  "crate_name": "tower-http",
+  "crate_version": "0.7.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784342230,
+  "analysis_completeness": {
+    "analyzed_files": 115,
+    "skipped_files": 0
+  },
+  "rust_version": "1.65",
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/compression/layer.rs",
+          "line": 130,
+          "column": 5
+        },
+        "evidence": "tokio::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/compression/layer.rs",
+          "line": 156,
+          "column": 24
+        },
+        "evidence": "tokio::fs::read",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/cors/tests.rs",
+          "line": 119,
+          "column": 49
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/cors/tests.rs",
+          "line": 129,
+          "column": 51
+        },
+        "evidence": "http://example.org",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/cors/tests.rs",
+          "line": 148,
+          "column": 33
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/cors/tests.rs",
+          "line": 172,
+          "column": 33
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/cors/tests.rs",
+          "line": 213,
+          "column": 33
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/cors/tests.rs",
+          "line": 230,
+          "column": 13
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/cors/tests.rs",
+          "line": 239,
+          "column": 33
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 291,
+          "column": 33
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 312,
+          "column": 33
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 319,
+          "column": 31
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 334,
+          "column": 33
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 341,
+          "column": 31
+        },
+        "evidence": "https://malicious.example",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 369,
+          "column": 31
+        },
+        "evidence": "https://malicious.example",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 393,
+          "column": 33
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 405,
+          "column": 31
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 481,
+          "column": 35
+        },
+        "evidence": "https://attacker.example",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 502,
+          "column": 18
+        },
+        "evidence": "https://example.com/bypass",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 553,
+          "column": 25
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 560,
+          "column": 25
+        },
+        "evidence": "https://example.com:8443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 567,
+          "column": 25
+        },
+        "evidence": "https://example.com:443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 574,
+          "column": 25
+        },
+        "evidence": "https://example.com:8444",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 585,
+          "column": 25
+        },
+        "evidence": "https://example.com:443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 594,
+          "column": 25
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 603,
+          "column": 25
+        },
+        "evidence": "https://example.com:8443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 610,
+          "column": 22
+        },
+        "evidence": "https://example.com/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 612,
+          "column": 25
+        },
+        "evidence": "https://example.com:8443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 623,
+          "column": 25
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 632,
+          "column": 22
+        },
+        "evidence": "https://example.com/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 634,
+          "column": 25
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 641,
+          "column": 22
+        },
+        "evidence": "https://example.com/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 643,
+          "column": 25
+        },
+        "evidence": "https://other.example",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 650,
+          "column": 22
+        },
+        "evidence": "https://example.com/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 652,
+          "column": 25
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 657,
+          "column": 22
+        },
+        "evidence": "https://other.example/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 659,
+          "column": 25
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 668,
+          "column": 25
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 878,
+          "column": 33
+        },
+        "evidence": "https://trusted.example",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 893,
+          "column": 30
+        },
+        "evidence": "https://trusted.example",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 899,
+          "column": 30
+        },
+        "evidence": "https://trusted.example",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 905,
+          "column": 30
+        },
+        "evidence": "https://attacker.example",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 913,
+          "column": 30
+        },
+        "evidence": "https://attacker.example",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 955,
+          "column": 26
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 956,
+          "column": 25
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 961,
+          "column": 26
+        },
+        "evidence": "https://example.com:8443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 962,
+          "column": 25
+        },
+        "evidence": "https://example.com:8443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 967,
+          "column": 26
+        },
+        "evidence": "https://Example.COM",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 968,
+          "column": 25
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 975,
+          "column": 26
+        },
+        "evidence": "https://example.com:443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 976,
+          "column": 25
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 983,
+          "column": 26
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/mod.rs",
+          "line": 984,
+          "column": 25
+        },
+        "evidence": "https://example.com:443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/url.rs",
+          "line": 79,
+          "column": 13
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/url.rs",
+          "line": 80,
+          "column": 13
+        },
+        "evidence": "http://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/url.rs",
+          "line": 81,
+          "column": 13
+        },
+        "evidence": "https://example.com:8443",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/url.rs",
+          "line": 103,
+          "column": 14
+        },
+        "evidence": "https://",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/url.rs",
+          "line": 124,
+          "column": 14
+        },
+        "evidence": "https://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/url.rs",
+          "line": 127,
+          "column": 14
+        },
+        "evidence": "https://example.com/path",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/url.rs",
+          "line": 130,
+          "column": 14
+        },
+        "evidence": "https://example.com/path?query=value",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/url.rs",
+          "line": 133,
+          "column": 14
+        },
+        "evidence": "https://example.com/path#fragment",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/url.rs",
+          "line": 138,
+          "column": 14
+        },
+        "evidence": "https://example.com#fragment",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/url.rs",
+          "line": 141,
+          "column": 14
+        },
+        "evidence": "https://example.com/#fragment",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/url.rs",
+          "line": 145,
+          "column": 14
+        },
+        "evidence": "https://ümlaut.de",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/csrf/url.rs",
+          "line": 148,
+          "column": 14
+        },
+        "evidence": "https://日本.jp",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 473,
+          "column": 18
+        },
+        "evidence": "http://example.com/42",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 491,
+          "column": 18
+        },
+        "evidence": "http://example.com/42",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 509,
+          "column": 18
+        },
+        "evidence": "http://example.com/42",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 530,
+          "column": 18
+        },
+        "evidence": "http://example.com/42",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 546,
+          "column": 18
+        },
+        "evidence": "http://example.com/42",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 561,
+          "column": 18
+        },
+        "evidence": "http://a.example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 586,
+          "column": 18
+        },
+        "evidence": "http://a.example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 603,
+          "column": 18
+        },
+        "evidence": "http://a.example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 627,
+          "column": 35
+        },
+        "evidence": "http://b.example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 642,
+          "column": 48
+        },
+        "evidence": "http://b.example.com/second",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 643,
+          "column": 56
+        },
+        "evidence": "http://b.example.com/final",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 699,
+          "column": 22
+        },
+        "evidence": "http://example.com/301",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 715,
+          "column": 22
+        },
+        "evidence": "http://example.com/301",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 745,
+          "column": 22
+        },
+        "evidence": "http://example.com/302",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 761,
+          "column": 22
+        },
+        "evidence": "http://example.com/302",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 777,
+          "column": 22
+        },
+        "evidence": "http://example.com/302",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 807,
+          "column": 22
+        },
+        "evidence": "http://example.com/303",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 823,
+          "column": 22
+        },
+        "evidence": "http://example.com/303",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 839,
+          "column": 22
+        },
+        "evidence": "http://example.com/303",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 869,
+          "column": 22
+        },
+        "evidence": "http://example.com/307",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 885,
+          "column": 22
+        },
+        "evidence": "http://example.com/308",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 941,
+          "column": 37
+        },
+        "evidence": "https://example.com/api",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/mod.rs",
+          "line": 952,
+          "column": 31
+        },
+        "evidence": "https://münchen.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 187,
+          "column": 40
+        },
+        "evidence": "http://example.com/old",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 188,
+          "column": 44
+        },
+        "evidence": "http://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 189,
+          "column": 45
+        },
+        "evidence": "https://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 256,
+          "column": 40
+        },
+        "evidence": "http://example.com/old",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 257,
+          "column": 44
+        },
+        "evidence": "http://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 258,
+          "column": 45
+        },
+        "evidence": "https://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 283,
+          "column": 40
+        },
+        "evidence": "http://example.com/old",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 284,
+          "column": 45
+        },
+        "evidence": "https://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 302,
+          "column": 40
+        },
+        "evidence": "http://example.com/old",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 303,
+          "column": 45
+        },
+        "evidence": "https://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 319,
+          "column": 40
+        },
+        "evidence": "http://example.com/old",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/filter_credentials.rs",
+          "line": 320,
+          "column": 45
+        },
+        "evidence": "https://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/limited.rs",
+          "line": 45,
+          "column": 36
+        },
+        "evidence": "https://example.com/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/same_origin.rs",
+          "line": 42,
+          "column": 40
+        },
+        "evidence": "http://example.com/old",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/same_origin.rs",
+          "line": 43,
+          "column": 44
+        },
+        "evidence": "http://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/follow_redirect/policy/same_origin.rs",
+          "line": 44,
+          "column": 45
+        },
+        "evidence": "https://example.com/new",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/on_early_drop/early_drops_as_failures.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/on_early_drop/service.rs",
+          "line": 123,
+          "column": 32
+        },
+        "evidence": "http://example/",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/services/fs/serve_dir/backend.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/services/fs/serve_dir/backend.rs",
+          "line": 81,
+          "column": 24
+        },
+        "evidence": "tokio::fs::File::open",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/services/fs/serve_dir/backend.rs",
+          "line": 87,
+          "column": 31
+        },
+        "evidence": "tokio::fs::metadata",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/services/fs/serve_dir/headers.rs",
+          "line": 3,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/services/fs/serve_dir/tests.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/services/fs/serve_dir/tests.rs",
+          "line": 41,
+          "column": 20
+        },
+        "evidence": "std::fs::read_to_string",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/services/fs/serve_dir/tests.rs",
+          "line": 600,
+          "column": 25
+        },
+        "evidence": "std::fs::read",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/services/fs/serve_dir/tests.rs",
+          "line": 1021,
+          "column": 5
+        },
+        "evidence": "std::fs::OpenOptions",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/services/fs/serve_dir/tests.rs",
+          "line": 1691,
+          "column": 5
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/services/fs/serve_dir/tests.rs",
+          "line": 1032,
+          "column": 25
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/services/fs/serve_dir/tests.rs",
+          "line": 1024,
+          "column": 5
+        },
+        "evidence": "extern block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/body.rs",
+          "line": 5,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/future.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/trace/service.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      }
+    ]
+  }
+}

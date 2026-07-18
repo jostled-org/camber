@@ -1,0 +1,57 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "a075e4f4068a172ed37c0954946674adf1e47fd57f213283ec0fcae2b06f628d",
+  "crate_name": "h2",
+  "crate_version": "0.4.15",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784342227,
+  "analysis_completeness": {
+    "analyzed_files": 52,
+    "skipped_files": 0
+  },
+  "rust_version": "1.63",
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/hpack/header.rs",
+          "line": 283,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/hpack/test/fixture.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::fs::File",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/proto/streams/recv.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/proto/streams/stream.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "std::time::Instant",
+        "origin": "import"
+      }
+    ]
+  }
+}

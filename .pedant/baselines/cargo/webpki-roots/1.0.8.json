@@ -1,0 +1,16 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "cf6701bff94a174cadbce6fdabc6b55499277b7987e3906130079eabad27e694",
+  "crate_name": "webpki-roots",
+  "crate_version": "1.0.8",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784342231,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.70",
+  "profile": {
+    "findings": []
+  }
+}

@@ -1,0 +1,187 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "baaeeb4099f3f3967f0a412548397a26601a6769c98d2d5c493cc322b845f80f",
+  "crate_name": "tokio-rustls",
+  "crate_version": "0.26.4",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784342230,
+  "analysis_completeness": {
+    "analyzed_files": 6,
+    "skipped_files": 0
+  },
+  "rust_version": "1.71",
+  "profile": {
+    "findings": [
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::ServerName",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/client.rs",
+          "line": 15,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/handshake.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "rustls::server::AcceptedAlert",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/handshake.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "rustls::ConnectionCommon",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/handshake.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "rustls::SideData",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/mod.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "rustls::ConnectionCommon",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/mod.rs",
+          "line": 6,
+          "column": 1
+        },
+        "evidence": "rustls::SideData",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/test_stream.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::ServerName",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/test_stream.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/test_stream.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "rustls::Connection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/common/test_stream.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConnection",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 49,
+          "column": 5
+        },
+        "evidence": "rustls",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 51,
+          "column": 1
+        },
+        "evidence": "rustls::CommonState",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/server.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::server::AcceptedAlert",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/server.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/server.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "rustls::ServerConnection",
+        "origin": "import"
+      }
+    ]
+  }
+}

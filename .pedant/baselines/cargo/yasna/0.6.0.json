@@ -1,0 +1,77 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "584a36db9d0791650f440c98343e84782cfa3f593b9ca13e786d45510a615683",
+  "crate_name": "yasna",
+  "crate_version": "0.6.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784342231,
+  "analysis_completeness": {
+    "analyzed_files": 13,
+    "skipped_files": 0
+  },
+  "rust_version": "1.60",
+  "profile": {
+    "findings": [
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/models/time.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "time::Date",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/models/time.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "time::Month",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/models/time.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "time::OffsetDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/models/time.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "time::PrimitiveDateTime",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/models/time.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "time::Time",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/models/time.rs",
+          "line": 12,
+          "column": 1
+        },
+        "evidence": "time::UtcOffset",
+        "origin": "import"
+      }
+    ]
+  }
+}

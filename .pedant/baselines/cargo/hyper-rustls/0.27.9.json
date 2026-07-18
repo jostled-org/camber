@@ -1,0 +1,207 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "2581ac8e3aee72b86fa147ca2b7d2587a7b6d273315e2938977957ee9b415944",
+  "crate_name": "hyper-rustls",
+  "crate_version": "0.27.9",
+  "analysis_tier": "syntactic",
+  "timestamp": 1784342227,
+  "analysis_completeness": {
+    "analyzed_files": 5,
+    "skipped_files": 0
+  },
+  "rust_version": "1.85",
+  "profile": {
+    "findings": [
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/config.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "rustls::client::WantsClientCert",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/config.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/config.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "rustls::ConfigBuilder",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/config.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "rustls::WantsVerifier",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/config.rs",
+          "line": 76,
+          "column": 25
+        },
+        "evidence": "rustls::RootCertStore::empty",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connector.rs",
+          "line": 8,
+          "column": 1
+        },
+        "evidence": "hyper::rt",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/connector.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::ServerName",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connector.rs",
+          "line": 228,
+          "column": 5
+        },
+        "evidence": "tokio::net::TcpStream",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/connector.rs",
+          "line": 269,
+          "column": 30
+        },
+        "evidence": "rustls::ClientConfig::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connector.rs",
+          "line": 292,
+          "column": 34
+        },
+        "evidence": "https://google.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/connector.rs",
+          "line": 293,
+          "column": 33
+        },
+        "evidence": "http://google.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/connector/builder.rs",
+          "line": 9,
+          "column": 1
+        },
+        "evidence": "rustls::crypto::CryptoProvider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/connector/builder.rs",
+          "line": 10,
+          "column": 1
+        },
+        "evidence": "rustls::pki_types::ServerName",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/connector/builder.rs",
+          "line": 11,
+          "column": 1
+        },
+        "evidence": "rustls::ClientConfig",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/connector/builder.rs",
+          "line": 416,
+          "column": 21
+        },
+        "evidence": "rustls::RootCertStore::empty",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/connector/builder.rs",
+          "line": 417,
+          "column": 36
+        },
+        "evidence": "rustls::ClientConfig::builder",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/connector/builder.rs",
+          "line": 496,
+          "column": 17
+        },
+        "evidence": "rustls::crypto::ring::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "crypto",
+        "location": {
+          "file": "./src/connector/builder.rs",
+          "line": 498,
+          "column": 17
+        },
+        "evidence": "rustls::crypto::aws_lc_rs::default_provider",
+        "origin": "import"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/stream.rs",
+          "line": 7,
+          "column": 1
+        },
+        "evidence": "hyper::rt",
+        "origin": "import"
+      }
+    ]
+  }
+}
