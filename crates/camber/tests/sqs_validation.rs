@@ -1,7 +1,5 @@
 #![cfg(feature = "sqs")]
 
-mod common;
-
 use camber::mq::sqs;
 use camber::{RuntimeError, runtime};
 use std::time::Duration;

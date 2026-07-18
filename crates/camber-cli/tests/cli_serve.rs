@@ -1,5 +1,5 @@
 use camber_cli::config::Config;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Child, Command};
 use tempfile::NamedTempFile;
 
@@ -56,6 +56,15 @@ fn kill(child: &mut Child) {
     let _ = child.wait();
 }
 
+fn read_raw_response(stream: &mut std::net::TcpStream) -> String {
+    let mut response = String::new();
+    match stream.read_to_string(&mut response) {
+        Ok(_) => response,
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => response,
+        Err(error) => panic!("read: {error}"),
+    }
+}
+
 /// Bind a backend listener on an available port.
 fn spawn_backend() -> (std::net::TcpListener, u16) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind backend");
@@ -81,24 +90,18 @@ fn serve_one(listener: std::net::TcpListener, body: &'static str) -> std::thread
 
 /// Send an HTTP/1.1 request with a Host header and return the raw response.
 fn raw_request(addr: &str, host: &str, path: &str) -> String {
-    use std::io::Read;
     let mut stream = std::net::TcpStream::connect(addr).expect("connect");
     let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).expect("write");
-    let mut buf = String::new();
-    stream.read_to_string(&mut buf).expect("read");
-    buf
+    read_raw_response(&mut stream)
 }
 
 /// Send an HTTP/1.1 request with a custom method, Host header, and return the raw response.
 fn raw_method_request(addr: &str, method: &str, host: &str, path: &str) -> String {
-    use std::io::Read;
     let mut stream = std::net::TcpStream::connect(addr).expect("connect");
     let req = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).expect("write");
-    let mut buf = String::new();
-    stream.read_to_string(&mut buf).expect("read");
-    buf
+    read_raw_response(&mut stream)
 }
 
 /// Accept multiple connections on a backend listener and respond to each with the given body.
@@ -252,7 +255,6 @@ proxy = "http://127.0.0.1:{backend_port}"
     wait_for_ready(&format!("127.0.0.1:{port}"));
 
     // Send request through the proxy with Host header
-    use std::io::Read;
     let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
     stream
         .write_all(
@@ -260,8 +262,7 @@ proxy = "http://127.0.0.1:{backend_port}"
                 .as_bytes(),
         )
         .expect("write");
-    let mut buf = String::new();
-    stream.read_to_string(&mut buf).expect("read");
+    let buf = read_raw_response(&mut stream);
 
     assert!(
         buf.contains("200") || buf.contains("from-backend"),
@@ -295,7 +296,6 @@ root = "{root}"
     wait_for_ready(&format!("127.0.0.1:{port}"));
 
     // Request the static file with Host header
-    use std::io::Read;
     let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
     stream
         .write_all(
@@ -303,8 +303,7 @@ root = "{root}"
                 .as_bytes(),
         )
         .expect("write");
-    let mut buf = String::new();
-    stream.read_to_string(&mut buf).expect("read");
+    let buf = read_raw_response(&mut stream);
 
     assert!(buf.contains("200"), "expected 200, got: {buf}");
     assert!(buf.contains("<h1>hello</h1>"), "body missing: {buf}");
