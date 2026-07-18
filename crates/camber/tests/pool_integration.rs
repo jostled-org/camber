@@ -41,42 +41,50 @@ async fn pool_dispatches_concurrent_http_requests() {
     runtime::request_shutdown();
 }
 
-#[camber::test]
-async fn pool_backpressure_under_load() {
-    let completed = Arc::new(AtomicUsize::new(0));
+#[test]
+fn pool_backpressure_under_load() {
+    runtime::builder()
+        .worker_threads(2)
+        .keepalive_timeout(Duration::from_secs(5))
+        .shutdown_timeout(Duration::from_secs(1))
+        .run(|| {
+            common::block_on(async {
+                let completed = Arc::new(AtomicUsize::new(0));
 
-    let mut router = Router::new();
-    let completed_inner = Arc::clone(&completed);
-    router.get("/slow", move |_req: &Request| {
-        let completed_inner = completed_inner.clone();
-        async move {
-            thread::sleep(Duration::from_millis(100));
-            completed_inner.fetch_add(1, Ordering::SeqCst);
-            Response::text(200, "done")
-        }
-    });
+                let mut router = Router::new();
+                let completed_inner = Arc::clone(&completed);
+                router.get("/slow", move |_req: &Request| {
+                    let completed_inner = completed_inner.clone();
+                    async move {
+                        // Occupy both workers so remaining requests must queue.
+                        thread::sleep(Duration::from_millis(100));
+                        completed_inner.fetch_add(1, Ordering::SeqCst);
+                        Response::text(200, "done")
+                    }
+                });
 
-    let addr = common::spawn_server(router);
+                let addr = common::spawn_server(router);
+                let client = Arc::new(http::client());
+                let mut handles = Vec::new();
+                for _ in 0..10 {
+                    let client = Arc::clone(&client);
+                    let url = format!("http://{addr}/slow");
+                    let handle = spawn_async(async move {
+                        let resp = client.get(&url).await.unwrap();
+                        assert_eq!(resp.status(), 200);
+                    });
+                    handles.push(handle);
+                }
 
-    // Send 10 concurrent requests
-    let mut handles = Vec::new();
-    for _ in 0..10 {
-        let url = format!("http://{addr}/slow");
-        let h = spawn_async(async move {
-            let resp = http::get(&url).await.unwrap();
-            assert_eq!(resp.status(), 200);
-        });
-        handles.push(h);
-    }
+                for handle in handles {
+                    handle.await.unwrap();
+                }
 
-    for h in handles {
-        h.await.unwrap();
-    }
-
-    // All 10 completed — backpressure queued, didn't drop
-    assert_eq!(completed.load(Ordering::SeqCst), 10);
-
-    runtime::request_shutdown();
+                assert_eq!(completed.load(Ordering::SeqCst), 10);
+                runtime::request_shutdown();
+            });
+        })
+        .unwrap();
 }
 
 #[camber::test]
