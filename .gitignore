@@ -1,10 +1,11 @@
 /target
+.DS_Store
 .mcp.json
-.manifest.toml
+docs/rust_profile.md
 docs/.codebase-snapshot.md
 docs/specs/
 docs/plans/
-docs/scripts/
+docs/scripts/*
 docs/internal/
 docs/planning_guidelines.md
 docs/introspection_guidelines.md

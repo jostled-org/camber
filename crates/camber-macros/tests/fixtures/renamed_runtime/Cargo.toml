@@ -1,0 +1,11 @@
+[package]
+name = "renamed-runtime-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+renamed-camber = { package = "camber", path = "../../../../camber" }
+renamed-macros = { package = "camber-macros", path = "../../.." }

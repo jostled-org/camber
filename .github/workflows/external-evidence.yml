@@ -1,0 +1,219 @@
+name: External Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: External evidence lane
+        required: true
+        type: choice
+        options:
+          - nats
+          - dns
+          - docker
+          - go
+          - load_generators
+          - compile_time
+  schedule:
+    - cron: '23 4 * * 1'
+    - cron: '41 5 1 * *'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CAMBER_EXTERNAL_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}
+
+# Lane orchestration lives here directly — there is no repository runner.
+# Every selected test runs as an exact single-test cargo invocation with a
+# distinct CAMBER_EXTERNAL_CLEANUP_WITNESS path; a missing witness after a
+# passing test fails the lane (cleanup evidence is part of the contract).
+# Unselected lanes record a not_selected marker — never a pass.
+
+jobs:
+  not-selected:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [compile_time, dns, docker, go, load_generators, nats]
+    steps:
+      - name: Record unselected lane
+        if: matrix.lane != inputs.lane
+        run: |
+          mkdir -p logs/external
+          printf '{"lane":"%s","status":"not_selected","run_id":"%s"}\n' \
+            "${{ matrix.lane }}" "${CAMBER_EXTERNAL_RUN_ID}" \
+            > "logs/external/${{ matrix.lane }}.json"
+      - uses: actions/upload-artifact@v4
+        if: matrix.lane != inputs.lane
+        with:
+          name: external-${{ matrix.lane }}-not-selected
+          path: logs/external/${{ matrix.lane }}.json
+
+  nats:
+    if: github.event_name == 'workflow_dispatch' && inputs.lane == 'nats' || github.event.schedule == '23 4 * * 1'
+    runs-on: ubuntu-latest
+    services:
+      nats:
+        image: nats:2-alpine
+        ports:
+          - 4222:4222
+        options: >-
+          --health-cmd "pidof nats-server"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+          --health-start-period 5s
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - name: Run nats lane
+        run: |
+          set -euo pipefail
+          mkdir -p logs/external
+          for t in nats_publish_and_subscribe nats_queue_group nats_async_subscribe nats_async_connect_does_not_block_worker; do
+            CAMBER_EXTERNAL_CLEANUP_WITNESS="$PWD/logs/external/nats-$t.json" \
+              cargo test -p camber --features nats --test external_feature_services -- \
+              "external_nats::$t" --exact --ignored --test-threads=1 2>&1 | tee -a logs/external/nats.log
+            [ -f "logs/external/nats-$t.json" ] || { echo "missing cleanup witness for $t" >&2; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-nats-evidence
+          path: logs/external
+
+  dns:
+    if: github.event_name == 'workflow_dispatch' && inputs.lane == 'dns' || github.event.schedule == '41 5 1 * *'
+    runs-on: ubuntu-latest
+    env:
+      ACME_TEST_DOMAIN: ${{ secrets.ACME_TEST_DOMAIN }}
+      CF_TOKEN: ${{ secrets.CF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - name: Run dns lane
+        run: |
+          set -euo pipefail
+          mkdir -p logs/external
+          t=acme_dns01_provisions_cert
+          CAMBER_EXTERNAL_CLEANUP_WITNESS="$PWD/logs/external/dns-$t.json" \
+            cargo test -p camber --features dns01 --test external_feature_services -- \
+            "external_dns01::$t" --exact --ignored --test-threads=1 2>&1 | tee logs/external/dns.log
+          [ -f "logs/external/dns-$t.json" ] || { echo "missing cleanup witness for $t" >&2; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-dns-evidence
+          path: logs/external
+
+  docker:
+    if: github.event_name == 'workflow_dispatch' && inputs.lane == 'docker' || github.event.schedule == '23 4 * * 1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - name: Run docker lane
+        run: |
+          set -euo pipefail
+          mkdir -p logs/external
+          t=dockerfile_builds_successfully
+          CAMBER_EXTERNAL_CLEANUP_WITNESS="$PWD/logs/external/docker-$t.json" \
+            cargo test -p camber-cli --test external_cli_operational -- \
+            "external_docker::$t" --exact --ignored --test-threads=1 2>&1 | tee logs/external/docker.log
+          [ -f "logs/external/docker-$t.json" ] || { echo "missing cleanup witness for $t" >&2; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-docker-evidence
+          path: logs/external
+
+  go:
+    if: github.event_name == 'workflow_dispatch' && inputs.lane == 'go' || github.event.schedule == '23 4 * * 1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - name: Run go lane
+        run: |
+          set -euo pipefail
+          mkdir -p logs/external
+          t=go_server_responds_if_go_available
+          CAMBER_EXTERNAL_CLEANUP_WITNESS="$PWD/logs/external/go-$t.json" \
+            cargo test -p camber-bench --test external_bench_tools -- \
+            "external_go::$t" --exact --ignored --test-threads=1 2>&1 | tee logs/external/go.log
+          [ -f "logs/external/go-$t.json" ] || { echo "missing cleanup witness for $t" >&2; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-go-evidence
+          path: logs/external
+
+  load-generators:
+    if: github.event_name == 'workflow_dispatch' && inputs.lane == 'load_generators' || github.event.schedule == '23 4 * * 1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y wrk
+      - run: cargo install oha
+      - name: Run load_generators lane
+        run: |
+          set -euo pipefail
+          mkdir -p logs/external
+          for t in load_generator_measures_requests_per_second oha_produces_results_if_available bench_progress_output_present full_run_json_output_is_valid full_run_tier1_produces_report multiple_concurrency_levels_produce_multiple_results three_phase_runs_primer_warmup_measured wrk_or_oha_detected; do
+            CAMBER_EXTERNAL_CLEANUP_WITNESS="$PWD/logs/external/load_generators-$t.json" \
+              cargo test -p camber-bench --test external_bench_tools -- \
+              "external_load_generators::$t" --exact --ignored --test-threads=1 2>&1 | tee -a logs/external/load_generators.log
+            [ -f "logs/external/load_generators-$t.json" ] || { echo "missing cleanup witness for $t" >&2; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-load-generator-evidence
+          path: logs/external
+
+  compile-time:
+    if: github.event_name == 'workflow_dispatch' && inputs.lane == 'compile_time'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - name: Run compile_time lane
+        run: |
+          set -euo pipefail
+          mkdir -p logs/external
+          t=incremental_compile_under_5_seconds
+          CAMBER_EXTERNAL_CLEANUP_WITNESS="$PWD/logs/external/compile_time-$t.json" \
+            cargo test -p camber-cli --test external_cli_operational -- \
+            "external_compile_time::$t" --exact --ignored --test-threads=1 2>&1 | tee logs/external/compile_time.log
+          [ -f "logs/external/compile_time-$t.json" ] || { echo "missing cleanup witness for $t" >&2; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-compile-time-evidence
+          path: logs/external

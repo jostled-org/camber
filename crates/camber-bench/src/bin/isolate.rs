@@ -142,7 +142,6 @@ fn start_bare_hyper(upstream: std::net::SocketAddr) -> std::net::SocketAddr {
             }
         });
     });
-    std::thread::sleep(Duration::from_millis(50));
     addr
 }
 
@@ -227,6 +226,5 @@ fn start_axum(upstream: std::net::SocketAddr) -> std::net::SocketAddr {
             axum::serve(listener, app).await.unwrap();
         });
     });
-    std::thread::sleep(Duration::from_millis(50));
     addr
 }

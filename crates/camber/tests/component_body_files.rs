@@ -1,0 +1,21 @@
+#[path = "support/deterministic.rs"]
+pub mod deterministic;
+#[path = "support/http.rs"]
+pub mod http;
+#[path = "support/runtime.rs"]
+pub mod runtime_support;
+
+#[path = "component_body_files/binary_bodies.rs"]
+mod binary_bodies;
+#[path = "component_body_files/body_limits.rs"]
+mod body_limits;
+#[path = "component_body_files/cookie_handling.rs"]
+mod cookie_handling;
+#[path = "component_body_files/json_bodies.rs"]
+mod json_bodies;
+#[path = "component_body_files/multipart_forms.rs"]
+mod multipart_forms;
+#[path = "component_body_files/static_file_serving.rs"]
+mod static_file_serving;
+#[path = "component_body_files/urlencoded_forms.rs"]
+mod urlencoded_forms;

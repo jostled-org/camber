@@ -1,0 +1,64 @@
+# .manifest.toml — Project metadata for Claude skills and agents
+
+[project]
+name = "camber"
+description = "Rust runtime for IO-bound services — sequential code, real threads, Tokio underneath"
+type = "workspace"
+languages = ["rust"]
+remote = "github"
+
+[docs]
+readme = "README.md"
+vision = "docs/vision.md"
+conventions = "docs/internal/api-conventions.md"
+testing = "docs/internal/testing.md"
+# changelog = "CHANGELOG.md"
+
+[structure]
+src = "crates/"
+tests = "crates/camber/tests/"
+plans = "docs/plans/"
+plans_complete = "docs/plans/complete/"
+specs = "docs/specs/"
+
+[ci]
+clippy = "cargo clippy --workspace --features \"profiling,ws,grpc,acme,dns01,nats,sqs,otel\" -- -D warnings"
+test = "cargo test --workspace --features \"profiling,ws,grpc,acme,dns01,nats,sqs,otel\""
+fmt = "cargo fmt --check"
+
+# [verification] — plan-loop phase hooks. `step` is required for plan
+# execution. `affected`, `semantic`, and `gate` are optional; when unset the
+# plan loop falls back to its pedant baselines.
+[verification]
+step = "docs/scripts/verify_step.sh"
+
+[docs.specs]
+owned-server-lifecycle = { path = "docs/specs/owned-server-lifecycle.md", status = "active" }
+audit-refactors = { path = "docs/specs/audit-refactors.md", status = "active" }
+web-essentials = { path = "docs/specs/web-essentials.md", status = "active" }
+lifecycle-integration = { path = "docs/specs/lifecycle-integration.md", status = "active" }
+operational-maturity = { path = "docs/specs/operational-maturity.md", status = "active" }
+edge-hardening = { path = "docs/specs/edge-hardening.md", status = "implemented" }
+camber-bench = { path = "docs/specs/camber-bench.md", status = "active" }
+camber-bench-v2 = { path = "docs/specs/camber-bench-v2.md", status = "active" }
+sync-dispatch-model = { path = "docs/specs/sync-dispatch-model.md", status = "superseded" }
+spawn-blocking-dispatch = { path = "docs/specs/spawn-blocking-dispatch.md", status = "superseded" }
+dispatch-architecture-v2 = { path = "docs/specs/dispatch-architecture-v2.md", status = "superseded" }
+async-native = { path = "docs/specs/async-native.md", status = "implemented" }
+middleware-for-all-dispatch = { path = "docs/specs/middleware-for-all-dispatch.md", status = "active" }
+release-readiness = { path = "docs/specs/release-readiness.md", status = "active" }
+unified-release-fixes = { path = "docs/specs/unified-release-fixes.md", status = "active" }
+"final-design-polish for all items" = { path = "docs/specs/final-design-polish for all items.md", status = "active" }
+repo-cleanup = { path = "docs/specs/repo-cleanup.md", status = "active" }
+http-request-boundaries = { path = "docs/specs/http-request-boundaries.md", status = "implemented" }
+
+[capabilities]
+expected = [
+  "network",
+  "filesystem",
+  "crypto",
+  "time",
+  "proc_macro",
+  "env_access",
+  "process_exec",
+]

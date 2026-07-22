@@ -19,23 +19,61 @@ pub(crate) fn proxy_client() -> Result<&'static reqwest::Client, RuntimeError> {
         .map_err(|e| RuntimeError::Http(Arc::clone(e)))
 }
 
-/// Check whether a header must not be forwarded between hops (RFC 2616 §13.5.1).
-/// Uses pattern matching — zero-cost, no hashing overhead.
-/// All comparisons are lowercase: hyper normalizes header names to lowercase.
+/// Check whether a header must not be forwarded between hops.
 fn is_hop_by_hop(name: &str) -> bool {
-    matches!(
-        name,
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "proxy-connection"
-            | "te"
-            | "trailers"
-            | "transfer-encoding"
-            | "upgrade"
-            | "host"
-    )
+    name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("keep-alive")
+        || name.eq_ignore_ascii_case("proxy-authenticate")
+        || name.eq_ignore_ascii_case("proxy-authorization")
+        || name.eq_ignore_ascii_case("proxy-connection")
+        || name.eq_ignore_ascii_case("te")
+        || name.eq_ignore_ascii_case("trailer")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+        || name.eq_ignore_ascii_case("upgrade")
+        || name.eq_ignore_ascii_case("host")
+}
+
+fn is_rfc_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+                    | b'0'..=b'9'
+                    | b'A'..=b'Z'
+                    | b'a'..=b'z'
+            )
+        })
+}
+
+fn connection_header_tokens<'a>(
+    headers: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Box<[&'a str]> {
+    headers
+        .filter(|(name, _)| name.eq_ignore_ascii_case("connection"))
+        .flat_map(|(_, value)| value.split(','))
+        .map(|token| token.trim_matches(|character| matches!(character, ' ' | '\t')))
+        .filter(|token| is_rfc_token(token))
+        .collect()
+}
+
+fn is_connection_named(name: &str, connection_tokens: &[&str]) -> bool {
+    connection_tokens
+        .iter()
+        .any(|token| token.eq_ignore_ascii_case(name))
 }
 
 /// Check whether a header is a forwarded-metadata header that Camber sets itself.
@@ -161,6 +199,7 @@ fn to_reqwest_method(method: Method) -> reqwest::Method {
 fn filter_request_headers<'a>(
     mut builder: reqwest::RequestBuilder,
     headers: impl Iterator<Item = (&'a str, &'a str)>,
+    connection_tokens: &[&str],
 ) -> (reqwest::RequestBuilder, Option<&'a str>) {
     let mut original_host = None;
     for (name, value) in headers {
@@ -168,9 +207,10 @@ fn filter_request_headers<'a>(
             is_hop_by_hop(name),
             name.eq_ignore_ascii_case("host"),
             is_forwarded_metadata(name),
+            is_connection_named(name, connection_tokens),
         ) {
-            (true, true, _) => original_host = Some(value),
-            (true, _, _) | (_, _, true) => {}
+            (_, true, _, _) => original_host = Some(value),
+            (true, _, _, _) | (_, _, true, _) | (_, _, _, true) => {}
             _ => builder = builder.header(name, value),
         }
     }
@@ -233,8 +273,16 @@ fn build_upstream_request(
 ) -> Result<reqwest::RequestBuilder, RuntimeError> {
     let builder = upstream_builder(req.method, &req.path, backend, prefix)?;
 
-    let headers_iter = req.headers.iter().map(|(k, v)| (k.as_ref(), v.as_ref()));
-    let (builder, original_host) = filter_request_headers(builder, headers_iter);
+    let connection_tokens = connection_header_tokens(
+        req.headers
+            .iter()
+            .map(|(name, value)| (name.as_ref(), value.as_ref())),
+    );
+    let headers = req
+        .headers
+        .iter()
+        .map(|(name, value)| (name.as_ref(), value.as_ref()));
+    let (builder, original_host) = filter_request_headers(builder, headers, &connection_tokens);
     let builder = attach_forwarding_metadata(builder, original_host, req.remote_addr, req.scheme);
 
     Ok(builder.body(req.body.clone()))
@@ -258,11 +306,19 @@ fn build_upstream_request_streaming(
 ) -> Result<reqwest::RequestBuilder, RuntimeError> {
     let builder = upstream_builder(parts.method, &parts.path_and_query, backend, prefix)?;
 
-    let headers_iter = parts
-        .headers
-        .iter()
-        .map(|(k, v)| (k.as_str(), std::str::from_utf8(v.as_bytes()).unwrap_or("")));
-    let (builder, original_host) = filter_request_headers(builder, headers_iter);
+    let connection_tokens = connection_header_tokens(parts.headers.iter().map(|(name, value)| {
+        (
+            name.as_str(),
+            std::str::from_utf8(value.as_bytes()).unwrap_or(""),
+        )
+    }));
+    let headers = parts.headers.iter().map(|(name, value)| {
+        (
+            name.as_str(),
+            std::str::from_utf8(value.as_bytes()).unwrap_or(""),
+        )
+    });
+    let (builder, original_host) = filter_request_headers(builder, headers, &connection_tokens);
     let builder =
         attach_forwarding_metadata(builder, original_host, parts.remote_addr, parts.scheme);
 
@@ -279,9 +335,16 @@ fn build_upstream_request_streaming(
 
 /// Collect non-hop-by-hop headers from an upstream response.
 fn collect_response_headers(resp: &reqwest::Response) -> Box<[HeaderPair]> {
+    let connection_tokens = connection_header_tokens(resp.headers().iter().map(|(name, value)| {
+        (
+            name.as_str(),
+            std::str::from_utf8(value.as_bytes()).unwrap_or(""),
+        )
+    }));
     let mut headers: Vec<HeaderPair> = Vec::with_capacity(resp.headers().len());
     for (name, value) in resp.headers() {
-        match is_hop_by_hop(name.as_str()) {
+        match is_hop_by_hop(name.as_str()) || is_connection_named(name.as_str(), &connection_tokens)
+        {
             true => {}
             false => {
                 let v = value.to_str().unwrap_or("");

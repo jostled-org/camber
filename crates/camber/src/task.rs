@@ -14,26 +14,20 @@ use std::task::{Context, Poll};
 /// `CancellationToken` threaded through every function signature.
 /// If shutdown has already been requested, the future completes immediately.
 pub async fn on_shutdown() {
-    let (shutdown, shutdown_notify) = runtime::shutdown_signal();
+    let runtime = runtime::current_runtime();
     loop {
-        match shutdown.load(Ordering::Acquire) {
+        let notified = runtime.shutdown_notify.notified();
+        tokio::pin!(notified);
+        // Register before checking the sticky predicate. Shutdown cannot occur
+        // in the check/register gap because that gap no longer exists.
+        notified.as_mut().enable();
+        runtime.pause_test_schedule(
+            crate::runtime_test_support::RuntimeCheckpoint::ShutdownWaitRegistered,
+        );
+        match runtime.shutdown.load(Ordering::Acquire) {
             true => return,
-            false => shutdown_notify.notified().await,
+            false => notified.await,
         }
-    }
-}
-
-/// Abstraction over task execution.
-pub(crate) trait TaskSpawner: Send + Sync {
-    fn spawn_task(&self, f: Box<dyn FnOnce() + Send>);
-}
-
-/// Spawner that submits tasks to Tokio's blocking thread pool.
-pub(crate) struct TokioSpawner;
-
-impl TaskSpawner for TokioSpawner {
-    fn spawn_task(&self, f: Box<dyn FnOnce() + Send>) {
-        tokio::task::spawn_blocking(f);
     }
 }
 
@@ -93,7 +87,7 @@ impl<T> JoinHandle<T> {
     }
 }
 
-/// Drop guard that decrements task_count and notifies condvar.
+/// Drop guard that records tracked-task completion.
 /// Ensures structured concurrency even if the task panics.
 /// Used by both sync (`spawn`) and async (`spawn_async`) tasks.
 struct TaskGuard {
@@ -102,10 +96,7 @@ struct TaskGuard {
 
 impl Drop for TaskGuard {
     fn drop(&mut self) {
-        let prev = self.rt.task_count.fetch_sub(1, Ordering::AcqRel);
-        if prev == 1 {
-            self.rt.task_done.notify_all();
-        }
+        self.rt.task_finished();
     }
 }
 
@@ -120,21 +111,19 @@ where
     T: Send + 'static,
 {
     let rt = runtime::current_runtime();
-    rt.task_count.fetch_add(1, Ordering::AcqRel);
+    rt.task_started();
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<T, RuntimeError>>(1);
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_child = Arc::clone(&cancel);
-    let rt_child = Arc::clone(&rt);
 
     // Create a cancel channel for instant cancellation of blocking channel ops.
     let (cancel_tx, cancel_rx) = crossbeam_channel::bounded::<()>(1);
 
-    rt.spawner.spawn_task(Box::new(move || {
-        runtime::install_runtime(Arc::clone(&rt_child));
-        runtime::install_cancel_flag(cancel_child);
-        runtime::install_cancel_channel(cancel_rx);
-        let _guard = TaskGuard { rt: rt_child };
+    tokio::task::spawn_blocking(move || {
+        let runtime_guard = runtime::install_runtime(Arc::clone(&rt));
+        let cancel_guard = runtime::install_cancel_context(cancel_child, cancel_rx);
+        let task_guard = TaskGuard { rt };
 
         let result = std::panic::catch_unwind(AssertUnwindSafe(f));
         let mapped = match result {
@@ -142,7 +131,10 @@ where
             Err(payload) => Err(panic_to_error(payload)),
         };
         let _ = tx.send(mapped);
-    }));
+        drop(task_guard);
+        drop(cancel_guard);
+        drop(runtime_guard);
+    });
 
     JoinHandle {
         rx: Some(rx),
@@ -221,14 +213,15 @@ where
     T: Send + 'static,
 {
     let rt = runtime::current_runtime();
-    rt.task_count.fetch_add(1, Ordering::AcqRel);
+    rt.task_started();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     let cancel = Arc::new(tokio::sync::Notify::new());
     let cancel_inner = Arc::clone(&cancel);
     let rt_inner = Arc::clone(&rt);
 
-    tokio::spawn(run_async_task(future, tx, cancel_inner, rt_inner));
+    let task = run_async_task(future, tx, cancel_inner, rt_inner);
+    tokio::spawn(runtime::scope_runtime(rt, task));
 
     AsyncJoinHandle { rx, cancel }
 }
@@ -276,8 +269,7 @@ async fn run_async_task<F, T>(
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    runtime::install_runtime(Arc::clone(&rt));
-    let _guard = TaskGuard { rt };
+    let task_guard = TaskGuard { rt };
     let result = tokio::select! {
         biased;
         () = cancel.notified() => Err(RuntimeError::Cancelled),
@@ -287,4 +279,5 @@ async fn run_async_task<F, T>(
         },
     };
     let _ = tx.send(result);
+    drop(task_guard);
 }

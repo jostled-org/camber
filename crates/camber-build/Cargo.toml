@@ -2,6 +2,7 @@
 name = "camber-build"
 version.workspace = true
 edition.workspace = true
+autotests = false
 description = "Build helpers for Camber code generation"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jostled-org/camber"
@@ -16,3 +17,7 @@ workspace = true
 prost-build = "0.14"
 protoc-bin-vendored = "3"
 tonic-prost-build = "0.14"
+
+[[test]]
+name = "component_codegen"
+path = "tests/component_codegen.rs"

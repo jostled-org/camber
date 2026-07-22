@@ -42,7 +42,6 @@ pub(crate) fn bind_and_spawn(
         .recv()
         .map_err(|e| BenchError::ServerStart(e.to_string().into_boxed_str()))??;
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
     Ok((addr, ServerHandle::new(thread)))
 }
 

@@ -2,6 +2,7 @@
 name = "camber-bench"
 version.workspace = true
 edition.workspace = true
+autotests = false
 publish = false
 license = "MIT OR Apache-2.0"
 readme = "../../README.md"
@@ -43,3 +44,15 @@ hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 http-body-util = "0.1"
 bytes = "1"
+
+[[test]]
+name = "external_bench_tools"
+path = "tests/external_bench_tools.rs"
+
+[[test]]
+name = "focused_bench"
+path = "tests/focused_bench.rs"
+
+[[test]]
+name = "process_bench_smoke"
+path = "tests/process_bench_smoke.rs"

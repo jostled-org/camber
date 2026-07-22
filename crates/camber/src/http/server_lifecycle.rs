@@ -1,7 +1,7 @@
 use std::future::{Future, IntoFuture, Ready};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -21,6 +21,10 @@ use crate::{RuntimeError, runtime};
 
 const OWNED_TASK_PANIC: &str = "injected owned HTTP task panic";
 const SUPERVISOR_PROBE_PANIC: &str = "supervisor join probe panic";
+const TRANSIENT_ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+const UPGRADE_PENDING: u8 = 0;
+const UPGRADE_ADMITTED: u8 = 1;
+const UPGRADE_CANCELLED: u8 = 2;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ShutdownMode {
@@ -165,6 +169,10 @@ pub(super) struct ConnectionLifecycle {
     permit: Arc<ConnectionPermit>,
     control: Option<tokio::sync::watch::Receiver<ServerControl>>,
     registration: Option<tokio::sync::mpsc::Sender<UpgradeTicket>>,
+    #[cfg(feature = "ws")]
+    transport_registration: Option<tokio::sync::mpsc::Sender<TransportRegistration>>,
+    #[cfg(feature = "ws")]
+    transport_state: Option<tokio::sync::watch::Receiver<UpgradeTransportState>>,
     script: Option<Arc<LifecycleScript>>,
 }
 
@@ -174,6 +182,10 @@ impl Clone for ConnectionLifecycle {
             permit: Arc::clone(&self.permit),
             control: self.control.clone(),
             registration: self.registration.clone(),
+            #[cfg(feature = "ws")]
+            transport_registration: self.transport_registration.clone(),
+            #[cfg(feature = "ws")]
+            transport_state: self.transport_state.clone(),
             script: self.script.clone(),
         }
     }
@@ -185,6 +197,10 @@ impl ConnectionLifecycle {
             permit: ConnectionPermit::new(permit),
             control: None,
             registration: None,
+            #[cfg(feature = "ws")]
+            transport_registration: None,
+            #[cfg(feature = "ws")]
+            transport_state: None,
             script: None,
         }
     }
@@ -199,6 +215,10 @@ impl ConnectionLifecycle {
             permit,
             control: Some(control),
             registration: Some(registration),
+            #[cfg(feature = "ws")]
+            transport_registration: None,
+            #[cfg(feature = "ws")]
+            transport_state: None,
             script,
         }
     }
@@ -220,12 +240,58 @@ impl ConnectionLifecycle {
     pub(super) fn upgrade_registrar(&self) -> Option<UpgradeRegistrar> {
         let sender = self.registration.as_ref()?;
         let control = self.control.as_ref()?;
+        let transport_registration = self.transport_registration.as_ref()?;
+        let transport_state = self.transport_state.as_ref()?;
         Some(UpgradeRegistrar::new(
             sender.clone(),
             control.clone(),
+            transport_registration.clone(),
+            transport_state.clone(),
             self.script.clone(),
             Arc::downgrade(&self.permit),
         ))
+    }
+
+    #[cfg(feature = "ws")]
+    pub(super) fn bind_upgrade_transport(&mut self) -> UpgradeTransportOwner {
+        let (registration_sender, registration_receiver) = tokio::sync::mpsc::channel(1);
+        let (state_sender, state_receiver) =
+            tokio::sync::watch::channel(UpgradeTransportState::Pending);
+        self.transport_registration = Some(registration_sender);
+        self.transport_state = Some(state_receiver);
+        UpgradeTransportOwner {
+            registration_receiver,
+            state_sender,
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum UpgradeTransportState {
+    Pending,
+    Committed,
+    Cancelled,
+}
+
+#[cfg(feature = "ws")]
+pub(super) struct UpgradeDispatchGate {
+    state: tokio::sync::watch::Receiver<UpgradeTransportState>,
+}
+
+#[cfg(feature = "ws")]
+impl UpgradeDispatchGate {
+    pub(super) async fn committed(mut self) -> bool {
+        loop {
+            match *self.state.borrow_and_update() {
+                UpgradeTransportState::Committed => return true,
+                UpgradeTransportState::Cancelled => return false,
+                UpgradeTransportState::Pending => {}
+            }
+            if self.state.changed().await.is_err() {
+                return false;
+            }
+        }
     }
 }
 
@@ -237,9 +303,11 @@ enum RegistrationDecision {
 pub(super) struct UpgradeTicket {
     handle: Option<tokio::task::JoinHandle<()>>,
     abort: tokio::task::AbortHandle,
-    cancelled: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
     connection: Weak<ConnectionPermit>,
     acknowledgement: Option<tokio::sync::oneshot::Sender<RegistrationDecision>>,
+    decision_request: Option<tokio::sync::oneshot::Sender<()>>,
+    decision_ready: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl UpgradeTicket {
@@ -247,15 +315,17 @@ impl UpgradeTicket {
         UpgradeTicketParts {
             handle: self.handle.take(),
             abort: self.abort.clone(),
-            cancelled: Arc::clone(&self.cancelled),
+            state: Arc::clone(&self.state),
             connection: self.connection.clone(),
             acknowledgement: self.acknowledgement.take(),
+            decision_request: self.decision_request.take(),
+            decision_ready: self.decision_ready.take(),
         }
     }
 
     #[cfg(feature = "ws")]
     async fn abort_and_join(mut self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.state.store(UPGRADE_CANCELLED, Ordering::Release);
         self.abort.abort();
         let handle = self.handle.take();
         if let Some(handle) = handle {
@@ -267,7 +337,7 @@ impl UpgradeTicket {
 impl Drop for UpgradeTicket {
     fn drop(&mut self) {
         if self.handle.is_some() {
-            self.cancelled.store(true, Ordering::Release);
+            self.state.store(UPGRADE_CANCELLED, Ordering::Release);
             self.abort.abort();
         }
     }
@@ -276,9 +346,11 @@ impl Drop for UpgradeTicket {
 struct UpgradeTicketParts {
     handle: Option<tokio::task::JoinHandle<()>>,
     abort: tokio::task::AbortHandle,
-    cancelled: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
     connection: Weak<ConnectionPermit>,
     acknowledgement: Option<tokio::sync::oneshot::Sender<RegistrationDecision>>,
+    decision_request: Option<tokio::sync::oneshot::Sender<()>>,
+    decision_ready: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 #[cfg(feature = "ws")]
@@ -292,10 +364,12 @@ pub(super) enum UpgradeRegistration {
 pub(super) struct UpgradeRegistrar {
     sender: tokio::sync::mpsc::Sender<UpgradeTicket>,
     control: tokio::sync::watch::Receiver<ServerControl>,
+    transport_registration: tokio::sync::mpsc::Sender<TransportRegistration>,
+    transport_state: tokio::sync::watch::Receiver<UpgradeTransportState>,
     script: Option<Arc<LifecycleScript>>,
     connection: Weak<ConnectionPermit>,
     abort: Option<tokio::task::AbortHandle>,
-    cancelled: Option<Arc<AtomicBool>>,
+    state: Option<Arc<AtomicU8>>,
 }
 
 #[cfg(feature = "ws")]
@@ -303,41 +377,76 @@ impl UpgradeRegistrar {
     fn new(
         sender: tokio::sync::mpsc::Sender<UpgradeTicket>,
         control: tokio::sync::watch::Receiver<ServerControl>,
+        transport_registration: tokio::sync::mpsc::Sender<TransportRegistration>,
+        transport_state: tokio::sync::watch::Receiver<UpgradeTransportState>,
         script: Option<Arc<LifecycleScript>>,
         connection: Weak<ConnectionPermit>,
     ) -> Self {
         Self {
             sender,
             control,
+            transport_registration,
+            transport_state,
             script,
             connection,
             abort: None,
-            cancelled: None,
+            state: None,
         }
     }
 
-    pub(super) async fn submit(
+    pub(super) async fn submit(self, handle: tokio::task::JoinHandle<()>) -> UpgradeRegistration {
+        let sender = self.transport_registration.clone();
+        let (decision_sender, decision_receiver) = tokio::sync::oneshot::channel();
+        let registration = TransportRegistration {
+            registrar: Some(self),
+            handle: Some(handle),
+            decision: Some(decision_sender),
+        };
+        match sender.send(registration).await {
+            Ok(()) => receive_upgrade_decision(decision_receiver).await,
+            Err(error) => {
+                error.0.abort_and_join().await;
+                UpgradeRegistration::Unavailable
+            }
+        }
+    }
+
+    pub(super) fn dispatch_gate(&self) -> UpgradeDispatchGate {
+        UpgradeDispatchGate {
+            state: self.transport_state.clone(),
+        }
+    }
+
+    async fn submit_to_supervisor(
         mut self,
         handle: tokio::task::JoinHandle<()>,
-    ) -> UpgradeRegistration {
-        let abort = handle.abort_handle();
-        let cancelled = Arc::new(AtomicBool::new(false));
+    ) -> SupervisedUpgradeRegistration {
+        let abort = match self.abort.as_ref() {
+            Some(abort) => abort.clone(),
+            None => return SupervisedUpgradeRegistration::Unavailable,
+        };
+        let state = match self.state.as_ref() {
+            Some(state) => Arc::clone(state),
+            None => return SupervisedUpgradeRegistration::Unavailable,
+        };
         let (acknowledgement, acknowledged) = tokio::sync::oneshot::channel();
-        self.abort = Some(abort.clone());
-        self.cancelled = Some(Arc::clone(&cancelled));
+        let (decision_request, decision_requested) = tokio::sync::oneshot::channel();
+        let (decision_ready, decision_waiting) = tokio::sync::oneshot::channel();
         let ticket = UpgradeTicket {
             handle: Some(handle),
             abort,
-            cancelled,
+            state,
             connection: self.connection.clone(),
             acknowledgement: Some(acknowledgement),
+            decision_request: Some(decision_request),
+            decision_ready: Some(decision_waiting),
         };
         match self.sender.send(ticket).await {
             Ok(()) => {}
             Err(error) => {
                 error.0.abort_and_join().await;
                 self.disarm();
-                return UpgradeRegistration::Unavailable;
+                return SupervisedUpgradeRegistration::Unavailable;
             }
         }
         pause(
@@ -345,16 +454,51 @@ impl UpgradeRegistrar {
             LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
         )
         .await;
-        let registration = match acknowledged.await {
-            Ok(RegistrationDecision::Admitted) => UpgradeRegistration::Admitted,
-            Ok(RegistrationDecision::Rejected) => UpgradeRegistration::Rejected,
+        let mut acknowledged = acknowledged;
+        let (early_decision, request_failed) = tokio::select! {
+            biased;
+            decision = &mut acknowledged => (Some(decision), false),
+            request = decision_requested => match request {
+                Ok(()) => (None, false),
+                Err(_) => (None, true),
+            },
+        };
+        let decision = match (early_decision, request_failed) {
+            (Some(decision), _) => decision,
+            (None, false) => {
+                let _ = decision_ready.send(());
+                acknowledged.await
+            }
+            (None, true) => {
+                self.abort_expected();
+                self.disarm();
+                return SupervisedUpgradeRegistration::Unavailable;
+            }
+        };
+        let registration = match decision {
+            Ok(RegistrationDecision::Admitted) => {
+                SupervisedUpgradeRegistration::Admitted(UpgradeCommitment {
+                    abort: self.abort.clone(),
+                    state: self.state.clone(),
+                    armed: true,
+                })
+            }
+            Ok(RegistrationDecision::Rejected) => SupervisedUpgradeRegistration::Rejected,
             Err(_) => {
                 self.abort_expected();
-                UpgradeRegistration::Unavailable
+                SupervisedUpgradeRegistration::Unavailable
             }
         };
         self.disarm();
         registration
+    }
+
+    fn prepare(&mut self, handle: &tokio::task::JoinHandle<()>) -> UpgradeCancellation {
+        let abort = handle.abort_handle();
+        let state = Arc::new(AtomicU8::new(UPGRADE_PENDING));
+        self.abort = Some(abort.clone());
+        self.state = Some(Arc::clone(&state));
+        UpgradeCancellation { abort, state }
     }
 
     pub(super) fn control(&self) -> tokio::sync::watch::Receiver<ServerControl> {
@@ -363,15 +507,207 @@ impl UpgradeRegistrar {
 
     fn disarm(&mut self) {
         self.abort = None;
-        self.cancelled = None;
+        self.state = None;
     }
 
     fn abort_expected(&self) {
-        if let Some(cancelled) = self.cancelled.as_ref() {
-            cancelled.store(true, Ordering::Release);
+        if let Some(state) = self.state.as_ref() {
+            state.store(UPGRADE_CANCELLED, Ordering::Release);
         }
         if let Some(abort) = self.abort.as_ref() {
             abort.abort();
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+async fn receive_upgrade_decision(
+    receiver: tokio::sync::oneshot::Receiver<UpgradeRegistration>,
+) -> UpgradeRegistration {
+    match receiver.await {
+        Ok(decision) => decision,
+        Err(_) => UpgradeRegistration::Unavailable,
+    }
+}
+
+#[cfg(feature = "ws")]
+enum SupervisedUpgradeRegistration {
+    Admitted(UpgradeCommitment),
+    Rejected,
+    Unavailable,
+}
+
+#[cfg(feature = "ws")]
+pub(super) struct UpgradeCancellation {
+    abort: tokio::task::AbortHandle,
+    state: Arc<AtomicU8>,
+}
+
+#[cfg(feature = "ws")]
+impl UpgradeCancellation {
+    pub(super) fn cancel(&self) {
+        self.state.store(UPGRADE_CANCELLED, Ordering::Release);
+        self.abort.abort();
+    }
+}
+
+#[cfg(feature = "ws")]
+pub(super) struct UpgradeCommitment {
+    abort: Option<tokio::task::AbortHandle>,
+    state: Option<Arc<AtomicU8>>,
+    armed: bool,
+}
+
+#[cfg(feature = "ws")]
+impl UpgradeCommitment {
+    pub(super) fn commit(mut self) {
+        self.armed = false;
+    }
+
+    pub(super) fn cancel(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Some(state) = self.state.as_ref() {
+            state.store(UPGRADE_CANCELLED, Ordering::Release);
+        }
+        if let Some(abort) = self.abort.as_ref() {
+            abort.abort();
+        }
+        self.armed = false;
+    }
+}
+
+#[cfg(feature = "ws")]
+impl Drop for UpgradeCommitment {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+#[cfg(feature = "ws")]
+pub(super) struct TransportRegistration {
+    registrar: Option<UpgradeRegistrar>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+    decision: Option<tokio::sync::oneshot::Sender<UpgradeRegistration>>,
+}
+
+#[cfg(feature = "ws")]
+impl TransportRegistration {
+    pub(super) fn prepare(&mut self) -> Option<UpgradeCancellation> {
+        match (self.registrar.as_mut(), self.handle.as_ref()) {
+            (Some(registrar), Some(handle)) => Some(registrar.prepare(handle)),
+            _ => None,
+        }
+    }
+
+    pub(super) async fn register(mut self) -> TransportRegistrationOutcome {
+        let registration = match (self.registrar.take(), self.handle.take()) {
+            (Some(registrar), Some(handle)) => registrar.submit_to_supervisor(handle).await,
+            _ => SupervisedUpgradeRegistration::Unavailable,
+        };
+        TransportRegistrationOutcome {
+            registration,
+            decision: self.decision.take(),
+        }
+    }
+
+    async fn abort_and_join(mut self) {
+        if let Some(registrar) = self.registrar.as_ref() {
+            registrar.abort_expected();
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+impl Drop for TransportRegistration {
+    fn drop(&mut self) {
+        if let Some(registrar) = self.registrar.as_ref() {
+            registrar.abort_expected();
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+pub(super) struct TransportRegistrationOutcome {
+    registration: SupervisedUpgradeRegistration,
+    decision: Option<tokio::sync::oneshot::Sender<UpgradeRegistration>>,
+}
+
+#[cfg(feature = "ws")]
+impl TransportRegistrationOutcome {
+    pub(super) fn admitted(&self) -> bool {
+        matches!(
+            self.registration,
+            SupervisedUpgradeRegistration::Admitted(_)
+        )
+    }
+
+    pub(super) fn cancel(mut self) {
+        if let SupervisedUpgradeRegistration::Admitted(commitment) = self.registration {
+            drop(commitment);
+        }
+        if let Some(decision) = self.decision.take() {
+            let _ = decision.send(UpgradeRegistration::Unavailable);
+        }
+    }
+
+    pub(super) fn complete(mut self) -> Option<UpgradeCommitment> {
+        match self.registration {
+            SupervisedUpgradeRegistration::Admitted(commitment) => {
+                let sent = self
+                    .decision
+                    .take()
+                    .is_some_and(|decision| decision.send(UpgradeRegistration::Admitted).is_ok());
+                sent.then_some(commitment)
+            }
+            SupervisedUpgradeRegistration::Rejected => {
+                self.send(UpgradeRegistration::Rejected);
+                None
+            }
+            SupervisedUpgradeRegistration::Unavailable => {
+                self.send(UpgradeRegistration::Unavailable);
+                None
+            }
+        }
+    }
+
+    fn send(&mut self, registration: UpgradeRegistration) {
+        if let Some(decision) = self.decision.take() {
+            let _ = decision.send(registration);
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+pub(super) struct UpgradeTransportOwner {
+    registration_receiver: tokio::sync::mpsc::Receiver<TransportRegistration>,
+    state_sender: tokio::sync::watch::Sender<UpgradeTransportState>,
+}
+
+#[cfg(feature = "ws")]
+impl UpgradeTransportOwner {
+    pub(super) async fn next_registration(&mut self) -> Option<TransportRegistration> {
+        self.registration_receiver.recv().await
+    }
+
+    pub(super) fn commit(&self) {
+        self.state_sender
+            .send_replace(UpgradeTransportState::Committed);
+    }
+
+    pub(super) fn cancel(&self) {
+        self.state_sender
+            .send_replace(UpgradeTransportState::Cancelled);
+    }
+
+    pub(super) async fn abort_pending(&mut self) {
+        self.registration_receiver.close();
+        while let Some(registration) = self.registration_receiver.recv().await {
+            registration.abort_and_join().await;
         }
     }
 }
@@ -385,7 +721,7 @@ impl Drop for UpgradeRegistrar {
 
 struct OwnedTask {
     handle: tokio::task::JoinHandle<()>,
-    expected_cancellation: Option<Arc<AtomicBool>>,
+    expected_cancellation: Option<Arc<AtomicU8>>,
 }
 
 impl Future for OwnedTask {
@@ -398,7 +734,7 @@ impl Future for OwnedTask {
             expected_cancellation: self
                 .expected_cancellation
                 .as_ref()
-                .is_some_and(|expected| expected.load(Ordering::Acquire)),
+                .is_some_and(|state| state.load(Ordering::Acquire) == UPGRADE_CANCELLED),
         })
     }
 }
@@ -434,14 +770,10 @@ impl OwnedHttpTasks {
         });
     }
 
-    fn insert_registered(
-        &mut self,
-        handle: tokio::task::JoinHandle<()>,
-        cancelled: Arc<AtomicBool>,
-    ) {
+    fn insert_registered(&mut self, handle: tokio::task::JoinHandle<()>, state: Arc<AtomicU8>) {
         self.tasks.push(OwnedTask {
             handle,
-            expected_cancellation: Some(cancelled),
+            expected_cancellation: Some(state),
         });
     }
 
@@ -564,10 +896,7 @@ impl ServerSupervisor {
             Err(payload) => {
                 self.announce_abort();
                 self.close_pending().await;
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                self.enter_abort(None);
-                self.drain_owned().await;
-                tokio::time::sleep(Duration::from_millis(1)).await;
+                self.drain_owned_after_panic().await;
                 Err(panic_to_error(payload))
             }
         }
@@ -578,11 +907,9 @@ impl ServerSupervisor {
             self.start_abort_if_ready();
             if self.abort_drain_complete() {
                 self.drain_owned().await;
-                tokio::time::sleep(Duration::from_millis(1)).await;
                 return self.finish().await;
             }
             if self.graceful_drain_complete() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
                 return self.finish().await;
             }
             pause(&self.script, LifecycleCheckpoint::BeforeSupervisorSelect).await;
@@ -591,7 +918,6 @@ impl ServerSupervisor {
             let should_finish = self.apply_event(event).await;
             if should_finish {
                 self.drain_owned().await;
-                tokio::time::sleep(Duration::from_millis(1)).await;
                 return self.finish().await;
             }
         }
@@ -749,7 +1075,9 @@ impl ServerSupervisor {
             Ok((stream, remote_addr)) => self.handle_accepted(stream, remote_addr).await,
             Err(error) if crate::error::is_transient_accept_error(&error) => {
                 tracing::warn!("accept: fd limit reached, backing off");
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                // EMFILE/ENFILE retry throttling is product behavior, not an
+                // ordering barrier; immediate retries would spin the runtime.
+                tokio::time::sleep(TRANSIENT_ACCEPT_BACKOFF).await;
             }
             Err(error) => self.enter_graceful(Some(RuntimeError::Io(error))),
         }
@@ -786,7 +1114,7 @@ impl ServerSupervisor {
             close_socket(stream).await;
             return;
         }
-        self.spawn_connection(stream, remote_addr, None);
+        self.spawn_connection(stream, remote_addr, None).await;
     }
 
     async fn handle_permit(
@@ -807,15 +1135,21 @@ impl ServerSupervisor {
             }
             (_, None) => return,
         };
-        self.spawn_connection(accepted.stream, accepted.remote_addr, Some(permit));
+        self.spawn_connection(accepted.stream, accepted.remote_addr, Some(permit))
+            .await;
     }
 
-    fn spawn_connection(
+    async fn spawn_connection(
         &mut self,
         stream: tokio::net::TcpStream,
         remote_addr: std::net::SocketAddr,
         permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
+        pause(
+            &self.script,
+            LifecycleCheckpoint::KeepaliveTimeoutConfigured(self.keepalive_timeout),
+        )
+        .await;
         let registration = match self.registration_sender.as_ref() {
             Some(sender) => sender.clone(),
             None => return,
@@ -854,19 +1188,34 @@ impl ServerSupervisor {
             None => return,
         };
         self.tasks
-            .insert_registered(handle, Arc::clone(&parts.cancelled));
+            .insert_registered(handle, Arc::clone(&parts.state));
         pause(&self.script, LifecycleCheckpoint::BeforeUpgradeAcknowledge).await;
-        if self.script.is_some() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
+        let decision_requested = parts
+            .decision_request
+            .take()
+            .is_some_and(|request| request.send(()).is_ok());
+        let decision_ready = match parts.decision_ready.take() {
+            Some(decision_ready) => decision_ready.await.is_ok(),
+            None => false,
+        };
         self.raise_supervisor_fault();
         let runtime_requested = self
             .runtime_shutdown
             .as_ref()
             .is_some_and(|shutdown| shutdown.requested.load(Ordering::Acquire));
-        let admitted = self.current_control() == ServerControl::Running
-            && !runtime_requested
-            && !parts.cancelled.load(Ordering::Acquire);
+        let admission_open = self.current_control() == ServerControl::Running && !runtime_requested;
+        let admitted = decision_requested
+            && decision_ready
+            && admission_open
+            && parts
+                .state
+                .compare_exchange(
+                    UPGRADE_PENDING,
+                    UPGRADE_ADMITTED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok();
         match admitted {
             true => Self::acknowledge_upgrade(&mut parts),
             false => self.reject_upgrade(&mut parts).await,
@@ -879,13 +1228,13 @@ impl ServerSupervisor {
             .take()
             .is_some_and(|sender| sender.send(RegistrationDecision::Admitted).is_ok());
         if !sent {
-            parts.cancelled.store(true, Ordering::Release);
+            parts.state.store(UPGRADE_CANCELLED, Ordering::Release);
             parts.abort.abort();
         }
     }
 
     async fn reject_upgrade(&mut self, parts: &mut UpgradeTicketParts) {
-        parts.cancelled.store(true, Ordering::Release);
+        parts.state.store(UPGRADE_CANCELLED, Ordering::Release);
         parts.abort.abort();
         if self.rejection_requires_abort() {
             self.rejected_connections.push(parts.connection.clone());
@@ -893,21 +1242,18 @@ impl ServerSupervisor {
         if let Some(sender) = parts.acknowledgement.take() {
             let _ = sender.send(RegistrationDecision::Rejected);
         }
-        if self.script.is_some() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
     }
 
     fn reject_ticket(&mut self, ticket: UpgradeTicket) {
         let mut parts = ticket.into_parts();
-        parts.cancelled.store(true, Ordering::Release);
+        parts.state.store(UPGRADE_CANCELLED, Ordering::Release);
         parts.abort.abort();
         if self.mode == ShutdownMode::Abort {
             self.rejected_connections.push(parts.connection.clone());
         }
         if let Some(handle) = parts.handle.take() {
             self.tasks
-                .insert_registered(handle, Arc::clone(&parts.cancelled));
+                .insert_registered(handle, Arc::clone(&parts.state));
         }
         if let Some(sender) = parts.acknowledgement.take() {
             let _ = sender.send(RegistrationDecision::Rejected);
@@ -963,12 +1309,6 @@ impl ServerSupervisor {
         self.control_receiver.borrow_and_update();
     }
 
-    fn enter_abort(&mut self, outcome: Option<TerminalOutcome>) {
-        self.begin_abort(outcome);
-        self.tasks.abort_all();
-        self.abort_started = true;
-    }
-
     fn announce_abort(&mut self) {
         self.mode = ShutdownMode::Abort;
         self.deadline = None;
@@ -1021,6 +1361,30 @@ impl ServerSupervisor {
             self.reject_ticket(ticket);
         }
         self.tasks.abort_and_drain().await;
+    }
+
+    async fn drain_owned_after_panic(&mut self) {
+        self.registration_receiver.close();
+        while let Some(ticket) = self.registration_receiver.recv().await {
+            self.reject_ticket(ticket);
+        }
+        // Preserve protocol-level shutdown after a supervisor fault, but never
+        // let non-cooperative work outlive the configured shutdown deadline.
+        let deadline = tokio::time::Instant::now() + self.shutdown_timeout;
+        while !self.tasks.is_empty() {
+            let completion = tokio::select! {
+                biased;
+                completion = self.tasks.next() => completion,
+                () = tokio::time::sleep_until(deadline) => None,
+            };
+            match completion {
+                Some(completion) => self.handle_task_completion(completion),
+                None => break,
+            }
+        }
+        if !self.tasks.is_empty() {
+            self.tasks.abort_and_drain().await;
+        }
     }
 
     fn current_control(&self) -> ServerControl {
@@ -1094,10 +1458,13 @@ async fn wait_for_script_wake(script: Option<&Arc<LifecycleScript>>) {
     }
 }
 
-async fn close_socket(mut stream: tokio::net::TcpStream) {
-    use tokio::io::AsyncWriteExt;
-    let _ = stream.shutdown().await;
-    tokio::time::sleep(Duration::from_millis(1)).await;
+async fn close_socket(stream: tokio::net::TcpStream) {
+    let handle = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut stream = stream;
+        let _ = stream.shutdown().await;
+    });
+    let _ = handle.await;
 }
 
 async fn wait_deadline(deadline: Option<tokio::time::Instant>) {

@@ -153,6 +153,9 @@ pub(crate) mod resource_lifecycle;
 /// Runtime configuration and shutdown control.
 pub mod runtime;
 pub(crate) mod runtime_state;
+/// Runtime-instance scheduling support for external integration tests.
+#[doc(hidden)]
+pub mod runtime_test_support;
 /// Interval and cron-style scheduling.
 pub mod schedule;
 /// Secret loading helpers.

@@ -133,6 +133,14 @@ fn is_transient_status(status: u16) -> bool {
     matches!(status, 429 | 502..=504)
 }
 
+fn is_transient_transport_error(error: &reqwest::Error) -> bool {
+    !error.is_builder() && !error.is_redirect()
+}
+
+fn is_retry_eligible(method: &Method, retry_unsafe_methods: bool) -> bool {
+    retry_unsafe_methods || matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS")
+}
+
 fn jitter_nanos() -> u64 {
     crate::prng::next_u64()
 }
@@ -183,7 +191,7 @@ async fn do_request_with_retry(
                 is_transient_status(resp.status().as_u16()),
                 parse_retry_after(resp),
             ),
-            Err(e) => (e.is_timeout() || e.is_connect(), None),
+            Err(error) => (is_transient_transport_error(error), None),
         };
 
         let attempt = retries - remaining;
@@ -228,11 +236,16 @@ async fn retry_dispatch(
     body: Option<(&str, &str)>,
     retries: u32,
     backoff: Duration,
+    retry_unsafe_methods: bool,
 ) -> Result<Response, RuntimeError> {
     runtime::check_cancel()?;
+    let eligible_retries = match is_retry_eligible(&method, retry_unsafe_methods) {
+        true => retries,
+        false => 0,
+    };
     match try_mock(&method, url) {
         Some(resp) => Ok(resp),
-        None => do_request_with_retry(client, method, url, body, retries, backoff).await,
+        None => do_request_with_retry(client, method, url, body, eligible_retries, backoff).await,
     }
 }
 
@@ -243,6 +256,7 @@ pub fn client() -> ClientBuilder {
         read_timeout: DEFAULT_TIMEOUT,
         retries: 0,
         backoff: DEFAULT_BACKOFF,
+        retry_unsafe_methods: false,
         cached_client: OnceLock::new(),
     }
 }
@@ -254,6 +268,7 @@ impl std::fmt::Debug for ClientBuilder {
             .field("read_timeout", &self.read_timeout)
             .field("retries", &self.retries)
             .field("backoff", &self.backoff)
+            .field("retry_unsafe_methods", &self.retry_unsafe_methods)
             .finish()
     }
 }
@@ -267,6 +282,7 @@ pub struct ClientBuilder {
     read_timeout: Duration,
     retries: u32,
     backoff: Duration,
+    retry_unsafe_methods: bool,
     cached_client: OnceLock<Result<reqwest::Client, Arc<str>>>,
 }
 
@@ -286,10 +302,23 @@ impl ClientBuilder {
         self
     }
 
-    /// Set the maximum number of retries for transient errors.
-    /// Transient errors: connection failures, timeouts, 502/503/504 responses.
+    /// Set the maximum number of retries for transient failures.
+    ///
+    /// Transient failures are request transport errors, response-header timeouts, and
+    /// 429, 502, 503, or 504 responses. By default, configured retries apply
+    /// only to GET, HEAD, and OPTIONS requests.
     pub fn retries(mut self, n: u32) -> Self {
         self.retries = n;
+        self
+    }
+
+    /// Allow configured retries for POST, PUT, PATCH, and DELETE requests.
+    ///
+    /// This opt-in applies to both transient transport failures and transient
+    /// response statuses. Request bodies are sent again on each retry.
+    /// By default, only GET, HEAD, and OPTIONS requests are retried.
+    pub fn retry_unsafe_methods(mut self, enabled: bool) -> Self {
+        self.retry_unsafe_methods = enabled;
         self
     }
 
@@ -323,6 +352,7 @@ impl ClientBuilder {
             body,
             self.retries,
             self.backoff,
+            self.retry_unsafe_methods,
         )
         .await
     }
@@ -365,7 +395,16 @@ async fn default_dispatch(
     url: &str,
     body: Option<(&str, &str)>,
 ) -> Result<Response, RuntimeError> {
-    retry_dispatch(default_client()?, method, url, body, 0, Duration::ZERO).await
+    retry_dispatch(
+        default_client()?,
+        method,
+        url,
+        body,
+        0,
+        Duration::ZERO,
+        false,
+    )
+    .await
 }
 
 http_free_functions! {

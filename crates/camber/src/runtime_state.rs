@@ -1,8 +1,8 @@
 use crate::resource::HealthState;
-use crate::task::{TaskSpawner, TokioSpawner};
+use crate::runtime_test_support::{RuntimeCheckpoint, RuntimeSchedule};
 use crate::tls::CertStore;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -52,14 +52,14 @@ impl Default for RuntimeConfig {
     }
 }
 
-/// Shared runtime state. Stored as Arc<RuntimeInner> in thread-local.
+/// Shared runtime state. Async tasks use Tokio task-local storage; synchronous
+/// entry points use thread-local storage.
 pub(crate) struct RuntimeInner {
     pub(crate) shutdown: Arc<AtomicBool>,
     pub(crate) shutdown_notify: Arc<tokio::sync::Notify>,
-    pub(crate) task_count: AtomicUsize,
-    pub(crate) task_done: Condvar,
-    pub(crate) task_done_mu: Mutex<()>,
-    pub(crate) spawner: Box<dyn TaskSpawner>,
+    task_tracker: TaskTracker,
+    test_schedule: Option<Arc<RuntimeSchedule>>,
+    cancel_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub(crate) config: RuntimeConfig,
     pub(crate) metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
     pub(crate) tokio_handle: Option<tokio::runtime::Handle>,
@@ -72,13 +72,19 @@ impl RuntimeInner {
     }
 
     pub(crate) fn with_config(config: RuntimeConfig) -> Self {
+        Self::with_config_and_schedule(config, None)
+    }
+
+    pub(crate) fn with_config_and_schedule(
+        config: RuntimeConfig,
+        test_schedule: Option<Arc<RuntimeSchedule>>,
+    ) -> Self {
         Self {
             shutdown: Arc::new(AtomicBool::new(false)),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-            task_count: AtomicUsize::new(0),
-            task_done: Condvar::new(),
-            task_done_mu: Mutex::new(()),
-            spawner: Box::new(TokioSpawner),
+            task_tracker: TaskTracker::new(),
+            test_schedule,
+            cancel_task: Mutex::new(None),
             config,
             metrics_handle: None,
             tokio_handle: None,
@@ -90,6 +96,117 @@ impl RuntimeInner {
     pub(crate) fn notify_shutdown(&self) {
         self.shutdown_notify.notify_waiters();
     }
+
+    pub(crate) fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.notify_shutdown();
+    }
+
+    pub(crate) fn task_started(&self) {
+        self.task_tracker.start();
+    }
+
+    pub(crate) fn task_finished(&self) {
+        self.task_tracker.finish();
+    }
+
+    pub(crate) fn pause_test_schedule(&self, checkpoint: RuntimeCheckpoint) {
+        if let Some(schedule) = self.test_schedule.as_ref() {
+            schedule.pause(checkpoint);
+        }
+    }
+
+    fn replace_cancel_task(&self, task: tokio::task::JoinHandle<()>) {
+        let mut current = self.cancel_task.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(previous) = current.replace(task) {
+            previous.abort();
+        }
+    }
+
+    fn abort_cancel_task(&self) {
+        let mut current = self.cancel_task.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(task) = current.take() {
+            task.abort();
+        }
+    }
+}
+
+struct TaskTracker {
+    count: Mutex<usize>,
+    done: Condvar,
+}
+
+impl TaskTracker {
+    const fn new() -> Self {
+        Self {
+            count: Mutex::new(0),
+            done: Condvar::new(),
+        }
+    }
+
+    fn start(&self) {
+        let mut count = self.count.lock().unwrap_or_else(|e| e.into_inner());
+        *count += 1;
+    }
+
+    fn finish(&self) {
+        let mut count = self.count.lock().unwrap_or_else(|e| e.into_inner());
+        match *count {
+            0 => tracing::error!("runtime task tracker completed an unregistered task"),
+            1 => {
+                *count = 0;
+                self.done.notify_all();
+            }
+            current => *count = current - 1,
+        }
+    }
+
+    fn wait(&self, schedule: Option<&RuntimeSchedule>) {
+        let mut count = self.count.lock().unwrap_or_else(|e| e.into_inner());
+        while *count > 0 {
+            let checkpoint = RuntimeCheckpoint::TaskWaitPredicateObserved(*count);
+            match schedule.filter(|schedule| schedule.is_armed(checkpoint)) {
+                Some(schedule) => {
+                    drop(count);
+                    schedule.pause(checkpoint);
+                    count = self.count.lock().unwrap_or_else(|e| e.into_inner());
+                }
+                None => {
+                    count = self.done.wait(count).unwrap_or_else(|e| e.into_inner());
+                }
+            }
+        }
+    }
+
+    fn wait_timeout(&self, timeout: Duration, schedule: Option<&RuntimeSchedule>) {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut count = self.count.lock().unwrap_or_else(|e| e.into_inner());
+        while *count > 0 {
+            let checkpoint = RuntimeCheckpoint::TaskWaitPredicateObserved(*count);
+            if let Some(schedule) = schedule.filter(|schedule| schedule.is_armed(checkpoint)) {
+                drop(count);
+                schedule.pause(checkpoint);
+                count = self.count.lock().unwrap_or_else(|e| e.into_inner());
+                continue;
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            let (next_count, result) = self
+                .done
+                .wait_timeout(count, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            count = next_count;
+            if result.timed_out() {
+                return;
+            }
+        }
+    }
+}
+
+tokio::task_local! {
+    static TASK_RUNTIME: Arc<RuntimeInner>;
 }
 
 thread_local! {
@@ -98,18 +215,47 @@ thread_local! {
     static CANCEL_CHANNEL: std::cell::RefCell<Option<crossbeam_channel::Receiver<()>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Install a per-task cancellation flag on the current thread.
-pub(crate) fn install_cancel_flag(flag: Arc<AtomicBool>) {
-    CANCEL_FLAG.with(|cell| {
-        *cell.borrow_mut() = Some(flag);
-    });
+/// Restores the prior synchronous runtime context when its scope exits.
+pub(crate) struct RuntimeContextGuard {
+    previous: Option<Arc<RuntimeInner>>,
 }
 
-/// Install a per-task cancellation channel on the current thread.
-pub(crate) fn install_cancel_channel(rx: crossbeam_channel::Receiver<()>) {
-    CANCEL_CHANNEL.with(|cell| {
-        *cell.borrow_mut() = Some(rx);
-    });
+impl Drop for RuntimeContextGuard {
+    fn drop(&mut self) {
+        RUNTIME.with(|cell| {
+            *cell.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+/// Restores per-task cancellation state when a blocking worker is reused.
+pub(crate) struct CancelContextGuard {
+    previous_flag: Option<Arc<AtomicBool>>,
+    previous_channel: Option<crossbeam_channel::Receiver<()>>,
+}
+
+impl Drop for CancelContextGuard {
+    fn drop(&mut self) {
+        CANCEL_FLAG.with(|cell| {
+            *cell.borrow_mut() = self.previous_flag.take();
+        });
+        CANCEL_CHANNEL.with(|cell| {
+            *cell.borrow_mut() = self.previous_channel.take();
+        });
+    }
+}
+
+/// Install cancellation state for a blocking task and restore it on drop.
+pub(crate) fn install_cancel_context(
+    flag: Arc<AtomicBool>,
+    channel: crossbeam_channel::Receiver<()>,
+) -> CancelContextGuard {
+    let previous_flag = CANCEL_FLAG.with(|cell| cell.borrow_mut().replace(flag));
+    let previous_channel = CANCEL_CHANNEL.with(|cell| cell.borrow_mut().replace(channel));
+    CancelContextGuard {
+        previous_flag,
+        previous_channel,
+    }
 }
 
 /// Get the current task's cancellation channel receiver (if any).
@@ -128,8 +274,6 @@ pub(crate) fn check_cancel() -> Result<(), crate::RuntimeError> {
     })
 }
 
-static GLOBAL_CANCEL: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
-
 /// Register an external shutdown signal. When `future` completes, Camber
 /// treats it as a shutdown request. Calling again replaces the previous signal.
 pub fn on_cancel<F>(future: F)
@@ -137,23 +281,20 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let inner = ensure_context();
-    let shutdown = Arc::clone(&inner.shutdown);
-    let shutdown_notify = Arc::clone(&inner.shutdown_notify);
+    let task_inner = Arc::clone(&inner);
     let handle = tokio::spawn(async move {
         future.await;
-        shutdown.store(true, Ordering::Release);
-        shutdown_notify.notify_waiters();
+        task_inner.request_shutdown();
     });
-    let mut guard = GLOBAL_CANCEL.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(prev) = guard.take() {
-        prev.abort();
-    }
-    *guard = Some(handle);
+    inner.replace_cancel_task(handle);
 }
 
 /// Ensure a runtime exists on the current thread. Creates one lazily if absent.
 /// Returns an Arc to the runtime for immediate use.
 pub(crate) fn ensure_context() -> Arc<RuntimeInner> {
+    if let Ok(inner) = TASK_RUNTIME.try_with(Arc::clone) {
+        return inner;
+    }
     RUNTIME.with(|cell| {
         {
             let borrow = cell.borrow();
@@ -171,8 +312,7 @@ pub(crate) fn ensure_context() -> Arc<RuntimeInner> {
 /// Signal the runtime to shut down.
 pub fn request_shutdown() {
     let inner = ensure_context();
-    inner.shutdown.store(true, Ordering::Release);
-    inner.notify_shutdown();
+    inner.request_shutdown();
 }
 
 /// Return the underlying Tokio runtime handle.
@@ -185,6 +325,10 @@ pub fn tokio_handle() -> tokio::runtime::Handle {
 
 /// Check whether shutdown has been requested.
 pub fn is_shutting_down() -> bool {
+    if let Ok(shutting_down) = TASK_RUNTIME.try_with(|inner| inner.shutdown.load(Ordering::Acquire))
+    {
+        return shutting_down;
+    }
     RUNTIME.with(|cell| {
         let borrow = cell.borrow();
         match borrow.as_ref() {
@@ -195,7 +339,7 @@ pub fn is_shutting_down() -> bool {
 }
 
 pub(crate) fn has_runtime() -> bool {
-    RUNTIME.with(|cell| cell.borrow().is_some())
+    TASK_RUNTIME.try_with(|_| ()).is_ok() || RUNTIME.with(|cell| cell.borrow().is_some())
 }
 
 /// Get the shutdown flag and notify from the current runtime.
@@ -231,58 +375,30 @@ pub(crate) fn current_runtime() -> Arc<RuntimeInner> {
     ensure_context()
 }
 
-pub(crate) fn install_runtime(inner: Arc<RuntimeInner>) {
-    RUNTIME.with(|cell| {
-        *cell.borrow_mut() = Some(inner);
-    });
+pub(crate) fn install_runtime(inner: Arc<RuntimeInner>) -> RuntimeContextGuard {
+    let previous = RUNTIME.with(|cell| cell.borrow_mut().replace(inner));
+    RuntimeContextGuard { previous }
 }
 
-/// Abort lingering on_cancel task and clear the thread-local runtime.
-pub(crate) fn teardown_runtime() {
-    if let Some(handle) = GLOBAL_CANCEL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-    {
-        handle.abort();
-    }
-
-    RUNTIME.with(|cell| {
-        *cell.borrow_mut() = None;
-    });
+/// Scope runtime context to a future so it follows that future across workers.
+pub(crate) async fn scope_runtime<F>(inner: Arc<RuntimeInner>, future: F) -> F::Output
+where
+    F: Future,
+{
+    TASK_RUNTIME.scope(inner, future).await
 }
 
-pub(crate) fn wait_for_tasks(inner: &Arc<RuntimeInner>) {
-    if inner.task_count.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    let mut guard = inner.task_done_mu.lock().unwrap_or_else(|e| e.into_inner());
-    while inner.task_count.load(Ordering::Acquire) > 0 {
-        guard = inner
-            .task_done
-            .wait(guard)
-            .unwrap_or_else(|e| e.into_inner());
-    }
+/// Abort a lingering external cancellation watcher for this runtime.
+pub(crate) fn teardown_runtime(inner: &RuntimeInner) {
+    inner.abort_cancel_task();
 }
 
-pub(crate) fn wait_for_tasks_timeout(inner: &Arc<RuntimeInner>, timeout: Duration) {
-    if inner.task_count.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    let deadline = std::time::Instant::now() + timeout;
-    let mut guard = inner.task_done_mu.lock().unwrap_or_else(|e| e.into_inner());
-    while inner.task_count.load(Ordering::Acquire) > 0 {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return;
-        }
-        let (g, result) = inner
-            .task_done
-            .wait_timeout(guard, remaining)
-            .unwrap_or_else(|e| e.into_inner());
-        guard = g;
-        if result.timed_out() {
-            return;
-        }
-    }
+pub(crate) fn wait_for_tasks(inner: &RuntimeInner) {
+    inner.task_tracker.wait(inner.test_schedule.as_deref());
+}
+
+pub(crate) fn wait_for_tasks_timeout(inner: &RuntimeInner, timeout: Duration) {
+    inner
+        .task_tracker
+        .wait_timeout(timeout, inner.test_schedule.as_deref());
 }

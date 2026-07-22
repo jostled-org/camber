@@ -1,0 +1,11 @@
+pub mod common;
+
+#[cfg(feature = "profiling")]
+#[path = "component_observability/cpu_profiling.rs"]
+mod cpu_profiling;
+#[path = "component_observability/metrics_endpoint.rs"]
+mod metrics_endpoint;
+#[path = "component_observability/request_tracing.rs"]
+mod request_tracing;
+#[path = "component_observability/trace_context.rs"]
+mod trace_context;

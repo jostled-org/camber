@@ -50,7 +50,6 @@ pub fn start(
         let _ = child.wait();
     });
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
     Ok((addr, ServerHandle::new(thread)))
 }
 

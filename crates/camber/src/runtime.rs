@@ -6,6 +6,7 @@ use crate::runtime_state::{
     RuntimeConfig, RuntimeInner, install_runtime, teardown_runtime, wait_for_tasks,
     wait_for_tasks_timeout,
 };
+use crate::runtime_test_support::{RuntimeController, RuntimeSchedule};
 use crate::tls::CertStore;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,6 +74,7 @@ impl std::fmt::Debug for RuntimeBuilder {
 /// Configure a Camber runtime before running.
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
+    test_schedule: Option<Arc<RuntimeSchedule>>,
     resources: Vec<Box<dyn Resource>>,
     tls_cert_path: Option<std::path::PathBuf>,
     tls_key_path: Option<std::path::PathBuf>,
@@ -89,6 +91,7 @@ impl RuntimeBuilder {
     fn new() -> Self {
         Self {
             config: RuntimeConfig::default(),
+            test_schedule: None,
             resources: Vec::new(),
             tls_cert_path: None,
             tls_key_path: None,
@@ -139,6 +142,13 @@ impl RuntimeBuilder {
     /// A value of 0 is rejected when the runtime starts.
     pub fn connection_limit(mut self, n: usize) -> Self {
         self.config.connection_limit = Some(n);
+        self
+    }
+
+    /// Attach a runtime-instance scheduling seam for integration tests.
+    #[doc(hidden)]
+    pub fn with_test_schedule(mut self, controller: &RuntimeController) -> Self {
+        self.test_schedule = Some(controller.schedule());
         self
     }
 
@@ -228,6 +238,7 @@ impl RuntimeBuilder {
     where
         F: FnOnce() -> T,
     {
+        reject_nested_runtime()?;
         self.validate_tls_options()?;
         if self.config.worker_threads == 0 {
             return Err(crate::RuntimeError::InvalidArgument(
@@ -266,6 +277,7 @@ impl RuntimeBuilder {
 
         run_inner_impl(
             config,
+            self.test_schedule,
             self.resources.into_boxed_slice(),
             f,
             #[cfg(feature = "acme")]
@@ -340,6 +352,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = T>,
 {
+    reject_nested_runtime()?;
     let shutdown_timeout = Duration::from_secs(1);
 
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
@@ -354,13 +367,14 @@ where
     inner.tokio_handle = Some(tokio_rt.handle().clone());
     let inner = Arc::new(inner);
 
-    install_runtime(Arc::clone(&inner));
+    let runtime_guard = install_runtime(Arc::clone(&inner));
 
-    let result = tokio_rt.block_on(f());
+    let result = tokio_rt.block_on(crate::runtime_state::scope_runtime(Arc::clone(&inner), f()));
 
     wait_for_tasks_timeout(&inner, shutdown_timeout);
 
-    teardown_runtime();
+    teardown_runtime(&inner);
+    drop(runtime_guard);
 
     tokio_rt.shutdown_timeout(shutdown_timeout);
 
@@ -376,8 +390,10 @@ pub fn run<F, T>(f: F) -> Result<T, crate::RuntimeError>
 where
     F: FnOnce() -> T,
 {
+    reject_nested_runtime()?;
     run_inner_impl(
         RuntimeConfig::default(),
+        None,
         Vec::new().into_boxed_slice(),
         f,
         #[cfg(feature = "acme")]
@@ -389,6 +405,7 @@ where
 
 fn run_inner_impl<F, T>(
     config: RuntimeConfig,
+    test_schedule: Option<Arc<RuntimeSchedule>>,
     resources: Box<[Box<dyn Resource>]>,
     f: F,
     #[cfg(feature = "acme")] acme_state: Option<crate::acme::AcmeState<std::io::Error>>,
@@ -436,7 +453,7 @@ where
 
     let health_interval = config.health_interval;
 
-    let mut inner = RuntimeInner::with_config(config);
+    let mut inner = RuntimeInner::with_config_and_schedule(config, test_schedule);
 
     inner.metrics_handle = install_metrics(metrics_enabled);
 
@@ -445,11 +462,11 @@ where
 
     let inner = Arc::new(inner);
 
-    install_runtime(Arc::clone(&inner));
+    let runtime_guard = install_runtime(Arc::clone(&inner));
 
     // Run the user closure inside tokio's block_on so that tokio::spawn_blocking
     // and other tokio APIs are available on this thread.
-    let result = tokio_rt.block_on(async {
+    let runtime_scope = async {
         // Run initial health checks before the user closure starts serving
         // traffic. Runs inside block_on so Handle::current() is available
         // for resources that need async I/O (e.g. ProxyHealthResource).
@@ -492,7 +509,11 @@ where
         }
 
         value
-    });
+    };
+    let result = tokio_rt.block_on(crate::runtime_state::scope_runtime(
+        Arc::clone(&inner),
+        runtime_scope,
+    ));
 
     // Wait for all spawned tasks to complete (structured concurrency).
     // When shutting down, apply the configured timeout as a safety net.
@@ -506,13 +527,26 @@ where
     #[cfg(feature = "otel")]
     crate::http::otel::shutdown_exporter();
 
-    teardown_runtime();
+    teardown_runtime(&inner);
+    drop(runtime_guard);
 
     // Shut down the tokio runtime. Use shutdown_timeout to avoid blocking
     // indefinitely on spawn_blocking tasks that ignore the shutdown flag.
     tokio_rt.shutdown_timeout(shutdown_timeout);
 
     Ok(result)
+}
+
+fn reject_nested_runtime() -> Result<(), crate::RuntimeError> {
+    match (
+        crate::runtime_state::has_runtime(),
+        tokio::runtime::Handle::try_current().is_ok(),
+    ) {
+        (false, false) => Ok(()),
+        _ => Err(crate::RuntimeError::InvalidArgument(
+            "nested runtime creation is not supported".into(),
+        )),
+    }
 }
 
 fn init_prometheus_recorder() -> metrics_exporter_prometheus::PrometheusHandle {

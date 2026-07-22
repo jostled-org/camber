@@ -33,7 +33,6 @@ pub fn start() -> Result<SocketAddr, BenchError> {
         rt.block_on(accept_loop(listener));
     });
 
-    std::thread::sleep(Duration::from_millis(50));
     Ok(addr)
 }
 

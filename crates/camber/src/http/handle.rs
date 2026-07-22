@@ -66,9 +66,10 @@ async fn collect_body_limited(
     max_body: usize,
     remote_addr: Option<std::net::IpAddr>,
     is_tls: bool,
+    lifecycle_script: Option<&super::mock::LifecycleScript>,
 ) -> Result<Request, hyper::Response<HyperResponseBody>> {
     let (parts, body) = hyper_req.into_parts();
-    let body_bytes = collect_body(body, max_body).await?;
+    let body_bytes = collect_body(body, max_body, lifecycle_script).await?;
 
     let mut req = match Request::from_hyper(parts, body_bytes) {
         Some(r) => r,
@@ -86,8 +87,14 @@ async fn collect_body_limited(
 async fn collect_body(
     body: hyper::body::Incoming,
     max_body: usize,
+    lifecycle_script: Option<&super::mock::LifecycleScript>,
 ) -> Result<bytes::Bytes, hyper::Response<HyperResponseBody>> {
     use http_body_util::BodyExt;
+    if let Some(script) = lifecycle_script {
+        script
+            .pause(super::mock::LifecycleCheckpoint::RequestBodyLimitConfigured(max_body))
+            .await;
+    }
     let limited = http_body_util::Limited::new(body, max_body);
     match limited.collect().await {
         Ok(collected) => Ok(collected.to_bytes()),
@@ -136,10 +143,11 @@ async fn collect_request(
     max_body: usize,
     remote_addr: Option<std::net::IpAddr>,
     is_tls: bool,
+    lifecycle_script: Option<&super::mock::LifecycleScript>,
 ) -> Result<(Request, WsUpgrade), hyper::Response<HyperResponseBody>> {
     let mut r = hyper_req;
     let ws_upgrade = ws_proxy::extract_ws_upgrade(&mut r);
-    let req = collect_body_limited(r, max_body, remote_addr, is_tls).await?;
+    let req = collect_body_limited(r, max_body, remote_addr, is_tls, lifecycle_script).await?;
     Ok((req, ws_upgrade))
 }
 
@@ -150,8 +158,9 @@ async fn collect_request(
     max_body: usize,
     remote_addr: Option<std::net::IpAddr>,
     is_tls: bool,
+    lifecycle_script: Option<&super::mock::LifecycleScript>,
 ) -> Result<Request, hyper::Response<HyperResponseBody>> {
-    collect_body_limited(hyper_req, max_body, remote_addr, is_tls).await
+    collect_body_limited(hyper_req, max_body, remote_addr, is_tls, lifecycle_script).await
 }
 
 /// Route a request and dispatch to the appropriate handler.
@@ -243,7 +252,15 @@ pub(super) async fn handle_request(
         match skip_body_collection {
             true => build_head_only_request_ws(hyper_req, remote_addr, ctx.is_tls).map_err(|b| *b),
             false => {
-                collect_request(hyper_req, ctx.max_request_body, remote_addr, ctx.is_tls).await
+                let lifecycle_script = lifecycle.script();
+                collect_request(
+                    hyper_req,
+                    ctx.max_request_body,
+                    remote_addr,
+                    ctx.is_tls,
+                    lifecycle_script.as_deref(),
+                )
+                .await
             }
         };
     #[cfg(feature = "ws")]
@@ -257,7 +274,15 @@ pub(super) async fn handle_request(
         match skip_body_collection {
             true => build_head_only_request(hyper_req, remote_addr, ctx.is_tls).map_err(|b| *b),
             false => {
-                collect_request(hyper_req, ctx.max_request_body, remote_addr, ctx.is_tls).await
+                let lifecycle_script = lifecycle.script();
+                collect_request(
+                    hyper_req,
+                    ctx.max_request_body,
+                    remote_addr,
+                    ctx.is_tls,
+                    lifecycle_script.as_deref(),
+                )
+                .await
             }
         };
     #[cfg(not(feature = "ws"))]

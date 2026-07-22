@@ -25,6 +25,11 @@ jobs:
               - '**/*.rs'
               - '**/Cargo.toml'
               - '**/Cargo.lock'
+              - '.manifest.toml'
+              - '.pedant.toml'
+              - '.pedant/**'
+              - 'deny.toml'
+              - 'docs/scripts/**'
               - '.github/workflows/**'
 
   check:
@@ -45,9 +50,50 @@ jobs:
 
       - run: cargo fmt --check
       - run: cargo clippy --workspace --features "${CAMBER_CI_FEATURES}" -- -D warnings
-      - run: cargo install pedant && find . -path '*/src/*.rs' | xargs pedant check
       - run: cargo test --workspace --features "${CAMBER_CI_FEATURES}"
-      - run: cargo install cargo-deny && cargo deny --workspace check
+
+  dependency-policy:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-deny
+      - run: cargo deny --workspace check
+
+  pedant-source:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [camber, camber-bench, camber-build, camber-cli, camber-macros]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install pedant
+      - name: Check package source tree
+        run: pedant check --format github $(git ls-files "crates/${{ matrix.package }}/src")
+
+  pedant-tests:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [camber, camber-bench, camber-build, camber-cli, camber-macros]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install pedant
+      - name: Check package test tree
+        run: pedant check --format github $(git ls-files "crates/${{ matrix.package }}/tests")
 
   supply-chain:
     needs: changes

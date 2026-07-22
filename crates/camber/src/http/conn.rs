@@ -304,6 +304,278 @@ async fn serve_owned_tls(
     .await;
 }
 
+#[cfg(feature = "ws")]
+const OWNED_TRANSPORT_BUFFER_SIZE: usize = 8 * 1024;
+
+#[cfg(feature = "ws")]
+struct TransportStream<S> {
+    reader: Option<tokio::io::ReadHalf<S>>,
+    writer: tokio::io::WriteHalf<S>,
+    activation: Option<tokio::sync::oneshot::Sender<tokio::io::ReadHalf<S>>>,
+    incoming: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, std::io::Error>>,
+    pending: Option<bytes::Bytes>,
+    reader_abort: tokio::task::AbortHandle,
+}
+
+#[cfg(feature = "ws")]
+impl<S> Drop for TransportStream<S> {
+    fn drop(&mut self) {
+        self.reader_abort.abort();
+    }
+}
+
+#[cfg(feature = "ws")]
+impl<S> tokio::io::AsyncRead for TransportStream<S>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        if let Some(reader) = self.reader.as_mut() {
+            let filled = buffer.filled().len();
+            let result = std::pin::Pin::new(reader).poll_read(context, buffer);
+            let received_bytes =
+                matches!(result, std::task::Poll::Ready(Ok(()))) && buffer.filled().len() > filled;
+            self.activate_after_read(received_bytes);
+            return result;
+        }
+        if self.copy_pending(buffer) {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        match self.incoming.poll_recv(context) {
+            std::task::Poll::Ready(Some(Ok(bytes))) => {
+                self.pending = Some(bytes);
+                self.copy_pending(buffer);
+                std::task::Poll::Ready(Ok(()))
+            }
+            std::task::Poll::Ready(Some(Err(error))) => std::task::Poll::Ready(Err(error)),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(Ok(())),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+impl<S> TransportStream<S> {
+    fn activate_after_read(&mut self, received_bytes: bool) {
+        match received_bytes {
+            true => self.activate_reader(),
+            false => {}
+        }
+    }
+
+    fn activate_reader(&mut self) {
+        if let (Some(reader), Some(activation)) = (self.reader.take(), self.activation.take()) {
+            let _ = activation.send(reader);
+        }
+    }
+
+    fn copy_pending(&mut self, buffer: &mut tokio::io::ReadBuf<'_>) -> bool {
+        let mut bytes = match self.pending.take() {
+            Some(bytes) => bytes,
+            None => return false,
+        };
+        let count = bytes.len().min(buffer.remaining());
+        buffer.put_slice(&bytes[..count]);
+        bytes::Buf::advance(&mut bytes, count);
+        if !bytes.is_empty() {
+            self.pending = Some(bytes);
+        }
+        true
+    }
+}
+
+#[cfg(feature = "ws")]
+impl<S> tokio::io::AsyncWrite for TransportStream<S>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        std::pin::Pin::new(&mut self.writer).poll_write(context, buffer)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        std::pin::Pin::new(&mut self.writer).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        std::pin::Pin::new(&mut self.writer).poll_shutdown(context)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.writer.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffers: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        std::pin::Pin::new(&mut self.writer).poll_write_vectored(context, buffers)
+    }
+}
+
+#[cfg(feature = "ws")]
+struct OwnedTransport {
+    handle: Option<tokio::task::JoinHandle<()>>,
+    peer_closed: Option<tokio::sync::oneshot::Receiver<()>>,
+    barrier: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<()>>,
+}
+
+#[cfg(feature = "ws")]
+impl OwnedTransport {
+    fn new<S>(
+        stream: S,
+        script: Option<Arc<super::mock::LifecycleScript>>,
+    ) -> (TransportStream<S>, Self)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let (reader, writer) = tokio::io::split(stream);
+        let (activation, activated) = tokio::sync::oneshot::channel();
+        let (incoming_sender, incoming) = tokio::sync::mpsc::channel(1);
+        let (peer_closed_sender, peer_closed) = tokio::sync::oneshot::channel();
+        let (barrier, barriers) = tokio::sync::mpsc::channel(1);
+        let handle = tokio::spawn(drive_owned_reader(
+            activated,
+            incoming_sender,
+            peer_closed_sender,
+            barriers,
+            script,
+        ));
+        let reader_abort = handle.abort_handle();
+        (
+            TransportStream {
+                reader: Some(reader),
+                writer,
+                activation: Some(activation),
+                incoming,
+                pending: None,
+                reader_abort,
+            },
+            Self {
+                handle: Some(handle),
+                peer_closed: Some(peer_closed),
+                barrier,
+            },
+        )
+    }
+
+    async fn peer_closed(&mut self) {
+        wait_for_peer_close(&mut self.peer_closed).await;
+    }
+
+    async fn join(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+
+    async fn close(&mut self) {
+        if let Some(handle) = self.handle.as_ref() {
+            handle.abort();
+        }
+        self.join().await;
+    }
+
+    async fn peer_remains_open(&mut self) -> bool {
+        let (acknowledgement, acknowledged) = tokio::sync::oneshot::channel();
+        if self.barrier.send(acknowledgement).await.is_err() {
+            return false;
+        }
+        tokio::select! {
+            biased;
+            () = wait_for_peer_close(&mut self.peer_closed) => false,
+            result = acknowledged => result.is_ok(),
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+async fn wait_for_peer_close(peer_closed: &mut Option<tokio::sync::oneshot::Receiver<()>>) {
+    match peer_closed.as_mut() {
+        Some(receiver) => {
+            let _ = receiver.await;
+            *peer_closed = None;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(feature = "ws")]
+impl Drop for OwnedTransport {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.as_ref() {
+            handle.abort();
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+async fn drive_owned_reader<S>(
+    activation: tokio::sync::oneshot::Receiver<tokio::io::ReadHalf<S>>,
+    incoming: tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
+    peer_closed: tokio::sync::oneshot::Sender<()>,
+    mut barriers: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<()>>,
+    script: Option<Arc<super::mock::LifecycleScript>>,
+) where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let mut reader = match activation.await {
+        Ok(reader) => reader,
+        Err(_) => return,
+    };
+    let mut buffer = [0; OWNED_TRANSPORT_BUFFER_SIZE];
+    loop {
+        let result = tokio::select! {
+            biased;
+            result = reader.read(&mut buffer) => result,
+            barrier = barriers.recv() => match barrier {
+                Some(barrier) => {
+                    let _ = barrier.send(());
+                    continue;
+                }
+                None => break,
+            },
+        };
+        let count = match result {
+            Ok(count) => count,
+            Err(error) => {
+                let _ = incoming.send(Err(error)).await;
+                break;
+            }
+        };
+        if count == 0 {
+            break;
+        }
+        let bytes = bytes::Bytes::copy_from_slice(&buffer[..count]);
+        if incoming.send(Ok(bytes)).await.is_err() {
+            break;
+        }
+    }
+    let _ = peer_closed.send(());
+    if let Some(script) = script {
+        script
+            .pause(super::mock::LifecycleCheckpoint::UpgradePeerClosed)
+            .await;
+    }
+}
+
 async fn serve_owned_stream<S>(
     stream: S,
     router: Arc<ServerDispatch>,
@@ -314,9 +586,13 @@ async fn serve_owned_stream<S>(
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    #[cfg(feature = "ws")]
+    let (stream, transport) = OwnedTransport::new(stream, lifecycle.script());
     let io = hyper_util::rt::TokioIo::new(stream);
     serve_owned_io(
         io,
+        #[cfg(feature = "ws")]
+        transport,
         router,
         ctx,
         lifecycle,
@@ -328,6 +604,7 @@ async fn serve_owned_stream<S>(
 
 async fn serve_owned_io<I>(
     io: hyper_util::rt::TokioIo<I>,
+    #[cfg(feature = "ws")] mut transport: OwnedTransport,
     router: Arc<ServerDispatch>,
     ctx: Arc<ConnCtx>,
     lifecycle: ConnectionLifecycle,
@@ -336,6 +613,10 @@ async fn serve_owned_io<I>(
 ) where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    #[cfg(feature = "ws")]
+    let mut lifecycle = lifecycle;
+    #[cfg(feature = "ws")]
+    let mut upgrade_transport = lifecycle.bind_upgrade_transport();
     let service_lifecycle = lifecycle.clone();
     let service = hyper::service::service_fn(move |request| {
         let router = Arc::clone(&router);
@@ -350,6 +631,93 @@ async fn serve_owned_io<I>(
         Some(control) => control,
         None => return,
     };
+
+    #[cfg(feature = "ws")]
+    let mut peer_closed = false;
+    #[cfg(feature = "ws")]
+    loop {
+        let event = next_owned_connection_event(
+            connection.as_mut(),
+            &mut control,
+            &mut upgrade_transport,
+            &mut transport,
+        )
+        .await;
+        match event {
+            OwnedConnectionEvent::Complete(result) => {
+                finish_owned_connection(result, &mut upgrade_transport, &mut transport).await;
+                return;
+            }
+            OwnedConnectionEvent::Shutdown(mode) => {
+                shutdown_owned_connection(
+                    mode,
+                    connection.as_mut(),
+                    &mut upgrade_transport,
+                    &mut transport,
+                    |mut connection| connection.as_mut().graceful_shutdown(),
+                )
+                .await;
+                return;
+            }
+            OwnedConnectionEvent::Registration(Some(mut registration)) => {
+                let cancellation = registration.prepare();
+                cancel_closed_registration(peer_closed, cancellation.as_ref());
+                let registration = registration.register();
+                tokio::pin!(registration);
+                let event = await_upgrade_registration(
+                    connection.as_mut(),
+                    &mut control,
+                    registration.as_mut(),
+                    &mut transport,
+                )
+                .await;
+                let outcome = finish_interrupted_registration(
+                    event,
+                    connection.as_mut(),
+                    registration.as_mut(),
+                    cancellation.as_ref(),
+                    &mut upgrade_transport,
+                    &mut transport,
+                    |mut connection| connection.as_mut().graceful_shutdown(),
+                )
+                .await;
+                let Some(outcome) = outcome else {
+                    return;
+                };
+                let outcome = retain_open_upgrade(
+                    outcome,
+                    connection.as_mut(),
+                    &mut upgrade_transport,
+                    &mut transport,
+                )
+                .await;
+                let Some(outcome) = outcome else {
+                    return;
+                };
+                let Some(commitment) = outcome.complete() else {
+                    continue;
+                };
+                let event =
+                    await_upgrade_commitment(connection.as_mut(), &mut control, &mut transport)
+                        .await;
+                finish_upgrade_commitment(
+                    event,
+                    commitment,
+                    connection.as_mut(),
+                    &upgrade_transport,
+                    &mut transport,
+                    |mut connection| connection.as_mut().graceful_shutdown(),
+                )
+                .await;
+                transport.join().await;
+                return;
+            }
+            OwnedConnectionEvent::Registration(None) => {}
+            OwnedConnectionEvent::PeerClosed => peer_closed = true,
+        }
+    }
+
+    #[cfg(not(feature = "ws"))]
     tokio::select! {
         biased;
         mode = wait_for_shutdown(&mut control) => match mode {
@@ -360,6 +728,313 @@ async fn serve_owned_io<I>(
             ServerControl::Running => {}
         },
         result = &mut connection => log_connection_result(result, false),
+    }
+}
+
+#[cfg(feature = "ws")]
+trait LoggableConnectionError: AsRef<dyn std::error::Error + Send + Sync> + std::fmt::Display {}
+
+#[cfg(feature = "ws")]
+impl<T> LoggableConnectionError for T where
+    T: AsRef<dyn std::error::Error + Send + Sync> + std::fmt::Display
+{
+}
+
+#[cfg(feature = "ws")]
+async fn finish_owned_connection<E: LoggableConnectionError>(
+    result: Result<(), E>,
+    upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
+    transport: &mut OwnedTransport,
+) {
+    upgrade_transport.cancel();
+    upgrade_transport.abort_pending().await;
+    log_connection_result(result, false);
+    transport.close().await;
+}
+
+#[cfg(feature = "ws")]
+async fn shutdown_hyper_connection<C, E, F>(
+    mode: ServerControl,
+    mut connection: std::pin::Pin<&mut C>,
+    begin_shutdown: F,
+) where
+    C: std::future::Future<Output = Result<(), E>>,
+    E: LoggableConnectionError,
+    F: FnOnce(std::pin::Pin<&mut C>),
+{
+    match mode {
+        ServerControl::Graceful | ServerControl::Abort => {
+            begin_shutdown(connection.as_mut());
+            log_connection_result(connection.await, true);
+        }
+        ServerControl::Running => {}
+    }
+}
+
+#[cfg(feature = "ws")]
+async fn shutdown_owned_connection<C, E, F>(
+    mode: ServerControl,
+    connection: std::pin::Pin<&mut C>,
+    upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
+    transport: &mut OwnedTransport,
+    begin_shutdown: F,
+) where
+    C: std::future::Future<Output = Result<(), E>>,
+    E: LoggableConnectionError,
+    F: FnOnce(std::pin::Pin<&mut C>),
+{
+    upgrade_transport.cancel();
+    upgrade_transport.abort_pending().await;
+    shutdown_hyper_connection(mode, connection, begin_shutdown).await;
+    transport.close().await;
+}
+
+#[cfg(feature = "ws")]
+fn cancel_prepared_upgrade(cancellation: Option<&super::server_lifecycle::UpgradeCancellation>) {
+    match cancellation {
+        Some(cancellation) => cancellation.cancel(),
+        None => {}
+    }
+}
+
+#[cfg(feature = "ws")]
+fn cancel_closed_registration(
+    peer_closed: bool,
+    cancellation: Option<&super::server_lifecycle::UpgradeCancellation>,
+) {
+    match (peer_closed, cancellation) {
+        (true, Some(cancellation)) => cancellation.cancel(),
+        _ => {}
+    }
+}
+
+#[cfg(feature = "ws")]
+async fn settle_interrupted_registration<R>(
+    registration: std::pin::Pin<&mut R>,
+    cancellation: Option<&super::server_lifecycle::UpgradeCancellation>,
+    upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
+) where
+    R: std::future::Future<Output = super::server_lifecycle::TransportRegistrationOutcome>,
+{
+    upgrade_transport.cancel();
+    cancel_prepared_upgrade(cancellation);
+    let outcome = registration.await;
+    drop(outcome.complete());
+    upgrade_transport.abort_pending().await;
+}
+
+#[cfg(feature = "ws")]
+async fn finish_interrupted_registration<C, E, R, F>(
+    event: UpgradeRegistrationEvent<E>,
+    connection: std::pin::Pin<&mut C>,
+    registration: std::pin::Pin<&mut R>,
+    cancellation: Option<&super::server_lifecycle::UpgradeCancellation>,
+    upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
+    transport: &mut OwnedTransport,
+    begin_shutdown: F,
+) -> Option<super::server_lifecycle::TransportRegistrationOutcome>
+where
+    C: std::future::Future<Output = Result<(), E>>,
+    E: LoggableConnectionError,
+    R: std::future::Future<Output = super::server_lifecycle::TransportRegistrationOutcome>,
+    F: FnOnce(std::pin::Pin<&mut C>),
+{
+    match event {
+        UpgradeRegistrationEvent::Registered(outcome) => Some(outcome),
+        UpgradeRegistrationEvent::Complete(result) => {
+            settle_interrupted_registration(registration, cancellation, upgrade_transport).await;
+            log_connection_result(result, false);
+            transport.close().await;
+            None
+        }
+        UpgradeRegistrationEvent::Shutdown(mode) => {
+            settle_interrupted_registration(registration, cancellation, upgrade_transport).await;
+            shutdown_hyper_connection(mode, connection, begin_shutdown).await;
+            transport.close().await;
+            None
+        }
+        UpgradeRegistrationEvent::PeerClosed => {
+            settle_interrupted_registration(registration, cancellation, upgrade_transport).await;
+            log_connection_result(connection.await, false);
+            transport.close().await;
+            None
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+async fn cancel_admitted_upgrade<C, E>(
+    outcome: super::server_lifecycle::TransportRegistrationOutcome,
+    connection: std::pin::Pin<&mut C>,
+    upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
+    transport: &mut OwnedTransport,
+) where
+    C: std::future::Future<Output = Result<(), E>>,
+    E: LoggableConnectionError,
+{
+    upgrade_transport.cancel();
+    outcome.cancel();
+    upgrade_transport.abort_pending().await;
+    log_connection_result(connection.await, false);
+    transport.close().await;
+}
+
+#[cfg(feature = "ws")]
+async fn retain_open_upgrade<C, E>(
+    outcome: super::server_lifecycle::TransportRegistrationOutcome,
+    connection: std::pin::Pin<&mut C>,
+    upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
+    transport: &mut OwnedTransport,
+) -> Option<super::server_lifecycle::TransportRegistrationOutcome>
+where
+    C: std::future::Future<Output = Result<(), E>>,
+    E: LoggableConnectionError,
+{
+    let peer_open = match outcome.admitted() {
+        true => transport.peer_remains_open().await,
+        false => true,
+    };
+    match peer_open {
+        true => Some(outcome),
+        false => {
+            cancel_admitted_upgrade(outcome, connection, upgrade_transport, transport).await;
+            None
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+async fn commit_open_transport(
+    commitment: super::server_lifecycle::UpgradeCommitment,
+    upgrade_transport: &super::server_lifecycle::UpgradeTransportOwner,
+    transport: &mut OwnedTransport,
+) {
+    match transport.peer_remains_open().await {
+        true => {
+            commitment.commit();
+            upgrade_transport.commit();
+        }
+        false => {
+            upgrade_transport.cancel();
+            drop(commitment);
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+async fn finish_upgrade_commitment<C, E, F>(
+    event: UpgradeCommitmentEvent<E>,
+    commitment: super::server_lifecycle::UpgradeCommitment,
+    connection: std::pin::Pin<&mut C>,
+    upgrade_transport: &super::server_lifecycle::UpgradeTransportOwner,
+    transport: &mut OwnedTransport,
+    begin_shutdown: F,
+) where
+    C: std::future::Future<Output = Result<(), E>>,
+    E: LoggableConnectionError,
+    F: FnOnce(std::pin::Pin<&mut C>),
+{
+    match event {
+        UpgradeCommitmentEvent::Complete(result) if result.is_ok() => {
+            commit_open_transport(commitment, upgrade_transport, transport).await;
+            log_connection_result(result, false);
+        }
+        UpgradeCommitmentEvent::Complete(result) => {
+            upgrade_transport.cancel();
+            drop(commitment);
+            log_connection_result(result, false);
+        }
+        UpgradeCommitmentEvent::Shutdown(mode) => {
+            upgrade_transport.cancel();
+            drop(commitment);
+            shutdown_hyper_connection(mode, connection, begin_shutdown).await;
+        }
+        UpgradeCommitmentEvent::PeerClosed => {
+            upgrade_transport.cancel();
+            drop(commitment);
+            log_connection_result(connection.await, false);
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+enum OwnedConnectionEvent<E> {
+    Complete(Result<(), E>),
+    Shutdown(ServerControl),
+    Registration(Option<super::server_lifecycle::TransportRegistration>),
+    PeerClosed,
+}
+
+#[cfg(feature = "ws")]
+async fn next_owned_connection_event<C, E>(
+    mut connection: std::pin::Pin<&mut C>,
+    control: &mut tokio::sync::watch::Receiver<ServerControl>,
+    transport: &mut super::server_lifecycle::UpgradeTransportOwner,
+    owned_transport: &mut OwnedTransport,
+) -> OwnedConnectionEvent<E>
+where
+    C: std::future::Future<Output = Result<(), E>>,
+{
+    tokio::select! {
+        biased;
+        () = owned_transport.peer_closed() => OwnedConnectionEvent::PeerClosed,
+        result = connection.as_mut() => OwnedConnectionEvent::Complete(result),
+        mode = wait_for_shutdown(control) => OwnedConnectionEvent::Shutdown(mode),
+        registration = transport.next_registration() => {
+            OwnedConnectionEvent::Registration(registration)
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+enum UpgradeRegistrationEvent<E> {
+    Complete(Result<(), E>),
+    Shutdown(ServerControl),
+    Registered(super::server_lifecycle::TransportRegistrationOutcome),
+    PeerClosed,
+}
+
+#[cfg(feature = "ws")]
+async fn await_upgrade_registration<C, E, R>(
+    mut connection: std::pin::Pin<&mut C>,
+    control: &mut tokio::sync::watch::Receiver<ServerControl>,
+    registration: std::pin::Pin<&mut R>,
+    transport: &mut OwnedTransport,
+) -> UpgradeRegistrationEvent<E>
+where
+    C: std::future::Future<Output = Result<(), E>>,
+    R: std::future::Future<Output = super::server_lifecycle::TransportRegistrationOutcome>,
+{
+    tokio::select! {
+        biased;
+        () = transport.peer_closed() => UpgradeRegistrationEvent::PeerClosed,
+        result = connection.as_mut() => UpgradeRegistrationEvent::Complete(result),
+        mode = wait_for_shutdown(control) => UpgradeRegistrationEvent::Shutdown(mode),
+        outcome = registration => UpgradeRegistrationEvent::Registered(outcome),
+    }
+}
+
+#[cfg(feature = "ws")]
+enum UpgradeCommitmentEvent<E> {
+    Complete(Result<(), E>),
+    Shutdown(ServerControl),
+    PeerClosed,
+}
+
+#[cfg(feature = "ws")]
+async fn await_upgrade_commitment<C, E>(
+    mut connection: std::pin::Pin<&mut C>,
+    control: &mut tokio::sync::watch::Receiver<ServerControl>,
+    transport: &mut OwnedTransport,
+) -> UpgradeCommitmentEvent<E>
+where
+    C: std::future::Future<Output = Result<(), E>>,
+{
+    tokio::select! {
+        biased;
+        () = transport.peer_closed() => UpgradeCommitmentEvent::PeerClosed,
+        result = connection.as_mut() => UpgradeCommitmentEvent::Complete(result),
+        mode = wait_for_shutdown(control) => UpgradeCommitmentEvent::Shutdown(mode),
     }
 }
 

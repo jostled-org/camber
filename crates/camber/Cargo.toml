@@ -2,6 +2,7 @@
 name = "camber"
 version.workspace = true
 edition.workspace = true
+autotests = false
 description = "Opinionated async Rust for IO-bound services on top of Tokio"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jostled-org/camber"
@@ -97,9 +98,73 @@ tracing-subscriber = { version = "0.3.20", features = ["registry"] }
 rustls-acme = { version = "0.15", default-features = false, features = ["aws-lc-rs", "webpki-roots"] }
 wiremock = "0.6"
 
-[[test]]
-name = "otel"
-required-features = ["otel"]
-
 [build-dependencies]
 camber-build = { version = "0.1.8", path = "../camber-build" }
+
+[[test]]
+name = "acceptance_e2e"
+path = "tests/acceptance_e2e.rs"
+
+[[test]]
+name = "acceptance_owned_lifecycle"
+path = "tests/acceptance_owned_lifecycle.rs"
+
+[[test]]
+name = "acceptance_proxy"
+path = "tests/acceptance_proxy.rs"
+
+[[test]]
+name = "component_body_files"
+path = "tests/component_body_files.rs"
+
+[[test]]
+name = "component_http_routing"
+path = "tests/component_http_routing.rs"
+
+[[test]]
+name = "component_integrations"
+path = "tests/component_integrations.rs"
+
+[[test]]
+name = "component_middleware"
+path = "tests/component_middleware.rs"
+
+[[test]]
+name = "component_observability"
+path = "tests/component_observability.rs"
+
+[[test]]
+name = "component_protocols"
+path = "tests/component_protocols.rs"
+
+[[test]]
+name = "component_runtime_concurrency"
+path = "tests/component_runtime_concurrency.rs"
+
+[[test]]
+name = "component_runtime_resources"
+path = "tests/component_runtime_resources.rs"
+
+[[test]]
+name = "component_streaming"
+path = "tests/component_streaming.rs"
+
+[[test]]
+name = "component_transports"
+path = "tests/component_transports.rs"
+
+[[test]]
+name = "component_websocket"
+path = "tests/component_websocket.rs"
+
+[[test]]
+name = "external_feature_services"
+path = "tests/external_feature_services.rs"
+
+[[test]]
+name = "focused_api_contracts"
+path = "tests/focused_api_contracts.rs"
+
+[[test]]
+name = "process_observability_globals"
+path = "tests/process_observability_globals.rs"

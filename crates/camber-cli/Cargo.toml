@@ -2,6 +2,7 @@
 name = "camber-cli"
 version.workspace = true
 edition.workspace = true
+autotests = false
 description = "CLI, project scaffolding, and config-driven proxy for Camber"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jostled-org/camber"
@@ -30,3 +31,15 @@ thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"
+
+[[test]]
+name = "external_cli_operational"
+path = "tests/external_cli_operational.rs"
+
+[[test]]
+name = "process_cli_serve"
+path = "tests/process_cli_serve.rs"
+
+[[test]]
+name = "process_cli_tooling"
+path = "tests/process_cli_tooling.rs"

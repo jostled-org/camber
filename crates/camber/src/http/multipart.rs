@@ -1,7 +1,6 @@
 use crate::RuntimeError;
 use bytes::Bytes;
-
-use super::strip_quotes;
+use std::borrow::Cow;
 
 /// A parsed multipart/form-data part.
 #[derive(Debug)]
@@ -51,75 +50,209 @@ fn bad_request(msg: &'static str) -> RuntimeError {
     RuntimeError::BadRequest(msg.into())
 }
 
-type HeaderParams<'a> = Box<[(&'a str, &'a str)]>;
+#[derive(Clone, Copy)]
+enum ParameterValue<'a> {
+    Quoted(&'a str),
+    Unquoted(&'a str),
+}
 
-fn split_param(segment: &str) -> Result<(&str, &str), RuntimeError> {
+impl<'a> ParameterValue<'a> {
+    fn decode(self) -> Cow<'a, str> {
+        match self {
+            Self::Unquoted(value) => Cow::Borrowed(value),
+            Self::Quoted(value) => decode_quoted_value(value),
+        }
+    }
+}
+
+struct HeaderParameter<'a> {
+    name: &'a str,
+    value: ParameterValue<'a>,
+}
+
+struct HeaderParameters<'a> {
+    remaining: Option<&'a str>,
+}
+
+impl<'a> Iterator for HeaderParameters<'a> {
+    type Item = Result<HeaderParameter<'a>, RuntimeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let remaining = self.remaining.take()?;
+        Some(match split_next_parameter(remaining) {
+            Ok((parameter, next)) => {
+                self.remaining = next;
+                parse_parameter(parameter)
+            }
+            Err(error) => Err(error),
+        })
+    }
+}
+
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+fn is_quoted_text(ch: char) -> bool {
+    match ch {
+        '\t' | ' ' | '!' | '#'..='[' | ']'..='~' => true,
+        _ => !ch.is_ascii(),
+    }
+}
+
+fn is_quoted_pair_value(ch: char) -> bool {
+    match ch {
+        '\t' | ' '..='~' => true,
+        _ => !ch.is_ascii(),
+    }
+}
+
+fn validate_quoted_value(value: &str) -> Result<(), RuntimeError> {
+    let mut chars = value.chars();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => validate_quoted_pair(chars.next())?,
+            _ if is_quoted_text(ch) => {}
+            _ => return Err(bad_request("invalid multipart quoted parameter")),
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_quoted_pair(value: Option<char>) -> Result<(), RuntimeError> {
+    match value {
+        Some(escaped) if is_quoted_pair_value(escaped) => Ok(()),
+        _ => Err(bad_request("invalid multipart quoted parameter")),
+    }
+}
+
+fn decode_quoted_value(value: &str) -> Cow<'_, str> {
+    if !value.contains('\\') {
+        return Cow::Borrowed(value);
+    }
+
+    let mut decoded = String::with_capacity(value.len());
+    let mut escaped = false;
+    for ch in value.chars() {
+        match (escaped, ch) {
+            (true, _) => {
+                decoded.push(ch);
+                escaped = false;
+            }
+            (false, '\\') => escaped = true,
+            (false, _) => decoded.push(ch),
+        }
+    }
+    Cow::Owned(decoded)
+}
+
+fn parse_parameter_value(value: &str) -> Result<ParameterValue<'_>, RuntimeError> {
+    if let Some(quoted) = value.strip_prefix('"') {
+        let inner = quoted
+            .strip_suffix('"')
+            .ok_or_else(|| bad_request("invalid multipart quoted parameter"))?;
+        validate_quoted_value(inner)?;
+        return Ok(ParameterValue::Quoted(inner));
+    }
+
+    match !value.is_empty() && value.bytes().all(is_token_byte) {
+        true => Ok(ParameterValue::Unquoted(value)),
+        false => Err(bad_request("invalid multipart unquoted parameter")),
+    }
+}
+
+fn parse_parameter(segment: &str) -> Result<HeaderParameter<'_>, RuntimeError> {
     let (key, value) = segment
         .split_once('=')
         .ok_or_else(|| bad_request("invalid multipart header parameter"))?;
     let key = key.trim();
     let value = value.trim();
 
-    match key.is_empty() || value.is_empty() {
-        true => Err(bad_request("invalid multipart header parameter")),
-        false => Ok((key, strip_quotes(value))),
+    match !key.is_empty() && key.bytes().all(is_token_byte) {
+        true => Ok(HeaderParameter {
+            name: key,
+            value: parse_parameter_value(value)?,
+        }),
+        false => Err(bad_request("invalid multipart parameter name")),
     }
 }
 
-fn set_str_param_once<'a>(
-    slot: &mut Option<&'a str>,
-    value: &'a str,
-    err: &'static str,
-) -> Result<(), RuntimeError> {
-    match slot.is_some() || value.is_empty() {
-        true => Err(bad_request(err)),
-        false => {
-            *slot = Some(value);
-            Ok(())
-        }
-    }
-}
-
-fn set_boxed_param_once(
+fn set_owned_param_once(
     slot: &mut Option<Box<str>>,
-    value: &str,
+    value: ParameterValue<'_>,
     err: &'static str,
 ) -> Result<(), RuntimeError> {
-    match slot.is_some() {
-        true => Err(bad_request(err)),
-        false => {
-            *slot = Some(Box::from(value));
-            Ok(())
-        }
+    if slot.is_some() {
+        return Err(bad_request(err));
     }
+
+    let decoded = value.decode();
+    if decoded.is_empty() {
+        return Err(bad_request(err));
+    }
+    *slot = Some(match decoded {
+        Cow::Borrowed(value) => Box::from(value),
+        Cow::Owned(value) => value.into_boxed_str(),
+    });
+    Ok(())
 }
 
-fn split_header_segments(header: &str) -> Result<Box<[&str]>, RuntimeError> {
-    let mut segments = Vec::new();
-    let mut start = 0;
+fn split_next_parameter(input: &str) -> Result<(&str, Option<&str>), RuntimeError> {
     let mut in_quotes = false;
     let mut escaped = false;
 
-    for (idx, ch) in header.char_indices() {
+    for (index, ch) in input.char_indices() {
         match (in_quotes, escaped, ch) {
             (true, true, _) => escaped = false,
             (true, false, '\\') => escaped = true,
             (true, false, '"') => in_quotes = false,
             (false, _, '"') => in_quotes = true,
             (false, _, ';') => {
-                segments.push(header[start..idx].trim());
-                start = idx + 1;
+                let segment = input[..index].trim();
+                let remaining = &input[index + 1..];
+                return parameter_segment(segment, remaining);
             }
             _ => {}
         }
     }
 
-    match in_quotes {
+    if in_quotes || escaped {
+        return Err(bad_request("invalid multipart quoted parameter"));
+    }
+
+    let segment = input.trim();
+    match segment.is_empty() {
         true => Err(bad_request("invalid multipart header parameter")),
-        false => {
-            segments.push(header[start..].trim());
-            Ok(segments.into_boxed_slice())
-        }
+        false => Ok((segment, None)),
+    }
+}
+
+fn parameter_segment<'a>(
+    segment: &'a str,
+    remaining: &'a str,
+) -> Result<(&'a str, Option<&'a str>), RuntimeError> {
+    match segment.is_empty() {
+        true => Err(bad_request("invalid multipart header parameter")),
+        false => Ok((segment, Some(remaining))),
     }
 }
 
@@ -133,46 +266,70 @@ fn find_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     }
 }
 
-fn split_header_params(header: &str) -> Result<(&str, HeaderParams<'_>), RuntimeError> {
-    let mut segments = split_header_segments(header)?.into_iter();
-    let head = segments
-        .next()
-        .filter(|segment| !segment.is_empty())
-        .ok_or_else(|| bad_request("invalid multipart header"))?;
-
-    let mut params = Vec::new();
-    for segment in segments {
-        let trimmed = segment.trim();
-        if trimmed.is_empty() {
-            return Err(bad_request("invalid multipart header parameter"));
-        }
-        params.push(split_param(trimmed)?);
+fn split_header_params(header: &str) -> Result<(&str, HeaderParameters<'_>), RuntimeError> {
+    let (head, remaining) = match header.split_once(';') {
+        Some((head, parameters)) => (head.trim(), Some(parameters)),
+        None => (header.trim(), None),
+    };
+    match head.is_empty() {
+        true => Err(bad_request("invalid multipart header")),
+        false => Ok((head, HeaderParameters { remaining })),
     }
-
-    Ok((head, params.into_boxed_slice()))
 }
 
-fn extract_boundary(content_type: &str) -> Result<Box<str>, RuntimeError> {
+fn is_boundary_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'\''
+                | b'('
+                | b')'
+                | b'+'
+                | b'_'
+                | b','
+                | b'-'
+                | b'.'
+                | b'/'
+                | b':'
+                | b'='
+                | b'?'
+                | b' '
+        )
+}
+
+fn validate_boundary(boundary: &str) -> Result<(), RuntimeError> {
+    let valid_length = matches!(boundary.len(), 1..=70);
+    let valid_characters = boundary.bytes().all(is_boundary_char);
+    let valid_ending = !boundary.ends_with(' ');
+    match valid_length && valid_characters && valid_ending {
+        true => Ok(()),
+        false => Err(bad_request("missing or invalid multipart boundary")),
+    }
+}
+
+fn extract_boundary(content_type: &str) -> Result<Cow<'_, str>, RuntimeError> {
     let (media_type, params) = split_header_params(content_type)?;
     if !media_type.eq_ignore_ascii_case("multipart/form-data") {
         return Err(bad_request("missing or invalid multipart boundary"));
     }
 
-    let mut boundary: Option<&str> = None;
-    for (key, value) in params {
-        match key.eq_ignore_ascii_case("boundary") {
-            true => set_str_param_once(
-                &mut boundary,
-                value,
-                "missing or invalid multipart boundary",
-            )?,
+    let mut boundary = None;
+    for parameter in params {
+        let parameter = parameter?;
+        match parameter.name.eq_ignore_ascii_case("boundary") {
+            true if boundary.is_some() => {
+                return Err(bad_request("missing or invalid multipart boundary"));
+            }
+            true => {
+                let decoded = parameter.value.decode();
+                validate_boundary(&decoded)?;
+                boundary = Some(decoded);
+            }
             false => {}
         }
     }
 
-    boundary
-        .map(Box::from)
-        .ok_or_else(|| bad_request("missing or invalid multipart boundary"))
+    boundary.ok_or_else(|| bad_request("missing or invalid multipart boundary"))
 }
 
 fn parse_content_disposition(
@@ -183,20 +340,23 @@ fn parse_content_disposition(
         return Err(bad_request("invalid multipart content-disposition"));
     }
 
-    let mut name: Option<&str> = None;
-    let mut filename: Option<&str> = None;
+    let mut name = None;
+    let mut filename = None;
 
-    for (key, value) in params {
+    for parameter in params {
+        let parameter = parameter?;
         match (
-            key.eq_ignore_ascii_case("name"),
-            key.eq_ignore_ascii_case("filename"),
+            parameter.name.eq_ignore_ascii_case("name"),
+            parameter.name.eq_ignore_ascii_case("filename"),
         ) {
-            (true, false) => {
-                set_str_param_once(&mut name, value, "invalid multipart content-disposition")?
-            }
-            (false, true) => set_str_param_once(
+            (true, false) => set_owned_param_once(
+                &mut name,
+                parameter.value,
+                "invalid multipart content-disposition",
+            )?,
+            (false, true) => set_owned_param_once(
                 &mut filename,
-                value,
+                parameter.value,
                 "invalid multipart content-disposition",
             )?,
             _ => {}
@@ -204,7 +364,7 @@ fn parse_content_disposition(
     }
 
     let name = name.ok_or_else(|| bad_request("invalid multipart content-disposition"))?;
-    Ok((Box::from(name), filename.map(Box::from)))
+    Ok((name, filename))
 }
 
 fn parse_part_header(
@@ -219,17 +379,20 @@ fn parse_part_header(
         header_name.eq_ignore_ascii_case("content-disposition"),
         header_name.eq_ignore_ascii_case("content-type"),
         *saw_disposition,
+        content_type.is_some(),
     ) {
-        (true, false, true) => Err(bad_request("invalid multipart content-disposition")),
-        (true, false, false) => {
+        (true, false, true, _) => Err(bad_request("invalid multipart content-disposition")),
+        (true, false, false, _) => {
             let (parsed_name, parsed_filename) = parse_content_disposition(header_value)?;
             *name = Some(parsed_name);
             *filename = parsed_filename;
             *saw_disposition = true;
             Ok(())
         }
-        (false, true, _) => {
-            set_boxed_param_once(content_type, header_value, "invalid multipart part headers")
+        (false, true, _, true) => Err(bad_request("invalid multipart part headers")),
+        (false, true, _, false) => {
+            *content_type = Some(Box::from(header_value));
+            Ok(())
         }
         _ => Ok(()),
     }
@@ -293,16 +456,21 @@ fn parse_closing_delimiter(body: &[u8], end: usize) -> Result<Delimiter, Runtime
     }
 }
 
-fn find_next_delimiter(body: &[u8], marker: &[u8], from: usize) -> Option<usize> {
+fn find_next_delimiter(body: &[u8], boundary: &[u8], from: usize) -> Option<usize> {
+    const DELIMITER_PREFIX: &[u8] = b"\r\n--";
     let mut search_from = from;
 
     loop {
-        let pos = find_bytes(body, marker, search_from)?;
-        let suffix = pos + marker.len();
+        let pos = find_bytes(body, DELIMITER_PREFIX, search_from)?;
+        let boundary_start = pos + DELIMITER_PREFIX.len();
+        let suffix = boundary_start + boundary.len();
+        let boundary_matches = body
+            .get(boundary_start..suffix)
+            .is_some_and(|candidate| candidate == boundary);
 
-        match body.get(suffix..suffix + 2) {
-            Some(b"\r\n") | Some(b"--") => return Some(pos),
-            _ => search_from = pos + marker.len(),
+        match (boundary_matches, body.get(suffix..suffix + 2)) {
+            (true, Some(b"\r\n") | Some(b"--")) => return Some(pos),
+            _ => search_from = boundary_start,
         }
     }
 }
@@ -313,14 +481,14 @@ fn find_next_delimiter(body: &[u8], marker: &[u8], from: usize) -> Option<usize>
 /// the Content-Type header.
 pub(crate) fn parse(content_type: &str, body: &Bytes) -> Result<MultipartReader, RuntimeError> {
     let boundary = extract_boundary(content_type)?;
-    let opening = format!("--{boundary}");
-    let opening_bytes = opening.as_bytes();
+    let boundary_bytes = boundary.as_bytes();
+    let opening_length = boundary_bytes.len() + 2;
 
-    if !body.starts_with(opening_bytes) {
+    if !body.starts_with(b"--") || !body[2..].starts_with(boundary_bytes) {
         return Err(bad_request("invalid multipart delimiter framing"));
     }
 
-    let mut pos = match parse_delimiter_suffix(body, opening_bytes.len())? {
+    let mut pos = match parse_delimiter_suffix(body, opening_length)? {
         Delimiter::NextPart(next) => next,
         Delimiter::End => {
             return Ok(MultipartReader {
@@ -329,17 +497,15 @@ pub(crate) fn parse(content_type: &str, body: &Bytes) -> Result<MultipartReader,
         }
     };
 
-    let next_marker = format!("\r\n--{boundary}");
-    let next_marker_bytes = next_marker.as_bytes();
     let mut parts = Vec::new();
 
     loop {
-        let next_delim = find_next_delimiter(body, next_marker_bytes, pos)
+        let next_delim = find_next_delimiter(body, boundary_bytes, pos)
             .ok_or_else(|| bad_request("invalid multipart delimiter framing"))?;
         let raw_part = &body[pos..next_delim];
         parts.push(parse_part(raw_part, body, pos)?);
 
-        let suffix_pos = next_delim + next_marker_bytes.len();
+        let suffix_pos = next_delim + 4 + boundary_bytes.len();
         match parse_delimiter_suffix(body, suffix_pos)? {
             Delimiter::NextPart(next) => pos = next,
             Delimiter::End => break,

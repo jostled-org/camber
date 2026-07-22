@@ -15,7 +15,6 @@ fn bind_and_spawn(app: axum::Router) -> Result<(SocketAddr, ServerHandle), Bench
 
     let thread = spawn_axum_runtime(listener, app);
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
     Ok((addr, ServerHandle::new(thread)))
 }
 

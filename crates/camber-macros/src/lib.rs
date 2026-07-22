@@ -17,11 +17,12 @@ use syn::{ItemFn, parse_macro_input};
 /// #[camber::test]
 /// async fn my_test() {
 ///     let handle = camber::spawn_async(async { 42 });
-///     assert_eq!(handle.await.unwrap(), 42);
+///     assert!(matches!(handle.await, Ok(42)));
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr = proc_macro2::TokenStream::from(attr);
     let input = parse_macro_input!(item as ItemFn);
-    expand::expand_test(input).into()
+    expand::expand_test(attr, input).into()
 }
