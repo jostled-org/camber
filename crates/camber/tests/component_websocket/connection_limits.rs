@@ -4,23 +4,32 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-#[cfg(feature = "ws")]
 use camber::RuntimeError;
-#[cfg(feature = "ws")]
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, LifecycleFault, lifecycle};
 #[cfg(feature = "ws")]
-use camber::http::{HostRouter, Request, Response, Router, WsConn};
+use camber::http::{HostRouter, WsConn};
+use camber::http::{Request, Response, Router};
 #[cfg(feature = "ws")]
 use std::future::{Future, IntoFuture};
-#[cfg(feature = "ws")]
 use std::net::SocketAddr;
 #[cfg(feature = "ws")]
 use std::sync::Arc;
 #[cfg(feature = "ws")]
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
-#[cfg(feature = "ws")]
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+const PRESTART_SHUTDOWN_MODE: &str = "synchronous-prestart-shutdown";
+
+const PRESTART_SHUTDOWN_MARKER: &str = "synchronous-prestart-shutdown-complete";
+
+const PENDING_PERMIT_SHUTDOWN_MODE: &str = "synchronous-pending-permit-shutdown";
+
+const PENDING_PERMIT_SHUTDOWN_MARKER: &str = "synchronous-pending-permit-shutdown-complete";
+
+const SYNCHRONOUS_ISOLATION_MODE: &str = "synchronous-lifecycle-isolation";
+
+const SYNCHRONOUS_ISOLATION_MARKER: &str = "synchronous-lifecycle-isolation-complete";
 
 #[test]
 fn connection_limit_zero_rejected() {
@@ -221,7 +230,6 @@ fn acknowledge_server_close(stream: &mut impl Write) {
     write_ws_frame(stream, 0x8, &[]);
 }
 
-#[cfg(feature = "ws")]
 fn plain_stream(addr: SocketAddr) -> TcpStream {
     let stream = TcpStream::connect(addr).expect("connect TCP client");
     stream
@@ -261,14 +269,12 @@ where
     completion_rx
 }
 
-#[cfg(feature = "ws")]
 fn arm_pending_permit_checkpoint(controller: &LifecycleController) {
     controller
         .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
         .expect("arm pending connection-permit checkpoint");
 }
 
-#[cfg(feature = "ws")]
 fn wait_for_pending_permit(controller: &LifecycleController) {
     common::block_on(
         controller.wait_until_paused(LifecycleCheckpoint::ConnectionPermitWaitPending),
@@ -276,7 +282,6 @@ fn wait_for_pending_permit(controller: &LifecycleController) {
     .expect("production connection-permit acquisition returned Pending");
 }
 
-#[cfg(feature = "ws")]
 fn release_pending_permit(controller: &LifecycleController) {
     controller
         .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
@@ -306,7 +311,6 @@ fn assert_dispatched(dispatched: &Receiver<()>) {
         .expect("second client dispatches after WebSocket close");
 }
 
-#[cfg(feature = "ws")]
 fn synchronous_normal_checkpoints() -> [LifecycleCheckpoint; 12] {
     [
         LifecycleCheckpoint::BeforeSupervisorSelect,
@@ -345,7 +349,6 @@ fn synchronous_websocket_checkpoints() -> [LifecycleCheckpoint; 6] {
     ]
 }
 
-#[cfg(feature = "ws")]
 fn arm_checkpoints(controller: &LifecycleController, checkpoints: &[LifecycleCheckpoint]) {
     for checkpoint in checkpoints {
         controller
@@ -354,7 +357,6 @@ fn arm_checkpoints(controller: &LifecycleController, checkpoints: &[LifecycleChe
     }
 }
 
-#[cfg(feature = "ws")]
 fn assert_checkpoints_unconsumed(
     controller: &LifecycleController,
     checkpoints: &[LifecycleCheckpoint],
@@ -364,7 +366,6 @@ fn assert_checkpoints_unconsumed(
     }
 }
 
-#[cfg(feature = "ws")]
 fn lifecycle_faults() -> [LifecycleFault; 5] {
     [
         LifecycleFault::Accept(std::io::ErrorKind::Other),
@@ -375,7 +376,6 @@ fn lifecycle_faults() -> [LifecycleFault; 5] {
     ]
 }
 
-#[cfg(feature = "ws")]
 fn assert_invalid<T>(result: Result<T, RuntimeError>) {
     assert!(
         matches!(result, Err(RuntimeError::InvalidArgument(_))),
@@ -486,9 +486,161 @@ fn connection_limit_releases_slot_after_connection_exit() {
         .unwrap();
 }
 
-#[cfg(feature = "ws")]
+#[test]
+fn synchronous_serve_observes_shutdown_requested_before_start() {
+    const TEST_NAME: &str =
+        "connection_limits::synchronous_serve_observes_shutdown_requested_before_start";
+
+    match common::is_private_child(PRESTART_SHUTDOWN_MODE) {
+        true => {
+            camber::runtime::builder()
+                .shutdown_timeout(Duration::from_secs(1))
+                .run(|| {
+                    let listener = camber::net::listen("127.0.0.1:0")
+                        .expect("bind pre-start shutdown listener");
+                    let addr = listener
+                        .local_addr()
+                        .expect("pre-start shutdown listener address")
+                        .tcp()
+                        .expect("TCP listener address");
+                    let (dispatched, observed) = std::sync::mpsc::sync_channel(1);
+                    let mut router = Router::new();
+                    router.get("/sync", move |_req: &Request| {
+                        let dispatched = dispatched.clone();
+                        async move {
+                            dispatched.send(()).expect("record pre-start dispatch");
+                            Response::text(200, "sync")
+                        }
+                    });
+
+                    let mut queued = plain_stream(addr);
+                    send_request(&mut queued, "/sync");
+                    camber::runtime::request_shutdown();
+                    camber::http::serve_listener(listener, router)
+                        .expect("synchronous serve observes sticky shutdown");
+                    assert!(
+                        matches!(
+                            observed.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Empty
+                                | std::sync::mpsc::TryRecvError::Disconnected)
+                        ),
+                        "queued connection dispatched after shutdown"
+                    );
+                })
+                .expect("run pre-start shutdown runtime");
+            println!("{PRESTART_SHUTDOWN_MARKER}");
+            return;
+        }
+        false => {}
+    }
+
+    let run = common::run_isolated_exact(
+        TEST_NAME,
+        PRESTART_SHUTDOWN_MODE,
+        PRESTART_SHUTDOWN_MARKER,
+        EVENT_TIMEOUT,
+    )
+    .expect("run isolated pre-start shutdown contract");
+    assert!(
+        run.success(),
+        "isolated pre-start shutdown contract failed: {}",
+        String::from_utf8_lossy(run.stderr())
+    );
+}
+
+#[test]
+fn synchronous_serve_shutdown_cancels_pending_connection_permit() {
+    const TEST_NAME: &str =
+        "connection_limits::synchronous_serve_shutdown_cancels_pending_connection_permit";
+
+    match common::is_private_child(PENDING_PERMIT_SHUTDOWN_MODE) {
+        true => {
+            camber::runtime::builder()
+                .connection_limit(1)
+                .shutdown_timeout(Duration::from_secs(1))
+                .run(|| {
+                    let listener = camber::net::listen("127.0.0.1:0")
+                        .expect("bind pending-permit shutdown listener");
+                    let addr = listener
+                        .local_addr()
+                        .expect("pending-permit listener address")
+                        .tcp()
+                        .expect("TCP listener address");
+                    let controller = lifecycle(addr).expect("register pending-permit listener");
+                    arm_pending_permit_checkpoint(&controller);
+
+                    let mut router = Router::new();
+                    router.get("/sync", |_req: &Request| async {
+                        Response::text(200, "sync")
+                    });
+                    let server =
+                        camber::spawn(move || camber::http::serve_listener(listener, router));
+
+                    let mut first = plain_stream(addr);
+                    first
+                        .write_all(b"GET /sync HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                        .expect("write first keepalive request");
+                    assert_eq!(read_status(&mut first), 200);
+
+                    let mut second = plain_stream(addr);
+                    send_request(&mut second, "/sync");
+                    wait_for_pending_permit(&controller);
+
+                    camber::runtime::request_shutdown();
+                    assert!(
+                        server
+                            .join()
+                            .expect("join server during pending permit")
+                            .is_ok(),
+                        "synchronous server exits while permit acquisition is pending"
+                    );
+                    release_pending_permit(&controller);
+                })
+                .expect("run pending-permit shutdown runtime");
+            println!("{PENDING_PERMIT_SHUTDOWN_MARKER}");
+            return;
+        }
+        false => {}
+    }
+
+    let run = common::run_isolated_exact(
+        TEST_NAME,
+        PENDING_PERMIT_SHUTDOWN_MODE,
+        PENDING_PERMIT_SHUTDOWN_MARKER,
+        EVENT_TIMEOUT,
+    )
+    .expect("run isolated pending-permit shutdown contract");
+    assert!(
+        run.success(),
+        "isolated pending-permit shutdown contract failed: {}",
+        String::from_utf8_lossy(run.stderr())
+    );
+}
+
 #[test]
 fn synchronous_serve_cannot_consume_supervisor_checkpoints_or_faults() {
+    const TEST_NAME: &str =
+        "connection_limits::synchronous_serve_cannot_consume_supervisor_checkpoints_or_faults";
+
+    match common::is_private_child(SYNCHRONOUS_ISOLATION_MODE) {
+        true => {}
+        false => {
+            let run = common::run_isolated_exact(
+                TEST_NAME,
+                SYNCHRONOUS_ISOLATION_MODE,
+                SYNCHRONOUS_ISOLATION_MARKER,
+                Duration::from_secs(15),
+            )
+            .expect("run isolated synchronous lifecycle contract");
+            assert!(
+                run.success(),
+                "isolated synchronous lifecycle contract failed: {}",
+                String::from_utf8_lossy(run.stderr())
+            );
+            return;
+        }
+    }
+
     for fault in lifecycle_faults() {
         camber::runtime::builder()
             .connection_limit(1)
@@ -535,6 +687,7 @@ fn synchronous_serve_cannot_consume_supervisor_checkpoints_or_faults() {
             })
             .unwrap();
     }
+    println!("{SYNCHRONOUS_ISOLATION_MARKER}");
 }
 
 #[cfg(feature = "ws")]

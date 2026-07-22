@@ -354,7 +354,7 @@ fn serve_dispatch(
 ) -> Result<(), RuntimeError> {
     let router = Arc::new(dispatch);
     let rt = runtime::current_runtime();
-    let shutdown_notify = Arc::clone(&rt.shutdown_notify);
+    let shutdown = rt.shutdown_signal();
     let keepalive_timeout = rt.config.keepalive_timeout;
     let conn_limit = make_conn_limit(rt.config.connection_limit);
     let tls_acceptor = rt
@@ -374,7 +374,7 @@ fn serve_dispatch(
                 &listener,
                 router,
                 ctx,
-                shutdown_notify,
+                shutdown,
                 keepalive_timeout,
                 tls_acceptor,
                 conn_limit,

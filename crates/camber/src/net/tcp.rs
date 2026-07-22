@@ -132,10 +132,10 @@ where
     Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
 {
     let tcp = require_tcp(&listener, "serve_tcp")?;
-    let shutdown_notify = runtime::shutdown_notify();
+    let shutdown = runtime::shutdown_signal();
     let handler = Arc::new(handler);
 
-    super::accept::accept_loop(tcp, &shutdown_notify, None, |(stream, _addr)| {
+    super::accept::accept_loop(tcp, &shutdown, None, |(stream, _addr)| {
         let h = Arc::clone(&handler);
         async move { handle_connection(stream, h).await }
     })
@@ -185,11 +185,11 @@ where
     Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
 {
     let tcp = require_tcp(&listener, "serve_tcp_tls")?;
-    let shutdown_notify = runtime::shutdown_notify();
+    let shutdown = runtime::shutdown_signal();
     let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
     let handler = Arc::new(handler);
 
-    super::accept::accept_loop(tcp, &shutdown_notify, None, |(stream, _addr)| {
+    super::accept::accept_loop(tcp, &shutdown, None, |(stream, _addr)| {
         let a = acceptor.clone();
         let h = Arc::clone(&handler);
         async move { handle_tls_connection(stream, a, h).await }

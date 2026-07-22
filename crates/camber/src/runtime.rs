@@ -17,7 +17,7 @@ pub use tokio::runtime::Handle as TokioHandle;
 
 // Re-export crate-internal items so `use crate::runtime;` call sites keep working.
 pub(crate) use crate::runtime_state::{
-    cancel_channel, check_cancel, current_runtime, has_runtime, shutdown_notify, shutdown_signal,
+    ShutdownSignal, cancel_channel, check_cancel, current_runtime, has_runtime, shutdown_signal,
 };
 
 /// Register an external shutdown signal. When `future` completes, Camber
@@ -489,7 +489,7 @@ where
             &resources,
             &health_state,
             health_interval,
-            &inner.shutdown_notify,
+            &inner.shutdown_signal(),
         );
 
         let value = f();

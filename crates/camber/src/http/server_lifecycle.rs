@@ -1491,6 +1491,7 @@ async fn wait_runtime(shutdown: Option<&RuntimeShutdown>, script: Option<&Arc<Li
     loop {
         let notified = shutdown.notify.notified();
         tokio::pin!(notified);
+        notified.as_mut().enable();
         if let Some(script) = script {
             script.pause(LifecycleCheckpoint::BeforeRuntimeWait).await;
         }

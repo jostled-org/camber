@@ -31,8 +31,7 @@ impl ScheduleHandle {
 struct ScheduleState {
     cancelled: Arc<AtomicBool>,
     trigger: Arc<tokio::sync::Notify>,
-    shutdown: Arc<AtomicBool>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    shutdown: runtime::ShutdownSignal,
 }
 
 impl ScheduleState {
@@ -41,12 +40,10 @@ impl ScheduleState {
     }
 
     fn with_trigger(trigger: Arc<tokio::sync::Notify>) -> Self {
-        let (shutdown, shutdown_notify) = runtime::shutdown_signal();
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             trigger,
-            shutdown,
-            shutdown_notify,
+            shutdown: runtime::shutdown_signal(),
         }
     }
 
@@ -100,7 +97,6 @@ where
     tokio::spawn(run_interval_async(
         state.cancelled,
         state.shutdown,
-        state.shutdown_notify,
         state.trigger,
         interval,
         f,
@@ -132,7 +128,6 @@ where
     tokio::spawn(run_interval_async(
         state.cancelled,
         state.shutdown,
-        state.shutdown_notify,
         state.trigger,
         interval,
         f,
@@ -161,24 +156,17 @@ where
 
     let state = ScheduleState::new();
     let handle = state.handle();
-    tokio::spawn(run_cron(
-        state.cancelled,
-        state.shutdown,
-        state.shutdown_notify,
-        schedule,
-        f,
-    ));
+    tokio::spawn(run_cron(state.cancelled, state.shutdown, schedule, f));
     Ok(handle)
 }
 
-fn should_stop(cancel: &AtomicBool, shutdown: &AtomicBool) -> bool {
-    cancel.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire)
+fn should_stop(cancel: &AtomicBool, shutdown: &runtime::ShutdownSignal) -> bool {
+    cancel.load(Ordering::Acquire) || shutdown.is_requested()
 }
 
 async fn run_interval_async<F, Fut>(
     cancel: Arc<AtomicBool>,
-    shutdown: Arc<AtomicBool>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    shutdown: runtime::ShutdownSignal,
     trigger: Arc<tokio::sync::Notify>,
     interval: Duration,
     f: F,
@@ -200,15 +188,14 @@ async fn run_interval_async<F, Fut>(
                 f().await;
                 tick.reset();
             }
-            () = shutdown_notify.notified() => break,
+            () = shutdown.wait() => break,
         }
     }
 }
 
 async fn run_cron<F>(
     cancel: Arc<AtomicBool>,
-    shutdown: Arc<AtomicBool>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    shutdown: runtime::ShutdownSignal,
     schedule: cron::Schedule,
     f: F,
 ) where
@@ -224,7 +211,7 @@ async fn run_cron<F>(
                 if should_stop(&cancel, &shutdown) { break; }
                 f();
             }
-            () = shutdown_notify.notified() => break,
+            () = shutdown.wait() => break,
         }
     }
 }

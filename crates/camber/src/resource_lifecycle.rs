@@ -39,7 +39,7 @@ pub(crate) fn spawn_health_tasks(
     resources: &Arc<[Box<dyn Resource>]>,
     health_state: &Option<HealthState>,
     interval: Duration,
-    shutdown_notify: &Arc<tokio::sync::Notify>,
+    shutdown: &crate::runtime_state::ShutdownSignal,
 ) -> Box<[tokio::task::JoinHandle<()>]> {
     let hs = match health_state {
         Some(hs) => hs,
@@ -53,7 +53,7 @@ pub(crate) fn spawn_health_tasks(
             spawn_one_health_task(
                 Arc::clone(resources),
                 Arc::clone(hs),
-                Arc::clone(shutdown_notify),
+                shutdown.clone(),
                 interval,
                 idx,
             )
@@ -89,7 +89,7 @@ fn spawn_initial_health_check(
 fn spawn_one_health_task(
     resources: Arc<[Box<dyn Resource>]>,
     health_state: HealthState,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    shutdown: crate::runtime_state::ShutdownSignal,
     interval: Duration,
     idx: usize,
 ) -> tokio::task::JoinHandle<()> {
@@ -97,7 +97,11 @@ fn spawn_one_health_task(
         loop {
             tokio::select! {
                 () = tokio::time::sleep(interval) => {}
-                () = shutdown_notify.notified() => return,
+                () = shutdown.wait() => return,
+            }
+            match shutdown.is_requested() {
+                true => return,
+                false => {}
             }
             tokio::task::block_in_place(|| {
                 update_resource_health(resources.as_ref(), &health_state, idx)

@@ -66,6 +66,30 @@ pub(crate) struct RuntimeInner {
     pub(crate) health_state: Option<HealthState>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ShutdownSignal {
+    requested: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl ShutdownSignal {
+    pub(crate) fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn wait(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            match self.is_requested() {
+                true => return,
+                false => notified.await,
+            }
+        }
+    }
+}
+
 impl RuntimeInner {
     pub(crate) fn new() -> Self {
         Self::with_config(RuntimeConfig::default())
@@ -100,6 +124,13 @@ impl RuntimeInner {
     pub(crate) fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
         self.notify_shutdown();
+    }
+
+    pub(crate) fn shutdown_signal(&self) -> ShutdownSignal {
+        ShutdownSignal {
+            requested: Arc::clone(&self.shutdown),
+            notify: Arc::clone(&self.shutdown_notify),
+        }
     }
 
     pub(crate) fn task_started(&self) {
@@ -344,19 +375,8 @@ pub(crate) fn has_runtime() -> bool {
 
 /// Get the shutdown flag and notify from the current runtime.
 /// Used by the schedule module to stop tasks on shutdown.
-pub(crate) fn shutdown_signal() -> (Arc<AtomicBool>, Arc<tokio::sync::Notify>) {
-    let inner = ensure_context();
-    (
-        Arc::clone(&inner.shutdown),
-        Arc::clone(&inner.shutdown_notify),
-    )
-}
-
-/// Get just the shutdown notify from the current runtime.
-/// Used by accept loops that only need the notification, not the flag.
-pub(crate) fn shutdown_notify() -> Arc<tokio::sync::Notify> {
-    let inner = ensure_context();
-    Arc::clone(&inner.shutdown_notify)
+pub(crate) fn shutdown_signal() -> ShutdownSignal {
+    ensure_context().shutdown_signal()
 }
 
 /// Bridge an async future to synchronous context.

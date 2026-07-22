@@ -35,7 +35,7 @@ impl Acceptor for tokio::net::UnixListener {
 
 /// Run an accept loop, dispatching each connection to `on_accept`.
 ///
-/// Returns `Ok(())` when `shutdown_notify` fires. Returns `Err` on fatal
+/// Returns `Ok(())` when shutdown is requested. Returns `Err` on fatal
 /// accept errors. Transient errors (fd exhaustion) trigger a 100ms backoff.
 ///
 /// When `conn_limit` is `Some`, the semaphore bounds the number of concurrent
@@ -43,7 +43,7 @@ impl Acceptor for tokio::net::UnixListener {
 /// the permit is released when the connection task completes.
 pub(crate) async fn accept_loop<L, F, Fut>(
     listener: &L,
-    shutdown_notify: &tokio::sync::Notify,
+    shutdown: &crate::runtime_state::ShutdownSignal,
     conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
     on_accept: F,
 ) -> Result<(), RuntimeError>
@@ -54,10 +54,21 @@ where
 {
     loop {
         tokio::select! {
+            biased;
+            () = shutdown.wait() => {
+                return Ok(());
+            }
             result = listener.accept() => {
                 match result {
                     Ok(accepted) => {
-                        spawn_with_limit(conn_limit, on_accept(accepted)).await;
+                        match spawn_with_limit(
+                            conn_limit,
+                            shutdown,
+                            on_accept(accepted),
+                        ).await {
+                            true => return Ok(()),
+                            false => {}
+                        }
                     }
                     Err(e) if crate::error::is_transient_accept_error(&e) => {
                         tracing::warn!("accept: fd limit reached, backing off");
@@ -65,9 +76,6 @@ where
                     }
                     Err(e) => return Err(e.into()),
                 }
-            }
-            () = shutdown_notify.notified() => {
-                return Ok(());
             }
         }
     }
@@ -78,7 +86,7 @@ where
 /// pending semaphore acquisition.
 pub(crate) async fn accept_loop_with_permit<L, F, Fut>(
     listener: &L,
-    shutdown_notify: &tokio::sync::Notify,
+    shutdown: &crate::runtime_state::ShutdownSignal,
     conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
     script: Option<&Arc<crate::http::mock::LifecycleScript>>,
     on_accept: F,
@@ -90,11 +98,19 @@ where
 {
     loop {
         tokio::select! {
+            biased;
+            () = shutdown.wait() => {
+                return Ok(());
+            }
             result = listener.accept() => {
                 match result {
                     Ok(accepted) => {
                         let permit = match conn_limit {
-                            Some(_) => acquire_connection_permit(conn_limit, script).await.ok(),
+                            Some(_) => tokio::select! {
+                                biased;
+                                () = shutdown.wait() => return Ok(()),
+                                permit = acquire_connection_permit(conn_limit, script) => permit.ok(),
+                            },
                             None => None,
                         };
                         if conn_limit.is_none() || permit.is_some() {
@@ -108,7 +124,6 @@ where
                     Err(error) => return Err(error.into()),
                 }
             }
-            () = shutdown_notify.notified() => return Ok(()),
         }
     }
 }
@@ -149,16 +164,26 @@ pub(crate) async fn acquire_connection_permit(
 /// permit first. The permit is held for the lifetime of the spawned task,
 /// so it is released when the connection closes. Closed semaphores (runtime
 /// shutdown) are treated as a no-op — the connection is dropped silently.
-async fn spawn_with_limit<Fut>(conn_limit: Option<&Arc<tokio::sync::Semaphore>>, fut: Fut)
+async fn spawn_with_limit<Fut>(
+    conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
+    shutdown: &crate::runtime_state::ShutdownSignal,
+    fut: Fut,
+) -> bool
 where
     Fut: Future<Output = ()> + Send + 'static,
 {
     let permit = match conn_limit {
         None => {
             tokio::spawn(fut);
-            return;
+            return false;
         }
-        Some(sem) => Arc::clone(sem).acquire_owned().await,
+        Some(sem) => tokio::select! {
+            biased;
+            () = shutdown.wait() => {
+                return true;
+            }
+            permit = Arc::clone(sem).acquire_owned() => permit,
+        },
     };
     if let Ok(permit) = permit {
         tokio::spawn(async move {
@@ -166,6 +191,7 @@ where
             drop(permit);
         });
     }
+    false
 }
 
 /// Perform a TLS handshake with a 10-second timeout.

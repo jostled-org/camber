@@ -8,7 +8,7 @@ use std::sync::Arc;
 struct SyncConnectionState {
     router: Arc<ServerDispatch>,
     ctx: Arc<ConnCtx>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    shutdown: crate::runtime_state::ShutdownSignal,
     keepalive_timeout: std::time::Duration,
     remote_ip: std::net::IpAddr,
     lifecycle: ConnectionLifecycle,
@@ -18,7 +18,7 @@ pub(super) async fn accept_loop(
     listener: &net::Listener,
     router: Arc<ServerDispatch>,
     ctx: Arc<ConnCtx>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    shutdown: crate::runtime_state::ShutdownSignal,
     keepalive_timeout: std::time::Duration,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     conn_limit: Option<Arc<tokio::sync::Semaphore>>,
@@ -29,7 +29,7 @@ pub(super) async fn accept_loop(
                 tcp,
                 router,
                 ctx,
-                shutdown_notify,
+                shutdown,
                 keepalive_timeout,
                 tls_acceptor,
                 conn_limit,
@@ -37,15 +37,7 @@ pub(super) async fn accept_loop(
             .await
         }
         net::ListenerInner::Unix(unix, _) => {
-            accept_unix(
-                unix,
-                router,
-                ctx,
-                shutdown_notify,
-                keepalive_timeout,
-                conn_limit,
-            )
-            .await
+            accept_unix(unix, router, ctx, shutdown, keepalive_timeout, conn_limit).await
         }
     }
 }
@@ -54,7 +46,7 @@ pub(super) async fn accept_tcp(
     listener: &tokio::net::TcpListener,
     router: Arc<ServerDispatch>,
     ctx: Arc<ConnCtx>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    shutdown: crate::runtime_state::ShutdownSignal,
     keepalive_timeout: std::time::Duration,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     conn_limit: Option<Arc<tokio::sync::Semaphore>>,
@@ -65,13 +57,13 @@ pub(super) async fn accept_tcp(
         .and_then(super::mock::lifecycle_script);
     accept::accept_loop_with_permit(
         listener,
-        &shutdown_notify,
+        &shutdown,
         conn_limit.as_ref(),
         script.as_ref(),
         |(stream, addr), permit| {
             let router = Arc::clone(&router);
             let ctx = Arc::clone(&ctx);
-            let shutdown = Arc::clone(&shutdown_notify);
+            let shutdown = shutdown.clone();
             let acceptor = tls_acceptor.clone();
             let remote_ip = addr.ip();
             async move {
@@ -80,7 +72,7 @@ pub(super) async fn accept_tcp(
                         let state = SyncConnectionState {
                             router,
                             ctx,
-                            shutdown_notify: shutdown,
+                            shutdown,
                             keepalive_timeout,
                             remote_ip,
                             lifecycle: ConnectionLifecycle::synchronous(permit),
@@ -110,19 +102,19 @@ async fn accept_unix(
     listener: &tokio::net::UnixListener,
     router: Arc<ServerDispatch>,
     ctx: Arc<ConnCtx>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    shutdown: crate::runtime_state::ShutdownSignal,
     keepalive_timeout: std::time::Duration,
     conn_limit: Option<Arc<tokio::sync::Semaphore>>,
 ) -> Result<(), RuntimeError> {
     accept::accept_loop_with_permit(
         listener,
-        &shutdown_notify,
+        &shutdown,
         conn_limit.as_ref(),
         None,
         |stream, permit| {
             let router = Arc::clone(&router);
             let ctx = Arc::clone(&ctx);
-            let shutdown = Arc::clone(&shutdown_notify);
+            let shutdown = shutdown.clone();
             async move {
                 serve_stream(
                     stream,
@@ -144,7 +136,7 @@ async fn serve_stream<S>(
     stream: S,
     router: Arc<ServerDispatch>,
     ctx: Arc<ConnCtx>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    shutdown: crate::runtime_state::ShutdownSignal,
     keepalive_timeout: std::time::Duration,
     remote_addr: Option<std::net::IpAddr>,
     lifecycle: ConnectionLifecycle,
@@ -156,7 +148,7 @@ async fn serve_stream<S>(
         io,
         router,
         ctx,
-        shutdown_notify,
+        shutdown,
         keepalive_timeout,
         remote_addr,
         lifecycle,
@@ -177,7 +169,7 @@ async fn serve_tls_connection(
         tls_stream,
         state.router,
         state.ctx,
-        state.shutdown_notify,
+        state.shutdown,
         state.keepalive_timeout,
         Some(state.remote_ip),
         state.lifecycle,
@@ -189,7 +181,7 @@ async fn serve_io<I>(
     io: hyper_util::rt::TokioIo<I>,
     router: Arc<ServerDispatch>,
     ctx: Arc<ConnCtx>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    shutdown: crate::runtime_state::ShutdownSignal,
     keepalive_timeout: std::time::Duration,
     remote_addr: Option<std::net::IpAddr>,
     lifecycle: ConnectionLifecycle,
@@ -214,14 +206,8 @@ async fn serve_io<I>(
 
     tokio::pin!(conn);
     tokio::select! {
-        result = &mut conn => {
-            match result {
-                Ok(()) => {}
-                Err(ref e) if is_benign_hyper_error(e.as_ref()) => {}
-                Err(e) => tracing::warn!("connection error: {e}"),
-            }
-        }
-        () = shutdown_notify.notified() => {
+        biased;
+        () = shutdown.wait() => {
             // Signal HTTP/2 GOAWAY and let in-flight streams finish.
             conn.as_mut().graceful_shutdown();
             match tokio::time::timeout(std::time::Duration::from_secs(15), conn).await {
@@ -229,6 +215,13 @@ async fn serve_io<I>(
                 Ok(Err(ref e)) if is_benign_hyper_error(e.as_ref()) => {}
                 Ok(Err(e)) => tracing::warn!("connection error during shutdown: {e}"),
                 Err(_) => tracing::debug!("connection timed out during graceful shutdown"),
+            }
+        }
+        result = &mut conn => {
+            match result {
+                Ok(()) => {}
+                Err(ref e) if is_benign_hyper_error(e.as_ref()) => {}
+                Err(e) => tracing::warn!("connection error: {e}"),
             }
         }
     }

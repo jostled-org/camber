@@ -3,7 +3,6 @@ use crate::runtime;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 /// Async UDP socket wrapping `tokio::net::UdpSocket`.
 #[derive(Debug)]
@@ -81,16 +80,15 @@ where
     F: Fn(Vec<u8>, SocketAddr, Arc<UdpSocket>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), RuntimeError>> + Send,
 {
-    let (shutdown, shutdown_notify) = runtime::shutdown_signal();
+    let shutdown = runtime::shutdown_signal();
     let socket = Arc::new(socket);
 
-    recv_loop(&socket, &shutdown, &shutdown_notify, &handler).await
+    recv_loop(&socket, &shutdown, &handler).await
 }
 
 async fn recv_loop<F, Fut>(
     socket: &Arc<UdpSocket>,
-    shutdown: &std::sync::atomic::AtomicBool,
-    shutdown_notify: &tokio::sync::Notify,
+    shutdown: &runtime::ShutdownSignal,
     handler: &F,
 ) -> Result<(), RuntimeError>
 where
@@ -99,19 +97,23 @@ where
 {
     let mut buf = [0u8; 65535];
     loop {
-        if shutdown.load(Ordering::Acquire) {
+        if shutdown.is_requested() {
             return Ok(());
         }
         tokio::select! {
             result = socket.recv_from(&mut buf) => {
                 let (n, addr) = result?;
+                match shutdown.is_requested() {
+                    true => return Ok(()),
+                    false => {}
+                }
                 let datagram = buf[..n].to_vec();
                 match handler(datagram, addr, Arc::clone(socket)).await {
                     Ok(()) => {}
                     Err(e) => tracing::warn!("udp handler error: {e}"),
                 }
             }
-            () = shutdown_notify.notified() => {
+            () = shutdown.wait() => {
                 return Ok(());
             }
         }
