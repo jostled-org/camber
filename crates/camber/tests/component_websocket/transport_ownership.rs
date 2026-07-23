@@ -20,12 +20,13 @@ use std::io::Write;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use ws_binary_helpers::{read_ws_binary_frame, write_ws_binary_frame};
 use ws_frame_io::read_until_double_crlf;
 use ws_text_helpers::{read_ws_text_frame, write_ws_close_frame, write_ws_text_frame};
 
 const LIFECYCLE_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+const FLAG_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const VALID_WEBSOCKET_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 const VALID_WEBSOCKET_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
@@ -253,6 +254,21 @@ fn arm_unacknowledged_upgrade(controller: &LifecycleController) {
     controller
         .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
         .expect("pause before upgrade acknowledgement");
+}
+
+/// Await a flag a callback sets while unwinding its own stack.
+///
+/// A callback that reports completion over a channel is still holding its
+/// locals when the receiving task wakes: the send happens inside the callback
+/// body, the drops happen after it returns. Reading the flag once races that
+/// window and only loses under contention, so poll it to the lifecycle
+/// deadline instead.
+async fn wait_for_dropped_flag(flag: &AtomicBool, context: &str) {
+    let deadline = Instant::now() + LIFECYCLE_EVENT_TIMEOUT;
+    while !flag.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "{context}");
+        tokio::time::sleep(FLAG_POLL_INTERVAL).await;
+    }
 }
 
 async fn wait_for_unacknowledged_upgrade(controller: &LifecycleController) {
@@ -1390,7 +1406,11 @@ async fn owner_releases_direct_transport_without_claiming_blocking_callback_exit
             .expect("callback reports post-owner send result"),
         "callback-side WsConn retained a live supervisor peer after owner completion"
     );
-    assert!(callback_dropped.load(Ordering::Acquire));
+    wait_for_dropped_flag(
+        &callback_dropped,
+        "blocking callback did not drop after reporting its result",
+    )
+    .await;
 }
 
 // 1.T18, graceful direct WebSocket portion.
