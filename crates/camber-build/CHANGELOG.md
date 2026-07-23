@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/jostled-org/camber/compare/camber-build-v0.2.0...camber-build-v0.2.1) - 2026-07-23
+
+### Fixed
+
+- *(test)* stop codegen process-tree reaping from aborting on Linux
+
+### Other
+
+- stop test busy-waits from starving the runner
+
 ## [0.2.0](https://github.com/jostled-org/camber/compare/camber-build-v0.1.8...camber-build-v0.2.0) - 2026-07-22
 
 ### Other
