@@ -29,7 +29,6 @@ jobs:
               - '.pedant.toml'
               - '.pedant/**'
               - 'deny.toml'
-              - 'docs/scripts/**'
               - '.github/workflows/**'
 
   check:
@@ -50,7 +49,9 @@ jobs:
 
       - run: cargo fmt --check
       - run: cargo clippy --workspace --features "${CAMBER_CI_FEATURES}" -- -D warnings
-      - run: cargo test --workspace --features "${CAMBER_CI_FEATURES}"
+      - name: Run workspace tests
+        run: cargo test --workspace --features "${CAMBER_CI_FEATURES}"
+        timeout-minutes: 15
 
   dependency-policy:
     needs: changes

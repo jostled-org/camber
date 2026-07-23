@@ -72,7 +72,7 @@ opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.32", optional = true, features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.32", optional = true, features = ["grpc-tonic"] }
 tracing-opentelemetry = { version = "0.33", optional = true }
-camber-macros = { version = "0.1.2", path = "../camber-macros" }
+camber-macros = { version = "0.2.0", path = "../camber-macros" }
 
 [dev-dependencies]
 flate2 = "1"
@@ -99,7 +99,7 @@ rustls-acme = { version = "0.15", default-features = false, features = ["aws-lc-
 wiremock = "0.6"
 
 [build-dependencies]
-camber-build = { version = "0.1.8", path = "../camber-build" }
+camber-build = { version = "0.2.0", path = "../camber-build" }
 
 [[test]]
 name = "acceptance_e2e"

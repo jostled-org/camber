@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/jostled-org/camber/compare/camber-macros-v0.1.8...camber-macros-v0.2.0) - 2026-07-22
+
+### Other
+
+- Synchronize the workspace release at version 0.2.0.
+
 ## [0.1.2](https://github.com/jostled-org/camber/compare/camber-macros-v0.1.1...camber-macros-v0.1.2) - 2026-04-07
 
 ### Other

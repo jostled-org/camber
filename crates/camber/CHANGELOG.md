@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/jostled-org/camber/compare/camber-v0.1.8...camber-v0.2.0) - 2026-07-22
+
+### Changed
+
+- Harden runtime shutdown, transport ownership, and lifecycle integration contracts.
+
+### Fixed
+
+- Prevent synchronous runtime loops from missing shutdown wakeups.
+
 ## [0.1.8](https://github.com/jostled-org/camber/compare/camber-v0.1.7...camber-v0.1.8) - 2026-07-18
 
 ### Added
