@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 struct StandaloneServer {
     runtime: tokio::runtime::Runtime,
@@ -89,7 +90,7 @@ fn wait_for_flag(flag: &AtomicBool, expected: bool) {
             Instant::now() < deadline,
             "health signal did not reach {expected}"
         );
-        std::thread::yield_now();
+        std::thread::sleep(POLL_INTERVAL);
     }
 }
 

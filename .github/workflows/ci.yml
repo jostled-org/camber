@@ -49,9 +49,21 @@ jobs:
 
       - run: cargo fmt --check
       - run: cargo clippy --workspace --features "${CAMBER_CI_FEATURES}" -- -D warnings
+      # camber-bench is a benchmark crate and has no place in CI: a shared
+      # runner cannot produce meaningful measurements. It is excluded here, from
+      # both pedant matrices, and from default-members. Run it locally.
+      #
+      # `timeout` enforces the deadline from a plain OS process. A step-level
+      # timeout-minutes is enforced by the runner agent itself, so a test that
+      # starves the runner takes the enforcement down with it — that is how
+      # earlier runs reached 47 minutes on a 15-minute limit. The outer
+      # timeout-minutes stays as a backstop for the cold-cache compile.
       - name: Run workspace tests
-        run: cargo test --workspace --features "${CAMBER_CI_FEATURES}"
-        timeout-minutes: 15
+        run: >-
+          timeout --signal=KILL 900
+          cargo test --workspace --exclude camber-bench
+          --features "${CAMBER_CI_FEATURES}"
+        timeout-minutes: 20
 
   dependency-policy:
     needs: changes
@@ -71,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [camber, camber-bench, camber-build, camber-cli, camber-macros]
+        package: [camber, camber-build, camber-cli, camber-macros]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -87,7 +99,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [camber, camber-bench, camber-build, camber-cli, camber-macros]
+        package: [camber, camber-build, camber-cli, camber-macros]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

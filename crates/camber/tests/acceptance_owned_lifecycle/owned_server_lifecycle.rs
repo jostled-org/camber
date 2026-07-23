@@ -20,6 +20,7 @@ const HTTP_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
 const CLOSE_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 const PROBE_PANIC: &str = "supervisor join probe panic";
 const OWNED_TASK_PANIC: &str = "injected owned HTTP task panic";
+const DISPATCH_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn ok_router() -> Router {
     let mut router = Router::new();
@@ -3496,6 +3497,9 @@ const CHILD_PROTOCOL_ENV: &str = "CAMBER_OWNED_SERVER_CHILD_PROTOCOL";
 const PROTOCOL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(unix)]
+const PROTOCOL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[cfg(unix)]
 #[derive(Debug, thiserror::Error)]
 enum ProtocolChildError {
     #[error("protocol child did not exit before its deadline")]
@@ -3620,7 +3624,7 @@ impl ProtocolChild {
         loop {
             match self.try_reap()? {
                 Some(status) => return Ok(Some(status)),
-                None if Instant::now() < deadline => std::thread::yield_now(),
+                None if Instant::now() < deadline => std::thread::sleep(PROTOCOL_POLL_INTERVAL),
                 None => return Ok(None),
             }
         }
@@ -3675,7 +3679,7 @@ impl ProtocolChild {
         loop {
             match self.reader.as_ref() {
                 Some(reader) if reader.is_finished() => break,
-                Some(_) if Instant::now() < deadline => std::thread::yield_now(),
+                Some(_) if Instant::now() < deadline => std::thread::sleep(PROTOCOL_POLL_INTERVAL),
                 Some(_) => return Err(ProtocolChildError::StdoutReaderTimeout),
                 None => return Ok(()),
             }
@@ -4652,7 +4656,7 @@ where
 async fn wait_for_dispatch_drop(dropped: &AtomicBool, context: &str) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while !dropped.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(DISPATCH_POLL_INTERVAL).await;
         }
     })
     .await

@@ -4,6 +4,9 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
+use std::time::Duration;
+
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 static INVOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -60,7 +63,7 @@ where
     loop {
         match future.as_mut().poll(&mut context) {
             Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::yield_now(),
+            Poll::Pending => std::thread::sleep(POLL_INTERVAL),
         }
     }
 }

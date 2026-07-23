@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 const READINESS_TIMEOUT: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Run an async block inside the Camber runtime using block_in_place.
 fn run_async<F: std::future::Future>(f: F) -> F::Output {
@@ -45,7 +46,7 @@ async fn wait_for_cached_endpoint(
         loop {
             match cached_endpoint_status(addr, connector).await {
                 Some(status) => break status,
-                None => tokio::task::yield_now().await,
+                None => tokio::time::sleep(POLL_INTERVAL).await,
             }
         }
     })

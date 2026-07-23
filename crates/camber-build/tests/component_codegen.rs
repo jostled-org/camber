@@ -880,7 +880,7 @@ fn wait_for_process_exit(process_id: u32) -> io::Result<()> {
     loop {
         match process_is_running(process_id)? {
             false => return Ok(()),
-            true if Instant::now() < deadline => std::thread::yield_now(),
+            true if Instant::now() < deadline => std::thread::sleep(PROCESS_POLL_INTERVAL),
             true => {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,

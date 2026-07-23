@@ -9,6 +9,7 @@ const CHILD_MODE_ENV: &str = "CAMBER_FIXTURE_PRIVATE_CHILD_MODE";
 const CHILD_NONCE_ENV: &str = "CAMBER_FIXTURE_PRIVATE_CHILD_NONCE";
 const CHILD_PARENT_ID_ENV: &str = "CAMBER_FIXTURE_PRIVATE_PARENT_ID";
 const OUTPUT_CAPTURE_LIMIT: usize = 64 * 1024;
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 static CHILD_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
@@ -259,7 +260,7 @@ impl ChildGuard {
         loop {
             match self.try_wait()? {
                 Some(status) => return Ok(Some(status)),
-                None if Instant::now() < deadline => std::thread::yield_now(),
+                None if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
                 None => return Ok(None),
             }
         }
@@ -291,7 +292,7 @@ impl ChildGuard {
                 Instant::now() < deadline,
             ) {
                 (true, _) => break,
-                (false, true) => std::thread::yield_now(),
+                (false, true) => std::thread::sleep(POLL_INTERVAL),
                 (false, false) => {
                     return Err(ProcessError::ReaderTimeout {
                         timeout: self.cleanup_timeout,

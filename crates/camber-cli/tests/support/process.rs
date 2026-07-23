@@ -12,6 +12,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const OUTPUT_CAPTURE_LIMIT: usize = 64 * 1024;
 const READINESS_RESPONSE_LIMIT: u64 = 64 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 type CapturedOutput = (Box<[u8]>, Box<[u8]>);
 
@@ -172,7 +173,7 @@ impl ChildGuard {
                     return Err(self.cleanup_startup_failure(start_error));
                 }
             }
-            std::thread::yield_now();
+            std::thread::sleep(POLL_INTERVAL);
         }
     }
 
@@ -376,7 +377,7 @@ fn wait_for_exit(child: &mut Child, deadline: Instant) -> io::Result<ExitStatus>
     loop {
         match child.try_wait()? {
             Some(status) => return Ok(status),
-            None if Instant::now() < deadline => std::thread::yield_now(),
+            None if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,

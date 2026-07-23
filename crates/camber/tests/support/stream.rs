@@ -2,6 +2,8 @@ use std::io::{self, Read};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 #[derive(Debug, thiserror::Error)]
 pub enum BoundedReadError {
     #[error("stream read timed out after {timeout:?} with {bytes_read} bytes read")]
@@ -27,7 +29,7 @@ pub fn join_thread_bounded<T>(
     loop {
         match thread.as_ref() {
             Some(handle) if handle.is_finished() => break,
-            Some(_) if Instant::now() < deadline => std::thread::yield_now(),
+            Some(_) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
             Some(_) => return Err(BoundedReadError::JoinTimeout { timeout }),
             None => return Err(BoundedReadError::ThreadPanicked),
         }

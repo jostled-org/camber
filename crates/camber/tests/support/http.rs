@@ -7,6 +7,7 @@ use camber::RuntimeError;
 use camber::http::{self, Router, ServerHandle};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -247,7 +248,7 @@ pub fn wait_for_http_response(addr: SocketAddr, timeout: Duration) -> io::Result
             Ok(response) => return Ok(response),
             Err(error) => last_error = error,
         }
-        std::thread::yield_now();
+        std::thread::sleep(POLL_INTERVAL.min(remaining));
     }
 }
 

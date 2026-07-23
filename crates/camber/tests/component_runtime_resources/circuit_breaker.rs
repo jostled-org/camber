@@ -10,6 +10,7 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
 const TRANSITION_TIMEOUT: Duration = Duration::from_secs(2);
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Shared state for observing mock resource behavior from tests.
 struct MockState {
@@ -170,7 +171,7 @@ fn circuit_breaker_half_opens_after_cooldown() {
             loop {
                 match cb.health_check() {
                     Ok(()) => return,
-                    Err(_) => std::thread::yield_now(),
+                    Err(_) => std::thread::sleep(POLL_INTERVAL),
                 }
             }
         });

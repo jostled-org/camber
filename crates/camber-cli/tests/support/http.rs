@@ -10,6 +10,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const COOPERATIVE_IO_SLICE: Duration = Duration::from_millis(25);
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_HEADER_SIZE: usize = 64 * 1024;
 const MAX_BODY_SIZE: usize = 1024 * 1024;
 
@@ -449,7 +450,7 @@ impl Backend {
         loop {
             match self.thread.as_ref() {
                 Some(thread) if thread.is_finished() => break,
-                Some(_) if Instant::now() < deadline => std::thread::yield_now(),
+                Some(_) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
                 Some(_) => return Err(BackendError::TeardownTimeout),
                 None => return Err(BackendError::WorkerNotOwned),
             }
