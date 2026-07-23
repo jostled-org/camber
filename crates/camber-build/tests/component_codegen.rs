@@ -509,8 +509,12 @@ tonic-prost = "=0.14.6"
     }
 
     fn generate(&self, descriptor: &Path) -> io::Result<CommandOutput> {
+        // The isolated fixture crate resolves its own dependencies, which land
+        // on newer patch versions than the workspace lockfile pins. `--offline`
+        // then fails on any cache that lacks those exact versions — a cold CI
+        // runner only has what the main build fetched. Allow network resolution.
         self.cargo(
-            &["run", "--offline", "--quiet", "--bin", "generate"],
+            &["run", "--quiet", "--bin", "generate"],
             &[
                 ("OUT_DIR", self.output.as_path()),
                 ("CAMBER_PROTO", self.proto.as_path()),
@@ -527,7 +531,7 @@ tonic-prost = "=0.14.6"
 
     fn check(&self, binary: &str) -> io::Result<CommandOutput> {
         self.cargo(
-            &["check", "--offline", "--quiet", "--bin", binary],
+            &["check", "--quiet", "--bin", binary],
             &[("CAMBER_GENERATED_DIR", self.output.as_path())],
         )
     }
@@ -934,8 +938,13 @@ fn process_is_running(process_id: u32) -> io::Result<bool> {
 
 #[cfg(unix)]
 fn terminate_process_tree(process_id: u32) -> io::Result<()> {
+    // `--` terminates option parsing so the leading-dash process-group operand
+    // is not read as a flag. Without it, util-linux `kill` still delivers the
+    // signal but exits non-zero, which BSD `kill` does not; the spurious error
+    // then propagates into ChildGuard::drop and aborts the whole test binary.
     let status = Command::new("/bin/kill")
         .arg("-KILL")
+        .arg("--")
         .arg(format!("-{process_id}"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())

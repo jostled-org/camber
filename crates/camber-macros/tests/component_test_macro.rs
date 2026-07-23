@@ -178,8 +178,12 @@ fn configure_process_tree(command: &mut Command) {
 #[cfg(unix)]
 fn terminate_process_tree(child: &mut Child) -> io::Result<()> {
     let process_group = format!("-{}", child.id());
+    // `--` stops option parsing before the leading-dash process-group operand.
+    // Without it, util-linux `kill` delivers the signal but exits non-zero, so
+    // the success branch never runs on Linux and the fallback kills only the
+    // immediate child, leaking any descendants in the group.
     let status = Command::new("kill")
-        .args(["-KILL", process_group.as_str()])
+        .args(["-KILL", "--", process_group.as_str()])
         .status();
 
     match status {
