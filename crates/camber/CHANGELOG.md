@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/jostled-org/camber/compare/camber-v0.2.1...camber-v0.2.2) - 2026-07-24
+
+### Other
+
+- *(http)* extract shared streaming response builder
+- *(http)* split streaming and request recording into modules
+
 ## [0.2.1](https://github.com/jostled-org/camber/compare/camber-v0.2.0...camber-v0.2.1) - 2026-07-23
 
 ### Other
