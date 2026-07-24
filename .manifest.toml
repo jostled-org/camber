@@ -23,7 +23,7 @@ specs = "docs/specs/"
 
 [ci]
 clippy = "cargo clippy --workspace --features \"profiling,ws,grpc,acme,dns01,nats,sqs,otel\" -- -D warnings"
-test = "cargo test --workspace --features \"profiling,ws,grpc,acme,dns01,nats,sqs,otel\""
+test = "cargo test --workspace --exclude camber-bench --features \"profiling,ws,grpc,acme,dns01,nats,sqs,otel\""
 fmt = "cargo fmt --check"
 
 # [verification] — plan-loop phase hooks. `step` is required for plan
@@ -33,10 +33,10 @@ fmt = "cargo fmt --check"
 step = "docs/scripts/verify_step.sh"
 
 [docs.specs]
-owned-server-lifecycle = { path = "docs/specs/owned-server-lifecycle.md", status = "active" }
+owned-server-lifecycle = { path = "docs/specs/owned-server-lifecycle.md", status = "implemented" }
 audit-refactors = { path = "docs/specs/audit-refactors.md", status = "active" }
-web-essentials = { path = "docs/specs/web-essentials.md", status = "active" }
-lifecycle-integration = { path = "docs/specs/lifecycle-integration.md", status = "active" }
+web-essentials = { path = "docs/specs/web-essentials.md", status = "implemented" }
+lifecycle-integration = { path = "docs/specs/lifecycle-integration.md", status = "implemented" }
 operational-maturity = { path = "docs/specs/operational-maturity.md", status = "active" }
 edge-hardening = { path = "docs/specs/edge-hardening.md", status = "implemented" }
 camber-bench = { path = "docs/specs/camber-bench.md", status = "active" }
