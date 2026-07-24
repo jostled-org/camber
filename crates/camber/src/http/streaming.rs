@@ -1,6 +1,7 @@
 use super::body::{HyperResponseBody, StreamBody};
 use super::handle::{ConnCtx, run_head_gate, to_hyper_full};
 use super::record::record_request;
+use super::response::HeaderPair;
 use super::server_lifecycle::ConnectionLifecycle;
 use super::sse::SseWriter;
 use super::{Request, Response};
@@ -55,6 +56,26 @@ fn streaming_response_or_empty(
         })
 }
 
+/// Build a streaming hyper response from a status, header set, and body channel.
+///
+/// HEAD requests get a drained body; all other methods stream from `rx`.
+fn build_streaming_response(
+    status: u16,
+    headers: &[HeaderPair],
+    rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    is_head: bool,
+) -> hyper::Response<HyperResponseBody> {
+    let mut builder = hyper::Response::builder().status(status);
+    for (name, value) in headers {
+        builder = builder.header(name.as_ref(), value.as_ref());
+    }
+    let body = match is_head {
+        true => empty_stream_body(),
+        false => StreamBody { rx },
+    };
+    streaming_response_or_empty(builder, body)
+}
+
 pub(super) fn handle_stream_response(
     stream_resp: super::stream::StreamResponse,
     req: Request,
@@ -65,16 +86,12 @@ pub(super) fn handle_stream_response(
     let parts = stream_resp.into_parts();
     record_request(ctx, req.method(), req.path(), parts.status, start);
 
-    let body = match is_head {
-        true => empty_stream_body(),
-        false => StreamBody { rx: parts.rx },
-    };
-    let mut builder = hyper::Response::builder().status(parts.status);
-    for (name, value) in &parts.headers {
-        builder = builder.header(name.as_ref(), value.as_ref());
-    }
-
-    Ok(streaming_response_or_empty(builder, body))
+    Ok(build_streaming_response(
+        parts.status,
+        &parts.headers,
+        parts.rx,
+        is_head,
+    ))
 }
 
 /// Forward a streaming proxy request to the backend and return a streaming hyper response.
@@ -102,15 +119,12 @@ pub(super) async fn handle_proxy_stream_response(
         };
 
     record_request(ctx, req.method(), req.path(), upstream.status, start);
-    let mut builder = hyper::Response::builder().status(upstream.status);
-    for (name, value) in upstream.headers.iter() {
-        builder = builder.header(name.as_ref(), value.as_ref());
-    }
-    let body = match is_head {
-        true => empty_stream_body(),
-        false => StreamBody { rx: upstream.rx },
-    };
-    Ok(streaming_response_or_empty(builder, body))
+    Ok(build_streaming_response(
+        upstream.status,
+        &upstream.headers,
+        upstream.rx,
+        is_head,
+    ))
 }
 
 /// Dispatch a streaming proxy request without buffering the incoming body.
@@ -181,13 +195,10 @@ pub(super) async fn dispatch_streaming_proxy(
         };
 
     record_request(ctx, method_str, &path, upstream.status, start);
-    let mut builder = hyper::Response::builder().status(upstream.status);
-    for (name, value) in upstream.headers.iter() {
-        builder = builder.header(name.as_ref(), value.as_ref());
-    }
-    let response_body = match is_head {
-        true => empty_stream_body(),
-        false => StreamBody { rx: upstream.rx },
-    };
-    Ok(streaming_response_or_empty(builder, response_body))
+    Ok(build_streaming_response(
+        upstream.status,
+        &upstream.headers,
+        upstream.rx,
+        is_head,
+    ))
 }
