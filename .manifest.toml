@@ -34,21 +34,21 @@ step = "docs/scripts/verify_step.sh"
 
 [docs.specs]
 owned-server-lifecycle = { path = "docs/specs/owned-server-lifecycle.md", status = "implemented" }
-audit-refactors = { path = "docs/specs/audit-refactors.md", status = "active" }
+audit-refactors = { path = "docs/specs/audit-refactors.md", status = "implemented" }
 web-essentials = { path = "docs/specs/web-essentials.md", status = "implemented" }
 lifecycle-integration = { path = "docs/specs/lifecycle-integration.md", status = "implemented" }
-operational-maturity = { path = "docs/specs/operational-maturity.md", status = "active" }
+operational-maturity = { path = "docs/specs/operational-maturity.md", status = "implemented" }
 edge-hardening = { path = "docs/specs/edge-hardening.md", status = "implemented" }
-camber-bench = { path = "docs/specs/camber-bench.md", status = "active" }
-camber-bench-v2 = { path = "docs/specs/camber-bench-v2.md", status = "active" }
+camber-bench = { path = "docs/specs/camber-bench.md", status = "superseded" }
+camber-bench-v2 = { path = "docs/specs/camber-bench-v2.md", status = "implemented" }
 sync-dispatch-model = { path = "docs/specs/sync-dispatch-model.md", status = "superseded" }
 spawn-blocking-dispatch = { path = "docs/specs/spawn-blocking-dispatch.md", status = "superseded" }
 dispatch-architecture-v2 = { path = "docs/specs/dispatch-architecture-v2.md", status = "superseded" }
 async-native = { path = "docs/specs/async-native.md", status = "implemented" }
-middleware-for-all-dispatch = { path = "docs/specs/middleware-for-all-dispatch.md", status = "active" }
-release-readiness = { path = "docs/specs/release-readiness.md", status = "active" }
-unified-release-fixes = { path = "docs/specs/unified-release-fixes.md", status = "active" }
-"final-design-polish for all items" = { path = "docs/specs/final-design-polish for all items.md", status = "active" }
+middleware-for-all-dispatch = { path = "docs/specs/middleware-for-all-dispatch.md", status = "implemented" }
+release-readiness = { path = "docs/specs/release-readiness.md", status = "implemented" }
+unified-release-fixes = { path = "docs/specs/unified-release-fixes.md", status = "implemented" }
+"final-design-polish for all items" = { path = "docs/specs/final-design-polish for all items.md", status = "implemented" }
 repo-cleanup = { path = "docs/specs/repo-cleanup.md", status = "implemented" }
 http-request-boundaries = { path = "docs/specs/http-request-boundaries.md", status = "implemented" }
 

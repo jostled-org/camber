@@ -144,7 +144,7 @@ host = "app.example.com"
 proxy = "http://localhost:3000"
 ```
 
-Omit the field for unbounded behavior (the default).
+Omit the field for unbounded behavior (the default). `connection_limit = 0` is invalid and fails at startup with `RuntimeError::InvalidArgument` — use `1` or more, or omit it entirely.
 
 ## Proxy + Static File Overlay
 

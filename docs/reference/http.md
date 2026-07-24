@@ -85,17 +85,18 @@ Read cookies from requests and set them on responses:
 ```rust
 use camber::http::{CookieOptions, Request, Response, SameSite};
 
-fn handler(req: &Request) -> Result<Response, camber::RuntimeError> {
-    let session = req.cookie("session_id");
+router.get("/session", |req: &Request| {
+    let session = req.cookie("session_id").unwrap_or("none").to_owned();
+    async move {
+        let opts = CookieOptions::new()
+            .path("/")
+            .same_site(SameSite::Strict)
+            .secure()
+            .http_only();
 
-    let opts = CookieOptions::new()
-        .path("/")
-        .same_site(SameSite::Strict)
-        .secure()
-        .http_only();
-
-    Response::text(200, "ok")?.set_cookie_with("session", "abc123", &opts)
-}
+        Response::text(200, &session)?.set_cookie_with("session", "abc123", &opts)
+    }
+});
 ```
 
 ## Multipart Uploads
@@ -302,11 +303,11 @@ router.use_middleware(|req, next| {
     let has_auth = req
         .headers()
         .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
-    match has_auth {
-        true => next.call(req),
-        false => Box::pin(async {
-            Response::text(401, "unauthorized").expect("valid status")
-        }) as std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>>,
+    async move {
+        match has_auth {
+            true => next.call(req).await,
+            false => Response::text(401, "unauthorized")?.into_response(),
+        }
     }
 });
 router.grpc(grpc);
@@ -317,10 +318,10 @@ streams directly from tonic.
 
 ### Middleware Interaction
 
-gRPC requests go through the full middleware chain before reaching tonic. The middleware gate
-constructs an owned `Request` from the hyper request only when middleware is registered —
-zero overhead when there is none. Middleware can short-circuit (return 401, 403, 429) but
-cannot rewrite the streaming response body.
+gRPC requests pass through the middleware gate before reaching tonic. The gate constructs an
+owned `Request` from the hyper request only when middleware is registered — zero overhead when
+there is none. This is a gate-only path: middleware can short-circuit (return 401, 403, 429)
+but cannot wrap or rewrite the streaming response body, which streams directly from tonic.
 
 ### Streaming RPCs
 

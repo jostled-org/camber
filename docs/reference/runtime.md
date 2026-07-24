@@ -147,6 +147,22 @@ runtime::builder()
 
 Resources shut down in reverse registration order.
 
+### Sync bridge: `runtime::block_on`
+
+`Resource` trait methods (`health_check`, `shutdown`) are synchronous. When an implementation
+must call async code — an async client, a message-queue callback — bridge with
+`runtime::block_on`, which runs the future to completion via `block_in_place` +
+`Handle::block_on` from inside a runtime worker:
+
+```rust
+fn health_check(&self) -> Result<(), RuntimeError> {
+    runtime::block_on(async { self.client.ping().await })
+}
+```
+
+`block_on` is for synchronous contexts only — `Resource` impls, message-queue callbacks, and
+the synchronous CLI `run()` closure. Async handlers already have `.await` and must not use it.
+
 ## Error Handling
 
 Camber uses one main error type at the runtime boundary: `RuntimeError`.
