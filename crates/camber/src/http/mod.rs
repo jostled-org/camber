@@ -102,6 +102,7 @@ mod multipart;
 pub mod otel;
 /// Rate limiting middleware.
 pub mod rate_limit;
+mod record;
 mod request;
 mod response;
 mod router;
@@ -110,6 +111,7 @@ mod server_lifecycle;
 mod sse;
 mod static_files;
 mod stream;
+mod streaming;
 mod trie;
 mod util;
 /// Request validation middleware.

@@ -1,26 +1,23 @@
-use super::body::{HyperResponseBody, StreamBody};
+use super::body::HyperResponseBody;
 use super::dispatch::RouteClass;
 #[cfg(feature = "profiling")]
 use super::internal_routes::match_profiling_route;
 use super::internal_routes::{
     build_internal_handler, invoke_internal_route, match_internal_route_from_path,
 };
+use super::record::record_request;
 use super::request::RequestHead;
 use super::router::{DispatchResult, GateCheck, ServerDispatch, gate_result};
 use super::server_lifecycle::ConnectionLifecycle;
-use super::sse::SseWriter;
+use super::streaming::{
+    dispatch_streaming_proxy, handle_proxy_stream_response, handle_sse, handle_stream_response,
+};
 #[cfg(feature = "ws")]
 use super::ws_proxy::{self, WsUpgrade};
 use super::{BufferConfig, Request, Response};
 use crate::resource::HealthState;
 use crate::runtime_state::RuntimeInner;
 use std::sync::Arc;
-
-fn build_status_text_table() -> Box<[Box<str>]> {
-    (100u16..600)
-        .map(|code| Box::from(code.to_string()))
-        .collect()
-}
 
 #[cfg(feature = "grpc")]
 use super::grpc_support::is_grpc_request;
@@ -428,56 +425,6 @@ async fn dispatch_internal_through_middleware(
     }
 }
 
-async fn handle_sse(
-    handler: super::router::SseHandler,
-    req: Request,
-    buffer_size: usize,
-    lifecycle: &ConnectionLifecycle,
-) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    if let Some(script) = lifecycle.script() {
-        script
-            .pause(super::mock::LifecycleCheckpoint::SseBufferConfigured(
-                buffer_size,
-            ))
-            .await;
-    }
-    let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(buffer_size);
-
-    let _task = crate::task::spawn(move || {
-        let mut writer = SseWriter::new(tx);
-        if let Err(e) = handler(&req, &mut writer) {
-            tracing::warn!(error = %e, "SSE handler returned error");
-        }
-    });
-
-    let body = StreamBody { rx };
-    let builder = hyper::Response::builder()
-        .status(200)
-        .header("Content-Type", "text/event-stream")
-        .header("Cache-Control", "no-cache");
-    Ok(streaming_response_or_empty(builder, body))
-}
-
-/// Create an empty StreamBody (drained channel). Used for HEAD responses
-/// and fallback error paths.
-fn empty_stream_body() -> StreamBody {
-    StreamBody {
-        rx: tokio::sync::mpsc::channel(1).1,
-    }
-}
-
-fn streaming_response_or_empty(
-    builder: hyper::http::response::Builder,
-    body: StreamBody,
-) -> hyper::Response<HyperResponseBody> {
-    builder
-        .body(HyperResponseBody::Streaming(body))
-        .unwrap_or_else(|err| {
-            tracing::error!("failed to build streaming response: {err}");
-            hyper::Response::new(HyperResponseBody::Streaming(empty_stream_body()))
-        })
-}
-
 pub(super) fn to_hyper_full(resp: Response) -> hyper::Response<HyperResponseBody> {
     let (parts, body) = resp.into_hyper().into_parts();
     hyper::Response::from_parts(parts, HyperResponseBody::Full(body))
@@ -487,209 +434,6 @@ fn strip_body_if_head(is_head: bool, resp: Response) -> Response {
     match is_head {
         true => resp.strip_body(),
         false => resp,
-    }
-}
-
-fn handle_stream_response(
-    stream_resp: super::stream::StreamResponse,
-    req: Request,
-    ctx: &ConnCtx,
-    start: std::time::Instant,
-) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    let is_head = req.is_head();
-    let parts = stream_resp.into_parts();
-    record_request(ctx, req.method(), req.path(), parts.status, start);
-
-    let body = match is_head {
-        true => empty_stream_body(),
-        false => StreamBody { rx: parts.rx },
-    };
-    let mut builder = hyper::Response::builder().status(parts.status);
-    for (name, value) in &parts.headers {
-        builder = builder.header(name.as_ref(), value.as_ref());
-    }
-
-    Ok(streaming_response_or_empty(builder, body))
-}
-
-/// Forward a streaming proxy request to the backend and return a streaming hyper response.
-async fn handle_proxy_stream_response(
-    req: Request,
-    backend: &str,
-    prefix: &str,
-    ctx: &ConnCtx,
-    start: std::time::Instant,
-) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    let proxy_req = super::async_proxy::ProxyRequest::from_request(&req);
-    let is_head = req.is_head();
-
-    let upstream =
-        match super::async_proxy::forward_request_streaming(proxy_req, backend, prefix).await {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::warn!(error = %e, "streaming proxy upstream failed");
-                record_request(ctx, req.method(), req.path(), 502, start);
-                return Ok(to_hyper_full(Response::text_raw(
-                    502,
-                    "proxy upstream failed",
-                )));
-            }
-        };
-
-    record_request(ctx, req.method(), req.path(), upstream.status, start);
-    let mut builder = hyper::Response::builder().status(upstream.status);
-    for (name, value) in upstream.headers.iter() {
-        builder = builder.header(name.as_ref(), value.as_ref());
-    }
-    let body = match is_head {
-        true => empty_stream_body(),
-        false => StreamBody { rx: upstream.rx },
-    };
-    Ok(streaming_response_or_empty(builder, body))
-}
-
-/// Dispatch a streaming proxy request without buffering the incoming body.
-///
-/// Runs the middleware gate on a lightweight request (empty body), then
-/// forwards the original hyper body stream to upstream.
-async fn dispatch_streaming_proxy(
-    hyper_req: hyper::Request<hyper::body::Incoming>,
-    dispatch: &ServerDispatch,
-    ctx: &ConnCtx,
-    remote_addr: Option<std::net::IpAddr>,
-    backend: &str,
-    prefix: &str,
-    params: super::request::Params,
-) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    let start = std::time::Instant::now();
-    let method =
-        super::method::Method::from_hyper(hyper_req.method()).unwrap_or(super::method::Method::Get);
-    let method_str = method.as_str();
-    let is_head = matches!(method, super::method::Method::Head);
-
-    // Middleware gate check using a lightweight Request (empty body).
-    let gate_blocked =
-        run_head_gate(&hyper_req, dispatch, remote_addr, ctx.is_tls, Some(params)).await;
-
-    if let Some(blocked) = gate_blocked {
-        record_request(
-            ctx,
-            method_str,
-            hyper_req.uri().path(),
-            blocked.status(),
-            start,
-        );
-        return Ok(to_hyper_full(blocked));
-    }
-    let scheme = match ctx.is_tls {
-        true => "https",
-        false => "http",
-    };
-
-    let (hyper_parts, body) = hyper_req.into_parts();
-    let path: Box<str> = hyper_parts.uri.path().into();
-    let proxy_parts = super::async_proxy::IncomingProxyParts {
-        method,
-        path_and_query: hyper_parts
-            .uri
-            .path_and_query()
-            .map_or("/", |pq| pq.as_str())
-            .into(),
-        headers: hyper_parts.headers,
-        remote_addr,
-        scheme,
-    };
-
-    let upstream =
-        match super::async_proxy::forward_incoming_streaming(proxy_parts, body, backend, prefix)
-            .await
-        {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::warn!(error = %e, "streaming proxy upstream failed");
-                record_request(ctx, method_str, &path, 502, start);
-                return Ok(to_hyper_full(Response::text_raw(
-                    502,
-                    "proxy upstream failed",
-                )));
-            }
-        };
-
-    record_request(ctx, method_str, &path, upstream.status, start);
-    let mut builder = hyper::Response::builder().status(upstream.status);
-    for (name, value) in upstream.headers.iter() {
-        builder = builder.header(name.as_ref(), value.as_ref());
-    }
-    let response_body = match is_head {
-        true => empty_stream_body(),
-        false => StreamBody { rx: upstream.rx },
-    };
-    Ok(streaming_response_or_empty(builder, response_body))
-}
-
-fn record_request(
-    ctx: &ConnCtx,
-    method: &'static str,
-    path: &str,
-    status: u16,
-    start: std::time::Instant,
-) {
-    let elapsed = start.elapsed();
-
-    if ctx.tracing_enabled {
-        tracing::info!(
-            method,
-            path,
-            status,
-            latency_ms = elapsed.as_millis(),
-            "request completed"
-        );
-    }
-
-    if ctx.metrics_handle.is_some() {
-        let status_label = status_to_label(status);
-        metrics::counter!(
-            "http_requests_total",
-            "method" => method,
-            "status" => status_label,
-        )
-        .increment(1);
-        metrics::histogram!(
-            "http_request_duration_seconds",
-            "method" => method,
-            "status" => status_label,
-        )
-        .record(elapsed.as_secs_f64());
-    }
-}
-
-/// Return a static string label for an HTTP status code.
-///
-/// Common codes get `&'static str` with zero allocation. Rare codes
-/// are cached in a fixed-size table initialized on first use — no memory leak.
-fn status_to_label(status: u16) -> &'static str {
-    match status {
-        200 => "200",
-        201 => "201",
-        204 => "204",
-        301 => "301",
-        302 => "302",
-        304 => "304",
-        400 => "400",
-        401 => "401",
-        403 => "403",
-        404 => "404",
-        405 => "405",
-        413 => "413",
-        500 => "500",
-        502 => "502",
-        503 => "503",
-        100..600 => {
-            static TABLE: std::sync::OnceLock<Box<[Box<str>]>> = std::sync::OnceLock::new();
-            let table = TABLE.get_or_init(build_status_text_table);
-            &table[(status - 100) as usize]
-        }
-        _ => "unknown",
     }
 }
 
@@ -745,7 +489,7 @@ async fn dispatch_grpc_inner(
 /// Borrows URI and HeaderMap from the hyper request via `RequestHead`.
 /// Only clones into an owned `Request` when middleware actually exists.
 /// Returns `Some(response)` if middleware blocked, `None` if passed.
-async fn run_head_gate(
+pub(super) async fn run_head_gate(
     hyper_req: &hyper::Request<hyper::body::Incoming>,
     dispatch: &ServerDispatch,
     remote_addr: Option<std::net::IpAddr>,
