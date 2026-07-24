@@ -51,6 +51,7 @@ unified-release-fixes = { path = "docs/specs/unified-release-fixes.md", status =
 "final-design-polish for all items" = { path = "docs/specs/final-design-polish for all items.md", status = "implemented" }
 repo-cleanup = { path = "docs/specs/repo-cleanup.md", status = "implemented" }
 http-request-boundaries = { path = "docs/specs/http-request-boundaries.md", status = "implemented" }
+milestone-1-runtime-ownership-and-disconnect-cancellation = { path = "docs/specs/milestone-1-runtime-ownership-and-disconnect-cancellation.md", status = "draft" }
 
 [capabilities]
 expected = [
