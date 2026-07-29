@@ -1,3 +1,4 @@
+use crate::common::remaining;
 use camber::channel;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -5,6 +6,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 const SAFETY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How often a scheduled callback under probe is asked to fire.
+///
+/// Short enough that a probe observes several ticks well inside
+/// [`SAFETY_TIMEOUT`], and shared so a case's tick budget and its deadline
+/// cannot drift apart.
+pub const CALLBACK_INTERVAL: Duration = Duration::from_millis(25);
 
 pub fn async_deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + SAFETY_TIMEOUT
@@ -168,12 +176,18 @@ where
     }
 }
 
-fn remaining(deadline: Instant) -> Duration {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    assert!(!remaining.is_zero(), "aggregate safety deadline expired");
-    remaining
-}
-
-pub fn sync_remaining(deadline: Instant) -> Duration {
-    remaining(deadline)
+/// What is left of `deadline`, refusing a budget already spent.
+///
+/// [`crate::common::remaining`] saturates to zero, which is right for a wait
+/// whose own expiry is the failure it reports: the wait runs, returns at once,
+/// and its own message names what never arrived. A caller that has nothing to
+/// say about a zero-length wait says so here instead, under a name that cannot
+/// be confused with the shared helper's opposite semantics.
+pub fn deadline_left(deadline: Instant) -> Duration {
+    let left = remaining(deadline);
+    assert!(
+        !left.is_zero(),
+        "the aggregate safety deadline expired before the wait it bounds began"
+    );
+    left
 }

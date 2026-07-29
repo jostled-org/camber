@@ -65,6 +65,69 @@ fn server_readiness_is_signaled_without_sleep() {
 }
 
 #[test]
+fn paused_checkpoint_wait_reports_a_missing_observation() {
+    let controller = camber::runtime_test_support::runtime_schedule();
+    let never = camber::runtime_test_support::RuntimeCheckpoint::ScopeWaitObserved(0);
+
+    // Nothing armed it and no runtime will reach it, so the wait must return
+    // at its bound: an observer that parked here would hang the drain-window
+    // fixtures instead of failing them.
+    assert!(!super::wait_paused_bounded(
+        &controller,
+        never,
+        std::time::Duration::from_millis(25)
+    ));
+}
+
+#[test]
+fn paused_window_probe_reports_a_window_that_never_opened() {
+    let controller = camber::runtime_test_support::runtime_schedule();
+    let never = camber::runtime_test_support::RuntimeCheckpoint::ScopeWaitObserved(0);
+    let probed = std::cell::Cell::new(false);
+
+    // Nothing armed it, so the window never opens. The helper must report the
+    // miss at its bound and leave the probe unrun: a fixture that read a
+    // default observation as a real one would assert on a reading production
+    // never produced.
+    let observed = super::probe_paused_window(
+        &controller,
+        never,
+        std::time::Duration::from_millis(25),
+        || probed.set(true),
+    );
+
+    assert_eq!(observed, None);
+    assert!(!probed.get(), "the probe ran on a window that never opened");
+}
+
+#[test]
+fn paused_window_probe_leaves_an_armed_checkpoint_holding_nothing() {
+    let controller = camber::runtime_test_support::runtime_schedule();
+    let armed = camber::runtime_test_support::RuntimeCheckpoint::ScopeWaitObserved(0);
+    let next = camber::runtime_test_support::RuntimeCheckpoint::ScopeWaitObserved(1);
+
+    controller.pause_once(armed).unwrap();
+    let observed = super::probe_paused_window(
+        &controller,
+        armed,
+        std::time::Duration::from_millis(25),
+        || (),
+    );
+    assert_eq!(observed, None);
+
+    // The checkpoint was armed and nothing ever paused at it, which is the case
+    // `release` cannot clear — it reports an error precisely when nothing is
+    // paused. `arm` refuses while anything is still armed, so this succeeding
+    // is what says the guard left nothing behind. Left armed, the next
+    // production run to reach it would park with no observer to let it go.
+    assert!(
+        controller.pause_once(next).is_ok(),
+        "the expired probe left its checkpoint armed"
+    );
+    controller.disarm();
+}
+
+#[test]
 fn bounded_read_reports_timeout() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -80,12 +143,7 @@ fn bounded_read_reports_timeout() {
 #[test]
 fn child_guard_reaps_after_assertion_panic() {
     const MODE: &str = "panic-cleanup";
-    if super::is_private_child(MODE) {
-        println!("FIXTURE_READY");
-        std::io::Write::flush(&mut std::io::stdout()).unwrap();
-        let (_sender, receiver) = std::sync::mpsc::channel::<()>();
-        let result = receiver.recv_timeout(std::time::Duration::from_secs(30));
-        assert!(result.is_ok(), "fixture parent did not terminate child");
+    if hold_until_parent_kills(MODE, "FIXTURE_READY") {
         return;
     }
 
@@ -118,12 +176,7 @@ fn child_guard_reaps_after_assertion_panic() {
 #[test]
 fn child_guard_kills_and_waits_after_readiness_timeout() {
     const MODE: &str = "readiness-timeout";
-    if super::is_private_child(MODE) {
-        println!("CHILD_STARTED");
-        std::io::Write::flush(&mut std::io::stdout()).unwrap();
-        let (_sender, receiver) = std::sync::mpsc::channel::<()>();
-        let result = receiver.recv_timeout(std::time::Duration::from_secs(30));
-        assert!(result.is_ok(), "fixture parent did not terminate child");
+    if hold_until_parent_kills(MODE, "CHILD_STARTED") {
         return;
     }
 
@@ -255,7 +308,7 @@ fn signal_contract_cannot_reach_parent_process() {
     }
 
     let parent_id = std::process::id();
-    let sigint = super::run_signal_contract_exact(
+    let sigint = super::run_isolated_exact(
         "fixture_contracts::signal_contract_cannot_reach_parent_process",
         SIGINT_MODE,
         "CHILD_SIGNAL_CONTRACT_COMPLETE=isolated-sigint",
@@ -263,7 +316,7 @@ fn signal_contract_cannot_reach_parent_process() {
     )
     .unwrap();
     assert!(sigint.success());
-    let sigterm = super::run_signal_contract_exact(
+    let sigterm = super::run_isolated_exact(
         "fixture_contracts::signal_contract_cannot_reach_parent_process",
         SIGTERM_MODE,
         "CHILD_SIGNAL_CONTRACT_COMPLETE=isolated-sigterm",
@@ -291,10 +344,11 @@ fn complete_http_response_parses_chunked_body_without_eof() {
             .unwrap();
     }));
     let mut client = std::net::TcpStream::connect(address).unwrap();
-    client
-        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
-        .unwrap();
-    let response = super::read_http_response(&mut client).unwrap();
+    // One deadline over the whole response, not a bound per read: the peer holds
+    // the connection open after the terminating chunk, so a reader given a fresh
+    // budget per syscall would have nothing to expire against.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let response = super::read_http_response(&mut client, Some(deadline)).unwrap();
     assert_eq!(response.status, 200);
     assert_eq!(response.body.as_ref(), b"Wikipedia");
     assert_eq!(response.header("connection"), Some("keep-alive"));
@@ -329,10 +383,18 @@ fn server_guard_joins_after_assertion_panic() {
 #[test]
 fn child_guard_reaps_after_normal_success() {
     const MODE: &str = "normal-cleanup";
+    // The markers the child writes and the parent searches for, spelled once:
+    // a hand-counted window length is a second spelling that drifts the moment
+    // a marker is renamed. Spelled as text, because the line wait takes text
+    // and only the byte searches need the free conversion back.
+    const COMPLETE: &str = "NORMAL_COMPLETE";
+    const STDERR: &str = "NORMAL_STDERR";
     if super::is_private_child(MODE) {
-        println!("NORMAL_COMPLETE");
+        std::io::Write::write_all(&mut std::io::stdout(), COMPLETE.as_bytes()).unwrap();
+        std::io::Write::write_all(&mut std::io::stdout(), b"\n").unwrap();
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
-        std::io::Write::write_all(&mut std::io::stderr(), b"NORMAL_STDERR\n").unwrap();
+        std::io::Write::write_all(&mut std::io::stderr(), STDERR.as_bytes()).unwrap();
+        std::io::Write::write_all(&mut std::io::stderr(), b"\n").unwrap();
         std::io::Write::flush(&mut std::io::stderr()).unwrap();
         return;
     }
@@ -344,7 +406,7 @@ fn child_guard_reaps_after_normal_success() {
     .unwrap();
     let probe = child.take_reap_probe().unwrap();
     child
-        .wait_for_line("NORMAL_COMPLETE", std::time::Duration::from_secs(2))
+        .wait_for_line(COMPLETE, std::time::Duration::from_secs(2))
         .unwrap();
     assert!(
         child
@@ -355,14 +417,14 @@ fn child_guard_reaps_after_normal_success() {
     assert!(
         child
             .stdout()
-            .windows(15)
-            .any(|bytes| bytes == b"NORMAL_COMPLETE")
+            .windows(COMPLETE.len())
+            .any(|bytes| bytes == COMPLETE.as_bytes())
     );
     assert!(
         child
             .stderr()
-            .windows(13)
-            .any(|bytes| bytes == b"NORMAL_STDERR")
+            .windows(STDERR.len())
+            .any(|bytes| bytes == STDERR.as_bytes())
     );
     assert!(
         probe
@@ -376,12 +438,7 @@ fn child_guard_reaps_after_normal_success() {
 #[test]
 fn child_guard_reaps_after_child_timeout() {
     const MODE: &str = "child-timeout";
-    if super::is_private_child(MODE) {
-        println!("CHILD_HOLDING");
-        std::io::Write::flush(&mut std::io::stdout()).unwrap();
-        let (_sender, receiver) = std::sync::mpsc::channel::<()>();
-        let result = receiver.recv_timeout(std::time::Duration::from_secs(30));
-        assert!(result.is_ok(), "fixture parent did not terminate child");
+    if hold_until_parent_kills(MODE, "CHILD_HOLDING") {
         return;
     }
     let mut child = super::ChildGuard::spawn_exact_current(
@@ -428,6 +485,155 @@ fn external_resource_names_are_unique_and_safe() {
     assert!(first.chars().all(|character| character.is_ascii_lowercase()
         || character.is_ascii_digit()
         || character == '-'));
+}
+
+#[test]
+fn capture_bus_records_only_the_needle_that_asked() {
+    const WATCHED: &str = "camber-capture-contract-watched";
+    const UNWATCHED: &str = "camber-capture-contract-unwatched";
+    const REASON: &str = "capture-bus-contract";
+
+    let watched = super::capture_events(WATCHED);
+    let unwatched = super::capture_events(UNWATCHED);
+    camber::tracing::info!(subject = WATCHED, reason = REASON);
+
+    // Both halves matter: a bus that recorded nothing and a bus that recorded
+    // everything both leave a needle-scoped assertion looking healthy on its
+    // own, and only the pair separates them.
+    assert!(
+        watched.recorded(&[WATCHED, REASON]),
+        "the capture bus did not record the event naming its needle"
+    );
+    assert_eq!(
+        unwatched.len(),
+        0,
+        "the capture bus recorded an event that never named this needle"
+    );
+}
+
+#[test]
+fn capture_bus_unsubscribes_when_its_handle_drops() {
+    const NEEDLE: &str = "camber-capture-contract-dropped";
+
+    assert_eq!(super::captures_for(NEEDLE), 0);
+    let capture = super::capture_events(NEEDLE);
+    assert_eq!(super::captures_for(NEEDLE), 1);
+    drop(capture);
+
+    // A subscription outliving its handle would keep pushing into a buffer no
+    // test reads, and grow the fan-out every capture pays for.
+    assert_eq!(
+        super::captures_for(NEEDLE),
+        0,
+        "the capture bus kept a subscription after its handle dropped"
+    );
+}
+
+#[test]
+fn read_delimited_frames_a_split_delimiter() {
+    const HEAD: &[u8] = b"HTTP/1.1 200 OK\r\nX-Fixture: framed\r";
+    const TAIL: &[u8] = b"\n\r\nTRAILING-BODY";
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let mut server = Some(std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_nodelay(true).unwrap();
+        std::io::Write::write_all(&mut stream, HEAD).unwrap();
+        std::io::Write::flush(&mut stream).unwrap();
+        // Two writes, with the delimiter split between them. No pause is needed
+        // to make the reader resume across that split: it reads one byte per
+        // syscall, so the overlap scan runs on every byte of every run whatever
+        // TCP does with the segment boundary.
+        std::io::Write::write_all(&mut stream, TAIL).unwrap();
+        std::io::Write::flush(&mut stream).unwrap();
+    }));
+
+    let mut client = std::net::TcpStream::connect(address).unwrap();
+    let framed = super::read_delimited(
+        &mut client,
+        b"\r\n\r\n",
+        1024,
+        std::time::Duration::from_secs(2),
+    )
+    .unwrap();
+
+    assert_eq!(
+        framed.as_ref(),
+        b"HTTP/1.1 200 OK\r\nX-Fixture: framed\r\n\r\n"
+    );
+    // Framed, not drained: a reader that consumed past its delimiter would
+    // leave the next read of this connection short.
+    let rest = super::bounded_read(&mut client, std::time::Duration::from_secs(2), 1024).unwrap();
+    assert_eq!(rest.as_ref(), b"TRAILING-BODY");
+    super::join_thread_bounded(&mut server, std::time::Duration::from_secs(2)).unwrap();
+}
+
+#[test]
+fn read_delimited_bounds_a_dribbling_peer_by_deadline() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop_sender, stop_receiver) = std::sync::mpsc::channel::<()>();
+
+    // One byte at a time, each inside the reader's bound. A reader that gave
+    // every byte a fresh full timeout would never expire against this peer.
+    let mut server = Some(std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_nodelay(true).unwrap();
+        while stop_receiver.try_recv().is_err() {
+            match std::io::Write::write_all(&mut stream, b"x") {
+                Ok(()) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(_) => return,
+            }
+        }
+    }));
+
+    let mut client = std::net::TcpStream::connect(address).unwrap();
+    let started = std::time::Instant::now();
+    let result = super::read_delimited(
+        &mut client,
+        b"\r\n\r\n",
+        64 * 1024,
+        std::time::Duration::from_millis(200),
+    );
+
+    // The kind, not just the failure: a reset peer, a size limit, and an early
+    // EOF all fail a test named for the deadline while proving nothing about it.
+    let error = result.expect_err("a peer that never sent the delimiter produced a frame anyway");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut,
+        "the framed read failed for a reason other than its own deadline: {error}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "the framed read outlived its own deadline"
+    );
+    stop_sender.send(()).unwrap();
+    drop(client);
+    super::join_thread_bounded(&mut server, std::time::Duration::from_secs(2)).unwrap();
+}
+
+/// Hold this process open until the parent kills it, reporting whether this
+/// process was that child.
+///
+/// The parent's subject in every one of these cases is the kill: each proves the
+/// guard reaps a child that will not exit on its own. So the child prints
+/// `marker` for the parent's line wait, flushes it — a marker left in the buffer
+/// reads as a child that never got there — and then parks on a channel whose
+/// sender it holds itself, so only the parent can end it. Reaching the bound
+/// means the parent never did, which is the fault under test.
+fn hold_until_parent_kills(mode: &str, marker: &str) -> bool {
+    if !super::is_private_child(mode) {
+        return false;
+    }
+    println!("{marker}");
+    std::io::Write::flush(&mut std::io::stdout())
+        .expect("the held child could not flush its marker");
+    let (_sender, receiver) = std::sync::mpsc::channel::<()>();
+    let result = receiver.recv_timeout(std::time::Duration::from_secs(30));
+    assert!(result.is_ok(), "fixture parent did not terminate child");
+    true
 }
 
 fn assert_output_once(run: &super::IsolatedRun, expected: &str) {

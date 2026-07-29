@@ -13,20 +13,34 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
+/// The upstream a streaming-proxy route resolved to.
+///
+/// One payload rather than three loose parameters, so the dispatch call it
+/// feeds carries the route as a single value.
+pub(super) struct StreamingProxyTarget {
+    pub(super) backend: Arc<str>,
+    pub(super) prefix: Arc<str>,
+    pub(super) params: RequestParams,
+}
+
 /// Pre-body route classification result.
 pub(super) enum RouteClass {
     /// Normal route — collect body into Request before dispatch.
     Buffered,
     /// Streaming proxy — forward hyper body directly to upstream.
-    StreamingProxy {
-        backend: Arc<str>,
-        prefix: Arc<str>,
-        params: RequestParams,
-    },
+    StreamingProxy(StreamingProxyTarget),
     /// Streaming proxy health check failed — return 503 without body collection.
     StreamingProxyUnhealthy,
     /// Head-only route (WebSocket, SSE) — dispatch from request metadata, skip body collection.
     HeadOnly,
+    /// The Host header cannot name a router — it holds a path separator or a
+    /// control character — so the request can only be the `400` carried here.
+    ///
+    /// Carried out of classification rather than re-derived after the body is
+    /// read: the head already proved the answer, and reading the body first
+    /// would buffer up to `max_request_body` for a request no router, handler,
+    /// or middleware will ever see.
+    HostRejected(Response),
 }
 
 #[cfg(feature = "grpc")]
@@ -35,10 +49,39 @@ pub use super::grpc_support::GrpcRouter;
 /// Handler that returns 404 for unmatched routes, allowing middleware to still run.
 static NOT_FOUND_HANDLER: LazyLock<Handler> = LazyLock::new(|| {
     Box::new(|_req: &Request| {
-        Box::pin(async { Response::text_raw(404, "not found") })
-            as Pin<Box<dyn Future<Output = Response> + Send>>
+        Box::pin(async { not_found() }) as Pin<Box<dyn Future<Output = Response> + Send>>
     })
 });
+
+/// The answer to a path no route claims.
+///
+/// One constructor for the handler that runs middleware first and the fallback
+/// that does not: the two differ only in whether the chain is reached, never in
+/// what the peer is told.
+fn not_found() -> Response {
+    Response::text_raw(404, "not found")
+}
+
+/// The answer to a route whose upstream is failing its health check.
+///
+/// Shared with the pre-body path in `handle`, which refuses the same route
+/// class before a body is read. Both refusals name the same condition, so both
+/// come from here.
+pub(super) fn service_unavailable() -> Response {
+    Response::text_raw(503, "service unavailable")
+}
+
+/// Whether a matched route's upstream is currently failing its health check.
+///
+/// `None` is a route with no health check at all, which is never unhealthy.
+/// One definition for the pre-body classification and the post-body dispatch:
+/// two copies of the presence test, the negation, and the memory ordering are
+/// what lets one path read a stale flag after the other is changed.
+fn upstream_unhealthy(healthy: &Option<Arc<AtomicBool>>) -> bool {
+    healthy
+        .as_ref()
+        .is_some_and(|flag| !flag.load(Ordering::Relaxed))
+}
 
 /// Immutable trie-based router. Created from Router::freeze().
 pub(super) struct FrozenRouter {
@@ -63,6 +106,24 @@ pub(super) enum DispatchResult {
     ProxyWebSocket(Request, Arc<str>, Arc<str>),
     /// Streaming proxy: middleware gates the request, body streams with backpressure.
     ProxyStream(Request, Arc<str>, Arc<str>),
+}
+
+/// A dispatch that can only end in a buffered handler future.
+///
+/// Named apart from [`DispatchResult`] so the paths that produce nothing else —
+/// the handler chain and the terminal fallbacks — say so in their return type.
+/// A caller given the wider enum had to answer for streaming variants it can
+/// never receive, and the only answer available was a status no counter moved
+/// for.
+pub(super) struct AsyncDispatch {
+    pub(super) fut: Pin<Box<dyn Future<Output = Response> + Send>>,
+    pub(super) req: Request,
+}
+
+impl From<AsyncDispatch> for DispatchResult {
+    fn from(dispatch: AsyncDispatch) -> Self {
+        Self::Async(dispatch.fut, dispatch.req)
+    }
 }
 
 impl DispatchResult {
@@ -124,19 +185,17 @@ impl FrozenRouter {
                     prefix,
                 },
                 _,
-            )) if healthy.as_ref().is_some_and(|f| !f.load(Ordering::Relaxed)) => {
-                RouteClass::StreamingProxyUnhealthy
-            }
+            )) if upstream_unhealthy(healthy) => RouteClass::StreamingProxyUnhealthy,
             Some((
                 RouteHandler::ProxyStream {
                     backend, prefix, ..
                 },
                 params,
-            )) => RouteClass::StreamingProxy {
+            )) => RouteClass::StreamingProxy(StreamingProxyTarget {
                 backend: Arc::clone(backend),
                 prefix: Arc::clone(prefix),
                 params,
-            },
+            }),
             Some((RouteHandler::Sse(_), _)) => RouteClass::HeadOnly,
             #[cfg(feature = "ws")]
             Some((RouteHandler::WebSocket(_), _)) => RouteClass::HeadOnly,
@@ -164,7 +223,7 @@ impl FrozenRouter {
         match result {
             Some((RouteHandler::Async(handler), params)) => {
                 req.set_params(params);
-                self.dispatch_async(handler, req)
+                self.dispatch_async(handler, req).into()
             }
             Some((RouteHandler::Stream(handler), params)) => {
                 req.set_params(params);
@@ -182,9 +241,9 @@ impl FrozenRouter {
             }
             Some((RouteHandler::Proxy { healthy, .. }, _))
             | Some((RouteHandler::ProxyStream { healthy, .. }, _))
-                if healthy.as_ref().is_some_and(|f| !f.load(Ordering::Relaxed)) =>
+                if upstream_unhealthy(healthy) =>
             {
-                let fut = Box::pin(async { Response::text_raw(503, "service unavailable") });
+                let fut = Box::pin(async { service_unavailable() });
                 DispatchResult::Async(fut, req)
             }
             Some((
@@ -194,7 +253,7 @@ impl FrozenRouter {
                 params,
             )) => {
                 req.set_params(params);
-                dispatch_proxy_through_middleware(self, req, backend, prefix)
+                self.dispatch_proxy(ProxyKind::Buffered, req, backend, prefix)
             }
             Some((
                 RouteHandler::ProxyStream {
@@ -203,17 +262,47 @@ impl FrozenRouter {
                 params,
             )) => {
                 req.set_params(params);
-                dispatch_proxy_stream(req, backend, prefix)
+                self.dispatch_proxy(ProxyKind::Streaming, req, backend, prefix)
             }
-            None => self.dispatch_async(&NOT_FOUND_HANDLER, req),
+            None => self.dispatch_async(&NOT_FOUND_HANDLER, req).into(),
         }
     }
 
-    pub(super) fn dispatch_async(&self, handler: &Handler, req: Request) -> DispatchResult {
+    /// Dispatch a proxied route of either kind.
+    ///
+    /// The upgrade pre-check is asked once here rather than once per proxy
+    /// kind: a request that asks to leave HTTP is the same answer whichever
+    /// kind matched, and both would otherwise restate it along with the pair of
+    /// `Arc` clones it takes.
+    fn dispatch_proxy(
+        &self,
+        kind: ProxyKind,
+        req: Request,
+        backend: &Arc<str>,
+        prefix: &Arc<str>,
+    ) -> DispatchResult {
+        #[cfg(feature = "ws")]
+        if super::ws_proxy::is_ws_upgrade_request(&req) {
+            return DispatchResult::ProxyWebSocket(req, Arc::clone(backend), Arc::clone(prefix));
+        }
+
+        match kind {
+            ProxyKind::Buffered => {
+                dispatch_proxy_through_middleware(self, req, backend, prefix).into()
+            }
+            // The gate mechanism, not a wrapped response: middleware gates the
+            // request and the body streams with backpressure.
+            ProxyKind::Streaming => {
+                DispatchResult::ProxyStream(req, Arc::clone(backend), Arc::clone(prefix))
+            }
+        }
+    }
+
+    pub(super) fn dispatch_async(&self, handler: &Handler, req: Request) -> AsyncDispatch {
         let terminal = Terminal::Handler(handler);
         let next = Next::new(&self.middleware, terminal);
         let fut = next.call(&req);
-        DispatchResult::Async(fut, req)
+        AsyncDispatch { fut, req }
     }
 
     /// Build a middleware gate check for non-standard dispatch types (WS, SSE, Stream).
@@ -247,57 +336,41 @@ impl FrozenRouter {
         match self.middleware.is_empty() {
             true => None,
             false => {
-                let gate_req = head.to_gate_request(params);
+                // Built only on this arm: the URI and HeaderMap clones are
+                // wasted work when no middleware is registered to read them.
+                let gate_req = head.to_request(params);
                 self.middleware_gate(&gate_req)
             }
         }
     }
 }
 
-/// Check if the request is a WebSocket upgrade.
-#[cfg(feature = "ws")]
-fn is_ws_upgrade(req: &Request) -> bool {
-    req.headers()
-        .any(|(k, v)| k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket"))
+/// Which proxy kind a matched route dispatches as, once the upgrade
+/// pre-check both kinds share has answered.
+enum ProxyKind {
+    /// `Terminal::Proxy` through the middleware chain, response buffered.
+    Buffered,
+    /// Gated by middleware, body streamed with backpressure.
+    Streaming,
 }
 
 /// Dispatch a proxy request through the middleware chain.
 ///
-/// For WebSocket upgrades (ws feature): returns `DispatchResult::ProxyWebSocket`
-/// which uses the gate mechanism. For HTTP proxy: uses `Terminal::Proxy` so the
-/// middleware chain forwards directly without boxing a closure per request.
+/// Uses `Terminal::Proxy` so the middleware chain forwards directly without
+/// boxing a closure per request.
 fn dispatch_proxy_through_middleware(
     router: &FrozenRouter,
     req: Request,
     backend: &Arc<str>,
     prefix: &Arc<str>,
-) -> DispatchResult {
-    #[cfg(feature = "ws")]
-    if is_ws_upgrade(&req) {
-        return DispatchResult::ProxyWebSocket(req, Arc::clone(backend), Arc::clone(prefix));
-    }
-
+) -> AsyncDispatch {
     let terminal = Terminal::Proxy {
         backend: Arc::clone(backend),
         prefix: Arc::clone(prefix),
     };
     let next = Next::new(&router.middleware, terminal);
     let fut = next.call(&req);
-    DispatchResult::Async(fut, req)
-}
-
-/// Dispatch a streaming proxy request via the gate mechanism.
-///
-/// For WebSocket upgrades (ws feature): returns `DispatchResult::ProxyWebSocket`
-/// which uses the same gate mechanism. For HTTP: returns `DispatchResult::ProxyStream`
-/// so middleware gates the request without wrapping the streamed response.
-fn dispatch_proxy_stream(req: Request, backend: &Arc<str>, prefix: &Arc<str>) -> DispatchResult {
-    #[cfg(feature = "ws")]
-    if is_ws_upgrade(&req) {
-        return DispatchResult::ProxyWebSocket(req, Arc::clone(backend), Arc::clone(prefix));
-    }
-
-    DispatchResult::ProxyStream(req, Arc::clone(backend), Arc::clone(prefix))
+    AsyncDispatch { fut, req }
 }
 
 /// Convert a gate check result into `Option<Response>`.
@@ -309,6 +382,17 @@ pub(super) fn gate_result(reached: Arc<AtomicBool>, resp: Response) -> Option<Re
     }
 }
 
+/// A routed request, and the router that answered it.
+///
+/// The router is carried out of dispatch rather than resolved a second time:
+/// a gate check on the same request would otherwise repeat the Host-header
+/// parse and the binary search routing already did. `None` is a request no
+/// router claimed — the fallback arms — which has no gate to run either.
+pub(super) struct Routed<'a> {
+    pub(super) result: DispatchResult,
+    pub(super) router: Option<&'a FrozenRouter>,
+}
+
 /// Routes requests to the correct FrozenRouter.
 pub(super) enum ServerDispatch {
     Single(FrozenRouter),
@@ -317,18 +401,28 @@ pub(super) enum ServerDispatch {
 
 impl ServerDispatch {
     /// Classify a route from request-head metadata before body collection.
+    ///
+    /// A Host header that resolves to no router at all is still buffered — some
+    /// later arm answers it with a `404`. A Host header that is itself invalid
+    /// is not: it leaves as `HostRejected`, carrying the refusal it already
+    /// earned.
     pub(super) fn classify_route(&self, head: &RequestHead<'_>) -> RouteClass {
-        let router = match self.resolve_from_head(head) {
-            Some(r) => r,
-            None => return RouteClass::Buffered,
-        };
-        router.classify_route(head)
+        match self.resolve_from_head(head) {
+            Ok(Some(router)) => router.classify_route(head),
+            Ok(None) => RouteClass::Buffered,
+            Err(refusal) => RouteClass::HostRejected(refusal),
+        }
     }
 
-    fn resolve_from_head(&self, head: &RequestHead<'_>) -> Option<&FrozenRouter> {
+    /// Find the router a borrowed head names, or the refusal it earned.
+    ///
+    /// The refusal is threaded rather than collapsed into "no router": the two
+    /// answers are not the same question, and every caller here treats them
+    /// differently.
+    fn resolve_from_head(&self, head: &RequestHead<'_>) -> Result<Option<&FrozenRouter>, Response> {
         match self {
-            Self::Single(router) => Some(router),
-            Self::Host(host_router) => host_router.resolve_from_head(head).ok().flatten(),
+            Self::Single(router) => Ok(Some(router)),
+            Self::Host(host_router) => host_router.resolve_from_head(head),
         }
     }
 
@@ -341,29 +435,28 @@ impl ServerDispatch {
 
     /// Build a terminal `DispatchResult` from an error response.
     /// Pass `None` for a 404; pass `Some(resp)` for a host-resolution error.
-    fn fallback(error_resp: Option<Response>, req: Request) -> DispatchResult {
+    fn fallback(error_resp: Option<Response>, req: Request) -> AsyncDispatch {
         let fut: Pin<Box<dyn Future<Output = Response> + Send>> = match error_resp {
-            None => Box::pin(async { Response::text_raw(404, "not found") }),
+            None => Box::pin(async { not_found() }),
             Some(resp) => Box::pin(async move { resp }),
         };
-        DispatchResult::Async(fut, req)
+        AsyncDispatch { fut, req }
     }
 
-    pub(super) fn dispatch(&self, req: Request) -> DispatchResult {
+    pub(super) fn dispatch(&self, req: Request) -> Routed<'_> {
         match self.resolve(&req) {
-            Ok(Some(router)) => router.dispatch(req),
-            Ok(None) => Self::fallback(None, req),
-            Err(resp) => Self::fallback(Some(resp), req),
-        }
-    }
-
-    /// Run middleware as a gate check for non-standard dispatch types.
-    /// Returns `None` if no middleware or gate not needed. Does not borrow
-    /// the request or dispatch result in the returned value.
-    pub(super) fn middleware_gate(&self, req: &Request) -> Option<GateCheck> {
-        match self.resolve(req) {
-            Ok(Some(router)) => router.middleware_gate(req),
-            _ => None,
+            Ok(Some(router)) => Routed {
+                result: router.dispatch(req),
+                router: Some(router),
+            },
+            Ok(None) => Routed {
+                result: Self::fallback(None, req).into(),
+                router: None,
+            },
+            Err(resp) => Routed {
+                result: Self::fallback(Some(resp), req).into(),
+                router: None,
+            },
         }
     }
 
@@ -371,17 +464,29 @@ impl ServerDispatch {
     ///
     /// Uses `resolve_from_head` to find the router without cloning,
     /// then defers Request construction to the router's gate method.
+    ///
+    /// A Host header that names no router at all has no gate to run, which is
+    /// `Ok(None)`. A Host header that is invalid leaves as `Err(refusal)`: this
+    /// gate guards the gRPC and streaming-proxy paths, so a caller reading an
+    /// unresolvable host as a pass would forward the request upstream with the
+    /// chain never run.
     pub(super) fn middleware_gate_head(
         &self,
         head: &RequestHead<'_>,
         params: Option<RequestParams>,
-    ) -> Option<GateCheck> {
-        let router = self.resolve_from_head(head)?;
-        router.middleware_gate_head(head, params)
+    ) -> Result<Option<GateCheck>, Response> {
+        match self.resolve_from_head(head)? {
+            Some(router) => Ok(router.middleware_gate_head(head, params)),
+            None => Ok(None),
+        }
     }
 
     /// Dispatch a request through the middleware chain with a given handler.
-    pub(super) fn dispatch_with_handler(&self, handler: &Handler, req: Request) -> DispatchResult {
+    ///
+    /// Every arm below is a buffered handler future, so the caller is told that
+    /// in the return type rather than being handed the wider enum and left to
+    /// invent an answer for variants it cannot receive.
+    pub(super) fn dispatch_with_handler(&self, handler: &Handler, req: Request) -> AsyncDispatch {
         match self.resolve(&req) {
             Ok(Some(router)) => router.dispatch_async(handler, req),
             Ok(None) => Self::fallback(None, req),

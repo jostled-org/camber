@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
+/// The bound on one whole response frame, and on the socket reads it is made of.
+const RESPONSE_BOUND: Duration = Duration::from_secs(5);
+
 #[test]
 fn e2e_full_v02_runtime() {
     runtime::builder()
@@ -116,19 +119,17 @@ fn e2e_full_v02_runtime() {
 
 fn verify_keepalive(addr: std::net::SocketAddr) {
     let mut stream = TcpStream::connect(addr).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    stream.set_read_timeout(Some(RESPONSE_BOUND)).unwrap();
 
     let req1 = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
     stream.write_all(req1.as_bytes()).unwrap();
-    let resp1 = crate::http::read_http_response(&mut stream).unwrap();
+    let resp1 = crate::http::read_http_response_bounded(&mut stream).unwrap();
     assert_eq!(resp1.status, 200);
     assert_eq!(resp1.body.as_ref(), b"Hello");
 
     let req2 = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     stream.write_all(req2.as_bytes()).unwrap();
-    let resp2 = crate::http::read_http_response(&mut stream).unwrap();
+    let resp2 = crate::http::read_http_response_bounded(&mut stream).unwrap();
     assert_eq!(resp2.status, 200);
     assert_eq!(resp2.body.as_ref(), b"Hello");
 

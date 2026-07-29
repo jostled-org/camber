@@ -1,4 +1,5 @@
 use super::cookie::{self, CookiePairs};
+use super::disconnect::DisconnectSignal;
 use super::encoding::decode_hex_pair;
 use super::method::Method;
 use super::multipart::{self, MultipartReader};
@@ -16,6 +17,23 @@ pub(crate) type Params = Box<[(Arc<str>, Box<str>)]>;
 /// Boxed slice of (name, value) pairs for parsed URL-encoded data.
 type KvPairs = Box<[(Box<str>, Box<str>)]>;
 
+/// The connection-level facts a request carries in from its transport: who the
+/// peer is, whether the transport is TLS, and the signal that resolves this
+/// response's lifetime.
+///
+/// [`RequestHead`] names exactly this triple, so the dispatch paths thread one
+/// borrowed bundle rather than three parallel parameters that can only agree by
+/// construction. `Copy` because every field already is: a shared borrow, a
+/// `bool`, and an `Option<IpAddr>` — about 32 bytes once padded, not a pointer
+/// and two flags. Passing it by value therefore costs exactly what passing the
+/// three fields separately cost, which is the whole argument for `Copy` here.
+#[derive(Clone, Copy)]
+pub(super) struct RequestOrigin<'a> {
+    pub(super) remote_addr: Option<std::net::IpAddr>,
+    pub(super) is_tls: bool,
+    pub(super) disconnect: &'a DisconnectSignal,
+}
+
 /// Borrowed view of request metadata for pre-body classification and gate checks.
 ///
 /// Used before body collection to determine route type (buffered vs streaming)
@@ -24,24 +42,21 @@ pub(super) struct RequestHead<'a> {
     method: Method,
     uri: &'a hyper::Uri,
     headers: &'a hyper::HeaderMap,
-    remote_addr: Option<std::net::IpAddr>,
-    is_tls: bool,
+    origin: RequestOrigin<'a>,
 }
 
 impl<'a> RequestHead<'a> {
     /// Borrow metadata from a hyper request without consuming it.
     pub(super) fn from_hyper_request(
         req: &'a hyper::Request<hyper::body::Incoming>,
-        remote_addr: Option<std::net::IpAddr>,
-        is_tls: bool,
+        origin: RequestOrigin<'a>,
     ) -> Option<Self> {
         let method = Method::from_hyper(req.method())?;
         Some(Self {
             method,
             uri: req.uri(),
             headers: req.headers(),
-            remote_addr,
-            is_tls,
+            origin,
         })
     }
 
@@ -54,9 +69,7 @@ impl<'a> RequestHead<'a> {
     }
 
     pub(super) fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .get(name)
-            .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
+        header_str(self.headers, name)
     }
 
     #[cfg(feature = "profiling")]
@@ -64,19 +77,12 @@ impl<'a> RequestHead<'a> {
         self.uri.query()
     }
 
-    /// Build a lightweight owned Request for middleware gate checks.
-    ///
-    /// Clones the URI and HeaderMap from the borrowed references. Only call
-    /// this when middleware actually needs to run — skip when no middleware
-    /// is registered. Method is already validated by `from_hyper_request`.
-    pub(super) fn to_gate_request(&self, params: Option<Params>) -> Request {
-        self.to_request(params)
-    }
-
     /// Build a full owned Request from borrowed head metadata with an empty body.
     ///
-    /// Used for head-only dispatch paths (internal routes, WebSocket, SSE)
-    /// where the request body is not needed.
+    /// Clones the URI and HeaderMap from the borrowed references. Used for
+    /// head-only dispatch paths (internal routes, WebSocket, SSE, middleware
+    /// gate checks) where the request body is not needed. Method is already
+    /// validated by `from_hyper_request`.
     pub(super) fn to_request(&self, params: Option<Params>) -> Request {
         Request {
             method: self.method,
@@ -88,8 +94,9 @@ impl<'a> RequestHead<'a> {
             query_params: OnceLock::new(),
             form_params: OnceLock::new(),
             cookie_params: OnceLock::new(),
-            remote_addr: self.remote_addr,
-            is_tls: self.is_tls,
+            remote_addr: self.origin.remote_addr,
+            is_tls: self.origin.is_tls,
+            disconnect: self.origin.disconnect.clone(),
         }
     }
 }
@@ -107,19 +114,29 @@ pub struct Request {
     cookie_params: OnceLock<CookiePairs>,
     remote_addr: Option<std::net::IpAddr>,
     is_tls: bool,
+    disconnect: DisconnectSignal,
 }
 
 impl Request {
     /// Convert a hyper request with collected body bytes into a camber Request.
     ///
-    /// Returns `None` if the HTTP method is not supported (TRACE, CONNECT, etc.).
-    pub(crate) fn from_hyper(
+    /// Takes the whole [`RequestOrigin`], as [`RequestHead::to_request`] does:
+    /// all three transport facts are set at construction, so a buffered request
+    /// never exists holding a peer address or a TLS flag its caller still owes
+    /// it.
+    ///
+    /// `method` arrives already parsed, from the classification that read this
+    /// request's head. Parsing it again here produced a second `None` arm no
+    /// request could reach — an unnameable method is answered before a body is
+    /// ever collected — and forced every caller to carry a copy of the URI for
+    /// a refusal that never fired.
+    pub(super) fn from_hyper(
         parts: hyper::http::request::Parts,
         body_bytes: Bytes,
-    ) -> Option<Self> {
-        let method = Method::from_hyper(&parts.method)?;
-
-        Some(Self {
+        origin: RequestOrigin<'_>,
+        method: Method,
+    ) -> Self {
+        Self {
             method,
             uri: parts.uri,
             raw_headers: parts.headers,
@@ -129,9 +146,25 @@ impl Request {
             query_params: OnceLock::new(),
             form_params: OnceLock::new(),
             cookie_params: OnceLock::new(),
-            remote_addr: None,
-            is_tls: false,
-        })
+            remote_addr: origin.remote_addr,
+            is_tls: origin.is_tls,
+            disconnect: origin.disconnect.clone(),
+        }
+    }
+
+    /// Observe this response's lifetime.
+    ///
+    /// The returned signal resolves once, to the terminal
+    /// [`DisconnectCause`](super::DisconnectCause) of this request: the peer
+    /// went away, this HTTP/2 stream was reset, the server began shutting
+    /// down, or the response finished being produced. Clones share that one
+    /// terminal cause, so a producer spawned alongside the handler can hold
+    /// its own clone.
+    ///
+    /// A request built with [`Request::builder`] has no transport, so its
+    /// signal never resolves.
+    pub fn on_disconnect(&self) -> DisconnectSignal {
+        self.disconnect.clone()
     }
 
     /// Return the uppercase HTTP method string.
@@ -145,7 +178,7 @@ impl Request {
     /// The runtime strips the body automatically for HEAD responses,
     /// but this method lets handlers avoid building it in the first place.
     pub fn is_head(&self) -> bool {
-        matches!(self.method, Method::Head)
+        method_is_head(self.method)
     }
 
     /// Return the parsed HTTP method enum.
@@ -156,6 +189,16 @@ impl Request {
     /// Return the request path without the query string.
     pub fn path(&self) -> &str {
         self.uri.path()
+    }
+
+    /// Take an owned handle to the request URI.
+    ///
+    /// `hyper::Uri` is `Bytes`-backed, so this is a refcount bump rather than a
+    /// copy of the path. That is what makes it affordable to name a request
+    /// before it moves into a producer, on paths where the name is only ever
+    /// read if the spawn is refused.
+    pub(super) fn uri_owned(&self) -> hyper::Uri {
+        self.uri.clone()
     }
 
     /// Return the full path and query string from the original URI.
@@ -169,20 +212,16 @@ impl Request {
     ///
     /// Invalid header values are yielded as empty strings.
     pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
-        self.raw_headers.iter().map(|(k, v)| {
-            let name = k.as_str();
-            let value = std::str::from_utf8(v.as_bytes()).unwrap_or("");
-            (name, value)
-        })
+        self.raw_headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), header_value_str(value).unwrap_or("")))
     }
 
     /// Return the first header value matching the given name (case-insensitive).
     ///
     /// Uses hyper's O(1) hash lookup — no linear scan.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.raw_headers
-            .get(name)
-            .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
+        header_str(&self.raw_headers, name)
     }
 
     /// Return the remote IP address of the connecting client, if available.
@@ -190,17 +229,9 @@ impl Request {
         self.remote_addr
     }
 
-    pub(crate) fn set_remote_addr(&mut self, addr: std::net::IpAddr) {
-        self.remote_addr = Some(addr);
-    }
-
     /// Whether this request arrived over a TLS connection.
     pub(crate) fn is_tls(&self) -> bool {
         self.is_tls
-    }
-
-    pub(crate) fn set_tls(&mut self, tls: bool) {
-        self.is_tls = tls;
     }
 
     /// Return the request body as text.
@@ -421,8 +452,41 @@ impl RequestBuilder {
             cookie_params: OnceLock::new(),
             remote_addr: None,
             is_tls: false,
+            disconnect: DisconnectSignal::detached(),
         })
     }
+}
+
+/// Whether a method is `HEAD`.
+///
+/// One definition for [`Request::is_head`] and for the two dispatch paths that
+/// decide body stripping from a bare [`Method`], before any `Request` exists:
+/// internal-route dispatch and the streaming proxy. Three copies of the same
+/// `matches!` are three places a HEAD can stop being recognised.
+///
+/// A free function rather than an inherent method because `method.rs` owns that
+/// type's only `impl` block, and a second one elsewhere is the split inherent
+/// impl the structural checks reject.
+pub(super) fn method_is_head(method: Method) -> bool {
+    matches!(method, Method::Head)
+}
+
+/// Decode one header value as UTF-8.
+///
+/// The single decode step behind every header accessor. Only the answer to an
+/// undecodable value differs between them: a lookup reports absence, and the
+/// iteration over every header yields `""` rather than dropping the name.
+fn header_value_str(value: &hyper::header::HeaderValue) -> Option<&str> {
+    std::str::from_utf8(value.as_bytes()).ok()
+}
+
+/// Look one header up by name, case-insensitively, and decode it.
+///
+/// One definition for the borrowed [`RequestHead`] and the owned [`Request`]:
+/// they read the same map through the same lookup, and only differ in which
+/// one of them owns it.
+fn header_str<'a>(headers: &'a hyper::HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(header_value_str)
 }
 
 /// Find the first value in a slice of key-value pairs where the key matches `name`.
@@ -471,7 +535,7 @@ fn percent_decode_into(encoded: &str, scratch: &mut Vec<u8>) -> Box<str> {
 
     match std::str::from_utf8(scratch) {
         Ok(valid) => Box::from(valid),
-        Err(_) => String::from_utf8_lossy(scratch).into_owned().into(),
+        Err(_) => String::from_utf8_lossy(scratch).into(),
     }
 }
 

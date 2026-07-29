@@ -1,4 +1,4 @@
-use crate::http_support;
+use crate::common::{BOUND, probe_paused_window, run_in_child, spawn_server_ready};
 use camber::http::{self, Request, Response, Router};
 use camber::runtime_test_support::{RuntimeCheckpoint, runtime_schedule};
 use camber::{RuntimeError, runtime, spawn};
@@ -6,6 +6,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+/// Bounds each leg of this module's scope-checkpoint rendezvous.
+///
+/// Deliberately short of the parent's ten-second isolation bound even when
+/// every leg spends it: a run the parent kills discards the structured tuple
+/// that localizes which leg failed.
+const SCOPE_EVENT_BOUND: Duration = Duration::from_secs(2);
 const FINAL_TASK_MODE: &str = "runtime-final-task-scope-wait";
 const FINAL_TASK_MARKER: &str = "runtime-final-task-scope-wait-complete";
 const FINAL_TASK_TEST: &str = "task_lifecycle::final_task_completion_cannot_miss_scope_waiter";
@@ -14,11 +20,17 @@ const NESTED_RUNTIME_MARKER: &str = "runtime-nested-rejection-complete";
 const NESTED_RUNTIME_TEST: &str =
     "task_lifecycle::nested_runtime_is_rejected_without_corrupting_outer_context";
 
+/// The drain awaits unjoined BLOCKING children: `run` returns only once every
+/// `camber::spawn` body has finished, with no handle joined.
 #[test]
 fn spawned_tasks_complete_before_runtime_exits() {
     let counter = Arc::new(AtomicUsize::new(0));
-    run_unjoined_tasks(Arc::clone(&counter));
-    assert_eq!(counter.load(Ordering::SeqCst), 5);
+    run_unjoined_blocking_tasks(Arc::clone(&counter));
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        5,
+        "the runtime returned before every unjoined blocking child completed"
+    );
 }
 
 #[test]
@@ -40,20 +52,6 @@ fn join_handle_returns_error_on_task_panic() {
     assert!(matches!(result, Err(RuntimeError::TaskPanicked(_))));
 }
 
-#[test]
-fn spawn_join_returns_result() {
-    runtime::run(|| {
-        assert_eq!(spawn(|| 42).join().unwrap(), 42);
-
-        let result = spawn(|| {
-            assert_eq!(String::from("actual"), "expected", "intentional test panic");
-        })
-        .join();
-        assert!(matches!(result, Err(RuntimeError::TaskPanicked(_))));
-    })
-    .unwrap();
-}
-
 #[camber::test]
 async fn spawn_inside_handler_does_not_deadlock() {
     let mut router = Router::new();
@@ -62,7 +60,7 @@ async fn spawn_inside_handler_does_not_deadlock() {
         Response::text(200, result)
     });
 
-    let server = http_support::spawn_server_ready(router, Duration::from_secs(2)).unwrap();
+    let server = spawn_server_ready(router, Duration::from_secs(2)).unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
     let handles = (0..4)
         .map(|_| {
@@ -75,7 +73,7 @@ async fn spawn_inside_handler_does_not_deadlock() {
                 request_counter.fetch_add(1, Ordering::SeqCst);
             })
         })
-        .collect::<Vec<_>>();
+        .collect::<Box<[_]>>();
 
     for handle in handles {
         handle.await.unwrap();
@@ -84,14 +82,22 @@ async fn spawn_inside_handler_does_not_deadlock() {
     server.shutdown_bounded(Duration::from_secs(2)).unwrap();
 }
 
+/// The same structured-concurrency guarantee for unjoined ASYNC children,
+/// which the blocking case above does not cover: `camber::spawn_async` bodies
+/// still resolve before `run` returns even though nothing awaited their
+/// handles.
 #[test]
 fn structured_concurrency_waits_for_spawned_tasks() {
     let counter = Arc::new(AtomicUsize::new(0));
-    run_unjoined_tasks(Arc::clone(&counter));
-    assert_eq!(counter.load(Ordering::SeqCst), 5);
+    run_unjoined_async_tasks(Arc::clone(&counter));
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        5,
+        "the runtime returned before every unjoined async child completed"
+    );
 }
 
-fn run_unjoined_tasks(counter: Arc<AtomicUsize>) {
+fn run_unjoined_blocking_tasks(counter: Arc<AtomicUsize>) {
     runtime::run(move || {
         let (lifecycle_tx, lifecycle_rx) = camber::channel::bounded::<()>(1);
         (0..5).for_each(|_| {
@@ -111,28 +117,35 @@ fn run_unjoined_tasks(counter: Arc<AtomicUsize>) {
     .unwrap();
 }
 
+fn run_unjoined_async_tasks(counter: Arc<AtomicUsize>) {
+    runtime::run(move || {
+        // Each child parks on its own lifecycle sender and wakes only when the
+        // closure drops it, so no child can have finished before the closure
+        // returned: whatever the counter reads afterwards, the drain awaited.
+        let lifecycle = (0..5)
+            .map(|_| {
+                let (lifecycle_tx, lifecycle_rx) = tokio::sync::oneshot::channel::<()>();
+                let task_counter = Arc::clone(&counter);
+                camber::spawn_async(async move {
+                    assert!(lifecycle_rx.await.is_err());
+                    task_counter.fetch_add(1, Ordering::SeqCst);
+                });
+                lifecycle_tx
+            })
+            .collect::<Box<[_]>>();
+        drop(lifecycle);
+    })
+    .unwrap();
+}
+
 #[test]
 fn final_task_completion_cannot_miss_scope_waiter() {
-    match crate::process_support::is_private_child(FINAL_TASK_MODE) {
-        true => {
-            run_final_task_scope();
-            println!("{FINAL_TASK_MARKER}");
-            return;
-        }
-        false => {}
-    }
-
-    let run = crate::process_support::run_isolated_exact(
+    run_in_child(
         FINAL_TASK_TEST,
         FINAL_TASK_MODE,
         FINAL_TASK_MARKER,
-        Duration::from_secs(10),
-    )
-    .unwrap();
-    assert!(
-        run.success(),
-        "isolated final-task scope contract failed: {}",
-        String::from_utf8_lossy(run.stderr())
+        BOUND,
+        run_final_task_scope,
     );
 }
 
@@ -140,18 +153,23 @@ fn run_final_task_scope() {
     let completed = Arc::new(AtomicUsize::new(0));
     let task_completed = Arc::clone(&completed);
     let controller = runtime_schedule();
-    let checkpoint = RuntimeCheckpoint::TaskWaitPredicateObserved(1);
+    let checkpoint = RuntimeCheckpoint::ScopeWaitObserved(1);
     controller.pause_once(checkpoint).unwrap();
     let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
     let (finishing_tx, finishing_rx) = std::sync::mpsc::channel();
 
-    std::thread::scope(|scope| {
+    let observations = std::thread::scope(|scope| {
         let checkpoint_controller = &controller;
         let checkpoint_driver = scope.spawn(move || {
-            checkpoint_controller.wait_until_paused(checkpoint).unwrap();
-            finish_tx.send(()).unwrap();
-            finishing_rx.recv().unwrap();
-            checkpoint_controller.release(checkpoint).unwrap();
+            // The shared helper owns both bounded waits and releases the pause
+            // even when the probe between them unwinds, so a stranded runtime
+            // becomes an ordinary failure. `None` reports a window that was
+            // never observed or never released.
+            probe_paused_window(checkpoint_controller, checkpoint, SCOPE_EVENT_BOUND, || {
+                let started = finish_tx.send(()).is_ok();
+                let finished = finishing_rx.recv_timeout(SCOPE_EVENT_BOUND).is_ok();
+                (started, finished)
+            })
         });
 
         runtime::builder()
@@ -170,9 +188,14 @@ fn run_final_task_scope() {
                 });
             })
             .unwrap();
-        checkpoint_driver.join().unwrap();
+        checkpoint_driver.join().unwrap()
     });
 
+    assert_eq!(
+        observations,
+        Some((true, true)),
+        "the scope-wait rendezvous did not complete (started, finished)"
+    );
     assert_eq!(
         completed.load(Ordering::SeqCst),
         1,
@@ -182,26 +205,12 @@ fn run_final_task_scope() {
 
 #[test]
 fn nested_runtime_is_rejected_without_corrupting_outer_context() {
-    match crate::process_support::is_private_child(NESTED_RUNTIME_MODE) {
-        true => {
-            assert_nested_runtime_rejection();
-            println!("{NESTED_RUNTIME_MARKER}");
-            return;
-        }
-        false => {}
-    }
-
-    let run = crate::process_support::run_isolated_exact(
+    run_in_child(
         NESTED_RUNTIME_TEST,
         NESTED_RUNTIME_MODE,
         NESTED_RUNTIME_MARKER,
-        Duration::from_secs(10),
-    )
-    .unwrap();
-    assert!(
-        run.success(),
-        "isolated nested-runtime contract failed: {}",
-        String::from_utf8_lossy(run.stderr())
+        BOUND,
+        assert_nested_runtime_rejection,
     );
 }
 

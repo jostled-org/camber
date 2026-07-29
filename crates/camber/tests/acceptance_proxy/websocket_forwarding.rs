@@ -1,79 +1,29 @@
 #![cfg(feature = "ws")]
 
 use crate::common;
-#[path = "../support/ws_frame_io.rs"]
-mod ws_frame_io;
-#[path = "../support/ws_text_helpers.rs"]
-mod ws_text_helpers;
-
+use crate::common::{
+    assert_http_ok, assert_transport_eof, lifecycle_event, read_async_http_head,
+    read_async_ws_frame_or_eof, read_until_double_crlf, read_ws_text_frame, status_from_raw,
+    write_async_ws_frame, write_ws_close_frame, write_ws_text_frame,
+};
 use camber::RuntimeError;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleFault, lifecycle};
-use camber::http::{self, Request, Response, Router, WsConn};
+use camber::http::{
+    self, DisconnectCause, DisconnectSignal, Next, Request, Response, Router, WsConn,
+};
 use camber::runtime;
 use futures_util::{FutureExt, SinkExt, StreamExt};
-use std::future::{Future, IntoFuture};
+use std::future::IntoFuture;
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use ws_frame_io::read_until_double_crlf;
-use ws_text_helpers::{read_ws_text_frame, write_ws_close_frame, write_ws_text_frame};
-
-const LIFECYCLE_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
-
-fn raw_http_status(response: &str) -> u16 {
-    response
-        .split("\r\n")
-        .next()
-        .and_then(|status_line| status_line.split_whitespace().nth(1))
-        .and_then(|status| status.parse().ok())
-        .unwrap_or_else(|| panic!("invalid HTTP response head: {response:?}"))
-}
-
-async fn lifecycle_event<F>(context: &str, future: F) -> F::Output
-where
-    F: Future,
-{
-    tokio::time::timeout(LIFECYCLE_EVENT_TIMEOUT, future)
-        .await
-        .unwrap_or_else(|_| panic!("timed out waiting for {context}"))
-}
-
-fn proxy_upgrade_request(path: &str) -> String {
-    format!(
-        "GET {path} HTTP/1.1\r\n\
-         Host: localhost\r\n\
-         Upgrade: websocket\r\n\
-         Connection: Upgrade\r\n\
-         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-         Sec-WebSocket-Version: 13\r\n\
-         \r\n"
-    )
-}
 
 async fn send_async_proxy_upgrade(stream: &mut tokio::net::TcpStream) {
-    tokio::io::AsyncWriteExt::write_all(stream, proxy_upgrade_request("/ws/echo").as_bytes())
+    tokio::io::AsyncWriteExt::write_all(stream, common::ws_upgrade_request("/ws/echo").as_bytes())
         .await
         .expect("write proxied WebSocket upgrade request");
-}
-
-async fn read_async_http_head(stream: &mut tokio::net::TcpStream) -> Box<str> {
-    lifecycle_event("HTTP response head", async {
-        let mut response = Vec::new();
-        let mut byte = [0u8; 1];
-        while !response.ends_with(b"\r\n\r\n") {
-            let count = tokio::io::AsyncReadExt::read(stream, &mut byte)
-                .await
-                .expect("read HTTP response head");
-            assert_ne!(count, 0, "peer closed before completing HTTP response head");
-            response.push(byte[0]);
-        }
-        String::from_utf8(response)
-            .expect("HTTP response head is UTF-8")
-            .into_boxed_str()
-    })
-    .await
 }
 
 async fn connect_async_proxy_websocket(addr: std::net::SocketAddr) -> tokio::net::TcpStream {
@@ -84,112 +34,22 @@ async fn connect_async_proxy_websocket(addr: std::net::SocketAddr) -> tokio::net
     .await
     .expect("connect proxied WebSocket peer");
     send_async_proxy_upgrade(&mut stream).await;
-    let response = read_async_http_head(&mut stream).await;
+    let response = read_async_http_head(&mut stream, "the proxied WebSocket handshake").await;
     assert_eq!(
-        raw_http_status(&response),
+        status_from_raw(&response),
         101,
         "expected proxied WebSocket upgrade, got: {response}"
     );
     stream
 }
 
-async fn read_async_ws_frame_or_eof(stream: &mut tokio::net::TcpStream) -> Option<(u8, Vec<u8>)> {
-    lifecycle_event("proxied WebSocket frame or EOF", async {
-        let mut header = [0u8; 2];
-        let first = tokio::io::AsyncReadExt::read(stream, &mut header[..1])
-            .await
-            .expect("read proxied WebSocket frame header");
-        if first == 0 {
-            return None;
-        }
-        tokio::io::AsyncReadExt::read_exact(stream, &mut header[1..])
-            .await
-            .expect("read proxied WebSocket frame header");
-        assert_eq!(header[1] & 0x80, 0, "server frame must not be masked");
-
-        let length = match header[1] & 0x7f {
-            126 => {
-                let mut extended = [0u8; 2];
-                tokio::io::AsyncReadExt::read_exact(stream, &mut extended)
-                    .await
-                    .expect("read proxied WebSocket frame length");
-                u16::from_be_bytes(extended) as usize
-            }
-            127 => {
-                let mut extended = [0u8; 8];
-                tokio::io::AsyncReadExt::read_exact(stream, &mut extended)
-                    .await
-                    .expect("read proxied WebSocket frame length");
-                usize::try_from(u64::from_be_bytes(extended))
-                    .expect("proxied WebSocket frame length fits usize")
-            }
-            length => length as usize,
-        };
-        let mut payload = vec![0u8; length];
-        tokio::io::AsyncReadExt::read_exact(stream, &mut payload)
-            .await
-            .expect("read proxied WebSocket frame payload");
-        Some((header[0] & 0x0f, payload))
-    })
-    .await
-}
-
-async fn write_async_ws_frame(stream: &mut tokio::net::TcpStream, opcode: u8, payload: &[u8]) {
-    assert!(payload.len() <= 125, "test frame payload must be short");
-    let mask = [0x12, 0x34, 0x56, 0x78];
-    let mut frame = Vec::with_capacity(payload.len() + 6);
-    frame.extend_from_slice(&[0x80 | opcode, 0x80 | payload.len() as u8]);
-    frame.extend_from_slice(&mask);
-    frame.extend(
-        payload
-            .iter()
-            .enumerate()
-            .map(|(index, byte)| byte ^ mask[index % mask.len()]),
-    );
-    tokio::io::AsyncWriteExt::write_all(stream, &frame)
-        .await
-        .expect("write proxied WebSocket frame");
-}
-
 async fn assert_proxy_echo(stream: &mut tokio::net::TcpStream) {
-    write_async_ws_frame(stream, 0x1, b"bridge-live").await;
-    let (opcode, payload) = read_async_ws_frame_or_eof(stream)
+    write_async_ws_frame(stream, 0x1, b"bridge-live", "the proxied echo probe").await;
+    let (opcode, payload) = read_async_ws_frame_or_eof(stream, "the proxied echo reply")
         .await
         .expect("proxy echo arrives before EOF");
     assert_eq!(opcode, 0x1, "expected proxied WebSocket text frame");
-    assert_eq!(payload, b"bridge-live");
-}
-
-async fn assert_transport_eof(stream: &mut tokio::net::TcpStream) {
-    lifecycle_event("proxied transport EOF", async {
-        let mut byte = [0u8; 1];
-        match tokio::io::AsyncReadExt::read(stream, &mut byte).await {
-            Ok(0) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
-            Ok(count) => panic!("expected transport EOF, read {count} bytes"),
-            Err(error) => panic!("read transport EOF: {error}"),
-        }
-    })
-    .await;
-}
-
-async fn assert_http_ok(addr: std::net::SocketAddr, path: &str) {
-    let mut stream = lifecycle_event(
-        "proxy HTTP probe connection",
-        tokio::net::TcpStream::connect(addr),
-    )
-    .await
-    .expect("connect proxy HTTP probe");
-    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes())
-        .await
-        .expect("write proxy HTTP probe");
-    let response = read_async_http_head(&mut stream).await;
-    assert_eq!(
-        raw_http_status(&response),
-        200,
-        "expected successful proxy HTTP probe, got: {response}"
-    );
+    assert_eq!(payload.as_ref(), b"bridge-live");
 }
 
 struct LifecycleWsBackend {
@@ -255,6 +115,205 @@ fn lifecycle_proxy_router(backend_addr: std::net::SocketAddr) -> Router {
     proxy
 }
 
+/// How long a signal that must NOT be resolved is watched before it counts as
+/// unresolved. Short on purpose: the assertion is falsified by a resolution,
+/// not by waiting longer.
+const UNRESOLVED_WINDOW: Duration = Duration::from_millis(500);
+
+/// Capture proxied requests' response-lifetime signals from production
+/// middleware, which runs before the handoff those signals resolve at.
+///
+/// The signal itself is handed out rather than a resolved cause, so the case
+/// can read the terminal cause more than once and show it does not change.
+fn capture_proxy_signals(
+    proxy: &mut Router,
+) -> tokio::sync::mpsc::UnboundedReceiver<DisconnectSignal> {
+    let (signals, captured) = tokio::sync::mpsc::unbounded_channel();
+    proxy.use_middleware(move |request: &Request, next: Next| {
+        match request.path().starts_with("/ws") {
+            true => drop(signals.send(request.on_disconnect())),
+            false => {}
+        }
+        // Returned as it stands: `Next::call` already hands back a boxed
+        // future, which satisfies the middleware's future bound. Wrapping it in
+        // an async block would add a second state machine and a second
+        // allocation to every proxied request for no change in behavior.
+        next.call(request)
+    });
+    captured
+}
+
+// 8.T2, proxied WebSocket response-lifetime handoff.
+//
+// The proxied path takes the same explicit handoff as the direct one: nothing
+// is resolved while the registrar still holds the upgrade, and the committed
+// 101 is what establishes Completed. Bridge ownership is untouched — the owner
+// still joins the registered bridge at shutdown.
+#[camber::test]
+async fn proxied_websocket_resolves_completed_at_handoff() {
+    let backend = spawn_lifecycle_ws_backend(Arc::new(AtomicUsize::new(0))).await;
+    let backend_addr = backend.addr;
+    let mut proxy = lifecycle_proxy_router(backend_addr);
+    let mut captured = capture_proxy_signals(&mut proxy);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy handoff listener");
+    let proxy_addr = listener.local_addr().expect("proxy handoff address");
+    let controller = lifecycle(proxy_addr).expect("install proxy handoff controller");
+    controller
+        .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+        .expect("pause proxy handoff acknowledgement");
+    let handle = camber::http::serve_background(listener, proxy);
+
+    let mut peer = tokio::net::TcpStream::connect(proxy_addr)
+        .await
+        .expect("connect proxy handoff peer");
+    send_async_proxy_upgrade(&mut peer).await;
+    lifecycle_event(
+        "proxy handoff acknowledgement checkpoint",
+        controller.wait_until_paused(LifecycleCheckpoint::BeforeUpgradeAcknowledge),
+    )
+    .await
+    .expect("proxy upgrade reaches acknowledgement checkpoint");
+
+    let signal = lifecycle_event("proxied upgrade signal capture", captured.recv())
+        .await
+        .expect("the proxy middleware never captured a request signal");
+    assert!(
+        tokio::time::timeout(UNRESOLVED_WINDOW, signal.cancelled())
+            .await
+            .is_err(),
+        "the proxied upgrade's signal resolved before its 101 was handed off"
+    );
+
+    controller
+        .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+        .expect("release proxy handoff acknowledgement");
+    let response = read_async_http_head(&mut peer, "the proxied handoff upgrade response").await;
+    assert_eq!(
+        status_from_raw(&response),
+        101,
+        "expected a proxied WebSocket upgrade, got: {response}"
+    );
+    assert_eq!(
+        lifecycle_event("proxied handoff completion", signal.cancelled()).await,
+        DisconnectCause::Completed,
+        "the proxied upgrade did not resolve Completed at its 101 handoff"
+    );
+
+    write_async_ws_frame(&mut peer, 0x8, &[], "the proxied handoff close frame").await;
+    match read_async_ws_frame_or_eof(&mut peer, "the proxied handoff close reply").await {
+        None => {}
+        Some((0x8, _)) => assert_transport_eof(&mut peer, "the proxied handoff transport").await,
+        Some((opcode, payload)) => {
+            panic!("proxied close emitted opcode {opcode:#x} with payload {payload:?}")
+        }
+    }
+    assert_eq!(
+        lifecycle_event("proxied cause after peer close", signal.cancelled()).await,
+        DisconnectCause::Completed,
+        "the upgraded peer closing changed the cause established at the handoff"
+    );
+
+    runtime::request_shutdown();
+    assert!(
+        lifecycle_event("proxy handoff owner join", handle.into_future())
+            .await
+            .is_ok()
+    );
+    backend.shutdown().await;
+}
+
+/// A WebSocket echo backend the synchronous entry path can serve.
+///
+/// `spawn_lifecycle_ws_backend` cannot stand in here: it is an async
+/// `tokio-tungstenite` server that needs an async setup and an awaited
+/// shutdown, while this case runs entirely inside a synchronous
+/// `runtime::run` closure. This is a router the same `common::spawn_server`
+/// serves, so no handshake logic is duplicated.
+fn echo_ws_backend() -> Router {
+    let mut backend = Router::new();
+    backend.ws("/echo", |_req: &Request, mut conn: WsConn| {
+        while let Some(message) = conn.recv() {
+            if conn.send(&message).is_err() {
+                break;
+            }
+        }
+        Ok(())
+    });
+    backend
+}
+
+// 8.T4, synchronous-entry proxied WebSocket response-lifetime handoff.
+//
+// `serve_listener` gives its connections no upgrade registrar, so a proxied
+// upgrade served this way takes the detached-bridge branch that no owned
+// fixture reaches — 8.T2 pauses at an acknowledgement this path does not have.
+// Deleting the handoff from that branch makes this case report StreamReset
+// while every registrar-path proof stays green.
+//
+// Nothing needs holding here: the handoff resolves before the response returns
+// to Hyper, so a cause read once the 101 is on the wire is already past the
+// point being proven.
+#[test]
+fn synchronous_entry_proxied_websocket_resolves_completed_at_handoff() {
+    common::test_runtime()
+        .keepalive_timeout(Duration::from_millis(200))
+        .shutdown_timeout(Duration::from_secs(2))
+        .run(|| {
+            let backend_addr = common::spawn_server(echo_ws_backend());
+            let mut proxy = lifecycle_proxy_router(backend_addr);
+            let mut captured = capture_proxy_signals(&mut proxy);
+            let proxy_addr = common::spawn_server(proxy);
+
+            // No read bound is set here: every `ws` helper installs its own for
+            // the length of its call, so one set on the peer would only be
+            // overwritten and restored around each read.
+            let mut peer = TcpStream::connect(proxy_addr).expect("connect synchronous proxy peer");
+            peer.write_all(common::ws_upgrade_request("/ws/echo").as_bytes())
+                .expect("write the synchronous proxied upgrade request");
+            let head = read_until_double_crlf(&mut peer);
+            assert_eq!(
+                status_from_raw(&head),
+                101,
+                "expected a proxied WebSocket upgrade, got: {head}"
+            );
+
+            // Bounded like every other wait here: a middleware that never
+            // captured the request must fail this case, not park it on an
+            // unbounded receive.
+            let signal = runtime::block_on(lifecycle_event(
+                "synchronous proxied upgrade signal capture",
+                captured.recv(),
+            ))
+            .expect("the proxy middleware never captured a request signal");
+            assert_eq!(
+                runtime::block_on(lifecycle_event(
+                    "synchronous proxied handoff completion",
+                    signal.cancelled()
+                )),
+                DisconnectCause::Completed,
+                "a synchronous-entry proxied upgrade did not resolve Completed at its 101 handoff"
+            );
+
+            write_ws_text_frame(&mut peer, "hello");
+            assert_eq!(&*read_ws_text_frame(&mut peer), "hello");
+            write_ws_close_frame(&mut peer);
+            assert_eq!(
+                runtime::block_on(lifecycle_event(
+                    "synchronous proxied cause after peer close",
+                    signal.cancelled()
+                )),
+                DisconnectCause::Completed,
+                "the upgraded peer closing changed the cause established at the handoff"
+            );
+
+            runtime::request_shutdown();
+        })
+        .expect("the synchronous proxy runtime did not return cleanly");
+}
+
 fn assert_cancelled(result: Result<(), RuntimeError>) {
     assert!(
         matches!(result, Err(RuntimeError::Cancelled)),
@@ -268,48 +327,24 @@ fn websocket_proxy_forwards_text_messages() {
         .keepalive_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
-            // Backend: WebSocket echo server
-            let mut backend = Router::new();
-            backend.ws("/echo", |_req: &Request, mut conn: WsConn| {
-                while let Some(msg) = conn.recv() {
-                    if conn.send(&msg).is_err() {
-                        break;
-                    }
-                }
-                Ok(())
-            });
-            let backend_addr = common::spawn_server(backend);
+            let backend_addr = common::spawn_server(echo_ws_backend());
 
             // Proxy: forward /ws/* to backend
-            let mut proxy = Router::new();
-            proxy.proxy("/ws", &format!("http://{backend_addr}"));
-            let proxy_addr = common::spawn_server(proxy);
+            let proxy_addr = common::spawn_server(lifecycle_proxy_router(backend_addr));
 
             // Client: WebSocket handshake through proxy
             let mut stream = TcpStream::connect(proxy_addr).unwrap();
             stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
+                .write_all(common::ws_upgrade_request("/ws/echo").as_bytes())
                 .unwrap();
 
-            let key = "dGhlIHNhbXBsZSBub25jZQ==";
-            let upgrade_req = format!(
-                "GET /ws/echo HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: {key}\r\n\
-             Sec-WebSocket-Version: 13\r\n\
-             \r\n"
-            );
-            stream.write_all(upgrade_req.as_bytes()).unwrap();
-
             let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(raw_http_status(&resp), 101, "response: {resp}");
+            assert_eq!(status_from_raw(&resp), 101, "response: {resp}");
 
             // Send "hello", expect "hello" back
             write_ws_text_frame(&mut stream, "hello");
             let msg = read_ws_text_frame(&mut stream);
-            assert_eq!(msg, "hello");
+            assert_eq!(&*msg, "hello");
 
             write_ws_close_frame(&mut stream);
 
@@ -336,38 +371,21 @@ fn websocket_proxy_handles_client_close() {
             });
             let backend_addr = common::spawn_server(backend);
 
-            let mut proxy = Router::new();
-            proxy.proxy("/ws", &format!("http://{backend_addr}"));
-            let proxy_addr = common::spawn_server(proxy);
+            let proxy_addr = common::spawn_server(lifecycle_proxy_router(backend_addr));
 
             let mut stream = TcpStream::connect(proxy_addr).unwrap();
             stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
+                .write_all(common::ws_upgrade_request("/ws/chat").as_bytes())
                 .unwrap();
 
-            let key = "dGhlIHNhbXBsZSBub25jZQ==";
-            let upgrade_req = format!(
-                "GET /ws/chat HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: {key}\r\n\
-             Sec-WebSocket-Version: 13\r\n\
-             \r\n"
-            );
-            stream.write_all(upgrade_req.as_bytes()).unwrap();
-
             let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(raw_http_status(&resp), 101, "response: {resp}");
+            assert_eq!(status_from_raw(&resp), 101, "response: {resp}");
 
             // Receive 3 messages
             let m1 = read_ws_text_frame(&mut stream);
             let m2 = read_ws_text_frame(&mut stream);
             let m3 = read_ws_text_frame(&mut stream);
-            assert_eq!(
-                [m1.as_str(), m2.as_str(), m3.as_str()],
-                ["one", "two", "three"]
-            );
+            assert_eq!([&*m1, &*m2, &*m3], ["one", "two", "three"]);
 
             // Client sends close — proxy should clean up without panic
             write_ws_close_frame(&mut stream);
@@ -384,17 +402,9 @@ fn websocket_proxy_coexists_with_http_proxy() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             // Backend: serves both HTTP and WebSocket
-            let mut backend = Router::new();
+            let mut backend = echo_ws_backend();
             backend.get("/hello", |_req: &Request| async {
                 Response::text(200, "http-ok")
-            });
-            backend.ws("/echo", |_req: &Request, mut conn: WsConn| {
-                while let Some(msg) = conn.recv() {
-                    if conn.send(&msg).is_err() {
-                        break;
-                    }
-                }
-                Ok(())
             });
             let backend_addr = common::spawn_server(backend);
 
@@ -412,27 +422,15 @@ fn websocket_proxy_coexists_with_http_proxy() {
             // WebSocket upgrade through same proxy prefix
             let mut stream = TcpStream::connect(proxy_addr).unwrap();
             stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
+                .write_all(common::ws_upgrade_request("/api/echo").as_bytes())
                 .unwrap();
 
-            let key = "dGhlIHNhbXBsZSBub25jZQ==";
-            let upgrade_req = format!(
-                "GET /api/echo HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: {key}\r\n\
-             Sec-WebSocket-Version: 13\r\n\
-             \r\n"
-            );
-            stream.write_all(upgrade_req.as_bytes()).unwrap();
-
             let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(raw_http_status(&resp), 101, "response: {resp}");
+            assert_eq!(status_from_raw(&resp), 101, "response: {resp}");
 
             write_ws_text_frame(&mut stream, "ping");
             let msg = read_ws_text_frame(&mut stream);
-            assert_eq!(msg, "ping");
+            assert_eq!(&*msg, "ping");
 
             write_ws_close_frame(&mut stream);
 
@@ -449,37 +447,24 @@ fn websocket_proxy_rejects_cross_host_origin_before_upstream_upgrade() {
         .run(|| {
             // Backend: WebSocket echo server
             let mut backend = Router::new();
-            backend.ws("/echo", |_req: &Request, mut conn: WsConn| {
+            backend.ws("/echo", |_req: &Request, conn: WsConn| {
                 conn.send("should not reach")?;
                 Ok(())
             });
             let backend_addr = common::spawn_server(backend);
 
-            let mut proxy = Router::new();
-            proxy.proxy("/ws", &format!("http://{backend_addr}"));
-            let proxy_addr = common::spawn_server(proxy);
+            let proxy_addr = common::spawn_server(lifecycle_proxy_router(backend_addr));
 
             // Send proxied WS upgrade with mismatched Origin
             let mut stream = TcpStream::connect(proxy_addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-
-            let key = "dGhlIHNhbXBsZSBub25jZQ==";
-            let upgrade_req = format!(
-                "GET /ws/echo HTTP/1.1\r\n\
-                 Host: localhost\r\n\
-                 Upgrade: websocket\r\n\
-                 Connection: Upgrade\r\n\
-                 Origin: http://evil.example.com\r\n\
-                 Sec-WebSocket-Key: {key}\r\n\
-                 Sec-WebSocket-Version: 13\r\n\
-                 \r\n"
+            let upgrade_req = common::ws_upgrade_request_with(
+                "/ws/echo",
+                &[("Origin", "http://evil.example.com")],
             );
             stream.write_all(upgrade_req.as_bytes()).unwrap();
 
             let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(raw_http_status(&resp), 403, "response: {resp}");
+            assert_eq!(status_from_raw(&resp), 403, "response: {resp}");
 
             runtime::request_shutdown();
         })
@@ -494,7 +479,7 @@ fn ws_proxy_forwards_sec_websocket_protocol() {
         .run(|| {
             // Backend: echo Sec-WebSocket-Protocol as first WS message
             let mut backend = Router::new();
-            backend.ws("/echo", |req: &Request, mut conn: WsConn| {
+            backend.ws("/echo", |req: &Request, conn: WsConn| {
                 let proto = req
                     .headers()
                     .find(|(k, _)| k.eq_ignore_ascii_case("sec-websocket-protocol"))
@@ -505,30 +490,17 @@ fn ws_proxy_forwards_sec_websocket_protocol() {
             });
             let backend_addr = common::spawn_server(backend);
 
-            let mut proxy = Router::new();
-            proxy.proxy("/ws", &format!("http://{backend_addr}"));
-            let proxy_addr = common::spawn_server(proxy);
+            let proxy_addr = common::spawn_server(lifecycle_proxy_router(backend_addr));
 
             let mut stream = TcpStream::connect(proxy_addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-
-            let key = "dGhlIHNhbXBsZSBub25jZQ==";
-            let upgrade_req = format!(
-                "GET /ws/echo HTTP/1.1\r\n\
-                 Host: localhost\r\n\
-                 Upgrade: websocket\r\n\
-                 Connection: Upgrade\r\n\
-                 Sec-WebSocket-Key: {key}\r\n\
-                 Sec-WebSocket-Version: 13\r\n\
-                  Sec-WebSocket-Protocol: graphql-ws, graphql-transport-ws\r\n\
-                 \r\n"
+            let upgrade_req = common::ws_upgrade_request_with(
+                "/ws/echo",
+                &[("Sec-WebSocket-Protocol", "graphql-ws, graphql-transport-ws")],
             );
             stream.write_all(upgrade_req.as_bytes()).unwrap();
 
             let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(raw_http_status(&resp), 101, "response: {resp}");
+            assert_eq!(status_from_raw(&resp), 101, "response: {resp}");
             // Client should see the subprotocol in the 101 response
             let lower = resp.to_lowercase();
             assert!(
@@ -539,7 +511,7 @@ fn ws_proxy_forwards_sec_websocket_protocol() {
             // The backend receives only the protocol committed to the client.
             let msg = read_ws_text_frame(&mut stream);
             assert_eq!(
-                msg, "graphql-ws",
+                &*msg, "graphql-ws",
                 "backend should receive Sec-WebSocket-Protocol header"
             );
 
@@ -557,7 +529,7 @@ fn ws_proxy_strips_spoofed_forwarded_headers() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut backend = Router::new();
-            backend.ws("/echo", |req: &Request, mut conn: WsConn| {
+            backend.ws("/echo", |req: &Request, conn: WsConn| {
                 let forwarded_for = req
                     .headers()
                     .find(|(k, _)| k.eq_ignore_ascii_case("x-forwarded-for"))
@@ -568,33 +540,18 @@ fn ws_proxy_strips_spoofed_forwarded_headers() {
             });
             let backend_addr = common::spawn_server(backend);
 
-            let mut proxy = Router::new();
-            proxy.proxy("/ws", &format!("http://{backend_addr}"));
-            let proxy_addr = common::spawn_server(proxy);
+            let proxy_addr = common::spawn_server(lifecycle_proxy_router(backend_addr));
 
             let mut stream = TcpStream::connect(proxy_addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-
-            let key = "dGhlIHNhbXBsZSBub25jZQ==";
-            let upgrade_req = format!(
-                "GET /ws/echo HTTP/1.1\r\n\
-                 Host: localhost\r\n\
-                 Upgrade: websocket\r\n\
-                 Connection: Upgrade\r\n\
-                 Sec-WebSocket-Key: {key}\r\n\
-                 Sec-WebSocket-Version: 13\r\n\
-                 X-Forwarded-For: 6.6.6.6\r\n\
-                 \r\n"
-            );
+            let upgrade_req =
+                common::ws_upgrade_request_with("/ws/echo", &[("X-Forwarded-For", "6.6.6.6")]);
             stream.write_all(upgrade_req.as_bytes()).unwrap();
 
             let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(raw_http_status(&resp), 101, "response: {resp}");
+            assert_eq!(status_from_raw(&resp), 101, "response: {resp}");
 
             let msg = read_ws_text_frame(&mut stream);
-            assert_eq!(msg, "none", "spoofed forwarding header reached backend");
+            assert_eq!(&*msg, "none", "spoofed forwarding header reached backend");
 
             write_ws_close_frame(&mut stream);
 
@@ -616,23 +573,11 @@ fn websocket_proxy_rejects_invalid_backend_scheme() {
 
             let mut stream = TcpStream::connect(proxy_addr).unwrap();
             stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
+                .write_all(common::ws_upgrade_request("/ws/echo").as_bytes())
                 .unwrap();
 
-            let key = "dGhlIHNhbXBsZSBub25jZQ==";
-            let upgrade_req = format!(
-                "GET /ws/echo HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: {key}\r\n\
-             Sec-WebSocket-Version: 13\r\n\
-             \r\n"
-            );
-            stream.write_all(upgrade_req.as_bytes()).unwrap();
-
             let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(raw_http_status(&resp), 502, "response: {resp}");
+            assert_eq!(status_from_raw(&resp), 502, "response: {resp}");
 
             runtime::request_shutdown();
         })
@@ -645,45 +590,23 @@ fn websocket_proxy_stream_upgrade_ignores_request_body_limit() {
         .keepalive_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
-            let mut backend = Router::new();
-            backend.ws("/echo", |_req: &Request, mut conn: WsConn| {
-                while let Some(msg) = conn.recv() {
-                    if conn.send(&msg).is_err() {
-                        break;
-                    }
-                }
-                Ok(())
-            });
-            let backend_addr = common::spawn_server(backend);
+            let backend_addr = common::spawn_server(echo_ws_backend());
 
             let mut proxy = Router::new().max_request_body(10);
             proxy.proxy_stream("/ws", &format!("http://{backend_addr}"));
             let proxy_addr = common::spawn_server(proxy);
 
             let mut stream = TcpStream::connect(proxy_addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-
-            let key = "dGhlIHNhbXBsZSBub25jZQ==";
-            let upgrade_req = format!(
-                "GET /ws/echo HTTP/1.1\r\n\
-                 Host: localhost\r\n\
-                 Upgrade: websocket\r\n\
-                 Connection: Upgrade\r\n\
-                 Content-Length: 99999\r\n\
-                 Sec-WebSocket-Key: {key}\r\n\
-                 Sec-WebSocket-Version: 13\r\n\
-                 \r\n"
-            );
+            let upgrade_req =
+                common::ws_upgrade_request_with("/ws/echo", &[("Content-Length", "99999")]);
             stream.write_all(upgrade_req.as_bytes()).unwrap();
 
             let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(raw_http_status(&resp), 101, "response: {resp}");
+            assert_eq!(status_from_raw(&resp), 101, "response: {resp}");
 
             write_ws_text_frame(&mut stream, "hello");
             let msg = read_ws_text_frame(&mut stream);
-            assert_eq!(msg, "hello");
+            assert_eq!(&*msg, "hello");
 
             write_ws_close_frame(&mut stream);
             runtime::request_shutdown();
@@ -763,13 +686,20 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
                     owner.as_mut().now_or_never().is_none(),
                     "owner completed while the proxy bridge still owned its transport"
                 );
-                let (opcode, _) = read_async_ws_frame_or_eof(&mut websocket)
-                    .await
-                    .expect("graceful proxy shutdown sends a close frame");
+                let (opcode, _) =
+                    read_async_ws_frame_or_eof(&mut websocket, "the permit-holding proxy close")
+                        .await
+                        .expect("graceful proxy shutdown sends a close frame");
                 assert_eq!(opcode, 0x8, "expected graceful proxied close frame");
-                write_async_ws_frame(&mut websocket, 0x8, &[]).await;
-                assert_transport_eof(&mut websocket).await;
-                assert_transport_eof(&mut second).await;
+                write_async_ws_frame(
+                    &mut websocket,
+                    0x8,
+                    &[],
+                    "the permit-holding proxy close reply",
+                )
+                .await;
+                assert_transport_eof(&mut websocket, "the permit-holding proxy transport").await;
+                assert_transport_eof(&mut second, "the permit-waiting proxy transport").await;
                 assert!(
                     lifecycle_event("owned proxy bridge completion", owner.as_mut())
                         .await
@@ -803,12 +733,12 @@ async fn graceful_proxy_websocket_shutdown_sends_close_before_eof_and_join() {
 
     runtime::request_shutdown();
     let mut owner = Box::pin(handle.into_future());
-    let (opcode, _) = read_async_ws_frame_or_eof(&mut websocket)
+    let (opcode, _) = read_async_ws_frame_or_eof(&mut websocket, "the graceful proxy close")
         .await
         .expect("graceful proxy shutdown sends a frame before EOF");
     assert_eq!(opcode, 0x8, "expected graceful proxied close frame");
-    write_async_ws_frame(&mut websocket, 0x8, &[]).await;
-    assert_transport_eof(&mut websocket).await;
+    write_async_ws_frame(&mut websocket, 0x8, &[], "the graceful proxy close reply").await;
+    assert_transport_eof(&mut websocket, "the graceful proxy transport").await;
     assert!(
         lifecycle_event("graceful proxy bridge join", owner.as_mut())
             .await
@@ -832,11 +762,11 @@ async fn forced_proxy_websocket_abort_releases_transport_before_cancelled() {
 
     handle.cancel();
     let mut owner = Box::pin(handle.into_future());
-    match read_async_ws_frame_or_eof(&mut websocket).await {
+    match read_async_ws_frame_or_eof(&mut websocket, "the forced proxy close").await {
         None => {}
         Some((0x8, _)) => {
-            write_async_ws_frame(&mut websocket, 0x8, &[]).await;
-            assert_transport_eof(&mut websocket).await;
+            write_async_ws_frame(&mut websocket, 0x8, &[], "the forced proxy close reply").await;
+            assert_transport_eof(&mut websocket, "the forced proxy transport").await;
         }
         Some((opcode, payload)) => {
             panic!("forced proxy shutdown emitted opcode {opcode:#x} with payload {payload:?}")
@@ -885,8 +815,8 @@ async fn pending_proxy_upgrade_shutdown_is_rejected(forced: bool) {
         .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
         .expect("release pending proxy upgrade into shutdown");
     let mut owner = Box::pin(handle.into_future());
-    let response = read_async_http_head(&mut pending).await;
-    let status = raw_http_status(&response);
+    let response = read_async_http_head(&mut pending, "the rejected proxy-upgrade response").await;
+    let status = status_from_raw(&response);
     let response_lower = response.to_ascii_lowercase();
     assert_eq!(
         status, 503,
@@ -896,13 +826,12 @@ async fn pending_proxy_upgrade_shutdown_is_rejected(forced: bool) {
         response_lower.contains("connection: close"),
         "proxy upgrade rejection omitted Connection: close: {response}"
     );
-    assert_ne!(status, 101, "shutdown committed a proxy 101 response");
     assert_eq!(
         backend_connections.load(Ordering::Acquire),
         0,
         "rejected proxy upgrade reached its backend"
     );
-    assert_transport_eof(&mut pending).await;
+    assert_transport_eof(&mut pending, "the rejected proxy-upgrade transport").await;
     let result = lifecycle_event("pending proxy-upgrade drain", owner.as_mut()).await;
     match forced {
         true => assert_cancelled(result),
@@ -966,7 +895,12 @@ async fn cancelled_pending_proxy_upgrade_is_joined_and_connection_local() {
         .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
         .expect("release cancelled proxy registration");
 
-    assert_http_ok(proxy_addr, "/ok").await;
+    assert_http_ok(
+        proxy_addr,
+        "/ok",
+        "the proxy listener after registrar cancellation",
+    )
+    .await;
     assert_eq!(
         backend_connections.load(Ordering::Acquire),
         0,
@@ -1041,18 +975,24 @@ async fn supervisor_unwind_joins_acknowledged_and_pending_proxy_upgrades() {
         .expect("release proxy supervisor into unwind");
 
     let mut owner = Box::pin(handle.into_future());
-    match read_async_ws_frame_or_eof(&mut acknowledged).await {
+    match read_async_ws_frame_or_eof(&mut acknowledged, "the unwound proxy close").await {
         None => {}
         Some((0x8, _)) => {
-            write_async_ws_frame(&mut acknowledged, 0x8, &[]).await;
-            assert_transport_eof(&mut acknowledged).await;
+            write_async_ws_frame(&mut acknowledged, 0x8, &[], "the unwound proxy close reply")
+                .await;
+            assert_transport_eof(
+                &mut acknowledged,
+                "the unwound acknowledged proxy transport",
+            )
+            .await;
         }
         Some((opcode, payload)) => {
             panic!("proxy supervisor unwind emitted opcode {opcode:#x} with payload {payload:?}")
         }
     }
-    let pending_response = read_async_http_head(&mut pending).await;
-    let pending_status = raw_http_status(&pending_response);
+    let pending_response =
+        read_async_http_head(&mut pending, "the unwound proxy-upgrade response").await;
+    let pending_status = status_from_raw(&pending_response);
     assert_eq!(
         pending_status, 500,
         "pending proxy upgrade committed an unexpected response: {pending_response}"
@@ -1063,16 +1003,12 @@ async fn supervisor_unwind_joins_acknowledged_and_pending_proxy_upgrades() {
             .contains("connection: close"),
         "pending proxy unwind response omitted Connection: close: {pending_response}"
     );
-    assert_ne!(
-        pending_status, 101,
-        "supervisor unwind committed a proxy 101 response"
-    );
     assert_eq!(
         backend_connections.load(Ordering::Acquire),
         1,
         "pending proxy upgrade reached its backend during unwind"
     );
-    assert_transport_eof(&mut pending).await;
+    assert_transport_eof(&mut pending, "the unwound pending proxy transport").await;
     match lifecycle_event("proxy supervisor unwind drain", owner.as_mut()).await {
         Err(RuntimeError::TaskPanicked(message)) => assert!(!message.is_empty()),
         other => panic!("expected TaskPanicked after proxy upgrade drain, got {other:?}"),

@@ -28,6 +28,23 @@ pub enum RuntimeError {
     #[error("task panicked: {0}")]
     TaskPanicked(Box<str>),
 
+    /// A runtime-requiring entry point was called with no runtime context.
+    #[error("no runtime context is established")]
+    NoRuntime,
+
+    /// Admission was attempted at or after the root scope's close transition.
+    #[error("task scope is closed to admission")]
+    ScopeClosed,
+
+    /// The bounded scope drain expired before every child exited on its own,
+    /// carrying how many the boundary found outstanding. Only the async subset
+    /// of that count was then aborted and joined: a non-preemptible blocking
+    /// child is counted here and cannot be force-stopped at all. So this counts
+    /// children that failed to exit cooperatively — not children still running
+    /// when `run` returns, and not children the drain managed to stop.
+    #[error("scope drain timed out; children outstanding: {0}")]
+    ScopeDrainTimeout(usize),
+
     /// An HTTP client, server, or protocol-level failure occurred.
     #[error("http error: {0}")]
     Http(Arc<str>),
@@ -36,7 +53,12 @@ pub enum RuntimeError {
     #[error("bad request: {0}")]
     BadRequest(Box<str>),
 
-    /// Database interaction failed.
+    /// A database interaction failed.
+    ///
+    /// Camber never constructs this variant — it ships no database layer. It is
+    /// provided so an application's own data access code can report through the
+    /// same `RuntimeError` its handlers already return, instead of introducing a
+    /// second error type and a conversion at every `?`.
     #[error("database error: {0}")]
     Database(Box<str>),
 
@@ -73,11 +95,24 @@ pub enum RuntimeError {
     Acme(Box<str>),
 }
 
+/// The IO error kind a `RuntimeError` wraps, or `None` for every other
+/// variant.
+///
+/// One definition of the `RuntimeError::Io` unwrap, so each kind test below
+/// states only the kinds it accepts and none of them re-derives which variant
+/// carries a kind at all.
+fn io_kind(err: &RuntimeError) -> Option<io::ErrorKind> {
+    match err {
+        RuntimeError::Io(e) => Some(e.kind()),
+        _ => None,
+    }
+}
+
 /// Returns true for IO error kinds that are expected during normal
 /// operation (client disconnects, resets, broken pipes).
-pub(crate) fn is_benign_io(err: &io::Error) -> bool {
+fn is_benign_kind(kind: io::ErrorKind) -> bool {
     matches!(
-        err.kind(),
+        kind,
         io::ErrorKind::ConnectionReset
             | io::ErrorKind::ConnectionAborted
             | io::ErrorKind::BrokenPipe
@@ -85,12 +120,32 @@ pub(crate) fn is_benign_io(err: &io::Error) -> bool {
     )
 }
 
+/// Returns true for a raw IO error that is expected during normal operation.
+pub(crate) fn is_benign_io(err: &io::Error) -> bool {
+    is_benign_kind(err.kind())
+}
+
 /// Returns true for `RuntimeError::Io` variants wrapping benign IO errors.
 pub(crate) fn is_benign_io_error(err: &RuntimeError) -> bool {
-    match err {
-        RuntimeError::Io(e) => is_benign_io(e),
-        _ => false,
-    }
+    matches!(io_kind(err), Some(kind) if is_benign_kind(kind))
+}
+
+/// Returns true for `RuntimeError::Io` variants wrapping a datagram receive
+/// failure that ends one datagram rather than the socket.
+///
+/// A socket that has had `connect` called on it reports a prior send's ICMP
+/// port-unreachable as `ConnectionRefused` (or `ConnectionReset`) on the next
+/// receive, and a signal can cut the syscall short with `Interrupted`. The
+/// binding survives all three, so a recv loop continues past them.
+pub(crate) fn is_transient_datagram_error(err: &RuntimeError) -> bool {
+    matches!(
+        io_kind(err),
+        Some(
+            io::ErrorKind::ConnectionRefused
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::Interrupted
+        )
+    )
 }
 
 /// POSIX error codes for file descriptor exhaustion.

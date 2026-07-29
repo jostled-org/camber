@@ -3,83 +3,44 @@
 use crate::common;
 #[path = "../support/deterministic.rs"]
 mod deterministic;
-#[path = "../support/ws_binary_helpers.rs"]
-mod ws_binary_helpers;
-#[path = "../support/ws_frame_io.rs"]
-mod ws_frame_io;
-#[path = "../support/ws_text_helpers.rs"]
-mod ws_text_helpers;
 
+use crate::common::{
+    ASYNC_EVENT_TIMEOUT, assert_http_ok, assert_transport_eof, lifecycle_event,
+    read_async_http_head, read_async_ws_frame_or_eof, read_ws_binary_frame, read_ws_text_frame,
+    status_from_raw, write_async_ws_frame, write_ws_binary_frame, write_ws_close_frame,
+    write_ws_text_frame,
+};
 use camber::RuntimeError;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, LifecycleFault, lifecycle};
 use camber::http::{Request, Response, Router, WsConn, WsMessage};
 use camber::runtime;
 use futures_util::FutureExt;
-use std::future::{Future, IntoFuture};
+use std::future::IntoFuture;
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use ws_binary_helpers::{read_ws_binary_frame, write_ws_binary_frame};
-use ws_frame_io::read_until_double_crlf;
-use ws_text_helpers::{read_ws_text_frame, write_ws_close_frame, write_ws_text_frame};
 
-const LIFECYCLE_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 const FLAG_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const VALID_WEBSOCKET_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 const VALID_WEBSOCKET_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
-#[derive(Debug)]
-struct RawHttpHead {
-    status: u16,
-    headers: Box<[(Box<str>, Box<str>)]>,
-}
-
-impl RawHttpHead {
-    fn parse(raw: &str) -> Self {
-        let head = raw
-            .strip_suffix("\r\n\r\n")
-            .expect("HTTP head ends with CRLF CRLF");
-        let mut lines = head.split("\r\n");
-        let status_line = lines.next().expect("HTTP head has a status line");
-        let mut status_parts = status_line.splitn(3, ' ');
-        assert!(
-            matches!(status_parts.next(), Some("HTTP/1.0" | "HTTP/1.1")),
-            "unsupported HTTP response version: {status_line}"
-        );
-        let status = status_parts
-            .next()
-            .expect("HTTP status line has a status code")
-            .parse()
-            .expect("HTTP status code is numeric");
-        assert!(
-            status_parts.next().is_some(),
-            "HTTP status line has a reason phrase: {status_line}"
-        );
-
-        let headers = lines
-            .map(|line| {
-                let (name, value) = line
-                    .split_once(':')
-                    .unwrap_or_else(|| panic!("HTTP response header lacks a colon: {line:?}"));
-                assert!(!name.is_empty(), "HTTP response header name is empty");
-                (Box::from(name), Box::from(value.trim()))
-            })
-            .collect();
-        Self { status, headers }
-    }
-
-    fn header_values(&self, name: &str) -> Vec<&str> {
-        self.headers
-            .iter()
-            .filter_map(|(candidate, value)| {
-                candidate
-                    .eq_ignore_ascii_case(name)
-                    .then_some(value.as_ref())
-            })
-            .collect()
-    }
+/// Every value a response head carries under `name`, in order.
+///
+/// `HttpResponse::header` answers with the first one, which cannot express what
+/// these handshake cases claim: that a `101` carries exactly one `Upgrade`, or
+/// that a rejection carries no `Sec-WebSocket-Accept` at all. Sealed, because
+/// nothing appends to a lookup's result.
+fn header_values<'a>(head: &'a common::HttpResponse, name: &str) -> Box<[&'a str]> {
+    head.headers
+        .iter()
+        .filter_map(|(candidate, value)| {
+            candidate
+                .eq_ignore_ascii_case(name)
+                .then_some(value.as_ref())
+        })
+        .collect()
 }
 
 struct CallbackDropProbe(Arc<AtomicBool>);
@@ -90,38 +51,11 @@ impl Drop for CallbackDropProbe {
     }
 }
 
-async fn lifecycle_event<F>(context: &str, future: F) -> F::Output
-where
-    F: Future,
-{
-    tokio::time::timeout(LIFECYCLE_EVENT_TIMEOUT, future)
-        .await
-        .unwrap_or_else(|_| panic!("timed out waiting for {context}"))
-}
-
 async fn async_ws_request(stream: &mut tokio::net::TcpStream, path: &str) {
-    let request = ws_upgrade_request(path, "dGhlIHNhbXBsZSBub25jZQ==", "");
+    let request = common::ws_upgrade_request(path);
     tokio::io::AsyncWriteExt::write_all(stream, request.as_bytes())
         .await
         .expect("write WebSocket upgrade request");
-}
-
-async fn read_async_http_head(stream: &mut tokio::net::TcpStream) -> Box<str> {
-    lifecycle_event("HTTP response head", async {
-        let mut response = Vec::new();
-        let mut byte = [0u8; 1];
-        while !response.ends_with(b"\r\n\r\n") {
-            let count = tokio::io::AsyncReadExt::read(stream, &mut byte)
-                .await
-                .expect("read HTTP response head");
-            assert_ne!(count, 0, "peer closed before completing HTTP response head");
-            response.push(byte[0]);
-        }
-        String::from_utf8(response)
-            .expect("HTTP response head is UTF-8")
-            .into_boxed_str()
-    })
-    .await
 }
 
 async fn connect_async_websocket(addr: std::net::SocketAddr, path: &str) -> tokio::net::TcpStream {
@@ -132,103 +66,13 @@ async fn connect_async_websocket(addr: std::net::SocketAddr, path: &str) -> toki
     .await
     .expect("connect WebSocket peer");
     async_ws_request(&mut stream, path).await;
-    let response = read_async_http_head(&mut stream).await;
+    let response = read_async_http_head(&mut stream, "the direct WebSocket handshake").await;
     assert_eq!(
-        RawHttpHead::parse(&response).status,
+        status_from_raw(&response),
         101,
         "expected WebSocket upgrade, got: {response}"
     );
     stream
-}
-
-async fn read_async_ws_frame_or_eof(stream: &mut tokio::net::TcpStream) -> Option<(u8, Vec<u8>)> {
-    lifecycle_event("WebSocket frame or EOF", async {
-        let mut header = [0u8; 2];
-        let first = tokio::io::AsyncReadExt::read(stream, &mut header[..1])
-            .await
-            .expect("read WebSocket frame header");
-        if first == 0 {
-            return None;
-        }
-        tokio::io::AsyncReadExt::read_exact(stream, &mut header[1..])
-            .await
-            .expect("read WebSocket frame header");
-        assert_eq!(header[1] & 0x80, 0, "server frame must not be masked");
-
-        let length = match header[1] & 0x7f {
-            126 => {
-                let mut extended = [0u8; 2];
-                tokio::io::AsyncReadExt::read_exact(stream, &mut extended)
-                    .await
-                    .expect("read WebSocket frame length");
-                u16::from_be_bytes(extended) as usize
-            }
-            127 => {
-                let mut extended = [0u8; 8];
-                tokio::io::AsyncReadExt::read_exact(stream, &mut extended)
-                    .await
-                    .expect("read WebSocket frame length");
-                usize::try_from(u64::from_be_bytes(extended))
-                    .expect("WebSocket frame length fits usize")
-            }
-            length => length as usize,
-        };
-        let mut payload = vec![0u8; length];
-        tokio::io::AsyncReadExt::read_exact(stream, &mut payload)
-            .await
-            .expect("read WebSocket frame payload");
-        Some((header[0] & 0x0f, payload))
-    })
-    .await
-}
-
-async fn write_async_ws_frame(stream: &mut tokio::net::TcpStream, opcode: u8, payload: &[u8]) {
-    assert!(payload.len() <= 125, "test frame payload must be short");
-    let mask = [0x12, 0x34, 0x56, 0x78];
-    let mut frame = Vec::with_capacity(payload.len() + 6);
-    frame.extend_from_slice(&[0x80 | opcode, 0x80 | payload.len() as u8]);
-    frame.extend_from_slice(&mask);
-    frame.extend(
-        payload
-            .iter()
-            .enumerate()
-            .map(|(index, byte)| byte ^ mask[index % mask.len()]),
-    );
-    tokio::io::AsyncWriteExt::write_all(stream, &frame)
-        .await
-        .expect("write WebSocket frame");
-}
-
-async fn assert_transport_eof(stream: &mut tokio::net::TcpStream, context: &str) {
-    lifecycle_event(context, async {
-        let mut byte = [0u8; 1];
-        match tokio::io::AsyncReadExt::read(stream, &mut byte).await {
-            Ok(0) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
-            Ok(count) => panic!("{context}: expected closed transport, read {count} bytes"),
-            Err(error) => panic!("{context}: failed while observing closed transport: {error}"),
-        }
-    })
-    .await;
-}
-
-async fn assert_http_ok(addr: std::net::SocketAddr, path: &str) {
-    let mut stream = lifecycle_event(
-        "HTTP probe connection",
-        tokio::net::TcpStream::connect(addr),
-    )
-    .await
-    .expect("connect HTTP probe");
-    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes())
-        .await
-        .expect("write HTTP probe");
-    let response = read_async_http_head(&mut stream).await;
-    assert_eq!(
-        RawHttpHead::parse(&response).status,
-        200,
-        "expected successful HTTP probe, got: {response}"
-    );
 }
 
 fn lifecycle_websocket_router() -> Router {
@@ -264,7 +108,7 @@ fn arm_unacknowledged_upgrade(controller: &LifecycleController) {
 /// window and only loses under contention, so poll it to the lifecycle
 /// deadline instead.
 async fn wait_for_dropped_flag(flag: &AtomicBool, context: &str) {
-    let deadline = Instant::now() + LIFECYCLE_EVENT_TIMEOUT;
+    let deadline = Instant::now() + ASYNC_EVENT_TIMEOUT;
     while !flag.load(Ordering::Acquire) {
         assert!(Instant::now() < deadline, "{context}");
         tokio::time::sleep(FLAG_POLL_INTERVAL).await;
@@ -272,46 +116,47 @@ async fn wait_for_dropped_flag(flag: &AtomicBool, context: &str) {
 }
 
 async fn wait_for_unacknowledged_upgrade(controller: &LifecycleController) {
-    controller
-        .wait_until_paused(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
-        .await
-        .expect("upgrade ticket reaches the production registration channel");
+    lifecycle_event(
+        "upgrade ticket reaches the production registration channel",
+        controller.wait_until_paused(LifecycleCheckpoint::AfterUpgradeTicketSubmitted),
+    )
+    .await
+    .expect("upgrade ticket reaches the production registration channel");
     controller
         .release(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
         .expect("release submitted upgrade ticket");
-    controller
-        .wait_until_paused(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
-        .await
-        .expect("submitted upgrade reaches acknowledgement checkpoint");
-}
-
-fn ws_upgrade_request(path: &str, key: &str, extra_headers: &str) -> String {
-    format!(
-        "GET {path} HTTP/1.1\r\n\
-         Host: localhost\r\n\
-         Upgrade: websocket\r\n\
-         Connection: Upgrade\r\n\
-         {extra_headers}\
-         Sec-WebSocket-Key: {key}\r\n\
-         Sec-WebSocket-Version: 13\r\n\
-         \r\n"
+    lifecycle_event(
+        "submitted upgrade reaches acknowledgement checkpoint",
+        controller.wait_until_paused(LifecycleCheckpoint::BeforeUpgradeAcknowledge),
     )
+    .await
+    .expect("submitted upgrade reaches acknowledgement checkpoint");
 }
 
-fn optional_raw_header(name: &str, value: Option<&str>) -> String {
+/// One header line, or nothing when the case omits that header.
+///
+/// Sealed: the result is spliced into a request head and never appended to.
+fn optional_raw_header(name: &str, value: Option<&str>) -> Box<str> {
     match value {
-        Some(value) => format!("{name}: {value}\r\n"),
-        None => String::new(),
+        Some(value) => format!("{name}: {value}\r\n").into_boxed_str(),
+        None => Box::from(""),
     }
 }
 
+/// A handshake the shared builder cannot express.
+///
+/// `common::ws_upgrade_request_with` states the head Camber accepts, so it can
+/// only add headers. The cases here own the opposite claim — a head that omits
+/// `Connection` or `Sec-WebSocket-Version`, or carries a key Camber must
+/// refuse — which needs the whole request spelled out. Sealed, because nothing
+/// appends to a request once it is framed.
 fn raw_ws_upgrade_request(
     host: &str,
     connection: Option<&str>,
     key: &str,
     version: Option<&str>,
     extra_headers: &str,
-) -> String {
+) -> Box<str> {
     let connection = optional_raw_header("Connection", connection);
     let version = optional_raw_header("Sec-WebSocket-Version", version);
     format!(
@@ -324,32 +169,37 @@ fn raw_ws_upgrade_request(
          {extra_headers}\
          \r\n"
     )
+    .into_boxed_str()
 }
 
-fn perform_raw_ws_handshake(addr: std::net::SocketAddr, request: &str) -> (TcpStream, RawHttpHead) {
-    let mut stream = TcpStream::connect(addr).expect("connect raw WebSocket client");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("set raw WebSocket read timeout");
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .expect("set raw WebSocket write timeout");
+/// Send `request` and read the response it answers with.
+///
+/// The connection and its bounds come from `common::connect`, and the head is
+/// parsed by the shared response reader: a handshake case owns what it sends
+/// and what the head must say, not a second statement of how a socket is
+/// opened or how a status line is split.
+fn perform_raw_ws_handshake(
+    addr: std::net::SocketAddr,
+    request: &str,
+) -> (TcpStream, common::HttpResponse) {
+    let mut stream = common::connect(addr).expect("connect raw WebSocket client");
     stream
         .write_all(request.as_bytes())
         .expect("write raw WebSocket handshake");
-    let raw = read_until_double_crlf(&mut stream);
-    (stream, RawHttpHead::parse(&raw))
+    let response =
+        common::read_http_response(&mut stream, None).expect("read raw WebSocket handshake reply");
+    (stream, response)
 }
 
-fn assert_websocket_switch(head: &RawHttpHead, context: &str) {
+fn assert_websocket_switch(head: &common::HttpResponse, context: &str) {
     assert_eq!(head.status, 101, "{context}: unexpected status: {head:?}");
-    let upgrade = head.header_values("upgrade");
+    let upgrade = header_values(head, "upgrade");
     assert_eq!(upgrade.len(), 1, "{context}: Upgrade header: {head:?}");
     assert!(
         upgrade[0].eq_ignore_ascii_case("websocket"),
         "{context}: invalid Upgrade header: {head:?}"
     );
-    let connection = head.header_values("connection");
+    let connection = header_values(head, "connection");
     assert_eq!(
         connection.len(),
         1,
@@ -360,30 +210,30 @@ fn assert_websocket_switch(head: &RawHttpHead, context: &str) {
         "{context}: invalid Connection header: {head:?}"
     );
     assert_eq!(
-        head.header_values("sec-websocket-accept"),
+        *header_values(head, "sec-websocket-accept"),
         [VALID_WEBSOCKET_ACCEPT],
         "{context}: Sec-WebSocket-Accept header"
     );
 }
 
-fn assert_handshake_rejected(head: &RawHttpHead, expected_status: u16, context: &str) {
+fn assert_handshake_rejected(head: &common::HttpResponse, expected_status: u16, context: &str) {
     assert_eq!(
         head.status, expected_status,
         "{context}: unexpected rejection: {head:?}"
     );
     assert!(
-        head.header_values("sec-websocket-accept").is_empty(),
+        header_values(head, "sec-websocket-accept").is_empty(),
         "{context}: rejection exposed Sec-WebSocket-Accept: {head:?}"
     );
     assert!(
-        head.header_values("sec-websocket-protocol").is_empty(),
+        header_values(head, "sec-websocket-protocol").is_empty(),
         "{context}: rejection selected a subprotocol: {head:?}"
     );
 }
 
 fn websocket_probe_router(dispatch_count: Arc<AtomicUsize>) -> Router {
     let mut router = Router::new();
-    router.ws("/ws", move |_request: &Request, mut connection: WsConn| {
+    router.ws("/ws", move |_request: &Request, connection: WsConn| {
         dispatch_count.fetch_add(1, Ordering::AcqRel);
         connection.send("connected")?;
         Ok(())
@@ -392,7 +242,7 @@ fn websocket_probe_router(dispatch_count: Arc<AtomicUsize>) -> Router {
 }
 
 fn assert_connected_frame(stream: &mut TcpStream, context: &str) {
-    assert_eq!(read_ws_text_frame(stream), "connected", "{context}");
+    assert_eq!(&*read_ws_text_frame(stream), "connected", "{context}");
     write_ws_close_frame(stream);
 }
 
@@ -552,7 +402,7 @@ fn websocket_rejects_invalid_version_and_key() {
                     assert_handshake_rejected(&head, *expected_status, label);
                     match *label {
                         "wrong version" => assert_eq!(
-                            head.header_values("sec-websocket-version"),
+                            *header_values(&head, "sec-websocket-version"),
                             ["13"],
                             "wrong-version rejection must advertise version 13"
                         ),
@@ -601,7 +451,7 @@ fn websocket_rejects_invalid_version_and_key() {
             let (mut stream, head) = perform_raw_ws_handshake(addr, &valid);
             assert_websocket_switch(&head, "valid handshake after rejection matrix");
             assert!(
-                head.header_values("sec-websocket-protocol").is_empty(),
+                header_values(&head, "sec-websocket-protocol").is_empty(),
                 "unsolicited subprotocol in valid probe: {head:?}"
             );
             assert_connected_frame(&mut stream, "valid handshake did not dispatch");
@@ -632,7 +482,7 @@ fn websocket_selects_one_offered_subprotocol() {
             let (mut stream, head) = perform_raw_ws_handshake(addr, &request);
 
             assert_websocket_switch(&head, "subprotocol handshake");
-            let selected = head.header_values("sec-websocket-protocol");
+            let selected = header_values(&head, "sec-websocket-protocol");
             assert_eq!(
                 selected.len(),
                 1,
@@ -692,7 +542,7 @@ fn generated_websocket_origins_normalize_or_reject() {
                     true => {
                         assert_websocket_switch(&head, &context);
                         assert!(
-                            head.header_values("sec-websocket-protocol").is_empty(),
+                            header_values(&head, "sec-websocket-protocol").is_empty(),
                             "{context}: unsolicited subprotocol"
                         );
                         assert_connected_frame(&mut stream, &context);
@@ -713,27 +563,17 @@ fn generated_websocket_origins_normalize_or_reject() {
         .unwrap();
 }
 
-fn ws_connect(addr: std::net::SocketAddr) -> TcpStream {
-    let mut stream = TcpStream::connect(addr).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-
-    let key = "dGhlIHNhbXBsZSBub25jZQ==";
-    let upgrade_req = format!(
-        "GET /ws HTTP/1.1\r\n\
-         Host: localhost\r\n\
-         Upgrade: websocket\r\n\
-         Connection: Upgrade\r\n\
-         Sec-WebSocket-Key: {key}\r\n\
-         Sec-WebSocket-Version: 13\r\n\
-         \r\n"
-    );
-    stream.write_all(upgrade_req.as_bytes()).unwrap();
-
-    let resp = read_until_double_crlf(&mut stream);
-    assert_eq!(RawHttpHead::parse(&resp).status, 101, "response: {resp}");
-    stream
+/// Handshake `path` with the workspace's upgrade request plus `extra` headers.
+///
+/// The head itself is the shared one: a copy here could drift from what Camber
+/// accepts, and then every case below would be proving something about a
+/// request no client sends.
+fn ws_connect(
+    addr: std::net::SocketAddr,
+    path: &str,
+    extra: &[(&str, &str)],
+) -> (TcpStream, common::HttpResponse) {
+    perform_raw_ws_handshake(addr, &common::ws_upgrade_request_with(path, extra))
 }
 
 #[test]
@@ -754,35 +594,15 @@ fn websocket_echo() {
 
             let addr = common::spawn_server(router);
 
-            // Connect via raw TCP and perform WebSocket handshake
-            let mut stream = TcpStream::connect(addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-
-            // Send WebSocket upgrade request
-            let key = "dGhlIHNhbXBsZSBub25jZQ==";
-            let upgrade_req = format!(
-                "GET /ws HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: {key}\r\n\
-             Sec-WebSocket-Version: 13\r\n\
-             \r\n"
-            );
-            stream.write_all(upgrade_req.as_bytes()).unwrap();
-
-            // Read upgrade response
-            let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(RawHttpHead::parse(&resp).status, 101, "response: {resp}");
+            let (mut stream, head) = ws_connect(addr, "/ws", &[]);
+            assert_websocket_switch(&head, "echo handshake");
 
             // Send a text frame with "hello"
             write_ws_text_frame(&mut stream, "hello");
 
             // Read the echo response frame
             let msg = read_ws_text_frame(&mut stream);
-            assert_eq!(msg, "hello");
+            assert_eq!(&*msg, "hello");
 
             // Send close frame
             write_ws_close_frame(&mut stream);
@@ -799,7 +619,7 @@ fn websocket_server_sends_multiple() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |_req: &Request, mut conn: WsConn| {
+            router.ws("/ws", |_req: &Request, conn: WsConn| {
                 conn.send("one")?;
                 conn.send("two")?;
                 conn.send("three")?;
@@ -808,32 +628,14 @@ fn websocket_server_sends_multiple() {
 
             let addr = common::spawn_server(router);
 
-            let mut stream = TcpStream::connect(addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            let (mut stream, head) = ws_connect(addr, "/ws", &[]);
+            assert_websocket_switch(&head, "multi-send handshake");
 
-            let key = "dGhlIHNhbXBsZSBub25jZQ==";
-            let upgrade_req = format!(
-                "GET /ws HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: {key}\r\n\
-             Sec-WebSocket-Version: 13\r\n\
-             \r\n"
+            let messages: [Box<str>; 3] = std::array::from_fn(|_| read_ws_text_frame(&mut stream));
+            assert_eq!(
+                [&*messages[0], &*messages[1], &*messages[2]],
+                ["one", "two", "three"]
             );
-            stream.write_all(upgrade_req.as_bytes()).unwrap();
-
-            let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(RawHttpHead::parse(&resp).status, 101, "response: {resp}");
-
-            let mut messages = Vec::new();
-            for _ in 0..3 {
-                messages.push(read_ws_text_frame(&mut stream));
-            }
-
-            assert_eq!(messages, vec!["one", "two", "three"]);
 
             runtime::request_shutdown();
         })
@@ -847,32 +649,15 @@ fn websocket_handler_sees_request_path_and_headers() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |req: &Request, mut conn: WsConn| {
+            router.ws("/ws", |req: &Request, conn: WsConn| {
                 conn.send(req.path())?;
                 Ok(())
             });
 
             let addr = common::spawn_server(router);
 
-            let mut stream = TcpStream::connect(addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-
-            let key = "dGhlIHNhbXBsZSBub25jZQ==";
-            let upgrade_req = format!(
-                "GET /ws?token=abc HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: {key}\r\n\
-             Sec-WebSocket-Version: 13\r\n\
-             \r\n"
-            );
-            stream.write_all(upgrade_req.as_bytes()).unwrap();
-
-            let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(RawHttpHead::parse(&resp).status, 101, "response: {resp}");
+            let (mut stream, head) = ws_connect(addr, "/ws?token=abc", &[]);
+            assert_websocket_switch(&head, "request-path handshake");
 
             let msg = read_ws_text_frame(&mut stream);
             assert!(msg.contains("/ws"), "expected path in message: {msg}");
@@ -899,14 +684,46 @@ fn ws_send_and_recv_binary_frames() {
             });
 
             let addr = common::spawn_server(router);
-            let mut stream = ws_connect(addr);
+            let (mut stream, head) = ws_connect(addr, "/ws", &[]);
+            assert_websocket_switch(&head, "binary-frame handshake");
 
             let payload = b"\x00\x01\x02\xff\xfe\xfd";
             write_ws_binary_frame(&mut stream, payload);
 
             let received = read_ws_binary_frame(&mut stream);
-            assert_eq!(received, payload);
+            assert_eq!(received.as_ref(), payload);
 
+            write_ws_close_frame(&mut stream);
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn ws_recv_timeout_bounds_a_silent_peer() {
+    common::test_runtime()
+        .keepalive_timeout(Duration::from_millis(200))
+        .shutdown_timeout(Duration::from_secs(2))
+        .run(|| {
+            let (reported, outcome) = std::sync::mpsc::channel();
+            let mut router = Router::new();
+            router.ws("/ws", move |_req: &Request, mut conn: WsConn| {
+                let result = conn.recv_timeout(Duration::from_millis(50));
+                reported.send(result).unwrap();
+                Ok(())
+            });
+
+            let addr = common::spawn_server(router);
+            let (mut stream, head) = ws_connect(addr, "/ws", &[]);
+            assert_websocket_switch(&head, "silent-peer handshake");
+            let result = outcome
+                .recv_timeout(ASYNC_EVENT_TIMEOUT)
+                .expect("the timed receive never returned");
+
+            assert!(
+                matches!(result, Err(RuntimeError::Timeout)),
+                "a silent peer did not expire the receive deadline: {result:?}"
+            );
             write_ws_close_frame(&mut stream);
             runtime::request_shutdown();
         })
@@ -933,16 +750,17 @@ fn ws_recv_message_returns_both_types() {
             });
 
             let addr = common::spawn_server(router);
-            let mut stream = ws_connect(addr);
+            let (mut stream, head) = ws_connect(addr, "/ws", &[]);
+            assert_websocket_switch(&head, "message-type handshake");
 
             // Send text, then binary
             write_ws_text_frame(&mut stream, "hello");
             let r1 = read_ws_text_frame(&mut stream);
-            assert_eq!(r1, "text:hello");
+            assert_eq!(&*r1, "text:hello");
 
             write_ws_binary_frame(&mut stream, &[0xDE, 0xAD]);
             let r2 = read_ws_text_frame(&mut stream);
-            assert_eq!(r2, "binary:2");
+            assert_eq!(&*r2, "binary:2");
 
             write_ws_close_frame(&mut stream);
             runtime::request_shutdown();
@@ -966,14 +784,15 @@ fn ws_recv_binary_skips_text_frames() {
             });
 
             let addr = common::spawn_server(router);
-            let mut stream = ws_connect(addr);
+            let (mut stream, head) = ws_connect(addr, "/ws", &[]);
+            assert_websocket_switch(&head, "binary-skip handshake");
 
             // Send text first (should be skipped), then binary
             write_ws_text_frame(&mut stream, "ignored");
             write_ws_binary_frame(&mut stream, &[0xCA, 0xFE]);
 
             let received = read_ws_binary_frame(&mut stream);
-            assert_eq!(received, &[0xCA, 0xFE]);
+            assert_eq!(received.as_ref(), &[0xCA, 0xFE]);
 
             write_ws_close_frame(&mut stream);
             runtime::request_shutdown();
@@ -988,7 +807,7 @@ fn websocket_accepts_same_host_origin() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |_req: &Request, mut conn: WsConn| {
+            router.ws("/ws", |_req: &Request, conn: WsConn| {
                 conn.send("connected")?;
                 Ok(())
             });
@@ -997,27 +816,18 @@ fn websocket_accepts_same_host_origin() {
             let port = addr.port();
 
             // Origin matches Host after normalization (both include the same port)
-            let mut stream = TcpStream::connect(addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let req = format!(
-                "GET /ws HTTP/1.1\r\n\
-                 Host: localhost:{port}\r\n\
-                 Upgrade: websocket\r\n\
-                 Connection: Upgrade\r\n\
-                 Origin: http://localhost:{port}\r\n\
-                 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-                 Sec-WebSocket-Version: 13\r\n\
-                 \r\n"
+            let request = raw_ws_upgrade_request(
+                &format!("localhost:{port}"),
+                Some("Upgrade"),
+                VALID_WEBSOCKET_KEY,
+                Some("13"),
+                &format!("Origin: http://localhost:{port}\r\n"),
             );
-            stream.write_all(req.as_bytes()).unwrap();
-
-            let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(RawHttpHead::parse(&resp).status, 101, "response: {resp}");
+            let (mut stream, head) = perform_raw_ws_handshake(addr, &request);
+            assert_websocket_switch(&head, "same-host origin handshake");
 
             let msg = read_ws_text_frame(&mut stream);
-            assert_eq!(msg, "connected");
+            assert_eq!(&*msg, "connected");
 
             write_ws_close_frame(&mut stream);
             runtime::request_shutdown();
@@ -1032,7 +842,7 @@ fn websocket_rejects_cross_host_origin() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |_req: &Request, mut conn: WsConn| {
+            router.ws("/ws", |_req: &Request, conn: WsConn| {
                 conn.send("should not reach")?;
                 Ok(())
             });
@@ -1040,19 +850,8 @@ fn websocket_rejects_cross_host_origin() {
             let addr = common::spawn_server(router);
 
             // Origin on a different host
-            let mut stream = TcpStream::connect(addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let req = ws_upgrade_request(
-                "/ws",
-                "dGhlIHNhbXBsZSBub25jZQ==",
-                "Origin: http://evil.example.com\r\n",
-            );
-            stream.write_all(req.as_bytes()).unwrap();
-
-            let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(RawHttpHead::parse(&resp).status, 403, "response: {resp}");
+            let (_, head) = ws_connect(addr, "/ws", &[("Origin", "http://evil.example.com")]);
+            assert_handshake_rejected(&head, 403, "cross-host origin");
 
             runtime::request_shutdown();
         })
@@ -1066,22 +865,15 @@ fn websocket_rejects_null_origin() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |_req: &Request, mut conn: WsConn| {
+            router.ws("/ws", |_req: &Request, conn: WsConn| {
                 conn.send("should not reach")?;
                 Ok(())
             });
 
             let addr = common::spawn_server(router);
 
-            let mut stream = TcpStream::connect(addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let req = ws_upgrade_request("/ws", "dGhlIHNhbXBsZSBub25jZQ==", "Origin: null\r\n");
-            stream.write_all(req.as_bytes()).unwrap();
-
-            let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(RawHttpHead::parse(&resp).status, 403, "response: {resp}");
+            let (_, head) = ws_connect(addr, "/ws", &[("Origin", "null")]);
+            assert_handshake_rejected(&head, 403, "null origin");
 
             runtime::request_shutdown();
         })
@@ -1118,15 +910,8 @@ fn auth_middleware_blocks_unauthenticated_websocket() {
 
             let addr = common::spawn_server(router);
 
-            let mut stream = TcpStream::connect(addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let req = ws_upgrade_request("/chat", "dGhlIHNhbXBsZSBub25jZQ==", "");
-            stream.write_all(req.as_bytes()).unwrap();
-
-            let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(RawHttpHead::parse(&resp).status, 401, "response: {resp}");
+            let (_, head) = ws_connect(addr, "/chat", &[]);
+            assert_handshake_rejected(&head, 401, "unauthenticated WebSocket");
 
             runtime::request_shutdown();
         })
@@ -1140,7 +925,7 @@ fn websocket_upgrade_ignores_request_body_limit() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new().max_request_body(10);
-            router.ws("/ws", |_req: &Request, mut conn: WsConn| {
+            router.ws("/ws", |_req: &Request, conn: WsConn| {
                 conn.send("connected")?;
                 Ok(())
             });
@@ -1149,22 +934,11 @@ fn websocket_upgrade_ignores_request_body_limit() {
 
             // Send WS upgrade with Content-Length exceeding the body limit.
             // Head-only dispatch skips body collection, so 413 is not returned.
-            let mut stream = TcpStream::connect(addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let req = ws_upgrade_request(
-                "/ws",
-                "dGhlIHNhbXBsZSBub25jZQ==",
-                "Content-Length: 99999\r\n",
-            );
-            stream.write_all(req.as_bytes()).unwrap();
-
-            let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(RawHttpHead::parse(&resp).status, 101, "response: {resp}");
+            let (mut stream, head) = ws_connect(addr, "/ws", &[("Content-Length", "99999")]);
+            assert_websocket_switch(&head, "body-limit handshake");
 
             let msg = read_ws_text_frame(&mut stream);
-            assert_eq!(msg, "connected");
+            assert_eq!(&*msg, "connected");
 
             write_ws_close_frame(&mut stream);
             runtime::request_shutdown();
@@ -1203,27 +977,17 @@ fn auth_middleware_allows_authenticated_websocket() {
 
             let addr = common::spawn_server(router);
 
-            let mut stream = TcpStream::connect(addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let req = ws_upgrade_request(
-                "/chat",
-                "dGhlIHNhbXBsZSBub25jZQ==",
-                "Authorization: Bearer token\r\n",
-            );
-            stream.write_all(req.as_bytes()).unwrap();
-
-            let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(RawHttpHead::parse(&resp).status, 101, "response: {resp}");
+            let (mut stream, head) =
+                ws_connect(addr, "/chat", &[("Authorization", "Bearer token")]);
+            assert_websocket_switch(&head, "authenticated WebSocket handshake");
 
             // Verify WS works end-to-end
             let msg = read_ws_text_frame(&mut stream);
-            assert_eq!(msg, "welcome");
+            assert_eq!(&*msg, "welcome");
 
             write_ws_text_frame(&mut stream, "ping");
             let echo = read_ws_text_frame(&mut stream);
-            assert_eq!(echo, "ping");
+            assert_eq!(&*echo, "ping");
 
             write_ws_close_frame(&mut stream);
             runtime::request_shutdown();
@@ -1277,10 +1041,12 @@ fn direct_websocket_bridge_holds_permit_and_finishes_before_owned_completion() {
                 )
                 .await
                 .expect("write permit-waiting request");
-                controller
-                    .wait_until_paused(LifecycleCheckpoint::ConnectionPermitWaitPending)
-                    .await
-                    .expect("production permit acquisition returned Pending");
+                lifecycle_event(
+                    "production permit acquisition returned Pending",
+                    controller.wait_until_paused(LifecycleCheckpoint::ConnectionPermitWaitPending),
+                )
+                .await
+                .expect("production permit acquisition returned Pending");
                 assert!(
                     matches!(
                         dispatched_rx.try_recv(),
@@ -1298,11 +1064,18 @@ fn direct_websocket_bridge_holds_permit_and_finishes_before_owned_completion() {
                     owner.as_mut().now_or_never().is_none(),
                     "owner completed while the direct bridge still owned its transport"
                 );
-                let (opcode, _) = read_async_ws_frame_or_eof(&mut websocket)
-                    .await
-                    .expect("graceful shutdown sends a close frame");
+                let (opcode, _) =
+                    read_async_ws_frame_or_eof(&mut websocket, "the permit-holding direct close")
+                        .await
+                        .expect("graceful shutdown sends a close frame");
                 assert_eq!(opcode, 0x8, "expected graceful WebSocket close frame");
-                write_async_ws_frame(&mut websocket, 0x8, &[]).await;
+                write_async_ws_frame(
+                    &mut websocket,
+                    0x8,
+                    &[],
+                    "the permit-holding direct close reply",
+                )
+                .await;
                 assert_transport_eof(&mut websocket, "owned direct WebSocket transport EOF").await;
                 assert_transport_eof(&mut second, "permit-waiting transport EOF").await;
                 assert!(
@@ -1339,7 +1112,7 @@ async fn owner_releases_direct_transport_without_claiming_blocking_callback_exit
         let release_rx = Arc::clone(&release_rx);
         let callback_result_tx = Arc::clone(&callback_result_tx);
         let callback_dropped = Arc::clone(&callback_dropped);
-        move |_request: &Request, mut connection: WsConn| {
+        move |_request: &Request, connection: WsConn| {
             let _probe = CallbackDropProbe(Arc::clone(&callback_dropped));
             if let Some(sender) = entered_tx
                 .lock()
@@ -1376,11 +1149,17 @@ async fn owner_releases_direct_transport_without_claiming_blocking_callback_exit
 
     runtime::request_shutdown();
     let mut owner = Box::pin(handle.into_future());
-    let (opcode, _) = read_async_ws_frame_or_eof(&mut websocket)
+    let (opcode, _) = read_async_ws_frame_or_eof(&mut websocket, "the callback-boundary close")
         .await
         .expect("graceful shutdown sends a close frame");
     assert_eq!(opcode, 0x8, "expected graceful WebSocket close frame");
-    write_async_ws_frame(&mut websocket, 0x8, &[]).await;
+    write_async_ws_frame(
+        &mut websocket,
+        0x8,
+        &[],
+        "the callback-boundary close reply",
+    )
+    .await;
     assert_transport_eof(&mut websocket, "callback-boundary transport EOF").await;
     assert!(
         lifecycle_event("owner completion across callback boundary", owner.as_mut())
@@ -1425,11 +1204,11 @@ async fn graceful_direct_websocket_shutdown_sends_close_before_eof_and_join() {
 
     runtime::request_shutdown();
     let mut owner = Box::pin(handle.into_future());
-    let (opcode, _) = read_async_ws_frame_or_eof(&mut websocket)
+    let (opcode, _) = read_async_ws_frame_or_eof(&mut websocket, "the graceful direct close")
         .await
         .expect("graceful shutdown sends a frame before EOF");
     assert_eq!(opcode, 0x8, "expected graceful WebSocket close frame");
-    write_async_ws_frame(&mut websocket, 0x8, &[]).await;
+    write_async_ws_frame(&mut websocket, 0x8, &[], "the graceful direct close reply").await;
     assert_transport_eof(&mut websocket, "graceful direct WebSocket transport EOF").await;
     assert!(
         lifecycle_event("graceful direct bridge join", owner.as_mut())
@@ -1450,10 +1229,10 @@ async fn forced_direct_websocket_abort_releases_transport_before_cancelled() {
 
     handle.cancel();
     let mut owner = Box::pin(handle.into_future());
-    match read_async_ws_frame_or_eof(&mut websocket).await {
+    match read_async_ws_frame_or_eof(&mut websocket, "the forced direct close").await {
         None => {}
         Some((0x8, _)) => {
-            write_async_ws_frame(&mut websocket, 0x8, &[]).await;
+            write_async_ws_frame(&mut websocket, 0x8, &[], "the forced direct close reply").await;
             assert_transport_eof(&mut websocket, "forced direct WebSocket transport EOF").await;
         }
         Some((opcode, payload)) => {
@@ -1484,20 +1263,16 @@ async fn pending_direct_upgrade_shutdown_is_rejected(forced: bool) {
         .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
         .expect("release pending upgrade into shutdown");
     let mut owner = Box::pin(handle.into_future());
-    let response = read_async_http_head(&mut pending).await;
-    let response_head = RawHttpHead::parse(&response);
+    let response = read_async_http_head(&mut pending, "the rejected direct-upgrade response").await;
     let response_lower = response.to_ascii_lowercase();
     assert_eq!(
-        response_head.status, 503,
+        status_from_raw(&response),
+        503,
         "shutdown committed an unexpected upgrade response: {response}"
     );
     assert!(
         response_lower.contains("connection: close"),
         "upgrade rejection omitted Connection: close: {response}"
-    );
-    assert_ne!(
-        response_head.status, 101,
-        "shutdown committed a 101 response"
     );
     assert_transport_eof(&mut pending, "pending direct-upgrade transport EOF").await;
     let result = lifecycle_event("pending direct-upgrade drain", owner.as_mut()).await;
@@ -1554,7 +1329,7 @@ async fn cancelled_pending_direct_upgrade_is_joined_and_connection_local() {
         .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
         .expect("release cancelled registration");
 
-    assert_http_ok(addr, "/ok").await;
+    assert_http_ok(addr, "/ok", "the listener after registrar cancellation").await;
     runtime::request_shutdown();
     assert!(
         lifecycle_event(
@@ -1608,20 +1383,27 @@ async fn supervisor_unwind_joins_acknowledged_and_pending_direct_upgrades() {
         .expect("release supervisor into unwind");
 
     let mut owner = Box::pin(handle.into_future());
-    match read_async_ws_frame_or_eof(&mut acknowledged).await {
+    match read_async_ws_frame_or_eof(&mut acknowledged, "the unwound direct close").await {
         None => {}
         Some((0x8, _)) => {
-            write_async_ws_frame(&mut acknowledged, 0x8, &[]).await;
+            write_async_ws_frame(
+                &mut acknowledged,
+                0x8,
+                &[],
+                "the unwound direct close reply",
+            )
+            .await;
             assert_transport_eof(&mut acknowledged, "unwound acknowledged transport EOF").await;
         }
         Some((opcode, payload)) => {
             panic!("supervisor unwind emitted opcode {opcode:#x} with payload {payload:?}")
         }
     }
-    let pending_response = read_async_http_head(&mut pending).await;
-    let pending_head = RawHttpHead::parse(&pending_response);
+    let pending_response =
+        read_async_http_head(&mut pending, "the unwound direct-upgrade response").await;
     assert_eq!(
-        pending_head.status, 500,
+        status_from_raw(&pending_response),
+        500,
         "supervisor-unavailable direct upgrade did not return 500: {pending_response}"
     );
     assert!(
@@ -1629,10 +1411,6 @@ async fn supervisor_unwind_joins_acknowledged_and_pending_direct_upgrades() {
             .to_ascii_lowercase()
             .contains("connection: close"),
         "pending unwind response omitted Connection: close: {pending_response}"
-    );
-    assert_ne!(
-        pending_head.status, 101,
-        "supervisor-unavailable direct upgrade committed 101: {pending_response}"
     );
     assert_transport_eof(&mut pending, "unwound pending transport EOF").await;
     match lifecycle_event("supervisor unwind drain", owner.as_mut()).await {

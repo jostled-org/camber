@@ -140,7 +140,7 @@ fn e2e_websocket_chat_through_proxy() {
             for msg in &messages {
                 write_ws_text_frame(&mut stream, msg);
                 let echo = read_ws_text_frame(&mut stream);
-                assert_eq!(echo, *msg, "echo mismatch for message '{msg}'");
+                assert_eq!(&*echo, *msg, "echo mismatch for message '{msg}'");
             }
 
             write_ws_close_frame(&mut stream);

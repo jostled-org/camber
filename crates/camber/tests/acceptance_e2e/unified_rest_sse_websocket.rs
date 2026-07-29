@@ -135,7 +135,7 @@ async fn single_server_rest_sse_websocket() {
     // Echo test
     write_ws_text_frame(&mut ws_stream, "ping");
     let msg = read_ws_text_frame(&mut ws_stream);
-    assert_eq!(msg, "ping", "WebSocket echo failed");
+    assert_eq!(&*msg, "ping", "WebSocket echo failed");
 
     // Close
     write_ws_close_frame(&mut ws_stream);

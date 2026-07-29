@@ -19,6 +19,7 @@ pub enum LifecycleCheckpoint {
     SupervisorSelectedTask,
     AfterAccept,
     AfterPermit,
+    AfterOwnedConnectionFutureCompleted,
     AfterSupervisorResultSend,
     AfterUpgradeTicketSubmitted,
     UpgradePeerClosed,
@@ -202,6 +203,19 @@ impl LifecycleScript {
             self.supervisor_wake.notify_one();
         }
         result
+    }
+
+    /// Pause at `checkpoint` when a script is watching, and do nothing when
+    /// none is.
+    ///
+    /// Every checkpoint outside the supervisor reaches its script through an
+    /// `Option`, so the absence arm is the common one. Stated here, beside the
+    /// `pause` it guards, so a caller names its checkpoint and nothing else.
+    pub(crate) async fn pause_at(script: Option<&Self>, checkpoint: LifecycleCheckpoint) {
+        match script {
+            Some(script) => script.pause(checkpoint).await,
+            None => {}
+        }
     }
 
     pub(crate) async fn pause(&self, checkpoint: LifecycleCheckpoint) {
@@ -399,10 +413,18 @@ static MOCK_REGISTRY: Mutex<Option<Vec<MockEntry>>> = Mutex::new(None);
 
 struct MockEntry {
     method: Option<Method>,
-    url: Box<str>,
+    /// Shared with the [`MockHttp`] handle registration hands back, so the two
+    /// owners of one immutable URL cost a refcount bump rather than a second
+    /// allocation and a full copy.
+    url: Arc<str>,
     status: u16,
     body: bytes::Bytes,
-    headers: Arc<[HeaderPair]>,
+    /// Owned outright, not shared: nothing reads these headers but the
+    /// interception below, which copies each pair out. An `Arc<[_]>` here paid
+    /// for an atomic refcount block no one shares, and cost a second allocation
+    /// and a full copy at registration — `Vec::into` cannot reuse the buffer
+    /// for `Arc<[T]>` the way `into_boxed_slice` does.
+    headers: Box<[HeaderPair]>,
     call_count: Arc<AtomicUsize>,
 }
 
@@ -477,7 +499,7 @@ pub fn http_method(method: Method, url: &str) -> MockHttpBuilder {
 /// Builder for configuring a mock HTTP response.
 pub struct MockHttpBuilder {
     method: Option<Method>,
-    url: Box<str>,
+    url: Arc<str>,
     response: Option<Response>,
 }
 
@@ -495,13 +517,13 @@ impl MockHttpBuilder {
         };
         let call_count = Arc::new(AtomicUsize::new(0));
         let method = self.method;
-        let url = self.url.clone();
+        let url = Arc::clone(&self.url);
         let entry = MockEntry {
             method,
             url: self.url,
             status: resp.status(),
             body: bytes::Bytes::copy_from_slice(resp.body_bytes()),
-            headers: resp.headers().to_vec().into(),
+            headers: resp.headers().to_vec().into_boxed_slice(),
             call_count: Arc::clone(&call_count),
         };
         with_registry(|entries| {
@@ -521,7 +543,7 @@ impl MockHttpBuilder {
 /// The mock is automatically deregistered when this handle is dropped.
 pub struct MockHttp {
     method: Option<Method>,
-    url: Box<str>,
+    url: Arc<str>,
     call_count: Arc<AtomicUsize>,
 }
 
@@ -542,11 +564,17 @@ impl MockHttp {
 }
 
 impl Drop for MockHttp {
+    /// Deregister this mock, and only this mock.
+    ///
+    /// Matched by the identity of the shared counter, not by (url, method).
+    /// `install` pushes unconditionally, so two live mocks can name the same
+    /// URL and method; removing by name took both out, and the registry is
+    /// process-global, so two tests in one binary that mocked the same URL
+    /// deregistered each other. The survivor then counted nothing while the
+    /// real network call went out — a flake, not a failure.
     fn drop(&mut self) {
-        let method = self.method;
-        let url = &self.url;
         with_registry(|entries| {
-            entries.retain(|e| !(e.url == *url && e.method == method));
+            entries.retain(|entry| !Arc::ptr_eq(&entry.call_count, &self.call_count));
             if entries.is_empty() {
                 MOCK_ACTIVE.store(false, Ordering::Release);
             }

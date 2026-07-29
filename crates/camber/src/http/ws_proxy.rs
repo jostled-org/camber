@@ -1,4 +1,5 @@
 use super::body::HyperResponseBody;
+use super::disconnect::DisconnectSignal;
 use super::response::HeaderPair;
 use super::router::WsHandler;
 use super::server_lifecycle::{
@@ -6,7 +7,26 @@ use super::server_lifecycle::{
 };
 use super::websocket::WsConn;
 use super::{Request, Response};
+use std::ops::ControlFlow;
 use std::sync::Arc;
+
+/// The client-side WebSocket transport both bridges take over after the `101`.
+type ClientWs =
+    tokio_tungstenite::WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>;
+
+/// A framed WebSocket message, in either direction.
+///
+/// Named for the framing layer it belongs to, and deliberately not `WsMessage`:
+/// that name belongs to the public `WsMessage` enum in the sibling `websocket`
+/// module, which is what handlers are given and carries a text or binary
+/// payload and no control frames at all.
+type WsFrameMessage = tokio_tungstenite::tungstenite::protocol::Message;
+
+/// What a WebSocket stream yields for one frame.
+type WsFrame = Option<Result<WsFrameMessage, tokio_tungstenite::tungstenite::Error>>;
+
+/// The close frame a peer is given when Camber ends a bridge.
+type WsClose = tokio_tungstenite::tungstenite::protocol::CloseFrame;
 
 pub(super) enum WsUpgrade {
     Ready(hyper::upgrade::OnUpgrade, Box<str>),
@@ -34,12 +54,14 @@ fn validate_ws_handshake(
         return Err(WsHandshakeError::BadRequest);
     }
     let headers = request.headers();
-    match (
-        header_contains_token(headers, "connection", "upgrade"),
-        single_header_equals(headers, "upgrade", "websocket"),
-    ) {
-        (true, true) => {}
-        _ => return Err(WsHandshakeError::BadRequest),
+    // `&&` rather than a tuple of both scans: the `Upgrade` header is the
+    // cheap lookup and the one an ordinary request fails, so the token scan
+    // over `Connection` never runs for traffic that was never a handshake.
+    let asks_to_upgrade =
+        is_ws_upgrade_head(headers) && header_contains_token(headers, "connection", "upgrade");
+    match asks_to_upgrade {
+        true => {}
+        false => return Err(WsHandshakeError::BadRequest),
     }
     validate_ws_version(headers)?;
     validate_ws_subprotocols(headers)?;
@@ -73,6 +95,21 @@ fn validate_ws_version(headers: &hyper::HeaderMap) -> Result<(), WsHandshakeErro
     }
 }
 
+/// Whether a request head asks to leave HTTP for the WebSocket protocol.
+///
+/// The two routing predicates and the handshake validator all ask through
+/// here, so they read a repeated `Upgrade` header the same way: a request
+/// cannot be routed as an upgrade and then refused `400` by the validator for
+/// a header the router was happy with.
+pub(super) fn is_ws_upgrade_head(headers: &hyper::HeaderMap) -> bool {
+    single_header_equals(headers, "upgrade", "websocket")
+}
+
+/// The same question, of a request whose head has already been collected.
+pub(super) fn is_ws_upgrade_request(req: &Request) -> bool {
+    single_value_equals(named_request_headers(req, "upgrade"), "websocket")
+}
+
 fn single_header<'a>(
     headers: &'a hyper::HeaderMap,
     name: &'static str,
@@ -85,9 +122,26 @@ fn single_header<'a>(
 }
 
 fn single_header_equals(headers: &hyper::HeaderMap, name: &'static str, expected: &str) -> bool {
-    single_header(headers, name)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+    // An unreadable value keeps its place in the count rather than being
+    // filtered out: two values, one of them invalid, is still a repeat.
+    single_value_equals(
+        headers
+            .get_all(name)
+            .iter()
+            .map(|value| value.to_str().unwrap_or("")),
+        expected,
+    )
+}
+
+/// Whether a header carries exactly one value, and that value is `expected`.
+///
+/// A repeated header is not a match. Both header representations — the borrowed
+/// hyper map and a collected request — answer through this one rule.
+fn single_value_equals<'a>(mut values: impl Iterator<Item = &'a str>, expected: &str) -> bool {
+    match (values.next(), values.next()) {
+        (Some(value), None) => value.eq_ignore_ascii_case(expected),
+        _ => false,
+    }
 }
 
 fn header_contains_token(headers: &hyper::HeaderMap, name: &'static str, expected: &str) -> bool {
@@ -157,15 +211,27 @@ pub(super) fn check_ws_origin(req: &Request) -> Option<Response> {
     }
 }
 
-fn unique_request_header<'a>(req: &'a Request, name: &str) -> Result<Option<&'a str>, ()> {
-    let mut values = req
-        .headers()
-        .filter_map(|(candidate, value)| candidate.eq_ignore_ascii_case(name).then_some(value));
+fn unique_request_header<'a>(req: &'a Request, name: &'static str) -> Result<Option<&'a str>, ()> {
+    let mut values = named_request_headers(req, name);
     match (values.next(), values.next()) {
         (None, None) => Ok(None),
         (Some(value), None) => Ok(Some(value)),
         _ => Err(()),
     }
+}
+
+/// Every value a collected request carries under one header name.
+///
+/// The name is `'static`, the same way `single_header`'s is: every caller
+/// passes a literal, and unifying it with the request borrow would cap the
+/// returned values — which come from the request alone — at the shorter of the
+/// two lifetimes.
+fn named_request_headers<'a>(
+    req: &'a Request,
+    name: &'static str,
+) -> impl Iterator<Item = &'a str> {
+    req.headers()
+        .filter_map(move |(candidate, value)| candidate.eq_ignore_ascii_case(name).then_some(value))
 }
 
 fn rejected_origin() -> Option<Response> {
@@ -248,6 +314,63 @@ fn ws_upgrade_pair(
     }
 }
 
+/// What a validated handshake hands the bridge that will serve it.
+///
+/// The ordering both upgrade kinds depend on lives in the one function that
+/// builds this: the permit is taken only once the `101` exists, so the arm that
+/// cannot build one never holds a connection slot for an upgrade that will not
+/// happen, and the disconnect handoff is captured before the request can move
+/// into a bridge.
+struct WsHandoff<'a> {
+    on_upgrade: hyper::upgrade::OnUpgrade,
+    subprotocol: Option<&'a str>,
+    response: hyper::Response<HyperResponseBody>,
+    permit: Arc<ConnectionPermit>,
+    handoff: DisconnectSignal,
+}
+
+/// What a handshake attempt leaves the caller holding.
+///
+/// Both arms are what the peer gets, not success against error: a `101` whose
+/// bridge is still to be built, or the response that replaces it. Written as
+/// its own enum rather than a `Result` because that is what it means, and
+/// because `clippy::result_large_err` does not apply to it — so neither arm
+/// pays a heap allocation to carry a response the caller immediately returns.
+enum WsHandoffOutcome<'a> {
+    /// The handshake stands; here is everything the `101` handoff needs.
+    Ready(WsHandoff<'a>),
+    /// The peer gets this instead: a rejected handshake, or a `101` that could
+    /// not be built.
+    Refused(hyper::Response<HyperResponseBody>),
+}
+
+/// Validate the handshake and build everything the `101` handoff needs.
+///
+/// Both upgrade kinds enter here, so neither can restate that ordering or
+/// answer a refused handshake differently.
+fn prepare_ws_handoff<'a>(
+    ws_upgrade: WsUpgrade,
+    req: &'a Request,
+    lifecycle: &ConnectionLifecycle,
+) -> WsHandoffOutcome<'a> {
+    let (on_upgrade, accept_key) = match ws_upgrade_pair(ws_upgrade) {
+        Ok(pair) => pair,
+        Err(error) => return WsHandoffOutcome::Refused(ws_handshake_rejection(error)),
+    };
+    let subprotocol = extract_ws_subprotocol(req);
+    let response = match ws_switching_protocols(accept_key.as_ref(), subprotocol) {
+        Some(response) => response,
+        None => return WsHandoffOutcome::Refused(upgrade_build_failure()),
+    };
+    WsHandoffOutcome::Ready(WsHandoff {
+        on_upgrade,
+        subprotocol,
+        response,
+        permit: lifecycle.permit(),
+        handoff: req.on_disconnect(),
+    })
+}
+
 /// Validate the upgrade pair, spawn background work, return 101.
 pub(super) async fn handle_ws_upgrade(
     ws_upgrade: WsUpgrade,
@@ -255,54 +378,145 @@ pub(super) async fn handle_ws_upgrade(
     req: Request,
     buffer_size: usize,
     lifecycle: &ConnectionLifecycle,
-) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    let (on_upgrade, accept_key) = match ws_upgrade_pair(ws_upgrade) {
-        Ok(pair) => pair,
-        Err(error) => return Ok(ws_handshake_rejection(error)),
+) -> hyper::Response<HyperResponseBody> {
+    let prepared = match prepare_ws_handoff(ws_upgrade, &req, lifecycle) {
+        WsHandoffOutcome::Ready(prepared) => prepared,
+        WsHandoffOutcome::Refused(refusal) => return refusal,
     };
+    // The selected subprotocol is already in the `101`; dropping it here ends
+    // the borrow of the request the bridge is about to take.
+    let WsHandoff {
+        on_upgrade,
+        response,
+        permit,
+        handoff,
+        ..
+    } = prepared;
+    // Present only on the owned path, which is the same path that produces a
+    // registrar: a synchronous lifecycle carries neither.
+    let script = lifecycle.script();
+    own_upgrade_bridge(lifecycle, response, &handoff, move |attachment| {
+        bridge_ws_handler(
+            on_upgrade,
+            handler,
+            req,
+            buffer_size,
+            attachment,
+            script,
+            permit,
+        )
+    })
+    .await
+}
 
-    let subprotocol = extract_ws_subprotocol(&req);
-    let response = ws_switching_protocols(accept_key.as_ref(), subprotocol);
-    let permit = lifecycle.permit();
-    match lifecycle.upgrade_registrar() {
-        Some(registrar) => {
-            let control = registrar.control();
-            let dispatch_gate = registrar.dispatch_gate();
-            let script = lifecycle.script();
-            let (gate, start) = tokio::sync::oneshot::channel();
-            let handle = spawn_gated_bridge(
-                start,
-                bridge_ws_handler(
-                    on_upgrade,
-                    handler,
-                    req,
-                    buffer_size,
-                    DirectBridgeControl {
-                        server: Some(control),
-                        dispatch: Some(dispatch_gate),
-                    },
-                    script,
-                    permit,
-                ),
-            );
-            complete_upgrade_registration(registrar, handle, gate, response).await
-        }
-        None => {
-            drop(crate::task::spawn_async(bridge_ws_handler(
-                on_upgrade,
-                handler,
-                req,
-                buffer_size,
-                DirectBridgeControl {
-                    server: None,
-                    dispatch: None,
-                },
-                None,
-                permit,
-            )));
-            Ok(response)
+/// The answer to a `101` Camber could not build.
+///
+/// An ordinary buffered response whose body owns its own completion, the same
+/// shape the registrar-failure arms produce: no bridge is spawned and no
+/// handoff is resolved, because no upgrade happened. Returning the unbuilt
+/// response instead would hand the peer a bodyless `200` to a WebSocket
+/// handshake and resolve it as a successful upgrade.
+fn upgrade_build_failure() -> hyper::Response<HyperResponseBody> {
+    super::handle::to_hyper_full(Response::text_raw(
+        500,
+        "WebSocket upgrade response build failed",
+    ))
+}
+
+/// What an owned server contributes to a bridge it is about to register.
+///
+/// Absent exactly on the detached path, where no registrar exists to take
+/// ownership of the bridge.
+struct BridgeAttachment {
+    control: tokio::sync::watch::Receiver<ServerControl>,
+    dispatch: super::server_lifecycle::UpgradeDispatchGate,
+}
+
+impl BridgeAttachment {
+    /// Spread an optional attachment over the parts a bridge holds separately.
+    ///
+    /// Stated once, beside the struct, so a field added here reaches both
+    /// bridges. Split at each bridge instead, a bridge that forgot the new
+    /// field would still compile — every part is an `Option`.
+    fn split(
+        attachment: Option<Self>,
+    ) -> (
+        Option<tokio::sync::watch::Receiver<ServerControl>>,
+        Option<super::server_lifecycle::UpgradeDispatchGate>,
+    ) {
+        match attachment {
+            Some(Self { control, dispatch }) => (Some(control), Some(dispatch)),
+            None => (None, None),
         }
     }
+}
+
+/// Choose who owns the bridge, then resolve the response lifetime to match.
+///
+/// An owned server registers the bridge and commits the `101` only once its
+/// registrar has admitted it; a detached connection has no scope to be
+/// admitted into, so it commits at once. Every upgrade kind routes through
+/// here, so a new one inherits the choice instead of restating it.
+async fn own_upgrade_bridge<F, Fut>(
+    lifecycle: &ConnectionLifecycle,
+    response: hyper::Response<HyperResponseBody>,
+    handoff: &DisconnectSignal,
+    build_bridge: F,
+) -> hyper::Response<HyperResponseBody>
+where
+    F: FnOnce(Option<BridgeAttachment>) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let registrar = match lifecycle.upgrade_registrar() {
+        Some(registrar) => registrar,
+        None => {
+            detach_bridge(build_bridge(None));
+            return commit_upgrade(response, handoff);
+        }
+    };
+    let attachment = BridgeAttachment {
+        control: registrar.control(),
+        dispatch: registrar.dispatch_gate(),
+    };
+    let (gate, start) = tokio::sync::oneshot::channel();
+    let handle = spawn_gated_bridge(start, build_bridge(Some(attachment)));
+    complete_upgrade_registration(registrar, handle, gate, response, handoff).await
+}
+
+/// Launch a synchronous-entry WebSocket bridge detached.
+///
+/// The synchronous connection path carries no Camber runtime context by
+/// contract — the connection task that owns this upgrade is itself detached —
+/// so there is no root scope for the bridge to be admitted into. It inherits
+/// that connection's contract rather than becoming an orphaned scope child.
+///
+/// `own_upgrade_bridge` is its only caller. It stays a named function because
+/// `docs/scripts/check_no_orphan_spawns.sh` allowlists spawns by
+/// `file:function`, never by file: this is the site that anchors the detached
+/// contract. The module's two other allowlisted spawns are per-connection
+/// rather than background subsystems — `spawn_gated_bridge` hands its join
+/// handle straight to the registrar that owns it, and `bridge_ws_handler` runs
+/// the handler's blocking thread for the life of its own bridge. A spawn at any
+/// fourth site in this file is reported.
+fn detach_bridge<F>(bridge: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    drop(tokio::spawn(bridge));
+}
+
+/// Resolve the response lifetime at a successful `101` handoff.
+///
+/// Past this point the transport belongs to the WebSocket close contract, so
+/// this is Camber's last observation of the HTTP response. A `101` is excluded
+/// from the body's generic empty-response completion precisely so this handoff
+/// — not a rule about body length — owns the transition.
+fn commit_upgrade(
+    response: hyper::Response<HyperResponseBody>,
+    handoff: &DisconnectSignal,
+) -> hyper::Response<HyperResponseBody> {
+    handoff.complete();
+    response
 }
 
 fn spawn_gated_bridge<F>(
@@ -334,10 +548,75 @@ async fn await_upgrade(
     }
 }
 
-/// Await the upgrade then bridge async WS frames to a sync handler via channels.
-struct DirectBridgeControl {
-    server: Option<tokio::sync::watch::Receiver<ServerControl>>,
-    dispatch: Option<super::server_lifecycle::UpgradeDispatchGate>,
+/// Take over the client transport as a server-role WebSocket stream.
+///
+/// Both bridges start here, so the handshake role and the framing
+/// configuration are stated once rather than restated per bridge kind.
+async fn upgrade_client_ws(
+    on_upgrade: hyper::upgrade::OnUpgrade,
+    context: &str,
+) -> Option<ClientWs> {
+    let upgraded = await_upgrade(on_upgrade, context).await?;
+    Some(
+        tokio_tungstenite::WebSocketStream::from_raw_socket(
+            hyper_util::rt::TokioIo::new(upgraded),
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await,
+    )
+}
+
+/// Wait for the connection to report whether the peer ever saw this `101`.
+///
+/// An uncommitted dispatch means the response never reached the wire, so the
+/// transport is shut down rather than spoken WebSocket over. Both bridges gate
+/// on this answer, so neither can start framing against a peer that is still
+/// waiting on an HTTP response. A connection with no gate — the detached
+/// path — has no such handoff to wait on.
+async fn commit_dispatch(
+    gate: Option<super::server_lifecycle::UpgradeDispatchGate>,
+    stream: &mut ClientWs,
+) -> ControlFlow<()> {
+    let committed = match gate {
+        Some(gate) => gate.committed().await,
+        None => true,
+    };
+    match committed {
+        true => ControlFlow::Continue(()),
+        false => {
+            shutdown_client_transport(stream).await;
+            ControlFlow::Break(())
+        }
+    }
+}
+
+/// What a bridge holds once it is open: the control watch it stops on, and the
+/// client transport it frames over.
+type OpenBridge = (
+    Option<tokio::sync::watch::Receiver<ServerControl>>,
+    ClientWs,
+);
+
+/// Open a bridge: spread the attachment, take over the client transport, and
+/// wait for the `101` to reach the wire.
+///
+/// The sequence, not the steps, is what a third bridge would get wrong — every
+/// step below is already shared — so the sequence is written once. `None` is
+/// both ways it can fail to open: an upgrade Hyper never completed, and a
+/// dispatch the connection never committed. Neither leaves anything for the
+/// caller to do, because both have already logged or shut the transport down.
+async fn open_bridge(
+    on_upgrade: hyper::upgrade::OnUpgrade,
+    attachment: Option<BridgeAttachment>,
+    context: &str,
+) -> Option<OpenBridge> {
+    let (control, dispatch) = BridgeAttachment::split(attachment);
+    let mut stream = upgrade_client_ws(on_upgrade, context).await?;
+    match commit_dispatch(dispatch, &mut stream).await {
+        ControlFlow::Break(()) => None,
+        ControlFlow::Continue(()) => Some((control, stream)),
+    }
 }
 
 async fn bridge_ws_handler(
@@ -345,102 +624,150 @@ async fn bridge_ws_handler(
     handler: WsHandler,
     req: Request,
     buffer_size: usize,
-    mut control: DirectBridgeControl,
+    attachment: Option<BridgeAttachment>,
     script: Option<Arc<super::mock::LifecycleScript>>,
     permit: Arc<ConnectionPermit>,
 ) {
-    let upgraded = match await_upgrade(on_upgrade, "WebSocket client upgrade failed").await {
-        Some(u) => u,
+    let opened = open_bridge(on_upgrade, attachment, "WebSocket client upgrade failed").await;
+    let (mut control, mut ws_stream) = match opened {
+        Some(opened) => opened,
         None => return,
     };
 
-    let mut ws_stream = tokio_tungstenite::WebSocketStream::from_raw_socket(
-        hyper_util::rt::TokioIo::new(upgraded),
-        tokio_tungstenite::tungstenite::protocol::Role::Server,
-        None,
+    super::mock::LifecycleScript::pause_at(
+        script.as_deref(),
+        super::mock::LifecycleCheckpoint::WebSocketOutgoingBufferConfigured(buffer_size),
     )
     .await;
+    let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::channel::<WsFrameMessage>(buffer_size);
+    super::mock::LifecycleScript::pause_at(
+        script.as_deref(),
+        super::mock::LifecycleCheckpoint::WebSocketIncomingBufferConfigured(buffer_size),
+    )
+    .await;
+    let (incoming_tx, incoming_rx) = tokio::sync::mpsc::channel::<WsFrameMessage>(buffer_size);
 
-    let dispatch_committed = match control.dispatch {
-        Some(gate) => gate.committed().await,
-        None => true,
-    };
-    if !dispatch_committed {
-        shutdown_client_transport(&mut ws_stream).await;
-        return;
-    }
-
-    if let Some(script) = &script {
-        script
-            .pause(super::mock::LifecycleCheckpoint::WebSocketOutgoingBufferConfigured(buffer_size))
-            .await;
-    }
-    let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::channel::<
-        tokio_tungstenite::tungstenite::protocol::Message,
-    >(buffer_size);
-    if let Some(script) = &script {
-        script
-            .pause(super::mock::LifecycleCheckpoint::WebSocketIncomingBufferConfigured(buffer_size))
-            .await;
-    }
-    let (incoming_tx, incoming_rx) = tokio::sync::mpsc::channel::<
-        tokio_tungstenite::tungstenite::protocol::Message,
-    >(buffer_size);
-
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::StreamExt;
+    // Detached by contract — no handle exists to carry a panic back — so the
+    // structured record is the only report there is.
     drop(tokio::task::spawn_blocking(move || {
         let conn = WsConn::new(outgoing_tx, incoming_rx);
-        if let Err(e) = handler(&req, conn) {
-            tracing::warn!(error = %e, "WebSocket handler returned error");
+        match crate::task::catch_panic(move || handler(&req, conn)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "WebSocket handler returned error"),
+            Err(error) => tracing::error!(%error, "WebSocket handler panicked"),
         }
     }));
 
     loop {
-        tokio::select! {
+        let flow = tokio::select! {
             biased;
-            mode = next_control(&mut control.server), if control.server.is_some() => {
-                match mode {
-                    ServerControl::Graceful => {
-                        let _ = ws_stream
-                            .send(tokio_tungstenite::tungstenite::Message::Close(None))
-                            .await;
-                        drain_direct_close(&mut ws_stream).await;
-                    }
-                    ServerControl::Abort | ServerControl::Running => {}
-                }
-                break;
+            mode = next_control(&mut control) => stop_direct_bridge(mode, &mut ws_stream).await,
+            outgoing = outgoing_rx.recv() => forward_outgoing(outgoing, &mut ws_stream).await,
+            incoming = ws_stream.next() => {
+                forward_incoming(incoming, &mut ws_stream, &incoming_tx).await
             }
-            outgoing = outgoing_rx.recv() => match outgoing {
-                Some(message) => {
-                    if ws_stream.send(message).await.is_err() {
-                        break;
-                    }
-                }
-                None => {
-                    let _ = ws_stream.close(None).await;
-                    break;
-                }
-            },
-            incoming = ws_stream.next() => match incoming {
-                Some(Ok(message)) if message.is_close() => {
-                    let _ = ws_stream.flush().await;
-                    break;
-                }
-                Some(Ok(message)) => {
-                    if incoming_tx.send(message).await.is_err() {
-                        break;
-                    }
-                }
-                Some(Err(error)) => {
-                    tracing::debug!(%error, "WebSocket client bridge closed");
-                    break;
-                }
-                None => break,
-            }
+        };
+        match flow {
+            ControlFlow::Break(()) => break,
+            ControlFlow::Continue(()) => {}
         }
     }
     shutdown_client_transport(&mut ws_stream).await;
     drop(permit);
+}
+
+/// End the direct bridge on a server control transition.
+///
+/// A graceful stop owes the peer the close handshake; an abort takes the
+/// transport away without one, and a `Running` reaching here means the control
+/// sender is gone, which ends the bridge just the same.
+async fn stop_direct_bridge(mode: ServerControl, stream: &mut ClientWs) -> ControlFlow<()> {
+    match mode {
+        ServerControl::Graceful => graceful_close_direct(stream).await,
+        ServerControl::Abort | ServerControl::Running => {}
+    }
+    ControlFlow::Break(())
+}
+
+/// Close the client transport and wait for the peer's answering close.
+async fn graceful_close_direct(stream: &mut ClientWs) {
+    send_close(stream, None).await;
+    drain_until_close(stream).await;
+}
+
+/// Write one handler-produced message to the client.
+///
+/// A closed outgoing channel means the handler returned, so the bridge closes
+/// the transport it was framing for.
+async fn forward_outgoing(
+    outgoing: Option<WsFrameMessage>,
+    stream: &mut ClientWs,
+) -> ControlFlow<()> {
+    use futures_util::SinkExt;
+    let message = match outgoing {
+        Some(message) => message,
+        None => {
+            close_transport(stream).await;
+            return ControlFlow::Break(());
+        }
+    };
+    match stream.send(message).await {
+        Ok(()) => ControlFlow::Continue(()),
+        Err(error) => {
+            tracing::debug!(%error, "WebSocket client send failed");
+            ControlFlow::Break(())
+        }
+    }
+}
+
+/// Hand one client frame to the handler.
+///
+/// A close frame ends the bridge after the queued writes are flushed, so the
+/// peer sees everything the handler produced before the transport goes.
+async fn forward_incoming(
+    incoming: WsFrame,
+    stream: &mut ClientWs,
+    handler_tx: &tokio::sync::mpsc::Sender<WsFrameMessage>,
+) -> ControlFlow<()> {
+    let message = next_frame(incoming, "WebSocket client bridge closed")?;
+    match message.is_close() {
+        true => {
+            flush_transport(stream).await;
+            ControlFlow::Break(())
+        }
+        false => queue_for_handler(handler_tx, message).await,
+    }
+}
+
+/// Queue one frame for the handler thread.
+///
+/// A dropped receiver means the handler returned, so there is nothing left to
+/// deliver frames to.
+async fn queue_for_handler(
+    handler_tx: &tokio::sync::mpsc::Sender<WsFrameMessage>,
+    message: WsFrameMessage,
+) -> ControlFlow<()> {
+    match handler_tx.send(message).await {
+        Ok(()) => ControlFlow::Continue(()),
+        Err(_) => ControlFlow::Break(()),
+    }
+}
+
+/// Take the frame out of a stream's next item.
+///
+/// A transport error and an ended stream are the same answer to a bridge —
+/// there is nothing further to forward — so both break; only the error has
+/// anything to report.
+fn next_frame(frame: WsFrame, context: &str) -> ControlFlow<(), WsFrameMessage> {
+    match frame {
+        Some(Ok(message)) => ControlFlow::Continue(message),
+        Some(Err(error)) => {
+            tracing::debug!(%error, "{context}");
+            ControlFlow::Break(())
+        }
+        None => ControlFlow::Break(()),
+    }
 }
 
 /// Validate the upgrade pair, build the backend URL, spawn the bridge, return 101.
@@ -450,66 +777,74 @@ pub(super) async fn handle_proxy_ws(
     backend: Arc<str>,
     prefix: Arc<str>,
     lifecycle: &ConnectionLifecycle,
-) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    let (on_upgrade, accept_key) = match ws_upgrade_pair(ws_upgrade) {
-        Ok(pair) => pair,
-        Err(error) => return Ok(ws_handshake_rejection(error)),
+) -> hyper::Response<HyperResponseBody> {
+    let prepared = match prepare_ws_handoff(ws_upgrade, &req, lifecycle) {
+        WsHandoffOutcome::Ready(prepared) => prepared,
+        WsHandoffOutcome::Refused(refusal) => return refusal,
     };
 
     let backend_ws_url = match build_backend_ws_url(req.raw_path_and_query(), &prefix, &backend) {
         Ok(url) => url,
-        Err(resp) => return Ok(*resp),
+        Err(resp) => return *resp,
     };
 
-    let subprotocol = extract_ws_subprotocol(&req);
-    let forwarded_headers = collect_forwardable_ws_headers(&req, subprotocol);
-    let response = ws_switching_protocols(accept_key.as_ref(), subprotocol);
-    let permit = lifecycle.permit();
-    match lifecycle.upgrade_registrar() {
-        Some(registrar) => {
-            let control = registrar.control();
-            let dispatch_gate = registrar.dispatch_gate();
-            let (gate, start) = tokio::sync::oneshot::channel();
-            let handle = spawn_gated_bridge(
-                start,
-                bridge_ws_proxy(
-                    on_upgrade,
-                    backend_ws_url,
-                    forwarded_headers,
-                    Some(control),
-                    Some(dispatch_gate),
-                    permit,
-                ),
-            );
-            complete_upgrade_registration(registrar, handle, gate, response).await
-        }
-        None => {
-            drop(crate::task::spawn_async(bridge_ws_proxy(
-                on_upgrade,
-                backend_ws_url,
-                forwarded_headers,
-                None,
-                None,
-                permit,
-            )));
-            Ok(response)
-        }
-    }
+    // The backend is offered the protocol the client was already promised, so
+    // it cannot select a different one.
+    let forwarded_headers = collect_forwardable_ws_headers(&req, prepared.subprotocol);
+    let WsHandoff {
+        on_upgrade,
+        response,
+        permit,
+        handoff,
+        ..
+    } = prepared;
+    own_upgrade_bridge(lifecycle, response, &handoff, move |attachment| {
+        bridge_ws_proxy(
+            on_upgrade,
+            backend_ws_url,
+            forwarded_headers,
+            attachment,
+            permit,
+        )
+    })
+    .await
 }
 
+/// Hand the bridge to the owned server's registrar, committing the `101` only
+/// once the bridge is registered and owned.
+///
+/// A registrar-produced `503` or `500` is an ordinary HTTP response whose body
+/// owns its own completion, so only the admitted arm resolves the handoff.
 async fn complete_upgrade_registration(
     registrar: UpgradeRegistrar,
     handle: tokio::task::JoinHandle<()>,
     gate: tokio::sync::oneshot::Sender<()>,
     response: hyper::Response<HyperResponseBody>,
-) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    handoff: &DisconnectSignal,
+) -> hyper::Response<HyperResponseBody> {
     match registrar.submit(handle).await {
-        UpgradeRegistration::Admitted => {
-            let _ = gate.send(());
-            Ok(response)
-        }
-        UpgradeRegistration::Rejected => Ok(super::server_lifecycle::rejected_response()),
-        UpgradeRegistration::Unavailable => Ok(super::server_lifecycle::unavailable_response()),
+        UpgradeRegistration::Admitted => release_admitted_bridge(gate, response, handoff),
+        UpgradeRegistration::Rejected => super::server_lifecycle::rejected_response(),
+        UpgradeRegistration::Unavailable => super::server_lifecycle::unavailable_response(),
+    }
+}
+
+/// Release the admitted bridge from its gate, then commit its `101`.
+///
+/// The gate's receiver lives inside the registered task, so a send failure has
+/// one meaning: the supervisor aborted that task between admitting it and this
+/// release. The bridge will never run, and a `101` committed for it would hand
+/// the peer a transport nothing serves and resolve the response lifetime as
+/// `Completed`. That race reports what it is — the upgrade could not be taken
+/// up — through the same response the registrar's own unavailability produces.
+fn release_admitted_bridge(
+    gate: tokio::sync::oneshot::Sender<()>,
+    response: hyper::Response<HyperResponseBody>,
+    handoff: &DisconnectSignal,
+) -> hyper::Response<HyperResponseBody> {
+    match gate.send(()) {
+        Ok(()) => commit_upgrade(response, handoff),
+        Err(()) => super::server_lifecycle::unavailable_response(),
     }
 }
 
@@ -624,99 +959,217 @@ async fn bridge_ws_proxy(
     on_upgrade: hyper::upgrade::OnUpgrade,
     backend_ws_url: Box<str>,
     forwarded_headers: Box<[HeaderPair]>,
-    mut control: Option<tokio::sync::watch::Receiver<ServerControl>>,
-    dispatch_gate: Option<super::server_lifecycle::UpgradeDispatchGate>,
+    attachment: Option<BridgeAttachment>,
     permit: Arc<ConnectionPermit>,
 ) {
-    let upgraded = match await_upgrade(on_upgrade, "WebSocket proxy client upgrade failed").await {
-        Some(u) => u,
-        None => return,
-    };
-
-    let mut client_ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
-        hyper_util::rt::TokioIo::new(upgraded),
-        tokio_tungstenite::tungstenite::protocol::Role::Server,
-        None,
+    let opened = open_bridge(
+        on_upgrade,
+        attachment,
+        "WebSocket proxy client upgrade failed",
     )
     .await;
-
-    let dispatch_committed = match dispatch_gate {
-        Some(gate) => gate.committed().await,
-        None => true,
-    };
-    if !dispatch_committed {
-        shutdown_client_transport(&mut client_ws).await;
-        return;
-    }
-
-    let backend_request = match build_ws_backend_request(&backend_ws_url, &forwarded_headers) {
-        Some(req) => req,
+    let (mut control, mut client_ws) = match opened {
+        Some(opened) => opened,
         None => return,
     };
 
-    let (backend_ws, _) = match tokio_tungstenite::connect_async(backend_request).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::warn!(url = %backend_ws_url, error = %e, "WebSocket proxy backend connection failed");
+    // Past the dispatch commitment the peer holds an upgraded transport, so
+    // every exit from here owes it the same close the framing loop's exits
+    // give it — a backend that never answers is not a reason to drop the
+    // client socket without one.
+    let backend_request = match build_ws_backend_request(&backend_ws_url, &forwarded_headers) {
+        Some(req) => req,
+        None => {
+            end_client_transport(&mut client_ws, Some(backend_fault_close())).await;
             return;
         }
     };
 
-    use futures_util::{SinkExt, StreamExt};
-    let mut backend_ws = backend_ws;
-    loop {
-        tokio::select! {
+    let (mut backend_ws, _) = match tokio_tungstenite::connect_async(backend_request).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(url = %backend_ws_url, error = %e, "WebSocket proxy backend connection failed");
+            end_client_transport(&mut client_ws, Some(backend_fault_close())).await;
+            return;
+        }
+    };
+
+    use futures_util::StreamExt;
+    let exit = loop {
+        let flow = tokio::select! {
             biased;
-            mode = next_control(&mut control), if control.is_some() => {
-                match mode {
-                    ServerControl::Graceful => {
-                        let close = tokio_tungstenite::tungstenite::Message::Close(None);
-                        let _ = client_ws.send(close.clone()).await;
-                        let _ = backend_ws.send(close).await;
-                        drain_proxy_close(&mut client_ws, &mut backend_ws).await;
-                    }
-                    ServerControl::Abort | ServerControl::Running => {}
-                }
-                break;
+            mode = next_control(&mut control) => {
+                stop_proxy_bridge(mode, &mut client_ws, &mut backend_ws).await
             }
-            message = client_ws.next() => match message {
-                Some(Ok(message)) => {
-                    let closes = message.is_close();
-                    if backend_ws.send(message).await.is_err() {
-                        break;
-                    }
-                    if closes {
-                        forward_backend_close(&mut client_ws, &mut backend_ws).await;
-                        break;
-                    }
-                }
-                Some(Err(error)) => {
-                    tracing::debug!(%error, "WebSocket proxy client closed");
-                    break;
-                }
-                None => break,
-            },
-            message = backend_ws.next() => match message {
-                Some(Ok(message)) => {
-                    let closes = message.is_close();
-                    if client_ws.send(message).await.is_err() || closes {
-                        break;
-                    }
-                }
-                Some(Err(error)) => {
-                    tracing::debug!(%error, "WebSocket proxy backend closed");
-                    break;
-                }
-                None => break,
+            message = client_ws.next() => {
+                owes_close(forward_client_frame(message, &mut client_ws, &mut backend_ws).await)
             }
+            message = backend_ws.next() => {
+                owes_close(forward_backend_frame(message, &mut client_ws).await)
+            }
+        };
+        match flow {
+            ControlFlow::Break(exit) => break exit,
+            ControlFlow::Continue(()) => {}
+        }
+    };
+    match exit {
+        // The control arm closed both transports and drained the answering
+        // closes already. Closing either again is a write after the close
+        // frame, which the transport reports as a failure that never happened.
+        ProxyExit::Settled => shutdown_client_transport(&mut client_ws).await,
+        ProxyExit::Owed => {
+            close_transport(&mut backend_ws).await;
+            end_client_transport(&mut client_ws, None).await;
         }
     }
-    let _ = client_ws.close(None).await;
-    let _ = backend_ws.close(None).await;
-    shutdown_client_transport(&mut client_ws).await;
     drop(permit);
 }
 
+/// What the proxy bridge's transports are still owed when its loop ends.
+///
+/// Only the graceful control arm performs the close handshake itself, and only
+/// that arm knows it did; the teardown reads this answer rather than trying to
+/// re-derive it from the transports.
+enum ProxyExit {
+    /// The control arm closed both sides and drained their answering closes.
+    Settled,
+    /// No close handshake was performed, so the teardown still owes both.
+    Owed,
+}
+
+/// Label a frame-flow arm's answer: no arm but the graceful stop closes.
+fn owes_close(flow: ControlFlow<()>) -> ControlFlow<ProxyExit> {
+    match flow {
+        ControlFlow::Break(()) => ControlFlow::Break(ProxyExit::Owed),
+        ControlFlow::Continue(()) => ControlFlow::Continue(()),
+    }
+}
+
+/// End the client transport the peer took over at the `101`.
+///
+/// A raw shutdown alone leaves the peer reading `1006`, the code for a
+/// connection that simply dropped. Every post-commitment exit ends here
+/// instead, so the peer is told the transport closed; `reason` is what
+/// distinguishes a backend fault from the ordinary end of frame flow.
+async fn end_client_transport(stream: &mut ClientWs, reason: Option<WsClose>) {
+    send_close(stream, reason).await;
+    shutdown_client_transport(stream).await;
+}
+
+/// The close a peer is given when the backend, not the peer, ended the bridge.
+///
+/// `1011` is the server-side internal-error code: the handshake succeeded and
+/// the fault is on Camber's side of the bridge, which is exactly what a peer
+/// reading `1006` cannot tell from its own connection dropping.
+fn backend_fault_close() -> WsClose {
+    WsClose {
+        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Error,
+        reason: tokio_tungstenite::tungstenite::Utf8Bytes::from_static(
+            "WebSocket proxy backend unavailable",
+        ),
+    }
+}
+
+/// End the proxy bridge on a server control transition.
+///
+/// The same shape the direct bridge's arm has, over both transports: a
+/// graceful stop closes each side and waits for their answering closes, and
+/// says so, so the teardown does not close them a second time. An abort takes
+/// the transports away without a handshake, and a `Running` reaching here means
+/// the control sender is gone; neither has closed anything.
+async fn stop_proxy_bridge<C, B>(
+    mode: ServerControl,
+    client: &mut tokio_tungstenite::WebSocketStream<C>,
+    backend: &mut tokio_tungstenite::WebSocketStream<B>,
+) -> ControlFlow<ProxyExit>
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    match mode {
+        ServerControl::Graceful => {
+            graceful_close_proxy(client, backend).await;
+            ControlFlow::Break(ProxyExit::Settled)
+        }
+        ServerControl::Abort | ServerControl::Running => ControlFlow::Break(ProxyExit::Owed),
+    }
+}
+
+/// Close both transports and wait for each peer's answering close.
+async fn graceful_close_proxy<C, B>(
+    client: &mut tokio_tungstenite::WebSocketStream<C>,
+    backend: &mut tokio_tungstenite::WebSocketStream<B>,
+) where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    send_close(client, None).await;
+    send_close(backend, None).await;
+    drain_proxy_close(client, backend).await;
+}
+
+/// Forward one client frame to the backend.
+///
+/// A client close is forwarded and then answered: the bridge waits for the
+/// backend's own close so both halves finish the handshake before the
+/// transports go.
+async fn forward_client_frame<C, B>(
+    frame: WsFrame,
+    client: &mut tokio_tungstenite::WebSocketStream<C>,
+    backend: &mut tokio_tungstenite::WebSocketStream<B>,
+) -> ControlFlow<()>
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::SinkExt;
+    let message = next_frame(frame, "WebSocket proxy client closed")?;
+    let closes = message.is_close();
+    match (backend.send(message).await, closes) {
+        (Ok(()), false) => ControlFlow::Continue(()),
+        (Ok(()), true) => {
+            forward_backend_close(client, backend).await;
+            ControlFlow::Break(())
+        }
+        (Err(error), _) => {
+            tracing::debug!(%error, "WebSocket proxy backend send failed");
+            ControlFlow::Break(())
+        }
+    }
+}
+
+/// Forward one backend frame to the client.
+///
+/// A backend close is forwarded and ends the bridge — the client half has
+/// nothing further to carry once the origin has closed.
+async fn forward_backend_frame<C>(
+    frame: WsFrame,
+    client: &mut tokio_tungstenite::WebSocketStream<C>,
+) -> ControlFlow<()>
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::SinkExt;
+    let message = next_frame(frame, "WebSocket proxy backend closed")?;
+    let closes = message.is_close();
+    match (client.send(message).await, closes) {
+        (Ok(()), false) => ControlFlow::Continue(()),
+        (Ok(()), true) => ControlFlow::Break(()),
+        (Err(error), _) => {
+            tracing::debug!(%error, "WebSocket proxy client send failed");
+            ControlFlow::Break(())
+        }
+    }
+}
+
+/// Wait for the backend's answering close, then flush what the client is owed.
+///
+/// One deliberate difference from the shape this replaces: the flush now also
+/// runs when the backend stream errors or ends without a close. That is
+/// harmless — the flush only pushes tungstenite's queued close reply, and the
+/// `ProxyExit::Owed` teardown flushes the same transport again through
+/// `send_close`.
 async fn forward_backend_close<C, B>(
     client: &mut tokio_tungstenite::WebSocketStream<C>,
     backend: &mut tokio_tungstenite::WebSocketStream<B>,
@@ -724,16 +1177,46 @@ async fn forward_backend_close<C, B>(
     C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    use futures_util::{SinkExt, StreamExt};
-    while let Some(result) = backend.next().await {
-        match result {
-            Ok(message) if message.is_close() => {
-                let _ = client.flush().await;
-                return;
-            }
-            Ok(_) => {}
-            Err(_) => return,
-        }
+    drain_until_close(backend).await;
+    flush_transport(client).await;
+}
+
+/// Send a close frame, reporting a failure the teardown cannot act on.
+///
+/// `None` is the ordinary end of a bridge, which carries no status code; a
+/// frame is given only where the peer would otherwise have to guess at a fault
+/// that was not its own.
+async fn send_close<S>(stream: &mut tokio_tungstenite::WebSocketStream<S>, reason: Option<WsClose>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::SinkExt;
+    match stream.send(WsFrameMessage::Close(reason)).await {
+        Ok(()) => {}
+        Err(error) => tracing::debug!(%error, "WebSocket close frame send failed"),
+    }
+}
+
+/// Close a WebSocket transport, reporting a failure the teardown cannot act on.
+async fn close_transport<S>(stream: &mut tokio_tungstenite::WebSocketStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    match stream.close(None).await {
+        Ok(()) => {}
+        Err(error) => tracing::debug!(%error, "WebSocket close failed"),
+    }
+}
+
+/// Flush queued writes, reporting a failure the teardown cannot act on.
+async fn flush_transport<S>(stream: &mut tokio_tungstenite::WebSocketStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::SinkExt;
+    match stream.flush().await {
+        Ok(()) => {}
+        Err(error) => tracing::debug!(%error, "WebSocket flush failed"),
     }
 }
 
@@ -742,7 +1225,10 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt;
-    let _ = stream.get_mut().shutdown().await;
+    match stream.get_mut().shutdown().await {
+        Ok(()) => {}
+        Err(error) => tracing::debug!(%error, "WebSocket transport shutdown failed"),
+    }
     tokio::task::yield_now().await;
 }
 
@@ -765,7 +1251,11 @@ async fn next_control(
     }
 }
 
-async fn drain_direct_close<S>(stream: &mut tokio_tungstenite::WebSocketStream<S>)
+/// Read one transport until its peer's close frame arrives.
+///
+/// A transport error and an ended stream stop the drain the same way a close
+/// does: in all three there is no close frame still coming.
+async fn drain_until_close<S>(stream: &mut tokio_tungstenite::WebSocketStream<S>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -849,10 +1339,16 @@ fn ws_handshake_rejection(error: WsHandshakeError) -> hyper::Response<HyperRespo
     super::handle::to_hyper_full(response)
 }
 
+/// Build the `101` a validated handshake earns.
+///
+/// `None` is a builder failure — unreachable while the accept key is derived
+/// base64 and the subprotocol is token-validated, but a response that is not a
+/// `101` must never be handed back as one: the caller would register a bridge
+/// and resolve the handoff for an upgrade Hyper will never perform.
 fn ws_switching_protocols(
     accept_key: &str,
     subprotocol: Option<&str>,
-) -> hyper::Response<HyperResponseBody> {
+) -> Option<hyper::Response<HyperResponseBody>> {
     let mut builder = hyper::Response::builder()
         .status(hyper::StatusCode::SWITCHING_PROTOCOLS)
         .header("Upgrade", "websocket")
@@ -866,12 +1362,10 @@ fn ws_switching_protocols(
     match builder.body(HyperResponseBody::Full(http_body_util::Full::new(
         bytes::Bytes::new(),
     ))) {
-        Ok(response) => response,
+        Ok(response) => Some(response),
         Err(err) => {
             tracing::error!("failed to build WebSocket 101 response: {err}");
-            hyper::Response::new(HyperResponseBody::Full(http_body_util::Full::new(
-                bytes::Bytes::new(),
-            )))
+            None
         }
     }
 }

@@ -26,7 +26,7 @@ fn get_with_host(addr: std::net::SocketAddr, path: &str, host: &str) -> crate::h
     let mut stream = crate::http::connect(addr).unwrap();
     let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).unwrap();
-    crate::http::read_http_response(&mut stream).unwrap()
+    crate::http::read_http_response_bounded(&mut stream).unwrap()
 }
 
 /// 4.T1: Host routing + async proxy + connection pooling
@@ -173,7 +173,7 @@ fn e2e_websocket_proxy_still_works() {
             for msg in &messages {
                 write_ws_text_frame(&mut stream, msg);
                 let echo = read_ws_text_frame(&mut stream);
-                assert_eq!(echo, *msg, "echo mismatch for '{msg}'");
+                assert_eq!(&*echo, *msg, "echo mismatch for '{msg}'");
             }
 
             write_ws_close_frame(&mut stream);

@@ -39,6 +39,7 @@ Supported registration methods include:
 - `req.body()`
 - `req.json::<T>()`
 - `req.multipart()`
+- `req.on_disconnect()` — see [Observing Disconnect](#observing-disconnect)
 
 ### Handler Ownership Rule
 
@@ -57,6 +58,51 @@ router.get("/users/:id", |req| {
 ```
 
 If you only need request data before `.await`, reading directly from `req` is fine.
+
+### Observing Disconnect
+
+`req.on_disconnect()` returns a `DisconnectSignal` for that one response. Awaiting `cancelled()` resolves exactly once, to a `DisconnectCause`:
+
+| Cause | Meaning |
+|---|---|
+| `Completed` | the response body finished being produced |
+| `ServerShutdown` | the server or runtime began shutting down |
+| `PeerDisconnect` | the peer closed the connection, or the transport failed |
+| `StreamReset` | this request ended early while its connection stayed live |
+
+The signal is `Send + Sync + Clone`, and every clone resolves to the same cause. The first transition wins, and when more than one condition applies the causes resolve in the order above. `Completed` is set eagerly, before the drop that resolves the other three, so it outranks them; among the drop-resolved rows a shutdown that races a peer close reports `ServerShutdown`, and `StreamReset` is the residual — the connection is live, nothing is shutting down, and no completion was recorded. An HTTP/2 `RST_STREAM` is its canonical source, but any request that ends without producing its response over a live connection lands there on either protocol version, a panicking handler included.
+
+**`PeerDisconnect` cannot tell a half-close from a full one.** Read EOF is what marks the connection terminating, and a client that sends its request and then calls `shutdown(WR)` produces exactly that EOF while it waits for the answer. A completed response wins the table, so this reaches one case: a handler still producing its response observes `PeerDisconnect` while a live client is still waiting for it. The transport offers no clean way to separate the two, so this is a limit of the signal rather than a case it discriminates.
+
+**`Completed` means produced, not delivered.** It fires when Camber has handed the whole response body to Hyper, which is what an in-flight producer needs to know: it can release subprocesses, cursors, permits, and temp files. Hyper exposes frame production, not transport delivery, so "the last byte reached the client" is not observable and is not what this reports.
+
+A response that hands its transport on rather than writing a body still completes at that handoff. A WebSocket upgrade resolves `Completed` when the `101` is committed — the point where the WebSocket subsystem takes over and the HTTP response is over; the upgraded peer's lifetime is the WebSocket close contract, not this signal. Building the `101` is not that point: an upgrade held short of its handoff has not resolved there, and one the server refuses never reaches the handoff at all. A refused upgrade falls back to its own response body, which is an ordinary one — `400` or `426` from handshake validation, `403` for a rejected Origin, and on an owned server `503` when the supervisor rejects the registration or `500` when it is unavailable — so it resolves `Completed` when that body is produced. A peer that abandons the handshake before the `101` resolves `PeerDisconnect`. A gRPC request resolves `Completed` where Camber hands it to tonic, which owns that response body.
+
+**Hold the signal somewhere that outlives the handler.** Camber's per-request future is dropped when the peer goes away — that drop is the observation — so a handler awaiting its own signal is cancelled instead of woken. Clone the signal into the task that owns the resource:
+
+```rust
+router.get("/report", |req| {
+    let disconnect = req.on_disconnect();
+    async move {
+        camber::spawn_async(async move {
+            // Runs whether the response completed or the peer went away.
+            let cause = disconnect.cancelled().await;
+            release_report_resources(cause);
+        });
+        Response::text(200, "report queued")
+    }
+});
+```
+
+**The cleanup task needs a Camber runtime context.** `spawn_async` admits its future to the current runtime's root scope, so the connection task that calls it must carry that context. A `serve_background*` server started **inside** a Camber runtime propagates it: the supervisor is admitted to that runtime's root scope and runs under it, and each connection task it spawns captures that context and carries it in. The `serve_async*` entry points behave the same way: they capture the ambient context when the supervisor is built, and carry it into every connection task, so a `serve_async` server awaited inside a Camber runtime propagates it too. Started on a bare Tokio runtime, the supervisor is a plain `tokio::spawn` with nothing to capture, so its connection tasks run without a Camber context — the same position as the synchronous `http::serve` entry, whose connection tasks are detached and carry no Camber runtime context by contract.
+
+With no context `spawn_async` refuses with `RuntimeError::NoRuntime`, drops the cleanup future unrun, and reports the refusal only on the returned handle. The example above discards that handle, so on those paths it cleans up nothing and says nothing.
+
+**A closed scope refuses it too.** Closure return from `runtime::run` closes root-scope admission, but it is not a shutdown request, so an owned server keeps serving until one arrives. In that window `spawn_async` refuses with `RuntimeError::ScopeClosed` and drops the cleanup future unrun, exactly as `NoRuntime` does. If requests can still arrive after the closure returns, read the handle, or own the cleanup task outside the scope.
+
+Where a refusal is possible, hand the signal to a task the application owns — a `tokio::spawn` the application joins, or a channel into a worker it already runs — or start the server inside a Camber runtime that is still open and keep the pattern above. Awaiting the signal inside the handler is not an alternative: the guard that resolves it is held across the handler, so nothing can resolve while the handler is still running.
+
+A request built with `Request::builder()` has no transport, so its signal never resolves.
 
 ## Responses
 
@@ -129,6 +175,8 @@ router.ws("/chat", |_req: &Request, mut conn: WsConn| -> Result<(), RuntimeError
     Ok(())
 });
 ```
+
+`WsConn` receives with `recv` (text), `recv_binary`, and `recv_message` (the next text or binary message as a `WsMessage`, with ping and pong frames still skipped). Each blocks until a message arrives or the peer closes, and each returns `None` on close. `recv_timeout(duration)` is the bounded form of `recv`: it returns `RuntimeError::Timeout` when no text message or close frame arrives before the deadline. There is no bounded form of `recv_binary` or `recv_message`.
 
 Camber enforces a same-host Origin policy for browser WebSocket upgrades.
 WebSocket upgrades are classified before request-body buffering, so upgrade requests do not hit

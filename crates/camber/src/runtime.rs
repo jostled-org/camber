@@ -1,15 +1,15 @@
 use crate::resource::{HealthState, MIN_HEALTH_INTERVAL, Resource};
 use crate::resource_lifecycle::{
-    run_initial_health_checks, shutdown_resources, spawn_health_tasks,
+    admit_health_tasks, run_initial_health_checks, shutdown_resources,
 };
 use crate::runtime_state::{
-    RuntimeConfig, RuntimeInner, install_runtime, teardown_runtime, wait_for_tasks,
-    wait_for_tasks_timeout,
+    RuntimeConfig, RuntimeContextGuard, RuntimeInner, drain_root_scope, install_runtime,
+    teardown_runtime,
 };
 use crate::runtime_test_support::{RuntimeController, RuntimeSchedule};
 use crate::tls::CertStore;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 /// Re-export of `tokio::runtime::Handle` for use with [`tokio_handle()`].
@@ -17,46 +17,25 @@ pub use tokio::runtime::Handle as TokioHandle;
 
 // Re-export crate-internal items so `use crate::runtime;` call sites keep working.
 pub(crate) use crate::runtime_state::{
-    ShutdownSignal, cancel_channel, check_cancel, current_runtime, has_runtime, shutdown_signal,
+    cancel_channel, check_cancel, has_runtime, runtime_context, try_current_runtime,
 };
 
-/// Register an external shutdown signal. When `future` completes, Camber
-/// treats it as a shutdown request. Calling again replaces the previous signal.
-pub fn on_cancel<F>(future: F)
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    crate::runtime_state::on_cancel(future);
-}
-
-/// Run a future to completion on the current Tokio runtime.
-///
-/// Calls `block_in_place` + `Handle::block_on` internally. Use inside
-/// `runtime::run` closures or `camber::spawn` tasks to call async code.
-pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    crate::runtime_state::block_on(f)
-}
-
-/// Signal the runtime to shut down.
-pub fn request_shutdown() {
-    crate::runtime_state::request_shutdown();
-}
-
-/// Return the underlying Tokio runtime handle.
-///
-/// Use this inside handlers to run async code via `handle.block_on(...)`.
-/// Panics if called outside a Camber runtime.
-pub fn tokio_handle() -> tokio::runtime::Handle {
-    crate::runtime_state::tokio_handle()
-}
-
-/// Check whether shutdown has been requested.
-pub fn is_shutting_down() -> bool {
-    crate::runtime_state::is_shutting_down()
-}
+// The public lifecycle entry points, re-exported from their definitions rather
+// than forwarded through one-line wrappers. A wrapper's own doc comment is what
+// a user reads, so each was quietly dropping the typed-absence semantics stated
+// at the definition — that `request_shutdown` is a no-op and `is_shutting_down`
+// false with no runtime, and that `on_cancel` drops `future` unpolled. The
+// public paths — `camber::runtime::request_shutdown` and the rest — are
+// unchanged.
+pub use crate::runtime_state::{
+    block_on, is_shutting_down, on_cancel, request_shutdown, tokio_handle,
+};
 
 impl std::fmt::Debug for RuntimeBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Non-exhaustive: the TLS paths, the test schedule, the OTLP endpoint
+        // and the ACME/DNS-01 setups are deliberately not printed, and `..`
+        // says so instead of implying the struct holds only what is listed.
         f.debug_struct("RuntimeBuilder")
             .field("worker_threads", &self.config.worker_threads)
             .field("shutdown_timeout", &self.config.shutdown_timeout)
@@ -66,8 +45,8 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("health_interval", &self.config.health_interval)
             .field("connection_limit", &self.config.connection_limit)
             .field("resource_count", &self.resources.len())
-            .field("has_tls", &self.tls_cert_store.is_some())
-            .finish()
+            .field("has_tls", &self.has_manual_tls())
+            .finish_non_exhaustive()
     }
 }
 
@@ -76,8 +55,11 @@ pub struct RuntimeBuilder {
     config: RuntimeConfig,
     test_schedule: Option<Arc<RuntimeSchedule>>,
     resources: Vec<Box<dyn Resource>>,
-    tls_cert_path: Option<std::path::PathBuf>,
-    tls_key_path: Option<std::path::PathBuf>,
+    /// Written once by `tls_cert`/`tls_key` and thereafter only read, so the
+    /// path is boxed rather than kept in a growable `PathBuf` buffer neither
+    /// setter ever appends to.
+    tls_cert_path: Option<Box<std::path::Path>>,
+    tls_key_path: Option<Box<std::path::Path>>,
     tls_cert_store: Option<CertStore>,
     #[cfg(feature = "acme")]
     acme_config: Option<crate::acme::AcmeConfig>,
@@ -153,7 +135,9 @@ impl RuntimeBuilder {
     }
 
     /// Register a resource for lifecycle management. Resources are shut down
-    /// in reverse registration order during runtime teardown.
+    /// concurrently during runtime teardown — one thread each, all joined
+    /// before `run` returns — so a resource must not depend on another still
+    /// being up while it shuts down.
     pub fn resource(mut self, r: impl Resource) -> Self {
         self.resources.push(Box::new(r));
         self
@@ -188,13 +172,13 @@ impl RuntimeBuilder {
 
     /// Set the TLS certificate PEM file path.
     pub fn tls_cert(mut self, path: &std::path::Path) -> Self {
-        self.tls_cert_path = Some(path.to_path_buf());
+        self.tls_cert_path = Some(Box::from(path));
         self
     }
 
     /// Set the TLS private key PEM file path.
     pub fn tls_key(mut self, path: &std::path::Path) -> Self {
-        self.tls_key_path = Some(path.to_path_buf());
+        self.tls_key_path = Some(Box::from(path));
         self
     }
 
@@ -255,15 +239,15 @@ impl RuntimeBuilder {
 
         // Resolve manual TLS (cert files or CertStore).
         // When ACME is active, these are all None (enforced by validate_tls_options).
-        let (tls_cfg, store) =
-            crate::tls::resolve_tls(self.tls_cert_store, self.tls_cert_path, self.tls_key_path)?;
+        // `PathBuf::from(Box<Path>)` reuses the boxed allocation, so handing
+        // `resolve_tls` the owned type it takes costs no copy.
+        let (tls_cfg, store) = crate::tls::resolve_tls(
+            self.tls_cert_store,
+            self.tls_cert_path.map(std::path::PathBuf::from),
+            self.tls_key_path.map(std::path::PathBuf::from),
+        )?;
         config.tls_config = tls_cfg;
         config.cert_store = store;
-
-        #[cfg(feature = "otel")]
-        if let Some(ref endpoint) = self.otel_endpoint {
-            crate::http::otel::init_exporter(endpoint)?;
-        }
 
         #[cfg(feature = "acme")]
         let acme_state = match self.acme_config {
@@ -278,19 +262,29 @@ impl RuntimeBuilder {
         run_inner_impl(
             config,
             self.test_schedule,
-            self.resources.into_boxed_slice(),
+            self.resources.into(),
             f,
             #[cfg(feature = "acme")]
             acme_state,
             #[cfg(feature = "dns01")]
             self.dns01_setup,
+            #[cfg(feature = "otel")]
+            self.otel_endpoint,
         )
     }
 
+    /// Whether any TLS material was configured by hand — a resolver, or either
+    /// half of a cert/key pair.
+    ///
+    /// One definition for the mutual-exclusion check and the `Debug` field, so
+    /// a builder that debug-prints `has_tls: false` cannot then be rejected for
+    /// having manual TLS.
+    fn has_manual_tls(&self) -> bool {
+        self.tls_cert_path.is_some() || self.tls_key_path.is_some() || self.tls_cert_store.is_some()
+    }
+
     fn validate_tls_options(&self) -> Result<(), crate::RuntimeError> {
-        let has_manual = self.tls_cert_path.is_some()
-            || self.tls_key_path.is_some()
-            || self.tls_cert_store.is_some();
+        let has_manual = self.has_manual_tls();
 
         #[cfg(feature = "acme")]
         let has_acme = self.acme_config.is_some();
@@ -329,10 +323,39 @@ pub fn test<F, T>(f: F) -> Result<T, crate::RuntimeError>
 where
     F: FnOnce() -> T,
 {
-    builder()
-        .keepalive_timeout(Duration::from_millis(100))
-        .shutdown_timeout(Duration::from_secs(1))
-        .run(f)
+    // The config is INSTALLED, not replayed through the setters. Naming the
+    // knobs by hand is what let the two test entries drift: the async one
+    // consumes the config whole, so any knob added to `test_runtime_config` and
+    // not also listed here would reach only one of them. The field is private
+    // to this module, so this is not an API the setters guard. Their only other
+    // effect is the 100 ms clamp, and both durations below already sit at or
+    // above it — the clamps skipped here are no-ops.
+    let mut builder = RuntimeBuilder::new();
+    builder.config = test_runtime_config();
+    builder.run(f)
+}
+
+/// What a test-optimized runtime is configured as.
+///
+/// One definition, so the sync and async test entry points cannot drift on a
+/// `RuntimeConfig` knob only one of them got — which is what they had already
+/// done on the worker count. Both entries take the config WHOLE, so a knob
+/// added here reaches both. It is also the count the async entry builds its
+/// executor from, so the worker threads `RuntimeInner` reports are the ones it
+/// has.
+///
+/// The config is the only thing they share. `test` runs through
+/// `run_inner_impl` and gets that path's owned subsystems — the signal watcher
+/// and the per-resource health loops — while the async entry admits no
+/// background subsystem at all; a test that wants one opts in through the
+/// doc-hidden seam.
+fn test_runtime_config() -> RuntimeConfig {
+    RuntimeConfig {
+        worker_threads: tokio_default_worker_threads(),
+        keepalive_timeout: Duration::from_millis(100),
+        shutdown_timeout: Duration::from_secs(1),
+        ..RuntimeConfig::default()
+    }
 }
 
 /// Run an async closure within a test-optimized runtime.
@@ -353,32 +376,146 @@ where
     Fut: std::future::Future<Output = T>,
 {
     reject_nested_runtime()?;
-    let shutdown_timeout = Duration::from_secs(1);
+    let config = test_runtime_config();
 
-    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+    let tokio_rt = build_executor(config.worker_threads)?;
+    let (inner, context) =
+        establish_runtime(Some(tokio_rt.handle().clone()), config, None, None, None);
+
+    let scoped = run_scoped(&tokio_rt, &inner, f);
+    let drain = close_and_drain(&inner, &tokio_rt);
+
+    finish_runtime(&inner, tokio_rt, context, drain, scoped)
+}
+
+/// Tokio's own default worker count.
+///
+/// The test entries size their executor the way `new_multi_thread()` would
+/// have with no `worker_threads` call, which is not `RuntimeConfig`'s default:
+/// a `#[camber::test]` builds a whole runtime per test case and many run at
+/// once, so the server-shaped 4× oversubscription would be paid hundreds of
+/// times over for tests that spawn a handful of tasks.
+fn tokio_default_worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// Build the Tokio multi-thread executor one Camber runtime will run on.
+fn build_executor(worker_threads: usize) -> Result<tokio::runtime::Runtime, crate::RuntimeError> {
+    let executor = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
         .enable_all()
         .build()?;
+    Ok(executor)
+}
 
-    let mut inner = RuntimeInner::with_config(RuntimeConfig {
-        keepalive_timeout: Duration::from_millis(100),
-        shutdown_timeout,
-        ..RuntimeConfig::default()
-    });
-    inner.tokio_handle = Some(tokio_rt.handle().clone());
+/// Establish one Camber runtime: assemble the shared state its children reach
+/// it through, publish it to an attached test schedule, and install it as this
+/// thread's runtime context.
+///
+/// All three runtime-establishing entry points enter here — the two that build
+/// their own executor, and the doc-hidden context seam — so what it takes to BE
+/// a running Camber runtime is written once instead of kept in step by hand,
+/// the same reason `finish_runtime` owns the teardown tail. The three
+/// attachments are passed in rather than assigned by the caller because they
+/// must be in place before the state is shared: once the `Arc` exists, a child
+/// can already read them.
+///
+/// The executor is taken as an `Option<Handle>` rather than as the owning
+/// `Runtime`, because the seam owns no executor: it establishes a runtime on
+/// whatever Tokio context is already entered, and `None` is what a runtime with
+/// nowhere to launch a child reports through `RuntimeInner::executor`.
+pub(crate) fn establish_runtime(
+    tokio_handle: Option<TokioHandle>,
+    config: RuntimeConfig,
+    test_schedule: Option<Arc<RuntimeSchedule>>,
+    metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
+    health_state: Option<HealthState>,
+) -> (Arc<RuntimeInner>, RuntimeContextGuard) {
+    let mut inner = RuntimeInner::with_config_and_schedule(config, test_schedule);
+    inner.tokio_handle = tokio_handle;
+    inner.metrics_handle = metrics_handle;
+    inner.health_state = health_state;
+
     let inner = Arc::new(inner);
+    inner.publish_to_test_schedule();
+    let context = install_runtime(Arc::clone(&inner));
 
-    let runtime_guard = install_runtime(Arc::clone(&inner));
+    (inner, context)
+}
 
-    let result = tokio_rt.block_on(crate::runtime_state::scope_runtime(Arc::clone(&inner), f()));
+/// Run a future inside the runtime's task-local scope, catching an unwind
+/// instead of letting it escape past teardown.
+///
+/// An unwind that escaped here would drop the Tokio runtime mid-unwind, and
+/// `Runtime::drop` waits UNBOUNDED on every `spawn_blocking` child — the exact
+/// hang `FORCED_JOIN_GRACE` and `shutdown_timeout` exist to prevent. It would
+/// also skip the whole teardown precedence: `ScopeClosing` never fires, so no
+/// Camber-owned loop is told to stop, and no registered resource is shut down.
+/// The payload is carried to the far side of teardown and resumed there, so
+/// the caller's panic semantics are unchanged. Every failed assertion inside
+/// `#[camber::test]` takes this path.
+fn run_scoped<B, Fut>(
+    tokio_rt: &tokio::runtime::Runtime,
+    inner: &Arc<RuntimeInner>,
+    body: B,
+) -> ScopedOutcome<Fut::Output>
+where
+    B: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tokio_rt.block_on(crate::runtime_state::scope_runtime(
+            Arc::clone(inner),
+            body(),
+        ))
+    }))
+}
 
-    wait_for_tasks_timeout(&inner, shutdown_timeout);
+/// What the scoped run produced: the closure's value, or the payload its
+/// unwind carried. `Box<dyn Any + Send>` is the payload type `catch_unwind`
+/// and `resume_unwind` are defined in terms of, not a choice of dispatch.
+type ScopedOutcome<T> = Result<T, Box<dyn std::any::Any + Send>>;
 
-    teardown_runtime(&inner);
-    drop(runtime_guard);
+/// Close root-scope admission, then drain the scope.
+///
+/// Closing is what tells every Camber-owned child to stop, so it must precede
+/// the wait that expects them to have stopped. Both entry points drain through
+/// here, so neither can drift into closing at a different point than the other
+/// — which is what they had already done.
+fn close_and_drain(
+    inner: &RuntimeInner,
+    tokio_rt: &tokio::runtime::Runtime,
+) -> Option<crate::RuntimeError> {
+    inner.close_scope();
+    drain_root_scope(inner, tokio_rt.handle())
+}
 
-    tokio_rt.shutdown_timeout(shutdown_timeout);
-
-    Ok(result)
+/// Order the runtime-level failures that displace the closure's value.
+///
+/// A recorded internal panic outranks a drain timeout: a timeout is frequently
+/// the consequence of a wedged panicking child, so reporting the panic
+/// localizes the fault. The closure's value is never inspected — `T` is opaque,
+/// so it is either returned or displaced.
+///
+/// The displaced timeout is LOGGED rather than dropped. Exactly one error
+/// leaves through the `Result`, and this is the case the precedence above calls
+/// common, so the loser has no return path left at all — and the value it
+/// carries is the child count that failed to exit cooperatively, which nothing
+/// else reports: `drain_root_scope` constructs it silently and the forced
+/// stop's own warning fires only when its grace expires.
+fn runtime_failure(
+    inner: &RuntimeInner,
+    drain: Option<crate::RuntimeError>,
+) -> Option<crate::RuntimeError> {
+    match (inner.take_internal_panic(), drain) {
+        (Some(panicked), Some(displaced)) => {
+            tracing::warn!(%displaced, "drain timeout displaced by a recorded internal panic");
+            Some(panicked)
+        }
+        (panicked, drain) => panicked.or(drain),
+    }
 }
 
 /// Run a closure within a scoped Camber runtime with default configuration.
@@ -394,11 +531,13 @@ where
     run_inner_impl(
         RuntimeConfig::default(),
         None,
-        Vec::new().into_boxed_slice(),
+        Vec::new().into(),
         f,
         #[cfg(feature = "acme")]
         None,
         #[cfg(feature = "dns01")]
+        None,
+        #[cfg(feature = "otel")]
         None,
     )
 }
@@ -406,67 +545,55 @@ where
 fn run_inner_impl<F, T>(
     config: RuntimeConfig,
     test_schedule: Option<Arc<RuntimeSchedule>>,
-    resources: Box<[Box<dyn Resource>]>,
+    resources: Arc<[Box<dyn Resource>]>,
     f: F,
     #[cfg(feature = "acme")] acme_state: Option<crate::acme::AcmeState<std::io::Error>>,
     #[cfg(feature = "dns01")] dns01_setup: Option<crate::dns01::Dns01Setup>,
+    #[cfg(feature = "otel")] otel_endpoint: Option<Box<str>>,
 ) -> Result<T, crate::RuntimeError>
 where
     F: FnOnce() -> T,
 {
-    let shutdown_timeout = config.shutdown_timeout;
-    let metrics_enabled = config.metrics_enabled;
+    // Resolved first: a recorder the process refuses is a startup failure, and
+    // failing before an executor is built or a DNS-01 cert is provisioned means
+    // nothing has to be unwound to report it.
+    let metrics_handle = install_metrics(config.metrics_enabled)?;
 
-    // Build a Tokio multi-thread runtime with configured worker threads.
-    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.worker_threads)
-        .enable_all()
-        .build()?;
+    let tokio_rt = build_executor(config.worker_threads)?;
 
-    // DNS-01 setup: provision or load cert before server starts.
+    // DNS-01 setup: provision or load cert before the server starts, so the
+    // config the runtime is established with already carries the result.
     #[cfg(feature = "dns01")]
-    let (config, dns01_state) = match dns01_setup {
-        Some(setup) => {
-            let state = tokio_rt.block_on(crate::dns01::init_dns01(setup))?;
-            let mut cfg = config;
-            cfg.tls_config = Some(state.tls_config.clone());
-            cfg.cert_store = Some(state.store.clone());
-            (cfg, Some(state))
-        }
-        None => (config, None),
-    };
+    let (config, dns01_renewal) = provision_dns01(&tokio_rt, config, dns01_setup)?;
 
-    let resources: Arc<[Box<dyn Resource>]> = resources.into();
+    // The OTLP exporter is installed HERE, in the function that shuts it down,
+    // and after the last step that can return early. `init_exporter` leaves a
+    // running batch span processor in a process-global that only
+    // `shutdown_exporter` takes back, so a `?` returning between the two would
+    // leave that processor installed with its buffer never flushed — and the
+    // next `RuntimeBuilder::run` asking for otel would overwrite the slot,
+    // dropping the previous provider without `shutdown()` and losing its
+    // buffered spans silently. Nothing below this line returns early before the
+    // teardown at the bottom.
+    #[cfg(feature = "otel")]
+    if let Some(endpoint) = otel_endpoint {
+        crate::http::otel::init_exporter(&endpoint)?;
+    }
 
-    // Build health state from registered resources: one AtomicBool per resource.
-    let health_state: Option<HealthState> = match resources.is_empty() {
-        true => None,
-        false => Some(
-            resources
-                .iter()
-                .map(|r| (Box::from(r.name()), AtomicBool::new(true)))
-                .collect::<Vec<_>>()
-                .into_boxed_slice()
-                .into(),
-        ),
-    };
-
+    let health_state = build_health_state(&resources);
     let health_interval = config.health_interval;
 
-    let mut inner = RuntimeInner::with_config_and_schedule(config, test_schedule);
-
-    inner.metrics_handle = install_metrics(metrics_enabled);
-
-    inner.tokio_handle = Some(tokio_rt.handle().clone());
-    inner.health_state = health_state.clone();
-
-    let inner = Arc::new(inner);
-
-    let runtime_guard = install_runtime(Arc::clone(&inner));
+    let (inner, context) = establish_runtime(
+        Some(tokio_rt.handle().clone()),
+        config,
+        test_schedule,
+        metrics_handle,
+        health_state.clone(),
+    );
 
     // Run the user closure inside tokio's block_on so that tokio::spawn_blocking
     // and other tokio APIs are available on this thread.
-    let runtime_scope = async {
+    let runtime_scope = || async {
         // Run initial health checks before the user closure starts serving
         // traffic. Runs inside block_on so Handle::current() is available
         // for resources that need async I/O (e.g. ProxyHealthResource).
@@ -474,74 +601,228 @@ where
             run_initial_health_checks(&resources, hs).await;
         }
 
-        let signal_task = crate::signals::spawn_signal_watcher(
-            inner.shutdown.clone(),
-            inner.shutdown_notify.clone(),
-        );
-
-        #[cfg(feature = "acme")]
-        let acme_task = acme_state.map(spawn_acme_renewal);
-
-        #[cfg(feature = "dns01")]
-        let dns01_task = dns01_state.map(|s| s.acme.spawn_renewal(s.provider, s.store));
-
-        let health_tasks = spawn_health_tasks(
+        admit_owned_subsystems(
+            &inner,
             &resources,
             &health_state,
             health_interval,
-            &inner.shutdown_signal(),
+            #[cfg(feature = "acme")]
+            acme_state,
+            #[cfg(feature = "dns01")]
+            dns01_renewal,
         );
 
-        let value = f();
-
-        // Abort background tasks — no longer needed after the closure returns.
-        signal_task.abort();
-        for task in &health_tasks {
-            task.abort();
-        }
-        #[cfg(feature = "acme")]
-        if let Some(task) = acme_task {
-            task.abort();
-        }
-        #[cfg(feature = "dns01")]
-        if let Some(task) = dns01_task {
-            task.abort();
-        }
-
-        value
+        f()
     };
-    let result = tokio_rt.block_on(crate::runtime_state::scope_runtime(
-        Arc::clone(&inner),
-        runtime_scope,
-    ));
+    // The closure's return closes root-scope admission and fires ScopeClosing.
+    // It is not a shutdown request: ShutdownSignal stays unset. An unwinding
+    // closure reaches the same close, which is why the run is caught.
+    let scoped = run_scoped(&tokio_rt, &inner, runtime_scope);
 
-    // Wait for all spawned tasks to complete (structured concurrency).
-    // When shutting down, apply the configured timeout as a safety net.
-    match inner.shutdown.load(Ordering::Acquire) {
-        true => wait_for_tasks_timeout(&inner, shutdown_timeout),
-        false => wait_for_tasks(&inner),
-    }
+    // Drain the root scope before anything else: no child the executor can
+    // stop may still reach a registered resource once shutdown starts.
+    let drain = close_and_drain(&inner, &tokio_rt);
 
     shutdown_resources(&resources);
 
     #[cfg(feature = "otel")]
     crate::http::otel::shutdown_exporter();
 
-    teardown_runtime(&inner);
+    finish_runtime(&inner, tokio_rt, context, drain, scoped)
+}
+
+/// Provision or load the DNS-01 certificate before the server starts, folding
+/// the result into the config the runtime will be established with.
+///
+/// Runs on the executor the runtime will use, before that runtime exists: the
+/// cert has to be in the config the shared state is built from, and no scope
+/// child may be admitted until it is.
+#[cfg(feature = "dns01")]
+fn provision_dns01(
+    tokio_rt: &tokio::runtime::Runtime,
+    config: RuntimeConfig,
+    setup: Option<crate::dns01::Dns01Setup>,
+) -> Result<(RuntimeConfig, Option<Dns01Renewal>), crate::RuntimeError> {
+    let setup = match setup {
+        Some(setup) => setup,
+        None => return Ok((config, None)),
+    };
+    let state = tokio_rt.block_on(crate::dns01::init_dns01(setup))?;
+
+    let mut config = config;
+    config.tls_config = Some(state.tls_config);
+    config.cert_store = Some(state.store.clone());
+    Ok((
+        config,
+        Some(Dns01Renewal {
+            acme: state.acme,
+            provider: state.provider,
+            store: state.store,
+        }),
+    ))
+}
+
+/// What the DNS-01 renewal loop is built from, carried out of provisioning.
+///
+/// The provisioning state also holds the TLS material, which belongs to the
+/// config and is consumed there; splitting it here means the admission step
+/// receives only what its loop actually needs.
+#[cfg(feature = "dns01")]
+struct Dns01Renewal {
+    acme: crate::dns01::AcmeDns01,
+    provider: crate::dns01::CloudflareProvider,
+    store: CertStore,
+}
+
+/// Build health state from registered resources: one `AtomicBool` per
+/// resource, or nothing at all when none is registered.
+fn build_health_state(resources: &[Box<dyn Resource>]) -> Option<HealthState> {
+    match resources.is_empty() {
+        true => None,
+        // `Arc<[T]>: FromIterator<T>` over a `TrustedLen` map allocates once,
+        // where collecting through a `Vec` allocates twice and memcpys.
+        false => Some(
+            resources
+                .iter()
+                .map(|r| (Box::from(r.name()), AtomicBool::new(true)))
+                .collect(),
+        ),
+    }
+}
+
+/// Admit every Camber-owned background subsystem this runtime carries.
+///
+/// Each becomes a root-scope child with a lifecycle-signal arm, so teardown
+/// awaits its completion instead of aborting it, and each is admitted through
+/// the wrapper that names it in a refusal. Extracted whole: the entry point
+/// that used to hold this inline was also building the runtime, provisioning
+/// DNS-01, and draining the scope.
+///
+/// Every one of them is admitted to the runtime this function was HANDED, not
+/// to whichever runtime the ambient task-local happens to resolve to. The two
+/// coincide today; nothing in the types said so, and the signal watcher was the
+/// plainest case — its `Arc` named this runtime in the shutdown request it
+/// applies while the scope that owned it came from somewhere else entirely.
+fn admit_owned_subsystems(
+    inner: &Arc<RuntimeInner>,
+    resources: &Arc<[Box<dyn Resource>]>,
+    health_state: &Option<HealthState>,
+    health_interval: Duration,
+    #[cfg(feature = "acme")] acme_state: Option<crate::acme::AcmeState<std::io::Error>>,
+    #[cfg(feature = "dns01")] dns01_renewal: Option<Dns01Renewal>,
+) {
+    // The refusal is already reported against the subsystem's own name, and
+    // this setup runs inside the block that yields the user closure's value —
+    // there is no result here to propagate one through.
+    drop(admit_signal_watcher(inner));
+
+    #[cfg(feature = "acme")]
+    if let Some(state) = acme_state {
+        drop(crate::task::admit_signalled_subsystem_on(
+            inner,
+            "acme renewal",
+            move |signals| crate::acme::acme_renewal_loop(state, signals),
+        ));
+    }
+
+    #[cfg(feature = "dns01")]
+    if let Some(renewal) = dns01_renewal {
+        drop(crate::task::admit_signalled_subsystem_on(
+            inner,
+            "dns01 renewal",
+            move |signals| {
+                crate::dns01::dns01_renewal_loop(
+                    renewal.acme,
+                    renewal.provider,
+                    renewal.store,
+                    signals,
+                )
+            },
+        ));
+    }
+
+    admit_health_tasks(inner, resources, health_state, health_interval);
+}
+
+/// Admit the OS signal watcher one runtime owns.
+///
+/// The runtime's own setup and the doc-hidden test seam both enter here, so the
+/// seam admits the construction production uses instead of rebuilding it: the
+/// sources are registered synchronously before admission — so a signal raised
+/// immediately afterwards reaches an installed handler — and the request the
+/// watcher applies names this runtime.
+///
+/// That last part is now enforced rather than assumed: the ONE `Arc` supplies
+/// the shutdown request the watcher applies, the signals it stops on, and the
+/// scope that awaits it. The ambient form let the first come from the argument
+/// while the other two came from a task-local lookup.
+pub(crate) fn admit_signal_watcher(inner: &Arc<RuntimeInner>) -> Result<(), crate::RuntimeError> {
+    // The one clone the watcher genuinely keeps: the request it applies at
+    // shutdown outlives this call. Taking the `Arc` by value would add a
+    // second, since the admission itself only borrows.
+    let requested = Arc::clone(inner);
+    crate::task::admit_signalled_subsystem_on(inner, "signal watcher", move |signals| {
+        crate::signals::signal_watcher_loop(
+            crate::signals::SignalSources::register(),
+            crate::signals::ShutdownRequest::Runtime(requested),
+            signals,
+        )
+    })
+}
+
+/// Close out a drained runtime: release the thread's context, give the
+/// detached synchronous-entry connection tasks their shutdown window, and let
+/// a runtime-level failure displace the closure's value.
+///
+/// Both runtime-establishing entry points end here, so the closing order — and
+/// which failure wins — is written once rather than kept in step by hand.
+///
+/// A caught unwind resumes at the very end, once bounded teardown has run in
+/// full. It outranks every runtime-level failure by construction: the payload
+/// leaves through the panic, not through the `Result`.
+fn finish_runtime<T>(
+    inner: &RuntimeInner,
+    tokio_rt: tokio::runtime::Runtime,
+    runtime_guard: RuntimeContextGuard,
+    drain: Option<crate::RuntimeError>,
+    scoped: ScopedOutcome<T>,
+) -> Result<T, crate::RuntimeError> {
+    teardown_runtime(inner);
     drop(runtime_guard);
 
-    // Shut down the tokio runtime. Use shutdown_timeout to avoid blocking
-    // indefinitely on spawn_blocking tasks that ignore the shutdown flag.
-    tokio_rt.shutdown_timeout(shutdown_timeout);
+    // This is the detached synchronous-entry connection tasks' window, not a
+    // second scope drain: the scope already drained above.
+    tokio_rt.shutdown_timeout(inner.config.shutdown_timeout);
 
-    Ok(result)
+    // Read BEFORE the unwind resumes: `resume_unwind` diverges, and the panic
+    // slot has exactly one reader.
+    match (scoped, runtime_failure(inner, drain)) {
+        (Ok(value), None) => Ok(value),
+        (Ok(_), Some(error)) => Err(error),
+        (Err(payload), failure) => resume_past_failure(failure, payload),
+    }
+}
+
+/// Resume the closure's caught unwind, logging the runtime-level failure that
+/// unwind displaces.
+///
+/// The payload leaves through the panic, not through the `Result`, so a
+/// recorded internal panic or a drain timeout has no return path left at all.
+/// The log is the only trace it can leave, and without it a Camber-owned child
+/// that panicked inside a failing `#[camber::test]` — the common case, since
+/// every failed assertion takes this path — disappeared completely.
+fn resume_past_failure(
+    failure: Option<crate::RuntimeError>,
+    payload: Box<dyn std::any::Any + Send>,
+) -> ! {
+    if let Some(error) = failure {
+        tracing::error!(%error, "runtime failure displaced by an unwinding closure");
+    }
+    std::panic::resume_unwind(payload)
 }
 
 fn reject_nested_runtime() -> Result<(), crate::RuntimeError> {
-    match (
-        crate::runtime_state::has_runtime(),
-        tokio::runtime::Handle::try_current().is_ok(),
-    ) {
+    match (has_runtime(), tokio::runtime::Handle::try_current().is_ok()) {
         (false, false) => Ok(()),
         _ => Err(crate::RuntimeError::InvalidArgument(
             "nested runtime creation is not supported".into(),
@@ -549,41 +830,55 @@ fn reject_nested_runtime() -> Result<(), crate::RuntimeError> {
     }
 }
 
-fn init_prometheus_recorder() -> metrics_exporter_prometheus::PrometheusHandle {
+/// Build the Prometheus recorder and install it as the process-global one.
+///
+/// A rejected installation is an ERROR, not a warning: the handle it yields is
+/// wired to a recorder no metric will ever reach, so `/metrics` would render
+/// empty for the life of the process. The caller asked for `with_metrics()`,
+/// and an endpoint that can never report is worse than a startup refusal.
+fn init_prometheus_recorder() -> Result<metrics_exporter_prometheus::PrometheusHandle, Box<str>> {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     match metrics::set_global_recorder(recorder) {
-        Ok(()) => {}
-        Err(e) => tracing::warn!("failed to install global metrics recorder: {e}"),
-    }
-    handle
-}
-
-fn install_metrics(enabled: bool) -> Option<metrics_exporter_prometheus::PrometheusHandle> {
-    static HANDLE: std::sync::OnceLock<metrics_exporter_prometheus::PrometheusHandle> =
-        std::sync::OnceLock::new();
-    match enabled {
-        false => None,
-        true => Some(HANDLE.get_or_init(init_prometheus_recorder).clone()),
-    }
-}
-
-/// Spawn the ACME renewal stream as a background task.
-/// Polls the AcmeState stream which handles cert provisioning, caching,
-/// and renewal. Logs events and errors. Cancelled on shutdown.
-#[cfg(feature = "acme")]
-fn spawn_acme_renewal(
-    state: crate::acme::AcmeState<std::io::Error>,
-) -> tokio::task::JoinHandle<()> {
-    use futures_util::StreamExt;
-
-    tokio::spawn(async move {
-        let mut state = std::pin::pin!(state);
-        while let Some(event) = state.next().await {
-            match event {
-                Ok(ok) => tracing::info!("acme: {ok:?}"),
-                Err(err) => tracing::warn!("acme: {err}"),
-            }
+        Ok(()) => Ok(handle),
+        Err(error) => {
+            Err(format!("global metrics recorder is already installed: {error}").into_boxed_str())
         }
-    })
+    }
+}
+
+/// The process's Prometheus handle, installing the recorder on first use.
+///
+/// `metrics` accepts one global recorder per process, so the install itself is
+/// what the `OnceLock` runs: `get_or_init` admits exactly one initializer and
+/// blocks every other caller until it finishes, so a second runtime asking for
+/// metrics reuses the first one's handle instead of racing it to a refusal it
+/// did not cause.
+///
+/// The outcome is memoized either way, and both halves are load-bearing. A
+/// handle is shared because a rejected recorder's handle is dead — memoizing
+/// one would leave `/metrics` permanently empty for code that never asked. A
+/// refusal is shared because it means the APPLICATION installed its own
+/// recorder: that answer cannot change later in the process, so reporting it
+/// once per caller is the honest result rather than a retry that must fail
+/// again.
+fn shared_metrics_handle()
+-> Result<Option<metrics_exporter_prometheus::PrometheusHandle>, crate::RuntimeError> {
+    static HANDLE: std::sync::OnceLock<
+        Result<metrics_exporter_prometheus::PrometheusHandle, Box<str>>,
+    > = std::sync::OnceLock::new();
+    match HANDLE.get_or_init(init_prometheus_recorder) {
+        Ok(handle) => Ok(Some(handle.clone())),
+        Err(reason) => Err(crate::RuntimeError::Config(reason.clone())),
+    }
+}
+
+/// The metrics handle a runtime starts with: `None` unless it asked for one.
+fn install_metrics(
+    enabled: bool,
+) -> Result<Option<metrics_exporter_prometheus::PrometheusHandle>, crate::RuntimeError> {
+    match enabled {
+        false => Ok(None),
+        true => shared_metrics_handle(),
+    }
 }

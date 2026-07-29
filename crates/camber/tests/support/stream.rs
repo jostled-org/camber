@@ -1,8 +1,6 @@
-use std::io::{self, Read};
+use std::io;
 use std::net::TcpStream;
-use std::time::{Duration, Instant};
-
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
+use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BoundedReadError {
@@ -14,89 +12,63 @@ pub enum BoundedReadError {
     #[error("stream exceeded the {limit}-byte read limit")]
     LimitExceeded { limit: usize },
     #[error("stream read failed: {0}")]
-    Io(#[source] io::Error),
+    Io(#[from] io::Error),
     #[error("supporting thread did not finish before {timeout:?}")]
     JoinTimeout { timeout: Duration },
     #[error("supporting thread panicked")]
     ThreadPanicked,
+    /// The caller already took this handle, so there is no thread left to join.
+    /// A different fault from a thread that panicked, and reported as one: a
+    /// test that joins twice is asking about a thread it already has the answer
+    /// for.
+    #[error("supporting thread was already joined")]
+    AlreadyJoined,
 }
 
 pub fn join_thread_bounded<T>(
     thread: &mut Option<std::thread::JoinHandle<T>>,
     timeout: Duration,
 ) -> Result<T, BoundedReadError> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match thread.as_ref() {
-            Some(handle) if handle.is_finished() => break,
-            Some(_) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
-            Some(_) => return Err(BoundedReadError::JoinTimeout { timeout }),
-            None => return Err(BoundedReadError::ThreadPanicked),
-        }
+    match thread.as_ref() {
+        None => return Err(BoundedReadError::AlreadyJoined),
+        Some(handle) if super::http::poll_until(timeout, || handle.is_finished()) => {}
+        Some(_) => return Err(BoundedReadError::JoinTimeout { timeout }),
     }
-    let handle = thread.take().ok_or(BoundedReadError::ThreadPanicked)?;
-    handle.join().map_err(|_| BoundedReadError::ThreadPanicked)
+    thread
+        .take()
+        .expect("the wait only ends on a handle it observed finished")
+        .join()
+        .map_err(|_| BoundedReadError::ThreadPanicked)
 }
 
+/// Read a stream to closure under `timeout`, capped at `limit` bytes.
+///
+/// The read itself is the shared drain-to-close, so the framing, the chunk size,
+/// the size cap, and the one deadline over the whole read are stated once for
+/// the whole suite. Only the verdicts differ here: this caller reports the
+/// expiry and the overflow as its own named faults rather than as `io::Error`
+/// kinds, so a test can assert on which of them it hit.
 pub fn bounded_read(
     stream: &mut TcpStream,
     timeout: Duration,
     limit: usize,
 ) -> Result<Box<[u8]>, BoundedReadError> {
-    let prior_timeout = stream.read_timeout().map_err(BoundedReadError::Io)?;
-    let result = read_with_limit(stream, timeout, limit);
-    let restore = stream
-        .set_read_timeout(prior_timeout)
-        .map_err(BoundedReadError::Io);
-    match (result, restore) {
-        (Ok(bytes), Ok(())) => Ok(bytes),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-    }
-}
-
-fn read_with_limit(
-    stream: &mut TcpStream,
-    timeout: Duration,
-    limit: usize,
-) -> Result<Box<[u8]>, BoundedReadError> {
-    let deadline = Instant::now() + timeout;
     let mut bytes = Vec::new();
-    let mut chunk = [0_u8; 4096];
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(BoundedReadError::Timeout {
-                timeout,
-                bytes_read: bytes.len(),
-            });
+    let read = super::http::with_read_deadline(stream, timeout, |stream, deadline| {
+        super::http::read_to_eof(stream, &mut bytes, limit, Some(deadline))
+    });
+    match read {
+        Ok(()) => Ok(bytes.into_boxed_slice()),
+        Err(error) if super::http::is_deadline_expiry(&error) => Err(BoundedReadError::Timeout {
+            timeout,
+            bytes_read: bytes.len(),
+        }),
+        // The drain-to-close produces exactly one `InvalidData`, and it is the
+        // size cap. Reading the kind rather than the message keeps the two
+        // modules from agreeing on a sentence.
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            Err(BoundedReadError::LimitExceeded { limit })
         }
-        stream
-            .set_read_timeout(Some(remaining))
-            .map_err(BoundedReadError::Io)?;
-        match stream.read(&mut chunk) {
-            Ok(0) => return Ok(bytes.into_boxed_slice()),
-            Ok(count)
-                if bytes
-                    .len()
-                    .checked_add(count)
-                    .is_some_and(|length| length <= limit) =>
-            {
-                bytes.extend_from_slice(&chunk[..count]);
-            }
-            Ok(_) => return Err(BoundedReadError::LimitExceeded { limit }),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) =>
-            {
-                return Err(BoundedReadError::Timeout {
-                    timeout,
-                    bytes_read: bytes.len(),
-                });
-            }
-            Err(error) => return Err(BoundedReadError::Io(error)),
-        }
+        Err(error) => Err(BoundedReadError::Io(error)),
     }
 }

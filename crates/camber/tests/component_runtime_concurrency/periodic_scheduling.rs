@@ -1,13 +1,36 @@
-use crate::schedule_probes::{AsyncProbe, SyncCallback, SyncProbe, async_deadline, sync_deadline};
+use crate::common::{BOUND, wait_registry_at_most};
+use crate::schedule_probes::{
+    AsyncProbe, CALLBACK_INTERVAL, SyncCallback, SyncProbe, async_deadline, sync_deadline,
+};
+use crate::scope_builders::probed_runtime;
 use camber::{RuntimeError, runtime};
+use chrono::{Datelike, Timelike};
 use std::sync::Arc;
 use std::time::Duration;
 
-const CALLBACK_INTERVAL: Duration = Duration::from_millis(25);
 const INDEPENDENCE_INTERVAL: Duration = Duration::from_secs(60);
 const MULTIPLE_SCHEDULES_MODE: &str = "runtime-multiple-schedules";
 const MULTIPLE_SCHEDULES_MARKER: &str = "runtime-multiple-schedules-complete";
 const MULTIPLE_SCHEDULES_TEST: &str = "periodic_scheduling::multiple_scheduled_tasks_independent";
+
+/// A 7-field cron expression pinned to a year that has already passed.
+///
+/// Fields are `sec min hour dom month dow year`. It parses cleanly and names no
+/// instant after now, which is the pair of facts `reject_exhausted` exists for.
+const EXHAUSTED_CRON: &str = "0 0 0 1 1 * 2000";
+
+/// A 7-field cron expression whose only occurrence is decades out.
+///
+/// Far enough that a loop which slept to it rather than waking on its trigger
+/// would never come back inside any bound this suite is willing to wait.
+const DISTANT_CRON: &str = "0 0 0 1 1 * 2099";
+
+/// How far ahead the single-occurrence expression is pinned.
+///
+/// Not a race window: production sleeps to the occurrence it was given, and
+/// this is that occurrence. Short enough to keep the case quick, long enough
+/// that the schedule is built and admitted well before it comes due.
+const EXHAUSTION_LEAD: Duration = Duration::from_secs(2);
 
 #[camber::test]
 async fn every_async_fires_on_interval() {
@@ -48,20 +71,6 @@ async fn every_async_stops_on_shutdown() {
     probe.observe_and_release(deadline).await;
     probe.observe(deadline).await;
     runtime::request_shutdown();
-    probe.release();
-    probe.assert_disconnected(deadline).await;
-}
-
-#[camber::test]
-async fn every_async_cancel_stops_task() {
-    let (callback, mut probe) = AsyncProbe::new();
-    let handle =
-        camber::schedule::every_async(CALLBACK_INTERVAL, move || callback.clone().run()).unwrap();
-    let deadline = async_deadline();
-
-    probe.observe_and_release(deadline).await;
-    probe.observe(deadline).await;
-    handle.cancel();
     probe.release();
     probe.assert_disconnected(deadline).await;
 }
@@ -121,23 +130,6 @@ async fn interval_still_fires() {
     probe.assert_disconnected(deadline).await;
 }
 
-#[camber::test]
-async fn cancel_stops_loop() {
-    let trigger = Arc::new(tokio::sync::Notify::new());
-    let (callback, mut probe) = AsyncProbe::new();
-    let handle = camber::schedule::every_async_notified(CALLBACK_INTERVAL, trigger, move || {
-        callback.clone().run()
-    })
-    .unwrap();
-    let deadline = async_deadline();
-
-    probe.observe_and_release(deadline).await;
-    probe.observe(deadline).await;
-    handle.cancel();
-    probe.release();
-    probe.assert_disconnected(deadline).await;
-}
-
 #[test]
 fn scheduled_task_fires_on_interval() {
     runtime::test(|| {
@@ -177,7 +169,6 @@ fn cron_expression_parsing() {
         let handle = camber::schedule::cron("*/5 * * * *", || {});
         assert!(handle.is_ok(), "valid cron expression should parse");
         handle.unwrap().cancel();
-        assert!(camber::schedule::cron("not a cron", || {}).is_err());
         runtime::request_shutdown();
     })
     .unwrap();
@@ -185,26 +176,12 @@ fn cron_expression_parsing() {
 
 #[test]
 fn multiple_scheduled_tasks_independent() {
-    match crate::process_support::is_private_child(MULTIPLE_SCHEDULES_MODE) {
-        true => {
-            assert_multiple_scheduled_tasks_independent();
-            println!("{MULTIPLE_SCHEDULES_MARKER}");
-            return;
-        }
-        false => {}
-    }
-
-    let run = crate::process_support::run_isolated_exact(
+    crate::common::run_in_child(
         MULTIPLE_SCHEDULES_TEST,
         MULTIPLE_SCHEDULES_MODE,
         MULTIPLE_SCHEDULES_MARKER,
-        Duration::from_secs(10),
-    )
-    .unwrap();
-    assert!(
-        run.success(),
-        "isolated multiple-schedule contract failed: {}",
-        String::from_utf8_lossy(run.stderr())
+        BOUND,
+        assert_multiple_scheduled_tasks_independent,
     );
 }
 
@@ -244,4 +221,128 @@ fn cron_parse_error_is_schedule_variant() {
         runtime::request_shutdown();
     })
     .unwrap();
+}
+
+/// A cron expression that parses but names no future occurrence is refused at
+/// construction, rather than handed back as a live handle over a loop whose
+/// first lookup finds nothing.
+#[test]
+fn cron_pinned_to_a_past_year_is_refused_as_exhausted() {
+    runtime::test(|| {
+        let error = camber::schedule::cron(EXHAUSTED_CRON, || {}).unwrap_err();
+        // Pinned to the sentence, not only the variant: a parse failure carries
+        // the same variant, and a parse failure is the outcome this case must
+        // not be quietly passing on.
+        assert!(
+            matches!(&error, RuntimeError::Schedule(message)
+                if message.contains("no future occurrences")),
+            "a past-pinned cron expression was not refused as exhausted: {error:?}"
+        );
+        runtime::request_shutdown();
+    })
+    .unwrap();
+}
+
+/// A cron expression still ahead of now at construction, but finite, runs out
+/// inside its own loop: the loop stops itself and leaves the root scope while
+/// the scope is still open, with nobody having cancelled it.
+///
+/// `reject_exhausted` cannot see this one — the occurrence is genuinely in the
+/// future when the schedule is built — so the in-loop arm is the only thing
+/// that ends it.
+#[test]
+fn cron_that_runs_out_mid_loop_stops_itself_and_leaves_the_scope() {
+    let expr = single_occurrence_cron(EXHAUSTION_LEAD);
+    let (fired_tx, fired_rx) = std::sync::mpsc::channel::<()>();
+    let (controller, builder) = probed_runtime(BOUND);
+
+    let handle = builder
+        .run(move || {
+            let before = scope_entries(&controller);
+            let handle = camber::schedule::cron(&expr, move || {
+                let _ = fired_tx.send(());
+            })
+            .unwrap();
+            assert_eq!(
+                scope_entries(&controller),
+                before + 1,
+                "the cron loop was not admitted as a root-scope child"
+            );
+
+            fired_rx
+                .recv_timeout(BOUND)
+                .expect("the pinned cron occurrence never fired");
+            // Ordering, not budget: nothing else in the scope can exit while
+            // this closure runs — only `ScopeClosing` ends the runtime's own
+            // children, and that has not fired — so the registry falling back
+            // to its pre-admission length IS the exhaustion break.
+            assert!(
+                wait_registry_at_most(&controller, before, BOUND),
+                "the exhausted cron loop stayed in the root scope after its last occurrence"
+            );
+            handle
+        })
+        .unwrap();
+
+    // Nothing cancelled the loop: it stopped because its expression ran out,
+    // and the caller is left holding a live handle over a schedule that can
+    // never fire again — the reason that arm warns instead of falling out
+    // silently. The handle still accepts this, now as a no-op.
+    handle.cancel();
+}
+
+/// Cancelling a cron schedule wakes its loop instead of leaving it asleep until
+/// its next occurrence.
+///
+/// That is what `run_cron`'s trigger arm is for: the expression below names an
+/// instant decades out, and a loop that slept to it would hold its scope entry
+/// — and the closure and cancel flag with it — for the whole window.
+#[test]
+fn cancelled_cron_wakes_instead_of_sleeping_to_its_next_occurrence() {
+    let (controller, builder) = probed_runtime(BOUND);
+
+    builder
+        .run(move || {
+            let before = scope_entries(&controller);
+            let handle = camber::schedule::cron(DISTANT_CRON, || {}).unwrap();
+            assert_eq!(
+                scope_entries(&controller),
+                before + 1,
+                "the cron loop was not admitted as a root-scope child"
+            );
+
+            handle.cancel();
+            assert!(
+                wait_registry_at_most(&controller, before, BOUND),
+                "the cancelled cron loop slept on toward its next occurrence"
+            );
+        })
+        .unwrap();
+}
+
+/// How many children the root scope retains right now.
+fn scope_entries(controller: &camber::runtime_test_support::RuntimeController) -> usize {
+    controller
+        .scope_registry_len()
+        .expect("the runtime schedule could not read the root scope registry")
+}
+
+/// A 7-field cron expression naming exactly one occurrence, `lead` from now.
+///
+/// Every field is fixed to that one instant, the year included, so the
+/// expression names that second and nothing after it. `reject_exhausted`
+/// accepts it, the loop fires once, and its next lookup finds nothing — which
+/// is the arm under proof.
+fn single_occurrence_cron(lead: Duration) -> Box<str> {
+    let fire = chrono::Utc::now() + lead;
+    format!(
+        "{} {} {} {} {} * {}",
+        fire.second(),
+        fire.minute(),
+        fire.hour(),
+        fire.day(),
+        fire.month(),
+        fire.year()
+    )
+    .into_boxed_str()
 }

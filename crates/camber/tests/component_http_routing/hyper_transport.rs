@@ -94,14 +94,14 @@ fn hyper_keepalive_reuses_connection() {
             // First request
             let req1 = "GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n";
             stream.write_all(req1.as_bytes()).unwrap();
-            let resp1 = crate::http::read_http_response(&mut stream).unwrap();
+            let resp1 = crate::http::read_http_response_bounded(&mut stream).unwrap();
             assert_eq!(resp1.status, 200);
             assert_eq!(resp1.body.as_ref(), b"pong");
 
             // Second request on same connection
             let req2 = "GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
             stream.write_all(req2.as_bytes()).unwrap();
-            let resp2 = crate::http::read_http_response(&mut stream).unwrap();
+            let resp2 = crate::http::read_http_response_bounded(&mut stream).unwrap();
             assert_eq!(resp2.status, 200);
             assert_eq!(resp2.body.as_ref(), b"pong");
 

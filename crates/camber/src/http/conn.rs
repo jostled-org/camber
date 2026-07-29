@@ -1,17 +1,91 @@
+use super::body::GuardedBody;
+use super::disconnect::ConnectionLiveness;
 use super::handle::{ConnCtx, handle_request};
 use super::router::ServerDispatch;
-use super::server_lifecycle::{ConnectionLifecycle, ServerControl};
+use super::server_lifecycle::{ConnectionLifecycle, ServerControl, wait_shutdown_control};
 use crate::net::accept;
 use crate::{RuntimeError, net};
 use std::sync::Arc;
 
-struct SyncConnectionState {
+/// How long one synchronous connection may keep draining after GOAWAY.
+///
+/// Deliberately not `DEFAULT_SHUTDOWN_TIMEOUT`: that budget is the runtime's,
+/// spent across every connection at once, while this one caps a single
+/// connection's drain so one stalled peer cannot hold the whole budget. Guards
+/// still outstanding when it expires resolve `ServerShutdown`, because the
+/// latch is already set by the time the connection future drops.
+const CONNECTION_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The transport-independent state one connection serves requests with.
+///
+/// Both serve paths build the same per-request service from it; only the
+/// shutdown authority they carry alongside differs.
+pub(super) struct ConnectionState {
     router: Arc<ServerDispatch>,
     ctx: Arc<ConnCtx>,
-    shutdown: crate::runtime_state::ShutdownSignal,
-    keepalive_timeout: std::time::Duration,
-    remote_ip: std::net::IpAddr,
     lifecycle: ConnectionLifecycle,
+    keepalive_timeout: std::time::Duration,
+    remote_addr: Option<std::net::IpAddr>,
+}
+
+impl ConnectionState {
+    pub(super) fn new(
+        router: Arc<ServerDispatch>,
+        ctx: Arc<ConnCtx>,
+        lifecycle: ConnectionLifecycle,
+        keepalive_timeout: std::time::Duration,
+        remote_addr: Option<std::net::IpAddr>,
+    ) -> Self {
+        Self {
+            router,
+            ctx,
+            lifecycle,
+            keepalive_timeout,
+            remote_addr,
+        }
+    }
+}
+
+/// Build the per-request service both serve paths hand to Hyper.
+///
+/// Each request gets its own signal and armed guard from the connection's
+/// liveness, so no response-scoped state is shared between requests.
+///
+/// The state arrives by value: the connection that built it never reads it
+/// again, so the router, the context, and the lifecycle move here rather than
+/// being cloned out of a borrow. That matters most for the lifecycle, whose own
+/// `Clone` bumps a permit, two watch receivers, two channel senders, and a
+/// script handle.
+///
+/// The lifecycle is then shared through an `Arc` rather than cloned per
+/// request, because `serve_request` only borrows it. Taking the value here is
+/// also what makes the one snapshot correct — the owned path binds its upgrade
+/// transport onto the lifecycle before it asks for a service, so this is the
+/// first point at which the value no longer changes.
+fn connection_service(
+    state: ConnectionState,
+    liveness: Arc<ConnectionLiveness>,
+) -> impl hyper::service::Service<
+    hyper::Request<hyper::body::Incoming>,
+    Response = hyper::Response<GuardedBody>,
+    Error = std::convert::Infallible,
+    Future: Send + 'static,
+> + use<> {
+    let ConnectionState {
+        router,
+        ctx,
+        lifecycle,
+        remote_addr,
+        ..
+    } = state;
+    let lifecycle = Arc::new(lifecycle);
+    hyper::service::service_fn(move |request| {
+        let router = Arc::clone(&router);
+        let ctx = Arc::clone(&ctx);
+        let lifecycle = Arc::clone(&lifecycle);
+        let liveness = Arc::clone(&liveness);
+        async move { serve_request(request, &router, &ctx, remote_addr, &lifecycle, liveness).await }
+    })
 }
 
 pub(super) async fn accept_loop(
@@ -61,36 +135,14 @@ pub(super) async fn accept_tcp(
         conn_limit.as_ref(),
         script.as_ref(),
         |(stream, addr), permit| {
-            let router = Arc::clone(&router);
-            let ctx = Arc::clone(&ctx);
+            let state =
+                synchronous_state(&router, &ctx, permit, keepalive_timeout, Some(addr.ip()));
             let shutdown = shutdown.clone();
             let acceptor = tls_acceptor.clone();
-            let remote_ip = addr.ip();
             async move {
                 match acceptor {
-                    Some(a) => {
-                        let state = SyncConnectionState {
-                            router,
-                            ctx,
-                            shutdown,
-                            keepalive_timeout,
-                            remote_ip,
-                            lifecycle: ConnectionLifecycle::synchronous(permit),
-                        };
-                        serve_tls_connection(stream, a, state).await;
-                    }
-                    None => {
-                        serve_stream(
-                            stream,
-                            router,
-                            ctx,
-                            shutdown,
-                            keepalive_timeout,
-                            Some(remote_ip),
-                            ConnectionLifecycle::synchronous(permit),
-                        )
-                        .await;
-                    }
+                    Some(a) => serve_tls_connection(stream, a, state, shutdown).await,
+                    None => serve_stream(stream, state, shutdown).await,
                 }
             }
         },
@@ -112,189 +164,132 @@ async fn accept_unix(
         conn_limit.as_ref(),
         None,
         |stream, permit| {
-            let router = Arc::clone(&router);
-            let ctx = Arc::clone(&ctx);
+            let state = synchronous_state(&router, &ctx, permit, keepalive_timeout, None);
             let shutdown = shutdown.clone();
             async move {
-                serve_stream(
-                    stream,
-                    router,
-                    ctx,
-                    shutdown,
-                    keepalive_timeout,
-                    None,
-                    ConnectionLifecycle::synchronous(permit),
-                )
-                .await;
+                serve_stream(stream, state, shutdown).await;
             }
         },
     )
     .await
 }
 
-async fn serve_stream<S>(
-    stream: S,
-    router: Arc<ServerDispatch>,
-    ctx: Arc<ConnCtx>,
-    shutdown: crate::runtime_state::ShutdownSignal,
+/// The connection state a synchronously-accepted connection serves with.
+///
+/// Both listeners build the identical value: the per-server router and context
+/// by refcount, and a lifecycle holding nothing but this connection's admission
+/// permit, because a synchronous server has no supervisor to register with.
+/// Only the peer address differs, and a Unix peer has none.
+fn synchronous_state(
+    router: &Arc<ServerDispatch>,
+    ctx: &Arc<ConnCtx>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
     keepalive_timeout: std::time::Duration,
     remote_addr: Option<std::net::IpAddr>,
-    lifecycle: ConnectionLifecycle,
+) -> ConnectionState {
+    ConnectionState::new(
+        Arc::clone(router),
+        Arc::clone(ctx),
+        ConnectionLifecycle::synchronous(permit),
+        keepalive_timeout,
+        remote_addr,
+    )
+}
+
+async fn serve_stream<S>(
+    stream: S,
+    state: ConnectionState,
+    shutdown: crate::runtime_state::ShutdownSignal,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let io = hyper_util::rt::TokioIo::new(stream);
-    serve_io(
-        io,
-        router,
-        ctx,
-        shutdown,
-        keepalive_timeout,
-        remote_addr,
-        lifecycle,
-    )
-    .await;
+    // Per-connection liveness is created where the stream is accepted and
+    // wraps the raw stream INSIDE the Hyper IO adapter, so a dying transport
+    // is recorded before Hyper reacts to it.
+    let liveness = ConnectionLiveness::latched(shutdown.flag());
+    let io = hyper_util::rt::TokioIo::new(liveness.wrap(stream));
+    serve_io(io, state, shutdown, liveness).await;
 }
 
 async fn serve_tls_connection(
     stream: tokio::net::TcpStream,
     acceptor: tokio_rustls::TlsAcceptor,
-    state: SyncConnectionState,
+    state: ConnectionState,
+    shutdown: crate::runtime_state::ShutdownSignal,
 ) {
     let tls_stream = match accept::tls_handshake(stream, &acceptor).await {
         Some(s) => s,
         None => return,
     };
-    serve_stream(
-        tls_stream,
-        state.router,
-        state.ctx,
-        state.shutdown,
-        state.keepalive_timeout,
-        Some(state.remote_ip),
-        state.lifecycle,
-    )
-    .await;
+    serve_stream(tls_stream, state, shutdown).await;
 }
 
 async fn serve_io<I>(
     io: hyper_util::rt::TokioIo<I>,
-    router: Arc<ServerDispatch>,
-    ctx: Arc<ConnCtx>,
+    state: ConnectionState,
     shutdown: crate::runtime_state::ShutdownSignal,
-    keepalive_timeout: std::time::Duration,
-    remote_addr: Option<std::net::IpAddr>,
-    lifecycle: ConnectionLifecycle,
+    liveness: Arc<ConnectionLiveness>,
 ) where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-        let router = Arc::clone(&router);
-        let ctx = Arc::clone(&ctx);
-        let lifecycle = lifecycle.clone();
-        async move { handle_request(req, &router, &ctx, remote_addr, &lifecycle).await }
-    });
-
-    let mut builder =
-        hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
-    builder
-        .http1()
-        .keep_alive(true)
-        .timer(hyper_util::rt::TokioTimer::new())
-        .header_read_timeout(Some(keepalive_timeout));
-    let conn = builder.serve_connection_with_upgrades(io, service);
-
-    tokio::pin!(conn);
-    tokio::select! {
-        biased;
-        () = shutdown.wait() => {
-            // Signal HTTP/2 GOAWAY and let in-flight streams finish.
-            conn.as_mut().graceful_shutdown();
-            match tokio::time::timeout(std::time::Duration::from_secs(15), conn).await {
-                Ok(Ok(())) => {}
-                Ok(Err(ref e)) if is_benign_hyper_error(e.as_ref()) => {}
-                Ok(Err(e)) => tracing::warn!("connection error during shutdown: {e}"),
-                Err(_) => tracing::debug!("connection timed out during graceful shutdown"),
-            }
-        }
-        result = &mut conn => {
-            match result {
-                Ok(()) => {}
-                Err(ref e) if is_benign_hyper_error(e.as_ref()) => {}
-                Err(e) => tracing::warn!("connection error: {e}"),
-            }
-        }
-    }
+    let connection = build_connection(io, state, liveness);
+    tokio::pin!(connection);
+    drive_connection_until_shutdown(
+        connection.as_mut(),
+        // A latched flag carries no mode, and the only thing it can mean is a
+        // graceful wind-down: a synchronous server has no supervisor to abort
+        // through, so `ConnectionShutdown::Abort` is unreachable here.
+        async {
+            shutdown.wait().await;
+            ConnectionShutdown::Graceful
+        },
+        // Nothing outside this task can end this connection either, so the
+        // bound on its drain is its own rather than a supervisor's deadline.
+        DrainPolicy::Bounded(CONNECTION_DRAIN_TIMEOUT),
+    )
+    .await;
 }
 
+/// Serve one connection an owned server accepted.
+///
+/// The shutdown authority arrives by value from the supervisor that subscribed
+/// it, so every later reader — the handshake race, the connection driver, and
+/// every response guard's cause table — takes a receiver derived from that one
+/// subscription. No arm can invent a different answer to "is the server
+/// shutting down", and no arm can find the answer missing.
 pub(super) async fn serve_owned_connection(
     stream: tokio::net::TcpStream,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-    router: Arc<ServerDispatch>,
-    ctx: Arc<ConnCtx>,
-    lifecycle: ConnectionLifecycle,
-    keepalive_timeout: std::time::Duration,
-    remote_addr: std::net::IpAddr,
+    state: ConnectionState,
+    control: tokio::sync::watch::Receiver<ServerControl>,
 ) {
+    // Per-connection liveness belongs to the accepted stream, never to the
+    // per-server context every connection shares.
+    let liveness = ConnectionLiveness::controlled(control.clone());
     match tls_acceptor {
-        Some(acceptor) => {
-            serve_owned_tls(
-                stream,
-                acceptor,
-                router,
-                ctx,
-                lifecycle,
-                keepalive_timeout,
-                remote_addr,
-            )
-            .await;
-        }
-        None => {
-            serve_owned_stream(
-                stream,
-                router,
-                ctx,
-                lifecycle,
-                keepalive_timeout,
-                remote_addr,
-            )
-            .await;
-        }
+        Some(acceptor) => serve_owned_tls(stream, acceptor, state, liveness, control).await,
+        None => serve_owned_stream(stream, state, liveness, control).await,
     }
 }
 
 async fn serve_owned_tls(
     stream: tokio::net::TcpStream,
     acceptor: tokio_rustls::TlsAcceptor,
-    router: Arc<ServerDispatch>,
-    ctx: Arc<ConnCtx>,
-    lifecycle: ConnectionLifecycle,
-    keepalive_timeout: std::time::Duration,
-    remote_addr: std::net::IpAddr,
+    state: ConnectionState,
+    liveness: Arc<ConnectionLiveness>,
+    mut control: tokio::sync::watch::Receiver<ServerControl>,
 ) {
-    let mut control = match lifecycle.control() {
-        Some(control) => control,
-        None => return,
-    };
     let handshake = accept::tls_handshake(stream, &acceptor);
     tokio::pin!(handshake);
     let tls_stream = tokio::select! {
         biased;
-        _ = wait_for_shutdown(&mut control) => return,
+        _ = wait_connection_shutdown(&mut control) => return,
         stream = &mut handshake => match stream {
             Some(stream) => stream,
             None => return,
         },
     };
-    serve_owned_stream(
-        tls_stream,
-        router,
-        ctx,
-        lifecycle,
-        keepalive_timeout,
-        remote_addr,
-    )
-    .await;
+    serve_owned_stream(tls_stream, state, liveness, control).await;
 }
 
 #[cfg(feature = "ws")]
@@ -360,9 +355,11 @@ impl<S> TransportStream<S> {
         }
     }
 
+    /// Detach the read half to the reader task, once and for this connection.
     fn activate_reader(&mut self) {
-        if let (Some(reader), Some(activation)) = (self.reader.take(), self.activation.take()) {
-            let _ = activation.send(reader);
+        match (self.reader.take(), self.activation.take()) {
+            (Some(reader), Some(activation)) => hand_off_reader(activation, reader),
+            _ => {}
         }
     }
 
@@ -378,6 +375,25 @@ impl<S> TransportStream<S> {
             self.pending = Some(bytes);
         }
         true
+    }
+}
+
+/// Hand the read half to the detached reader task.
+///
+/// A refused handoff drops the read half, and every later read on this
+/// connection then reports EOF — indistinguishable from a real peer close, and
+/// enough to resolve every remaining guard on it as `PeerDisconnect`. The
+/// reader task outlives this stream by construction, so a refusal is only
+/// reachable through an abort that has already ended the connection; it is
+/// recorded rather than discarded because nothing else would name it.
+#[cfg(feature = "ws")]
+fn hand_off_reader<S>(
+    activation: tokio::sync::oneshot::Sender<tokio::io::ReadHalf<S>>,
+    reader: tokio::io::ReadHalf<S>,
+) {
+    match activation.send(reader) {
+        Ok(()) => {}
+        Err(_) => tracing::debug!("upgrade transport reader is gone; connection read half dropped"),
     }
 }
 
@@ -471,9 +487,15 @@ impl OwnedTransport {
         wait_for_peer_close(&mut self.peer_closed).await;
     }
 
+    /// Wait for the reader task to end, and say so when it did not end cleanly.
+    ///
+    /// Cancellation is the ordinary end here — `close` aborts the task — so it
+    /// is silent. A panic is not: without this the connection would degrade to
+    /// "the peer closed" with nothing recording that its reader died.
     async fn join(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.await;
+        match self.handle.take() {
+            None => {}
+            Some(handle) => log_reader_join(handle.await),
         }
     }
 
@@ -494,6 +516,38 @@ impl OwnedTransport {
             () = wait_for_peer_close(&mut self.peer_closed) => false,
             result = acknowledged => result.is_ok(),
         }
+    }
+}
+
+/// Report a reader task that panicked, and stay quiet about one that was
+/// aborted: an aborted read half is how every upgrade handoff ends.
+#[cfg(feature = "ws")]
+fn log_reader_join(outcome: Result<(), tokio::task::JoinError>) {
+    match outcome {
+        Err(error) if error.is_panic() => {
+            tracing::warn!("upgrade transport reader panicked: {error}");
+        }
+        Ok(()) | Err(_) => {}
+    }
+}
+
+/// Report a transport read error the stream never received.
+///
+/// A delivered error reaches `TransportStream::poll_read` and is logged from
+/// there. A refused send is the only path that carries a real `io::Error` and
+/// has nowhere left to put it, and `SendError` hands the value back at exactly
+/// that point. Dropping it would leave the connection degrading to an
+/// indistinguishable "the peer closed", the same way a refused reader handoff
+/// would.
+#[cfg(feature = "ws")]
+fn report_unsent_read_error(
+    outcome: Result<(), tokio::sync::mpsc::error::SendError<Result<bytes::Bytes, std::io::Error>>>,
+) {
+    match outcome {
+        Err(tokio::sync::mpsc::error::SendError(Err(error))) => {
+            tracing::debug!("upgrade transport reader is gone; connection read failed: {error}");
+        }
+        Ok(()) | Err(_) => {}
     }
 }
 
@@ -533,11 +587,18 @@ async fn drive_owned_reader<S>(
         Ok(reader) => reader,
         Err(_) => return,
     };
-    let mut buffer = [0; OWNED_TRANSPORT_BUFFER_SIZE];
+    // One reusable buffer, read into directly and split off per read. Every
+    // read on this path costs a chunk otherwise: activation fires on the first
+    // non-empty read, so from the first byte onward the whole connection is
+    // read through here whether or not an upgrade is ever attempted.
+    let mut buffer = bytes::BytesMut::with_capacity(OWNED_TRANSPORT_BUFFER_SIZE);
     loop {
+        // `read_buf` appends, and the buffer is emptied by the split below, so
+        // this asks for one full read's room rather than growing without bound.
+        buffer.reserve(OWNED_TRANSPORT_BUFFER_SIZE);
         let result = tokio::select! {
             biased;
-            result = reader.read(&mut buffer) => result,
+            result = reader.read_buf(&mut buffer) => result,
             barrier = barriers.recv() => match barrier {
                 Some(barrier) => {
                     let _ = barrier.send(());
@@ -549,48 +610,46 @@ async fn drive_owned_reader<S>(
         let count = match result {
             Ok(count) => count,
             Err(error) => {
-                let _ = incoming.send(Err(error)).await;
+                report_unsent_read_error(incoming.send(Err(error)).await);
                 break;
             }
         };
         if count == 0 {
             break;
         }
-        let bytes = bytes::Bytes::copy_from_slice(&buffer[..count]);
-        if incoming.send(Ok(bytes)).await.is_err() {
+        if incoming.send(Ok(buffer.split().freeze())).await.is_err() {
             break;
         }
     }
     let _ = peer_closed.send(());
-    if let Some(script) = script {
-        script
-            .pause(super::mock::LifecycleCheckpoint::UpgradePeerClosed)
-            .await;
-    }
+    super::mock::LifecycleScript::pause_at(
+        script.as_deref(),
+        super::mock::LifecycleCheckpoint::UpgradePeerClosed,
+    )
+    .await;
 }
 
 async fn serve_owned_stream<S>(
     stream: S,
-    router: Arc<ServerDispatch>,
-    ctx: Arc<ConnCtx>,
-    lifecycle: ConnectionLifecycle,
-    keepalive_timeout: std::time::Duration,
-    remote_addr: std::net::IpAddr,
+    state: ConnectionState,
+    liveness: Arc<ConnectionLiveness>,
+    control: tokio::sync::watch::Receiver<ServerControl>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    // Composes with the owned path's existing transport wrapper by sitting
+    // beneath it: both wrap the raw stream, never the built IO adapter.
+    let stream = liveness.wrap(stream);
     #[cfg(feature = "ws")]
-    let (stream, transport) = OwnedTransport::new(stream, lifecycle.script());
+    let (stream, transport) = OwnedTransport::new(stream, state.lifecycle.script());
     let io = hyper_util::rt::TokioIo::new(stream);
     serve_owned_io(
         io,
         #[cfg(feature = "ws")]
         transport,
-        router,
-        ctx,
-        lifecycle,
-        keepalive_timeout,
-        Some(remote_addr),
+        state,
+        liveness,
+        control,
     )
     .await;
 }
@@ -598,32 +657,21 @@ async fn serve_owned_stream<S>(
 async fn serve_owned_io<I>(
     io: hyper_util::rt::TokioIo<I>,
     #[cfg(feature = "ws")] mut transport: OwnedTransport,
-    router: Arc<ServerDispatch>,
-    ctx: Arc<ConnCtx>,
-    lifecycle: ConnectionLifecycle,
-    keepalive_timeout: std::time::Duration,
-    remote_addr: Option<std::net::IpAddr>,
+    state: ConnectionState,
+    liveness: Arc<ConnectionLiveness>,
+    mut control: tokio::sync::watch::Receiver<ServerControl>,
 ) where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     #[cfg(feature = "ws")]
-    let mut lifecycle = lifecycle;
+    let mut state = state;
+    // Binding precedes the service build: the lifecycle the service takes over
+    // has to carry the upgrade transport registration, and the build is what
+    // moves the state out of this frame.
     #[cfg(feature = "ws")]
-    let mut upgrade_transport = lifecycle.bind_upgrade_transport();
-    let service_lifecycle = lifecycle.clone();
-    let service = hyper::service::service_fn(move |request| {
-        let router = Arc::clone(&router);
-        let ctx = Arc::clone(&ctx);
-        let lifecycle = service_lifecycle.clone();
-        async move { handle_request(request, &router, &ctx, remote_addr, &lifecycle).await }
-    });
-    let builder = connection_builder(keepalive_timeout);
-    let connection = builder.serve_connection_with_upgrades(io, service);
+    let mut upgrade_transport = state.lifecycle.bind_upgrade_transport();
+    let connection = build_connection(io, state, liveness);
     tokio::pin!(connection);
-    let mut control = match lifecycle.control() {
-        Some(control) => control,
-        None => return,
-    };
 
     #[cfg(feature = "ws")]
     let mut peer_closed = false;
@@ -636,10 +684,12 @@ async fn serve_owned_io<I>(
             &mut transport,
         )
         .await;
-        match event {
+        // The event decides the flow; acting on it is a separate statement, so
+        // an arm that ends the connection reads the same as one that does not.
+        let flow = match event {
             OwnedConnectionEvent::Complete(result) => {
                 finish_owned_connection(result, &mut upgrade_transport, &mut transport).await;
-                return;
+                ConnectionFlow::Finished
             }
             OwnedConnectionEvent::Shutdown(mode) => {
                 shutdown_owned_connection(
@@ -647,138 +697,322 @@ async fn serve_owned_io<I>(
                     connection.as_mut(),
                     &mut upgrade_transport,
                     &mut transport,
-                    |mut connection| connection.as_mut().graceful_shutdown(),
                 )
                 .await;
-                return;
+                ConnectionFlow::Finished
             }
-            OwnedConnectionEvent::Registration(Some(mut registration)) => {
-                let cancellation = registration.prepare();
-                cancel_closed_registration(peer_closed, cancellation.as_ref());
-                let registration = registration.register();
-                tokio::pin!(registration);
-                let event = await_upgrade_registration(
+            OwnedConnectionEvent::Registration(Some(registration)) => {
+                serve_upgrade_registration(
+                    registration,
+                    peer_closed,
                     connection.as_mut(),
                     &mut control,
-                    registration.as_mut(),
-                    &mut transport,
-                )
-                .await;
-                let outcome = finish_interrupted_registration(
-                    event,
-                    connection.as_mut(),
-                    registration.as_mut(),
-                    cancellation.as_ref(),
-                    &mut upgrade_transport,
-                    &mut transport,
-                    |mut connection| connection.as_mut().graceful_shutdown(),
-                )
-                .await;
-                let Some(outcome) = outcome else {
-                    return;
-                };
-                let outcome = retain_open_upgrade(
-                    outcome,
-                    connection.as_mut(),
                     &mut upgrade_transport,
                     &mut transport,
                 )
-                .await;
-                let Some(outcome) = outcome else {
-                    return;
-                };
-                let Some(commitment) = outcome.complete() else {
-                    continue;
-                };
-                let event =
-                    await_upgrade_commitment(connection.as_mut(), &mut control, &mut transport)
-                        .await;
-                finish_upgrade_commitment(
-                    event,
-                    commitment,
-                    connection.as_mut(),
-                    &upgrade_transport,
-                    &mut transport,
-                    |mut connection| connection.as_mut().graceful_shutdown(),
-                )
-                .await;
-                transport.join().await;
-                return;
+                .await
             }
-            OwnedConnectionEvent::Registration(None) => {}
-            OwnedConnectionEvent::PeerClosed => peer_closed = true,
+            OwnedConnectionEvent::Registration(None) => ConnectionFlow::Serving,
+            OwnedConnectionEvent::PeerClosed => {
+                peer_closed = true;
+                ConnectionFlow::Serving
+            }
+        };
+        match flow {
+            ConnectionFlow::Finished => return,
+            ConnectionFlow::Serving => {}
         }
     }
 
     #[cfg(not(feature = "ws"))]
-    tokio::select! {
-        biased;
-        mode = wait_for_shutdown(&mut control) => match mode {
-            ServerControl::Graceful | ServerControl::Abort => {
-                connection.as_mut().graceful_shutdown();
-                log_connection_result(connection.await, true);
-            }
-            ServerControl::Running => {}
-        },
-        result = &mut connection => log_connection_result(result, false),
+    drive_connection_until_shutdown(
+        connection.as_mut(),
+        wait_connection_shutdown(&mut control),
+        DrainPolicy::Supervised,
+    )
+    .await;
+}
+
+/// What driving one Hyper connection to its end answers with.
+type ConnectionResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+/// One built connection, in the two operations every serve path needs of it.
+///
+/// Hyper's connection type cannot be named here: it is parameterised by the
+/// opaque closure type `connection_service` returns, and by the IO type of
+/// whichever transport accepted the connection. Naming what the paths do with
+/// it instead — poll it to completion, and start its graceful shutdown — is
+/// what lets the build be written once for both of them.
+trait HyperConnection: std::future::Future<Output = ConnectionResult> {
+    /// Send the peer a GOAWAY and stop accepting new work on this connection.
+    ///
+    /// The connection still has to be polled after this; what bounds that poll
+    /// is the caller's [`DrainPolicy`].
+    fn begin_graceful_shutdown(self: std::pin::Pin<&mut Self>);
+}
+
+impl<I, S, B, E> HyperConnection
+    for hyper_util::server::conn::auto::UpgradeableConnection<'static, I, S, E>
+where
+    S: hyper::service::Service<
+            hyper::Request<hyper::body::Incoming>,
+            Response = hyper::Response<B>,
+        >,
+    S::Future: 'static,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    B: hyper::body::Body + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+    E: hyper_util::server::conn::auto::HttpServerConnExec<S::Future, B>,
+{
+    fn begin_graceful_shutdown(self: std::pin::Pin<&mut Self>) {
+        self.graceful_shutdown();
     }
 }
 
-#[cfg(feature = "ws")]
-trait LoggableConnectionError: AsRef<dyn std::error::Error + Send + Sync> + std::fmt::Display {}
-
-#[cfg(feature = "ws")]
-impl<T> LoggableConnectionError for T where
-    T: AsRef<dyn std::error::Error + Send + Sync> + std::fmt::Display
+/// Build the connection every serve path drives.
+///
+/// `into_owned` is what makes one builder per connection affordable to hand
+/// over: Hyper's connection borrows the builder it came from, and an owned
+/// connection is the only shape that can leave this frame.
+fn build_connection<I>(
+    io: hyper_util::rt::TokioIo<I>,
+    state: ConnectionState,
+    liveness: Arc<ConnectionLiveness>,
+) -> impl HyperConnection + Send + use<I>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let builder = connection_builder(state.keepalive_timeout);
+    let service = connection_service(state, liveness);
+    builder
+        .serve_connection_with_upgrades(io, service)
+        .into_owned()
+}
+
+/// What bounds a connection's drain once its graceful shutdown has begun.
+///
+/// Both paths drain the same way and stop for different reasons, so the reason
+/// travels with the call rather than being inferred from which path made it.
+enum DrainPolicy {
+    /// This connection's own budget. One stalled peer cannot outlast it.
+    Bounded(std::time::Duration),
+    /// Bounded by the owned server's supervisor instead: its `shutdown_timeout`
+    /// expires, `start_abort_if_ready` fires, and `tasks.abort_all()` drops the
+    /// task this connection is being driven on. Awaiting unbounded here is what
+    /// lets that one deadline govern every connection at once.
+    Supervised,
+}
+
+/// Why a connection is winding down.
+///
+/// `ServerControl::Running` has no variant: it is not a reason to end a
+/// connection, and every arm that ends one would otherwise carry a branch for
+/// a case that must never abandon a live connection silently.
+enum ConnectionShutdown {
+    /// Drain the in-flight work.
+    Graceful,
+    /// The server is aborting. Winding down runs the same sequence; what makes
+    /// it stop sooner is the supervisor aborting this task.
+    Abort,
+}
+
+/// Which half of a connection's life a result came back from.
+///
+/// The same reason the other two-case decisions here are enums: the phase is
+/// known by the call that reports the result, and cannot be inferred from the
+/// result itself — an error out of a drain and an error out of a live
+/// connection are the same value and mean different things. Carried rather than
+/// inferred, so no site can name the wrong half by transposing a bare literal.
+enum ConnectionPhase {
+    /// The connection was serving requests when it ended.
+    Serving,
+    /// The connection was draining after its graceful shutdown began.
+    Draining,
+}
+
+/// Wait for this server to leave `Running`, as a reason to wind a connection
+/// down.
+///
+/// `wait_shutdown_control` loops until the control value leaves `Running`, so
+/// the third case cannot arrive. It is answered with a future that never
+/// completes rather than with a shutdown, because every caller treats the
+/// answer as terminal: a `Running` shutdown would drop an accepted, still
+/// serving connection with no response written and nothing logged.
+async fn wait_connection_shutdown(
+    control: &mut tokio::sync::watch::Receiver<ServerControl>,
+) -> ConnectionShutdown {
+    match wait_shutdown_control(control).await {
+        ServerControl::Graceful => ConnectionShutdown::Graceful,
+        ServerControl::Abort => ConnectionShutdown::Abort,
+        ServerControl::Running => {
+            tracing::error!("shutdown control reported a running server; connection kept serving");
+            std::future::pending().await
+        }
+    }
+}
+
+/// Whether the connection loop keeps serving or is done.
+#[cfg(feature = "ws")]
+enum ConnectionFlow {
+    Serving,
+    Finished,
+}
+
+/// Carry one upgrade registration from prepared to committed.
+///
+/// Every step can end the connection instead, which is why it answers with a
+/// flow rather than by falling off the end: the caller owns the loop.
+#[cfg(feature = "ws")]
+async fn serve_upgrade_registration<C>(
+    mut registration: super::server_lifecycle::TransportRegistration,
+    peer_closed: bool,
+    mut connection: std::pin::Pin<&mut C>,
+    control: &mut tokio::sync::watch::Receiver<ServerControl>,
+    upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
+    transport: &mut OwnedTransport,
+) -> ConnectionFlow
+where
+    C: HyperConnection,
+{
+    let cancellation = registration.prepare();
+    cancel_closed_registration(peer_closed, cancellation.as_ref());
+    let registration = registration.register();
+    tokio::pin!(registration);
+    let event = await_upgrade_registration(
+        connection.as_mut(),
+        control,
+        registration.as_mut(),
+        transport,
+    )
+    .await;
+    let settled = finish_interrupted_registration(
+        event,
+        connection.as_mut(),
+        registration.as_mut(),
+        cancellation.as_ref(),
+        upgrade_transport,
+        transport,
+    )
+    .await;
+    let settled = match settled {
+        Some(outcome) => outcome,
+        None => return ConnectionFlow::Finished,
+    };
+    let retained =
+        retain_open_upgrade(settled, connection.as_mut(), upgrade_transport, transport).await;
+    let retained = match retained {
+        Some(outcome) => outcome,
+        None => return ConnectionFlow::Finished,
+    };
+    let commitment = match retained.complete() {
+        Some(commitment) => commitment,
+        None => return ConnectionFlow::Serving,
+    };
+    let event = await_upgrade_commitment(connection.as_mut(), control, transport).await;
+    finish_upgrade_commitment(
+        event,
+        commitment,
+        connection.as_mut(),
+        upgrade_transport,
+        transport,
+    )
+    .await;
+    transport.join().await;
+    ConnectionFlow::Finished
 }
 
 #[cfg(feature = "ws")]
-async fn finish_owned_connection<E: LoggableConnectionError>(
-    result: Result<(), E>,
+async fn finish_owned_connection(
+    result: ConnectionResult,
     upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
     transport: &mut OwnedTransport,
 ) {
     upgrade_transport.cancel();
     upgrade_transport.abort_pending().await;
-    log_connection_result(result, false);
+    log_connection_result(result, ConnectionPhase::Serving);
     transport.close().await;
 }
 
-#[cfg(feature = "ws")]
-async fn shutdown_hyper_connection<C, E, F>(
-    mode: ServerControl,
+/// Drive one connection to its end under the shutdown that ended it.
+///
+/// The single shutdown table every serve path reads: nothing about it is
+/// WebSocket-specific or transport-specific, so the upgrade-aware loop, the
+/// plain owned tail, and the synchronous path all wind down the same way, and
+/// differ only in what bounds the drain that follows.
+async fn shutdown_hyper_connection<C>(
+    mode: ConnectionShutdown,
     mut connection: std::pin::Pin<&mut C>,
-    begin_shutdown: F,
+    drain: DrainPolicy,
 ) where
-    C: std::future::Future<Output = Result<(), E>>,
-    E: LoggableConnectionError,
-    F: FnOnce(std::pin::Pin<&mut C>),
+    C: HyperConnection,
 {
     match mode {
-        ServerControl::Graceful | ServerControl::Abort => {
-            begin_shutdown(connection.as_mut());
-            log_connection_result(connection.await, true);
+        ConnectionShutdown::Graceful | ConnectionShutdown::Abort => {
+            connection.as_mut().begin_graceful_shutdown();
+            drain_connection(connection, drain).await;
         }
-        ServerControl::Running => {}
+    }
+}
+
+/// Drive a connection until it ends on its own or a shutdown winds it down.
+///
+/// The race both non-upgrade serve paths run. They differ only in where the
+/// shutdown reason comes from and in what bounds the drain that follows, so
+/// both travel in as arguments and the race itself is written once. The
+/// upgrade-aware loop is deliberately not a caller: it races two more events
+/// and acts on each with its own prologue.
+async fn drive_connection_until_shutdown<C, F>(
+    mut connection: std::pin::Pin<&mut C>,
+    shutdown: F,
+    drain: DrainPolicy,
+) where
+    C: HyperConnection,
+    F: std::future::Future<Output = ConnectionShutdown>,
+{
+    tokio::select! {
+        biased;
+        mode = shutdown => shutdown_hyper_connection(mode, connection.as_mut(), drain).await,
+        result = connection.as_mut() => log_connection_result(result, ConnectionPhase::Serving),
+    }
+}
+
+/// Poll a connection through its drain under the policy that bounds it.
+async fn drain_connection<C>(connection: std::pin::Pin<&mut C>, drain: DrainPolicy)
+where
+    C: HyperConnection,
+{
+    match drain {
+        DrainPolicy::Supervised => {
+            log_connection_result(connection.await, ConnectionPhase::Draining)
+        }
+        DrainPolicy::Bounded(budget) => drain_within_budget(connection, budget).await,
+    }
+}
+
+/// Drain a connection under a budget of its own, and say so when it expires.
+async fn drain_within_budget<C>(connection: std::pin::Pin<&mut C>, budget: std::time::Duration)
+where
+    C: HyperConnection,
+{
+    match tokio::time::timeout(budget, connection).await {
+        Ok(result) => log_connection_result(result, ConnectionPhase::Draining),
+        Err(_) => tracing::debug!("connection timed out during graceful shutdown"),
     }
 }
 
 #[cfg(feature = "ws")]
-async fn shutdown_owned_connection<C, E, F>(
-    mode: ServerControl,
+async fn shutdown_owned_connection<C>(
+    mode: ConnectionShutdown,
     connection: std::pin::Pin<&mut C>,
     upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
     transport: &mut OwnedTransport,
-    begin_shutdown: F,
 ) where
-    C: std::future::Future<Output = Result<(), E>>,
-    E: LoggableConnectionError,
-    F: FnOnce(std::pin::Pin<&mut C>),
+    C: HyperConnection,
 {
     upgrade_transport.cancel();
     upgrade_transport.abort_pending().await;
-    shutdown_hyper_connection(mode, connection, begin_shutdown).await;
+    shutdown_hyper_connection(mode, connection, DrainPolicy::Supervised).await;
     transport.close().await;
 }
 
@@ -816,72 +1050,82 @@ async fn settle_interrupted_registration<R>(
     upgrade_transport.abort_pending().await;
 }
 
+/// What ended a registration that never reached its outcome.
+///
+/// Split from the event so the settle-then-close pair every interruption runs
+/// is written once. Restating it per arm left three copies to keep in step with
+/// each other, and a future arm or a future reordering of the pair would have
+/// had nothing to check it against.
 #[cfg(feature = "ws")]
-async fn finish_interrupted_registration<C, E, R, F>(
-    event: UpgradeRegistrationEvent<E>,
+enum RegistrationInterruption {
+    /// The connection finished on its own; only its result is left to report.
+    Ended(ConnectionResult),
+    /// The server is winding down, so the connection drains under it.
+    Shutdown(ConnectionShutdown),
+    /// The peer went away mid-registration; the connection is polled to its end.
+    PeerClosed,
+}
+
+#[cfg(feature = "ws")]
+async fn finish_interrupted_registration<C, R>(
+    event: UpgradeRegistrationEvent,
     connection: std::pin::Pin<&mut C>,
     registration: std::pin::Pin<&mut R>,
     cancellation: Option<&super::server_lifecycle::UpgradeCancellation>,
     upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
     transport: &mut OwnedTransport,
-    begin_shutdown: F,
 ) -> Option<super::server_lifecycle::TransportRegistrationOutcome>
 where
-    C: std::future::Future<Output = Result<(), E>>,
-    E: LoggableConnectionError,
+    C: HyperConnection,
     R: std::future::Future<Output = super::server_lifecycle::TransportRegistrationOutcome>,
-    F: FnOnce(std::pin::Pin<&mut C>),
 {
-    match event {
-        UpgradeRegistrationEvent::Registered(outcome) => Some(outcome),
-        UpgradeRegistrationEvent::Complete(result) => {
-            settle_interrupted_registration(registration, cancellation, upgrade_transport).await;
-            log_connection_result(result, false);
-            transport.close().await;
-            None
+    let interruption = match event {
+        UpgradeRegistrationEvent::Registered(outcome) => return Some(outcome),
+        UpgradeRegistrationEvent::Complete(result) => RegistrationInterruption::Ended(result),
+        UpgradeRegistrationEvent::Shutdown(mode) => RegistrationInterruption::Shutdown(mode),
+        UpgradeRegistrationEvent::PeerClosed => RegistrationInterruption::PeerClosed,
+    };
+    settle_interrupted_registration(registration, cancellation, upgrade_transport).await;
+    match interruption {
+        RegistrationInterruption::Ended(result) => {
+            log_connection_result(result, ConnectionPhase::Serving)
         }
-        UpgradeRegistrationEvent::Shutdown(mode) => {
-            settle_interrupted_registration(registration, cancellation, upgrade_transport).await;
-            shutdown_hyper_connection(mode, connection, begin_shutdown).await;
-            transport.close().await;
-            None
+        RegistrationInterruption::Shutdown(mode) => {
+            shutdown_hyper_connection(mode, connection, DrainPolicy::Supervised).await;
         }
-        UpgradeRegistrationEvent::PeerClosed => {
-            settle_interrupted_registration(registration, cancellation, upgrade_transport).await;
-            log_connection_result(connection.await, false);
-            transport.close().await;
-            None
+        RegistrationInterruption::PeerClosed => {
+            log_connection_result(connection.await, ConnectionPhase::Serving)
         }
     }
+    transport.close().await;
+    None
 }
 
 #[cfg(feature = "ws")]
-async fn cancel_admitted_upgrade<C, E>(
+async fn cancel_admitted_upgrade<C>(
     outcome: super::server_lifecycle::TransportRegistrationOutcome,
     connection: std::pin::Pin<&mut C>,
     upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
     transport: &mut OwnedTransport,
 ) where
-    C: std::future::Future<Output = Result<(), E>>,
-    E: LoggableConnectionError,
+    C: HyperConnection,
 {
     upgrade_transport.cancel();
     outcome.cancel();
     upgrade_transport.abort_pending().await;
-    log_connection_result(connection.await, false);
+    log_connection_result(connection.await, ConnectionPhase::Serving);
     transport.close().await;
 }
 
 #[cfg(feature = "ws")]
-async fn retain_open_upgrade<C, E>(
+async fn retain_open_upgrade<C>(
     outcome: super::server_lifecycle::TransportRegistrationOutcome,
     connection: std::pin::Pin<&mut C>,
     upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
     transport: &mut OwnedTransport,
 ) -> Option<super::server_lifecycle::TransportRegistrationOutcome>
 where
-    C: std::future::Future<Output = Result<(), E>>,
-    E: LoggableConnectionError,
+    C: HyperConnection,
 {
     let peer_open = match outcome.admitted() {
         true => transport.peer_remains_open().await,
@@ -914,65 +1158,80 @@ async fn commit_open_transport(
     }
 }
 
+/// Why a commitment is given up instead of handed over.
+///
+/// Split from the event so the cancel-then-drop prologue every abandonment runs
+/// is written once, for the same reason [`RegistrationInterruption`] exists.
 #[cfg(feature = "ws")]
-async fn finish_upgrade_commitment<C, E, F>(
-    event: UpgradeCommitmentEvent<E>,
+enum AbandonedCommitment {
+    /// The connection ended with an error, which is reported after the drop.
+    Ended(ConnectionResult),
+    /// The server is winding down, so the connection drains under it.
+    Shutdown(ConnectionShutdown),
+    /// The peer went away; the connection is polled to its end.
+    PeerClosed,
+}
+
+#[cfg(feature = "ws")]
+async fn finish_upgrade_commitment<C>(
+    event: UpgradeCommitmentEvent,
     commitment: super::server_lifecycle::UpgradeCommitment,
     connection: std::pin::Pin<&mut C>,
     upgrade_transport: &super::server_lifecycle::UpgradeTransportOwner,
     transport: &mut OwnedTransport,
-    begin_shutdown: F,
 ) where
-    C: std::future::Future<Output = Result<(), E>>,
-    E: LoggableConnectionError,
-    F: FnOnce(std::pin::Pin<&mut C>),
+    C: HyperConnection,
 {
-    match event {
+    let abandoned = match event {
+        // The one arm that keeps the commitment, and so the one arm that does
+        // not run the prologue below.
         UpgradeCommitmentEvent::Complete(result) if result.is_ok() => {
             commit_open_transport(commitment, upgrade_transport, transport).await;
-            log_connection_result(result, false);
+            log_connection_result(result, ConnectionPhase::Serving);
+            return;
         }
-        UpgradeCommitmentEvent::Complete(result) => {
-            upgrade_transport.cancel();
-            drop(commitment);
-            log_connection_result(result, false);
+        UpgradeCommitmentEvent::Complete(result) => AbandonedCommitment::Ended(result),
+        UpgradeCommitmentEvent::Shutdown(mode) => AbandonedCommitment::Shutdown(mode),
+        UpgradeCommitmentEvent::PeerClosed => AbandonedCommitment::PeerClosed,
+    };
+    upgrade_transport.cancel();
+    drop(commitment);
+    match abandoned {
+        AbandonedCommitment::Ended(result) => {
+            log_connection_result(result, ConnectionPhase::Serving)
         }
-        UpgradeCommitmentEvent::Shutdown(mode) => {
-            upgrade_transport.cancel();
-            drop(commitment);
-            shutdown_hyper_connection(mode, connection, begin_shutdown).await;
+        AbandonedCommitment::Shutdown(mode) => {
+            shutdown_hyper_connection(mode, connection, DrainPolicy::Supervised).await;
         }
-        UpgradeCommitmentEvent::PeerClosed => {
-            upgrade_transport.cancel();
-            drop(commitment);
-            log_connection_result(connection.await, false);
+        AbandonedCommitment::PeerClosed => {
+            log_connection_result(connection.await, ConnectionPhase::Serving)
         }
     }
 }
 
 #[cfg(feature = "ws")]
-enum OwnedConnectionEvent<E> {
-    Complete(Result<(), E>),
-    Shutdown(ServerControl),
+enum OwnedConnectionEvent {
+    Complete(ConnectionResult),
+    Shutdown(ConnectionShutdown),
     Registration(Option<super::server_lifecycle::TransportRegistration>),
     PeerClosed,
 }
 
 #[cfg(feature = "ws")]
-async fn next_owned_connection_event<C, E>(
+async fn next_owned_connection_event<C>(
     mut connection: std::pin::Pin<&mut C>,
     control: &mut tokio::sync::watch::Receiver<ServerControl>,
     transport: &mut super::server_lifecycle::UpgradeTransportOwner,
     owned_transport: &mut OwnedTransport,
-) -> OwnedConnectionEvent<E>
+) -> OwnedConnectionEvent
 where
-    C: std::future::Future<Output = Result<(), E>>,
+    C: HyperConnection,
 {
     tokio::select! {
         biased;
         () = owned_transport.peer_closed() => OwnedConnectionEvent::PeerClosed,
         result = connection.as_mut() => OwnedConnectionEvent::Complete(result),
-        mode = wait_for_shutdown(control) => OwnedConnectionEvent::Shutdown(mode),
+        mode = wait_connection_shutdown(control) => OwnedConnectionEvent::Shutdown(mode),
         registration = transport.next_registration() => {
             OwnedConnectionEvent::Registration(registration)
         }
@@ -980,55 +1239,79 @@ where
 }
 
 #[cfg(feature = "ws")]
-enum UpgradeRegistrationEvent<E> {
-    Complete(Result<(), E>),
-    Shutdown(ServerControl),
+enum UpgradeRegistrationEvent {
+    Complete(ConnectionResult),
+    Shutdown(ConnectionShutdown),
     Registered(super::server_lifecycle::TransportRegistrationOutcome),
     PeerClosed,
 }
 
 #[cfg(feature = "ws")]
-async fn await_upgrade_registration<C, E, R>(
+async fn await_upgrade_registration<C, R>(
     mut connection: std::pin::Pin<&mut C>,
     control: &mut tokio::sync::watch::Receiver<ServerControl>,
     registration: std::pin::Pin<&mut R>,
     transport: &mut OwnedTransport,
-) -> UpgradeRegistrationEvent<E>
+) -> UpgradeRegistrationEvent
 where
-    C: std::future::Future<Output = Result<(), E>>,
+    C: HyperConnection,
     R: std::future::Future<Output = super::server_lifecycle::TransportRegistrationOutcome>,
 {
     tokio::select! {
         biased;
         () = transport.peer_closed() => UpgradeRegistrationEvent::PeerClosed,
         result = connection.as_mut() => UpgradeRegistrationEvent::Complete(result),
-        mode = wait_for_shutdown(control) => UpgradeRegistrationEvent::Shutdown(mode),
+        mode = wait_connection_shutdown(control) => UpgradeRegistrationEvent::Shutdown(mode),
         outcome = registration => UpgradeRegistrationEvent::Registered(outcome),
     }
 }
 
 #[cfg(feature = "ws")]
-enum UpgradeCommitmentEvent<E> {
-    Complete(Result<(), E>),
-    Shutdown(ServerControl),
+enum UpgradeCommitmentEvent {
+    Complete(ConnectionResult),
+    Shutdown(ConnectionShutdown),
     PeerClosed,
 }
 
 #[cfg(feature = "ws")]
-async fn await_upgrade_commitment<C, E>(
+async fn await_upgrade_commitment<C>(
     mut connection: std::pin::Pin<&mut C>,
     control: &mut tokio::sync::watch::Receiver<ServerControl>,
     transport: &mut OwnedTransport,
-) -> UpgradeCommitmentEvent<E>
+) -> UpgradeCommitmentEvent
 where
-    C: std::future::Future<Output = Result<(), E>>,
+    C: HyperConnection,
 {
     tokio::select! {
         biased;
         () = transport.peer_closed() => UpgradeCommitmentEvent::PeerClosed,
         result = connection.as_mut() => UpgradeCommitmentEvent::Complete(result),
-        mode = wait_for_shutdown(control) => UpgradeCommitmentEvent::Shutdown(mode),
+        mode = wait_connection_shutdown(control) => UpgradeCommitmentEvent::Shutdown(mode),
     }
+}
+
+/// Serve one request under its own response-lifetime guard.
+///
+/// The guard is armed here, held across the handler, and moves into the
+/// response body — the only holder that can still resolve the signal. Liveness
+/// arrives by value because the guard becomes its holder for the rest of the
+/// response; the service closure's per-request clone is the one it keeps.
+///
+/// The request method is read before the request is consumed, because a `HEAD`
+/// gets a response Hyper never writes a body for, and this is the last place
+/// that fact is still available to the body that has to know it.
+async fn serve_request(
+    request: hyper::Request<hyper::body::Incoming>,
+    router: &ServerDispatch,
+    ctx: &ConnCtx,
+    remote_addr: Option<std::net::IpAddr>,
+    lifecycle: &ConnectionLifecycle,
+    liveness: Arc<ConnectionLiveness>,
+) -> Result<hyper::Response<GuardedBody>, std::convert::Infallible> {
+    let bodyless_request = request.method() == hyper::Method::HEAD;
+    let (signal, guard) = liveness.begin_response();
+    let response = handle_request(request, router, ctx, remote_addr, lifecycle, signal).await?;
+    Ok(GuardedBody::attach(response, guard, bodyless_request))
 }
 
 fn connection_builder(
@@ -1044,30 +1327,14 @@ fn connection_builder(
     builder
 }
 
-async fn wait_for_shutdown(
-    control: &mut tokio::sync::watch::Receiver<ServerControl>,
-) -> ServerControl {
-    loop {
-        let current = *control.borrow_and_update();
-        if current != ServerControl::Running {
-            return current;
-        }
-        match control.changed().await {
-            Ok(()) => {}
-            Err(_) => return current,
-        }
-    }
-}
-
-fn log_connection_result<E>(result: Result<(), E>, draining: bool)
-where
-    E: AsRef<dyn std::error::Error + Send + Sync> + std::fmt::Display,
-{
-    match (result, draining) {
+fn log_connection_result(result: ConnectionResult, phase: ConnectionPhase) {
+    match (result, phase) {
         (Ok(()), _) => {}
-        (Err(ref error), _) if is_benign_hyper_error(error.as_ref()) => {}
-        (Err(error), true) => tracing::warn!("connection error during shutdown: {error}"),
-        (Err(error), false) => tracing::warn!("connection error: {error}"),
+        (Err(ref error), _) if is_benign_hyper_error(&**error) => {}
+        (Err(error), ConnectionPhase::Draining) => {
+            tracing::warn!("connection error during shutdown: {error}");
+        }
+        (Err(error), ConnectionPhase::Serving) => tracing::warn!("connection error: {error}"),
     }
 }
 

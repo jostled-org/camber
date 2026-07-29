@@ -9,6 +9,9 @@ pub mod tls;
 #[cfg(feature = "ws")]
 #[path = "support/ws.rs"]
 pub mod ws;
+#[cfg(feature = "ws")]
+#[path = "support/ws_async.rs"]
+pub mod ws_async;
 
 pub mod common {
     pub use crate::deterministic::*;
@@ -17,6 +20,8 @@ pub mod common {
     pub use crate::tls::*;
     #[cfg(feature = "ws")]
     pub use crate::ws::*;
+    #[cfg(feature = "ws")]
+    pub use crate::ws_async::*;
 }
 
 #[path = "acceptance_proxy/buffered_forwarding.rs"]

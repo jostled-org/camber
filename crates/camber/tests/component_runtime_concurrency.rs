@@ -1,18 +1,37 @@
+pub mod common;
+
+// The deterministic generator is not re-exported by `common`; declaring it
+// here keeps one name per support file rather than a second alias for one
+// `common` already owns.
 #[path = "support/deterministic.rs"]
 pub mod deterministic;
-#[path = "support/http.rs"]
-pub mod http_support;
-#[path = "support/process.rs"]
-pub mod process_support;
+
+// The runtime-scope builder every case here starts from. It lives beside the
+// cases rather than in `common`, because the worker count it names is owned by
+// these two roots; `component_runtime_resources` mounts this same file.
+#[path = "component_runtime_concurrency/scope_builders.rs"]
+pub mod scope_builders;
 
 #[path = "component_runtime_concurrency/async_channels.rs"]
 mod async_channels;
 #[path = "component_runtime_concurrency/async_tasks.rs"]
 mod async_tasks;
+#[path = "component_runtime_concurrency/no_runtime.rs"]
+mod no_runtime;
+#[path = "component_runtime_concurrency/owned_subsystems.rs"]
+mod owned_subsystems;
+#[path = "component_runtime_concurrency/panic_isolation.rs"]
+mod panic_isolation;
 #[path = "component_runtime_concurrency/periodic_scheduling.rs"]
 mod periodic_scheduling;
+#[path = "component_runtime_concurrency/precedence.rs"]
+mod precedence;
 #[path = "component_runtime_concurrency/schedule_probes.rs"]
 mod schedule_probes;
+#[path = "component_runtime_concurrency/scope_admission.rs"]
+mod scope_admission;
+#[path = "component_runtime_concurrency/scope_signals.rs"]
+mod scope_signals;
 #[path = "component_runtime_concurrency/shutdown_observation.rs"]
 mod shutdown_observation;
 #[path = "component_runtime_concurrency/sync_channels.rs"]

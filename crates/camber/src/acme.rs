@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -6,9 +7,73 @@ use rustls_acme::caches::DirCache;
 
 use crate::RuntimeError;
 use crate::config::AcmeBase;
+use crate::runtime_state::LifecycleSignals;
 
 /// Re-export `AcmeState` so downstream crates don't need a direct `rustls-acme` dependency.
 pub use rustls_acme::AcmeState;
+
+/// Drive an ACME renewal event stream until it ends or a lifecycle signal
+/// fires.
+///
+/// Generic over the stream so the loop the runtime admits is the same loop a
+/// deterministic test drives with scripted events — the renewal stream itself
+/// talks to a live ACME directory.
+pub(crate) async fn acme_renewal_loop<S, T, E>(events: S, signals: LifecycleSignals)
+where
+    S: futures_util::Stream<Item = Result<T, E>>,
+    T: std::fmt::Debug,
+    E: std::fmt::Display,
+{
+    use futures_util::StreamExt;
+
+    let mut events = std::pin::pin!(events);
+    loop {
+        // `guard` is the one definition of "race this work against the
+        // lifecycle signals". The wait for the next renewal event is unbounded
+        // — the stream is idle for weeks between renewals — so without it a
+        // scope-owned loop would hold the drain open to its escalation
+        // boundary.
+        let event = match signals.guard(events.next()).await {
+            ControlFlow::Break(()) => return,
+            ControlFlow::Continue(event) => event,
+        };
+        match report_event(event) {
+            ControlFlow::Break(()) => return,
+            ControlFlow::Continue(()) => {}
+        }
+    }
+}
+
+/// Log one renewal event, and report whether the stream can still produce more.
+///
+/// An exhausted stream is not a lifecycle stop: nothing will drive provisioning
+/// again, so the certificates the loop was renewing expire in place. The
+/// lifecycle exit stays silent precisely so this one is distinguishable.
+///
+/// The event and the error are structured FIELDS, not part of the message.
+/// Interpolating either would give one condition a distinct message string per
+/// occurrence, which is the thing an operator filters on — and would make
+/// `tracing` format a message per event that a field carries for free.
+fn report_event<T, E>(event: Option<Result<T, E>>) -> ControlFlow<()>
+where
+    T: std::fmt::Debug,
+    E: std::fmt::Display,
+{
+    match event {
+        None => {
+            tracing::warn!("acme: renewal stream ended; certificates will not be renewed");
+            ControlFlow::Break(())
+        }
+        Some(Ok(ok)) => {
+            tracing::info!(event = ?ok, "acme: renewal event");
+            ControlFlow::Continue(())
+        }
+        Some(Err(err)) => {
+            tracing::warn!(%err, "acme: renewal error");
+            ControlFlow::Continue(())
+        }
+    }
+}
 
 /// Configuration for automatic TLS via ACME (Let's Encrypt) using HTTP-01 challenges.
 ///
@@ -64,13 +129,22 @@ impl AcmeConfig {
         ),
         RuntimeError,
     > {
-        let domain_strings: Vec<String> = self.base.domains.iter().map(|d| d.to_string()).collect();
+        // `RustlsAcmeConfig::new` takes `impl AsRef<str>` and copies each domain
+        // into its own storage, so the stored list is handed over by reference. An
+        // intermediate `Vec<String>` would clone every domain to be dropped one
+        // line later.
+        let AcmeBase {
+            domains,
+            email,
+            cache_dir,
+            staging,
+        } = self.base;
 
-        let mut acme_cfg = RustlsAcmeConfig::new(domain_strings)
-            .cache(DirCache::new(self.base.cache_dir))
-            .directory_lets_encrypt(!self.base.staging);
+        let mut acme_cfg = RustlsAcmeConfig::new(domains.iter())
+            .cache(DirCache::new(cache_dir))
+            .directory_lets_encrypt(!staging);
 
-        if let Some(email) = &self.base.email {
+        if let Some(email) = email {
             acme_cfg = acme_cfg.contact_push(format!("mailto:{email}"));
         }
 

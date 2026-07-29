@@ -1,6 +1,6 @@
 use crate::RuntimeError;
 use crate::net::{Listener, ListenerInner};
-use crate::runtime;
+use crate::runtime_state::LifecycleSignals;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -113,7 +113,13 @@ impl TcpStream {
 
 /// Accept TCP connections on `addr` and dispatch each to `handler`.
 ///
-/// Runs until the runtime's shutdown signal fires, then returns `Ok(())`.
+/// Runs until the runtime asks it to stop — a shutdown request, or the root
+/// scope closing — then returns `Ok(())`.
+///
+/// With no runtime context the lifecycle signals are inert latches that nothing
+/// can fire, so that stop condition is unreachable and the loop runs until the
+/// caller drops the future. Absence is not refused here because the caller owns
+/// this future and can end it that way.
 pub async fn serve_tcp<F, Fut>(addr: &str, handler: F) -> Result<(), RuntimeError>
 where
     F: Fn(TcpStream) -> Fut + Send + Sync + 'static,
@@ -125,17 +131,23 @@ where
 
 /// Accept TCP connections on an existing listener and dispatch each to `handler`.
 ///
-/// Runs until the runtime's shutdown signal fires, then returns `Ok(())`.
+/// Runs until the runtime asks it to stop — a shutdown request, or the root
+/// scope closing — then returns `Ok(())`.
+///
+/// With no runtime context the lifecycle signals are inert latches that nothing
+/// can fire, so that stop condition is unreachable and the loop runs until the
+/// caller drops the future. Absence is not refused here because the caller owns
+/// this future and can end it that way.
 pub async fn serve_tcp_listener<F, Fut>(listener: Listener, handler: F) -> Result<(), RuntimeError>
 where
     F: Fn(TcpStream) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
 {
-    let tcp = require_tcp(&listener, "serve_tcp")?;
-    let shutdown = runtime::shutdown_signal();
+    let tcp = require_tcp(&listener, "serve_tcp_listener")?;
+    let signals = LifecycleSignals::current();
     let handler = Arc::new(handler);
 
-    super::accept::accept_loop(tcp, &shutdown, None, |(stream, _addr)| {
+    super::accept::accept_loop(tcp, &signals, None, |(stream, _)| {
         let h = Arc::clone(&handler);
         async move { handle_connection(stream, h).await }
     })
@@ -148,17 +160,19 @@ where
     Fut: Future<Output = Result<(), RuntimeError>> + Send,
 {
     let tcp_stream = TcpStream::from_tokio(stream);
-    match handler(tcp_stream).await {
-        Ok(()) => {}
-        Err(e) if crate::error::is_benign_io_error(&e) => {}
-        Err(e) => tracing::warn!("tcp connection error: {e}"),
-    }
+    super::accept::report_handler_error("tcp", handler(tcp_stream).await);
 }
 
 /// Accept TCP+TLS connections on `addr` and dispatch each to `handler`.
 ///
-/// Performs TLS handshake on each accepted connection before passing
-/// the `TlsStream` to the handler. Runs until the runtime's shutdown signal.
+/// Performs TLS handshake on each accepted connection before passing the
+/// `TlsStream` to the handler. Runs until the runtime asks it to stop — a
+/// shutdown request, or the root scope closing.
+///
+/// With no runtime context the lifecycle signals are inert latches that nothing
+/// can fire, so that stop condition is unreachable and the loop runs until the
+/// caller drops the future. Absence is not refused here because the caller owns
+/// this future and can end it that way.
 pub async fn serve_tcp_tls<F, Fut>(
     addr: &str,
     tls_config: Arc<rustls::ServerConfig>,
@@ -174,7 +188,13 @@ where
 
 /// Accept TCP+TLS connections on an existing listener and dispatch each to `handler`.
 ///
-/// Runs until the runtime's shutdown signal fires, then returns `Ok(())`.
+/// Runs until the runtime asks it to stop — a shutdown request, or the root
+/// scope closing — then returns `Ok(())`.
+///
+/// With no runtime context the lifecycle signals are inert latches that nothing
+/// can fire, so that stop condition is unreachable and the loop runs until the
+/// caller drops the future. Absence is not refused here because the caller owns
+/// this future and can end it that way.
 pub async fn serve_tcp_tls_listener<F, Fut>(
     listener: Listener,
     tls_config: Arc<rustls::ServerConfig>,
@@ -184,12 +204,12 @@ where
     F: Fn(super::TlsStream) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
 {
-    let tcp = require_tcp(&listener, "serve_tcp_tls")?;
-    let shutdown = runtime::shutdown_signal();
+    let tcp = require_tcp(&listener, "serve_tcp_tls_listener")?;
+    let signals = LifecycleSignals::current();
     let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
     let handler = Arc::new(handler);
 
-    super::accept::accept_loop(tcp, &shutdown, None, |(stream, _addr)| {
+    super::accept::accept_loop(tcp, &signals, None, |(stream, _)| {
         let a = acceptor.clone();
         let h = Arc::clone(&handler);
         async move { handle_tls_connection(stream, a, h).await }
@@ -209,9 +229,5 @@ async fn handle_tls_connection<F, Fut>(
         Some(s) => super::TlsStream::from_server(s),
         None => return,
     };
-    match handler(tls_stream).await {
-        Ok(()) => {}
-        Err(e) if crate::error::is_benign_io_error(&e) => {}
-        Err(e) => tracing::warn!("tls connection error: {e}"),
-    }
+    super::accept::report_handler_error("tls", handler(tls_stream).await);
 }

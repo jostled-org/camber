@@ -26,6 +26,31 @@ async fn mock_http_intercepts_outbound_call() {
     runtime::request_shutdown();
 }
 
+/// Two live mocks can name the same URL and method. Dropping one deregisters
+/// that one and leaves the other intercepting.
+///
+/// The registry is process-global, so deregistering by (url, method) took both
+/// out: the survivor's handle then counted nothing while the real network call
+/// went out.
+#[camber::test]
+async fn dropping_one_mock_leaves_its_twin_registered() {
+    let url = "https://twin-api/data";
+    let first = mock::http(url).returns(Response::text(200, "first").expect("valid status"));
+    let second = mock::http(url).returns(Response::text(200, "second").expect("valid status"));
+
+    let resp = http::get(url).await.expect("first mock intercepts");
+    assert_eq!(resp.body(), "first");
+    first.assert_called_once();
+
+    drop(first);
+
+    let resp = http::get(url).await.expect("second mock still intercepts");
+    assert_eq!(resp.body(), "second");
+    second.assert_called_once();
+
+    runtime::request_shutdown();
+}
+
 #[test]
 fn request_builder_constructs_test_request() {
     let req = Request::builder()

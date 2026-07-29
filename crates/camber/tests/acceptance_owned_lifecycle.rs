@@ -14,5 +14,9 @@ mod fixture_contracts;
 mod background_serving;
 #[path = "acceptance_owned_lifecycle/direct_serving.rs"]
 mod direct_serving;
+#[path = "acceptance_owned_lifecycle/disconnect/mod.rs"]
+mod disconnect;
+#[path = "acceptance_owned_lifecycle/scope_drain.rs"]
+mod scope_drain;
 #[path = "acceptance_owned_lifecycle/serve_variants.rs"]
 mod serve_variants;

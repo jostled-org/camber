@@ -637,7 +637,7 @@ router.get("/fallible", |req| async move {
 });
 ```
 
-`IntoResponse` maps `RuntimeError::BadRequest` to 400 and all other errors to 500. Handlers returning `Response` pass through unchanged.
+`IntoResponse` maps `RuntimeError::BadRequest` to 400, `RuntimeError::ScopeClosed` to 503, and all other errors to 500. `ScopeClosed` means the runtime refused a spawn inside the shutdown window, which is an orderly drain rather than a server fault — 503 is what a load balancer reads as "drain this instance". Handlers returning `Response` pass through unchanged.
 
 ## Concurrent Work in Handlers
 

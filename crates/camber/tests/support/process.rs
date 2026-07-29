@@ -9,7 +9,6 @@ const CHILD_MODE_ENV: &str = "CAMBER_FIXTURE_PRIVATE_CHILD_MODE";
 const CHILD_NONCE_ENV: &str = "CAMBER_FIXTURE_PRIVATE_CHILD_NONCE";
 const CHILD_PARENT_ID_ENV: &str = "CAMBER_FIXTURE_PRIVATE_PARENT_ID";
 const OUTPUT_CAPTURE_LIMIT: usize = 64 * 1024;
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
 static CHILD_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
@@ -115,9 +114,9 @@ impl ChildGuard {
             .env(CHILD_MODE_ENV, mode)
             .env(CHILD_NONCE_ENV, nonce)
             .env(CHILD_PARENT_ID_ENV, std::process::id().to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            // Only the stdin `spawn` does not set: it pipes both output streams
+            // itself, because it captures them.
+            .stdin(Stdio::null());
         Self::spawn(command, cleanup_timeout)
     }
 
@@ -171,8 +170,7 @@ impl ChildGuard {
     pub fn wait_for_line(&self, expected: &str, timeout: Duration) -> Result<(), ProcessError> {
         let deadline = Instant::now() + timeout;
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match self.lines.recv_timeout(remaining) {
+            match self.lines.recv_timeout(super::http::remaining(deadline)) {
                 Ok(line) if line.contains(expected) => return Ok(()),
                 Ok(_) => {}
                 Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -193,7 +191,7 @@ impl ChildGuard {
         match self.wait_for_line(expected, timeout) {
             Ok(()) => Ok(()),
             Err(error) => {
-                self.shutdown()?;
+                self.shutdown_reporting_failure();
                 Err(error)
             }
         }
@@ -206,9 +204,23 @@ impl ChildGuard {
                 Ok(status)
             }
             None => {
-                self.shutdown()?;
+                self.shutdown_reporting_failure();
                 Err(ProcessError::ExitTimeout { timeout })
             }
+        }
+    }
+
+    /// Shut the child down on behalf of a caller that already holds the better
+    /// diagnosis, reporting any cleanup fault through the reap probe.
+    ///
+    /// A readiness wait that expired and an exit bound that was not met each
+    /// name what the test was actually waiting for. Returning the cleanup fault
+    /// in place of that would answer a question nobody asked — and one test
+    /// asserts on the `ExitTimeout` exactly. The reap probe is where a cleanup
+    /// fault is read from, so it goes there instead of over the top.
+    fn shutdown_reporting_failure(&mut self) {
+        if let Err(error) = self.shutdown() {
+            self.report_cleanup_failure(&error);
         }
     }
 
@@ -255,21 +267,23 @@ impl ChildGuard {
         }
     }
 
+    /// Wait for the child to exit, bounded.
+    ///
+    /// The shared bounded poll clamps its last sleep to what is left of
+    /// `timeout`, so an exit that lands just inside the caller's budget is still
+    /// seen. Sleeping a whole fixed interval here used to overshoot it.
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<Option<ExitStatus>, ProcessError> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            match self.try_wait()? {
-                Some(status) => return Ok(Some(status)),
-                None if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
-                None => return Ok(None),
-            }
-        }
+        super::http::poll_value(timeout, || self.try_wait().transpose()).transpose()
     }
 
     fn finish_reap(&mut self, status: ExitStatus) -> Result<(), ProcessError> {
         let child_id = self.id();
-        self.child.take();
+        // Given up only once the readers are in. `Drop` keys its second attempt
+        // off the child still being held, so releasing it before a reader join
+        // that then times out would leave both reader threads running with
+        // nothing left to join them for the rest of the binary.
         self.join_readers()?;
+        self.child.take();
         if let Some(sender) = self.reap_sender.take() {
             let _ = sender.send(Ok(ReapedChild { child_id, status }));
         }
@@ -277,28 +291,19 @@ impl ChildGuard {
     }
 
     fn join_readers(&mut self) -> Result<(), ProcessError> {
-        let deadline = Instant::now() + self.cleanup_timeout;
-        loop {
-            let stdout_finished = self
-                .stdout_reader
+        let timeout = self.cleanup_timeout;
+        let finished = super::http::poll_until(timeout, || {
+            self.stdout_reader
                 .as_ref()
-                .is_none_or(JoinHandle::is_finished);
-            let stderr_finished = self
-                .stderr_reader
-                .as_ref()
-                .is_none_or(JoinHandle::is_finished);
-            match (
-                stdout_finished && stderr_finished,
-                Instant::now() < deadline,
-            ) {
-                (true, _) => break,
-                (false, true) => std::thread::sleep(POLL_INTERVAL),
-                (false, false) => {
-                    return Err(ProcessError::ReaderTimeout {
-                        timeout: self.cleanup_timeout,
-                    });
-                }
-            }
+                .is_none_or(JoinHandle::is_finished)
+                && self
+                    .stderr_reader
+                    .as_ref()
+                    .is_none_or(JoinHandle::is_finished)
+        });
+        match finished {
+            true => {}
+            false => return Err(ProcessError::ReaderTimeout { timeout }),
         }
         self.stdout = join_output_reader(&mut self.stdout_reader)?;
         self.stderr = join_output_reader(&mut self.stderr_reader)?;
@@ -410,15 +415,42 @@ pub fn run_isolated_exact(
     })
 }
 
-pub fn private_child_parent_id() -> Option<u32> {
-    std::env::var(CHILD_PARENT_ID_ENV).ok()?.parse().ok()
-}
-
-pub fn run_signal_contract_exact(
+/// Run `body` in a private child process, or drive that child from the parent.
+///
+/// One function, two sides. In the child it runs `body`, prints `marker` so the
+/// parent's readiness wait completes, and reports `true` so the caller returns
+/// without running the parent's assertions. In the parent it runs the child
+/// bounded by `bound`, fails with the child's stderr when the child failed, and
+/// reports `false` so the caller goes on to assert whatever it owns.
+///
+/// A process-isolated case is otherwise fifteen lines of preamble that every
+/// such test restates, and a copy that forgets the flush hangs its parent on a
+/// marker still sitting in the child's buffer.
+pub fn run_in_child(
     test_name: &str,
     mode: &str,
-    assertion_marker: &str,
-    timeout: Duration,
-) -> Result<IsolatedRun, ProcessError> {
-    run_isolated_exact(test_name, mode, assertion_marker, timeout)
+    marker: &str,
+    bound: Duration,
+    body: impl FnOnce(),
+) -> bool {
+    if !is_private_child(mode) {
+        let run = run_isolated_exact(test_name, mode, marker, bound)
+            .expect("the isolated child could not be run");
+        assert!(
+            run.success(),
+            "the isolated child failed: {}",
+            String::from_utf8_lossy(run.stderr())
+        );
+        return false;
+    }
+    body();
+    println!("{marker}");
+    // Flushed here, not left to exit: the parent waits on this line, and a
+    // marker still in the child's buffer reads as a child that never got there.
+    io::Write::flush(&mut std::io::stdout()).expect("the child could not flush its marker");
+    true
+}
+
+pub fn private_child_parent_id() -> Option<u32> {
+    std::env::var(CHILD_PARENT_ID_ENV).ok()?.parse().ok()
 }

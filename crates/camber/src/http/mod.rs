@@ -32,6 +32,11 @@
 //! - [`self::Response`]: build text, JSON, bytes, headers, and cookies
 //! - [`self::IntoResponse`]: handler return conversion for `Response` and
 //!   `Result<Response, RuntimeError>`
+//! - [`self::DisconnectSignal`] and [`self::DisconnectCause`]: observe one
+//!   response's lifetime through
+//!   [`Request::on_disconnect`](self::Request::on_disconnect) — it resolves
+//!   once, to the peer going away, this stream being reset, the server
+//!   shutting down, or the response finishing
 //!
 //! # HTTP Client
 //!
@@ -84,6 +89,7 @@ mod conn;
 mod cookie;
 /// CORS middleware builders and helpers.
 pub mod cors;
+mod disconnect;
 mod dispatch;
 mod encoding;
 #[cfg(feature = "grpc")]
@@ -127,6 +133,7 @@ pub use client::{
     patch_json, post, post_form, post_json, put, put_form, put_json,
 };
 pub use cookie::{CookieOptions, SameSite};
+pub use disconnect::{DisconnectCause, DisconnectSignal};
 pub use health::{ProxyHealthResource, spawn_health_checker};
 pub use host_router::HostRouter;
 pub use method::{Method, ParseMethodError};

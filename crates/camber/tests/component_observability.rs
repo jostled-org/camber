@@ -7,5 +7,6 @@ mod cpu_profiling;
 mod metrics_endpoint;
 #[path = "component_observability/request_tracing.rs"]
 mod request_tracing;
+#[cfg(feature = "otel")]
 #[path = "component_observability/trace_context.rs"]
 mod trace_context;

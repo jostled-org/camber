@@ -32,22 +32,32 @@ fn main() -> Result<(), RuntimeError> {
         .shutdown_timeout(Duration::from_secs(10))
         .run(|| {
             // start services, background work, resources, etc.
-            Ok(())
-        })
+            Ok::<(), RuntimeError>(())
+        })?
 }
 ```
+
+`run` returns `Result<T, RuntimeError>` and never inspects `T`, so a closure that
+returns its own `Result` nests. The `?` takes the runtime-level failure and
+leaves the closure's result as `main`'s value.
 
 Use `runtime::run(...)` when you want a scoped structured-concurrency context without HTTP serving:
 
 ```rust
-use camber::{runtime, spawn};
+use camber::{RuntimeError, runtime, spawn};
 
-runtime::run(|| {
-    let handle = spawn(|| expensive_work());
-    let value = handle.join().unwrap();
-    println!("{value}");
-}).unwrap();
+fn main() -> Result<(), RuntimeError> {
+    runtime::run(|| {
+        let value = spawn(|| expensive_work()).join()?;
+        println!("{value}");
+        Ok::<(), RuntimeError>(())
+    })?
+}
 ```
+
+`join()` carries the same failures as any other spawn: `NoRuntime` outside a
+runtime, `ScopeClosed` once admission has closed, `TaskPanicked` when the child
+unwound.
 
 ## Return Values
 
@@ -56,6 +66,37 @@ runtime::run(|| {
 - `http::serve(...)` returns `Result<(), RuntimeError>`
 
 Camber library APIs do not exit the process. Binaries decide how to render or map errors.
+
+A startup failure preempts all of this. Builder validation, the nested-runtime
+check, TLS resolution, metrics installation, and executor construction all run
+before your closure does, so any one of them returns its error without the
+closure ever being called. Nothing below can displace it.
+
+Once the closure runs, `run` never inspects its value. `T` is opaque to the
+runtime, so it is either returned as `Ok(T)` or displaced whole by a
+runtime-level failure. Those failures are ordered, first match wins:
+
+0. your closure unwinding → the panic resumes, and nothing returns through the
+   `Result` at all
+1. a panic in a Camber-owned background child → `RuntimeError::TaskPanicked`
+2. the scope drain expiring before every child exited on its own →
+   `RuntimeError::ScopeDrainTimeout(count)`, where `count` is how many children
+   the boundary found outstanding
+
+A panicking closure does not escape teardown. Camber catches the unwind, runs
+teardown in full — admission closes, `ScopeClosing` fires, the scope drains,
+resources shut down — and resumes the panic on the far side, so your panic
+semantics are unchanged. A recorded internal panic or a drain timeout is then
+logged rather than returned: the payload leaves through the panic, so the
+`Result` has no room left to carry either. Every failed assertion inside
+`#[camber::test]` takes this path.
+
+A panic outranks a drain timeout because a timeout is often the consequence of
+a wedged panicking child, so reporting the panic points at the real fault.
+
+A panic in a task **you** spawned with `camber::spawn` or `camber::spawn_async`
+is delivered on that task's own handle and leaves the runtime result alone.
+Panics never cancel sibling tasks.
 
 ## Runtime Builder
 
@@ -80,8 +121,11 @@ If you already have a Tokio runtime and want to run Camber servers inside it, us
 - `http::serve_async(...)`
 - `http::serve_async_tls(...)`
 - `http::serve_async_hosts(...)`
+- `http::serve_async_hosts_tls(...)`
 - `http::serve_background(...)`
+- `http::serve_background_tls(...)`
 - `http::serve_background_hosts(...)`
+- `http::serve_background_hosts_tls(...)`
 
 Background server APIs return `ServerHandle`, which:
 
@@ -120,10 +164,67 @@ from `RuntimeBuilder::run` is not itself a server shutdown event. Retain and
 await `ServerHandleFuture` before releasing resources when transport completion
 must be proved.
 
-The signal watcher belongs to the current Camber runtime and is aborted during
-closure return. A signal received after the signal watcher is gone has no
-server-lifecycle guarantee. Awaiting a server owner does not extend runtime
-task waiting or recreate that watcher.
+The signal watcher belongs to the current Camber runtime. It is a root-scope
+child that exits when the scope closes at closure return, and teardown awaits
+that exit rather than aborting it. A signal received after the signal watcher
+is gone has no server-lifecycle guarantee. Awaiting a server owner does not
+extend runtime task waiting or recreate that watcher.
+
+### Two Lifecycle Signals
+
+Camber-owned background work observes two distinct events:
+
+- **Scope closing** fires when the user closure returns, and also whenever
+  shutdown is requested. It is what stops perpetual background children —
+  interval and cron schedules, per-resource health loops, the proxy health
+  checker, ACME/DNS-01 renewal, and the signal watcher.
+- **Runtime shutdown** (`runtime::request_shutdown`, `on_cancel` completion, an
+  OS signal) is *not* fired by closure return. The owned HTTP server observes
+  only this one, which is why returning from the closure does not stop a server
+  that is still serving.
+
+### Teardown Order and `shutdown_timeout`
+
+Teardown runs in one order: the closure returns, admission closes and scope
+closing fires, the root scope drains, resources shut down, Tokio shuts down.
+
+`shutdown_timeout` bounds the **scope drain**, not total return. Children get
+that long to exit cooperatively. At the boundary Camber aborts every remaining
+async child and joins it under one short forced-join grace, then returns
+`RuntimeError::ScopeDrainTimeout(count)` reporting how many children the
+boundary found outstanding. Aborting drops a task that is waiting at an
+`.await`; a task that never awaits, and any `camber::spawn` blocking closure,
+cannot be stopped — the drain reports it and proceeds instead of waiting.
+
+Resource shutdown then runs unbounded — `shutdown_timeout` does not apply to it.
+The final Tokio shutdown is bounded by a second, full `shutdown_timeout`: that
+window belongs to the detached synchronous-entry connection tasks, which the
+scope drain never covered. Worst-case return is therefore roughly
+`2 × shutdown_timeout` plus however long resource shutdown takes.
+
+A per-resource health task is a root-scope child, and `Resource::health_check`
+runs under `block_in_place`, which `abort()` cannot preempt. A resource whose
+health check blocks — a database ping with its own multi-second timeout, say —
+while the drain escalates will not join within the forced-join grace, so the
+scope reports it outstanding and `run` returns `RuntimeError::ScopeDrainTimeout`
+where it previously returned `Ok`. Keep `health_check` bounded well inside
+`shutdown_timeout`, or expect that result.
+
+A forcibly aborted `spawn_async` task's own handle resolves
+`RuntimeError::TaskPanicked("task channel closed")`. `RuntimeError::Cancelled`
+is never a drain outcome. It is delivered only by explicit cancellation:
+`AsyncJoinHandle::cancel()`, which drops the spawned future; `JoinHandle::cancel()`
+on a `camber::spawn` blocking task, which the task observes at its next Camber IO
+boundary; or `ServerHandle::cancel()`, which the server owner returns as its
+terminal outcome.
+
+### Outside a Runtime
+
+`runtime::request_shutdown` and `runtime::on_cancel` are no-ops when no runtime
+is established — there is nothing to shut down, and `on_cancel`'s future is
+dropped unpolled. `camber::task::on_shutdown()` observes a signal that can never
+fire, so it never completes. `camber::spawn` and `camber::spawn_async` run
+nothing and their handles yield `RuntimeError::NoRuntime`.
 
 ## Resource Lifecycle
 
@@ -140,12 +241,16 @@ impl Resource for Cache {
     fn shutdown(&self) -> Result<(), RuntimeError> { Ok(()) }
 }
 
-runtime::builder()
-    .resource(Cache)
-    .run(|| Ok::<(), RuntimeError>(()))?;
+fn main() -> Result<(), RuntimeError> {
+    runtime::builder()
+        .resource(Cache)
+        .run(|| Ok::<(), RuntimeError>(()))?
+}
 ```
 
-Resources shut down in reverse registration order.
+Resources shut down concurrently — one thread per resource, every one joined
+before `run` returns. There is no ordering guarantee between them, so a resource
+must not depend on another still being up while it shuts down.
 
 ### Sync bridge: `runtime::block_on`
 
@@ -169,12 +274,15 @@ Camber uses one main error type at the runtime boundary: `RuntimeError`.
 
 Common variants include:
 
-- `Io`
-- `Http`
-- `Tls`
-- `Timeout`
-- `Cancelled`
-- `TaskPanicked`
-- `InvalidArgument`
+- `Io` — an underlying I/O failure
+- `Http` — an HTTP client, server, or protocol-level failure
+- `Tls` — TLS setup or handshake failed
+- `Timeout` — an operation exceeded its configured timeout
+- `Cancelled` — cooperative cancellation was requested
+- `TaskPanicked` — a spawned task unwound with a panic payload
+- `InvalidArgument` — a public API was called with an invalid argument
+- `NoRuntime` — a runtime-requiring entry point was called with no runtime context
+- `ScopeClosed` — admission was attempted at or after the root scope's close transition
+- `ScopeDrainTimeout(usize)` — the bounded scope drain expired, carrying how many children the boundary found outstanding (only the async subset of that count is then aborted and joined)
 
 Use normal Rust error propagation with `?`.

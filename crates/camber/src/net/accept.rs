@@ -35,15 +35,20 @@ impl Acceptor for tokio::net::UnixListener {
 
 /// Run an accept loop, dispatching each connection to `on_accept`.
 ///
-/// Returns `Ok(())` when shutdown is requested. Returns `Err` on fatal
+/// Returns `Ok(())` when either lifecycle signal fires. Returns `Err` on fatal
 /// accept errors. Transient errors (fd exhaustion) trigger a 100ms backoff.
+///
+/// The pair, not the shutdown latch alone. The user closure's return closes
+/// root-scope admission and fires `ScopeClosing` with the shutdown latch left
+/// unset, so a loop watching shutdown alone would still be parked at the
+/// escalation boundary and turn a clean exit into a scope drain timeout.
 ///
 /// When `conn_limit` is `Some`, the semaphore bounds the number of concurrent
 /// connections. The accept loop waits for a permit before spawning a task;
 /// the permit is released when the connection task completes.
 pub(crate) async fn accept_loop<L, F, Fut>(
     listener: &L,
-    shutdown: &crate::runtime_state::ShutdownSignal,
+    signals: &crate::runtime_state::LifecycleSignals,
     conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
     on_accept: F,
 ) -> Result<(), RuntimeError>
@@ -52,31 +57,34 @@ where
     F: Fn(L::Accepted) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    // Registered once for the listener, not once per connection. Both latches
+    // are sticky, so a wait that has not resolved is still the same wait next
+    // time round; constructing it inside the loop would register and deregister
+    // a `Notify` waiter — an internal mutex and an intrusive-list edit — on
+    // every accepted connection, and again on every permit wait.
+    let stop = signals.wait();
+    tokio::pin!(stop);
     loop {
-        tokio::select! {
+        // `biased` gives the stop signals priority over a ready connection, and
+        // states the stop condition once. The accept future is dropped unpolled
+        // when they win, so the connection stays queued on the listener.
+        let accepted = tokio::select! {
             biased;
-            () = shutdown.wait() => {
-                return Ok(());
+            () = &mut stop => return Ok(()),
+            result = listener.accept() => result,
+        };
+        let connection = match accepted {
+            Ok(connection) => connection,
+            Err(error) if crate::error::is_transient_accept_error(&error) => {
+                tracing::warn!("accept: fd limit reached, backing off");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
             }
-            result = listener.accept() => {
-                match result {
-                    Ok(accepted) => {
-                        match spawn_with_limit(
-                            conn_limit,
-                            shutdown,
-                            on_accept(accepted),
-                        ).await {
-                            true => return Ok(()),
-                            false => {}
-                        }
-                    }
-                    Err(e) if crate::error::is_transient_accept_error(&e) => {
-                        tracing::warn!("accept: fd limit reached, backing off");
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
+            Err(error) => return Err(error.into()),
+        };
+        match spawn_with_limit(conn_limit, stop.as_mut(), on_accept(connection)).await {
+            true => return Ok(()),
+            false => {}
         }
     }
 }
@@ -96,41 +104,43 @@ where
     F: Fn(L::Accepted, Option<tokio::sync::OwnedSemaphorePermit>) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    // Registered once for the listener, not once per connection — the same
+    // reason `accept_loop` hoists its wait. This loop would otherwise pay the
+    // registration twice per connection: once on the accept, once on the permit.
+    let stop = shutdown.wait();
+    tokio::pin!(stop);
     loop {
-        tokio::select! {
+        let accepted = tokio::select! {
             biased;
-            () = shutdown.wait() => {
-                return Ok(());
+            () = &mut stop => return Ok(()),
+            result = listener.accept() => result,
+        };
+        let connection = match accepted {
+            Ok(connection) => connection,
+            Err(error) if crate::error::is_transient_accept_error(&error) => {
+                tracing::warn!("accept: fd limit reached, backing off");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
             }
-            result = listener.accept() => {
-                match result {
-                    Ok(accepted) => {
-                        let permit = match conn_limit {
-                            Some(_) => tokio::select! {
-                                biased;
-                                () = shutdown.wait() => return Ok(()),
-                                permit = acquire_connection_permit(conn_limit, script) => permit.ok(),
-                            },
-                            None => None,
-                        };
-                        if conn_limit.is_none() || permit.is_some() {
-                            tokio::spawn(on_accept(accepted, permit));
-                        }
-                    }
-                    Err(error) if crate::error::is_transient_accept_error(&error) => {
-                        tracing::warn!("accept: fd limit reached, backing off");
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
+            Err(error) => return Err(error.into()),
+        };
+        let permit = match conn_limit {
+            Some(_) => tokio::select! {
+                biased;
+                () = &mut stop => return Ok(()),
+                permit = acquire_connection_permit(conn_limit, script.map(Arc::as_ref)) => permit.ok(),
+            },
+            None => None,
+        };
+        if conn_limit.is_none() || permit.is_some() {
+            tokio::spawn(on_accept(connection, permit));
         }
     }
 }
 
 pub(crate) async fn acquire_connection_permit(
     conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
-    script: Option<&Arc<crate::http::mock::LifecycleScript>>,
+    script: Option<&crate::http::mock::LifecycleScript>,
 ) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError> {
     let semaphore = match conn_limit {
         Some(semaphore) => Arc::clone(semaphore),
@@ -164,12 +174,18 @@ pub(crate) async fn acquire_connection_permit(
 /// permit first. The permit is held for the lifetime of the spawned task,
 /// so it is released when the connection closes. Closed semaphores (runtime
 /// shutdown) are treated as a no-op — the connection is dropped silently.
-async fn spawn_with_limit<Fut>(
+///
+/// `stop` is the loop's own hoisted wait, borrowed rather than re-derived: the
+/// caller already holds one registration for the whole listener, and deriving a
+/// second one here would restore the per-connection cost the hoist removed.
+/// Generic over the future so the caller decides which signals it races.
+async fn spawn_with_limit<Stop, Fut>(
     conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
-    shutdown: &crate::runtime_state::ShutdownSignal,
+    stop: Pin<&mut Stop>,
     fut: Fut,
 ) -> bool
 where
+    Stop: Future<Output = ()>,
     Fut: Future<Output = ()> + Send + 'static,
 {
     let permit = match conn_limit {
@@ -179,7 +195,7 @@ where
         }
         Some(sem) => tokio::select! {
             biased;
-            () = shutdown.wait() => {
+            () = stop => {
                 return true;
             }
             permit = Arc::clone(sem).acquire_owned() => permit,
@@ -192,6 +208,29 @@ where
         });
     }
     false
+}
+
+/// Report one user handler's outcome against the transport that dispatched to
+/// it.
+///
+/// A benign IO error is the peer hanging up mid-exchange: the ordinary end of an
+/// exchange, not a fault to report. Every transport that dispatches to a user
+/// handler answers it here, so the rule has one definition and a transport
+/// cannot quietly adopt a different one. It lives beside the loops for the same
+/// reason — this module is the transport-neutral half, so no reader has to open
+/// one transport's file to find another's error policy. Named for the handler
+/// rather than the connection, because UDP has no connection to name.
+///
+/// The transport is a structured FIELD, not part of the message. Interpolating
+/// it would give the three transports three distinct message strings for one
+/// condition, which is the thing an operator filters on — and would make
+/// `tracing` format a message per event that a field carries for free.
+pub(super) fn report_handler_error(transport: &'static str, result: Result<(), RuntimeError>) {
+    match result {
+        Ok(()) => {}
+        Err(error) if crate::error::is_benign_io_error(&error) => {}
+        Err(error) => tracing::warn!(transport, %error, "transport handler failed"),
+    }
 }
 
 /// Perform a TLS handshake with a 10-second timeout.

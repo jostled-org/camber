@@ -43,19 +43,22 @@ fn keepalive_serves_multiple_requests_on_one_connection() {
 
             // First request — no Connection header (HTTP/1.1 defaults to keep-alive)
             send_request(&mut stream, "/hello", None);
-            let response = crate::http::read_http_response(&mut stream).expect("first response");
+            let response =
+                crate::http::read_http_response_bounded(&mut stream).expect("first response");
             assert_eq!(response.status, 200);
             assert_eq!(response.body.as_ref(), b"Hello, world!");
 
             // Second request on the same connection
             send_request(&mut stream, "/hello", None);
-            let response = crate::http::read_http_response(&mut stream).expect("second response");
+            let response =
+                crate::http::read_http_response_bounded(&mut stream).expect("second response");
             assert_eq!(response.status, 200);
             assert_eq!(response.body.as_ref(), b"Hello, world!");
 
             // Third request with Connection: close
             send_request(&mut stream, "/hello", Some("close"));
-            let response = crate::http::read_http_response(&mut stream).expect("third response");
+            let response =
+                crate::http::read_http_response_bounded(&mut stream).expect("third response");
             assert_eq!(response.status, 200);
             assert_eq!(response.body.as_ref(), b"Hello, world!");
 
@@ -92,7 +95,7 @@ fn keepalive_timeout_closes_idle_connection() {
 
             // Send one request
             send_request(&mut stream, "/hello", None);
-            let response = crate::http::read_http_response(&mut stream).expect("response");
+            let response = crate::http::read_http_response_bounded(&mut stream).expect("response");
             assert_eq!(response.status, 200);
 
             // Wait longer than the keepalive timeout (200ms)
@@ -129,7 +132,7 @@ fn connection_close_header_prevents_keepalive() {
 
             // Send request with Connection: close
             send_request(&mut stream, "/hello", Some("close"));
-            let response = crate::http::read_http_response(&mut stream).expect("response");
+            let response = crate::http::read_http_response_bounded(&mut stream).expect("response");
             assert_eq!(response.status, 200);
             assert_eq!(response.header("connection"), Some("close"));
 

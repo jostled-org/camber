@@ -1,7 +1,8 @@
 use std::future::{Future, IntoFuture, Ready};
+use std::ops::ControlFlow;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -14,8 +15,10 @@ use super::BufferConfig;
 use super::Response;
 use super::mock::{LifecycleCheckpoint, LifecycleFault, LifecycleScript, SupervisorJoinProbe};
 use super::router::ServerDispatch;
-use crate::resource::HealthState;
-use crate::runtime_state::{DEFAULT_KEEPALIVE_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT};
+use crate::runtime_state::{
+    DEFAULT_KEEPALIVE_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT, RuntimeInner, ShutdownSignal,
+    carry_runtime,
+};
 use crate::task::{AsyncJoinFuture, panic_to_error};
 use crate::{RuntimeError, runtime};
 
@@ -69,81 +72,84 @@ impl ServerControl {
     }
 }
 
+/// What a server was started under, classified once at construction.
+///
+/// The runtime is the only server-scoped value stored: every timeout, limit,
+/// and observability handle the server needs is read back out of it on demand,
+/// so there is one answer to each question rather than a stored copy that can
+/// disagree with its source. `None` is the standalone capture, and stays
+/// `None`. Only the router's buffer sizes and the TLS flag are independent of
+/// the runtime, so they are the only other fields.
 pub(super) struct ServerContextSnapshot {
-    runtime_shutdown: Option<RuntimeShutdown>,
-    shutdown_timeout: Duration,
-    keepalive_timeout: Duration,
-    connection_limit: Option<usize>,
-    tracing_enabled: bool,
-    metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
-    #[cfg(feature = "profiling")]
-    profiling_enabled: bool,
-    health_state: Option<HealthState>,
+    runtime: Option<Arc<RuntimeInner>>,
     buffers: BufferConfig,
     is_tls: bool,
 }
 
-#[derive(Clone)]
-struct RuntimeShutdown {
-    requested: Arc<AtomicBool>,
-    notify: Arc<tokio::sync::Notify>,
-}
-
 impl ServerContextSnapshot {
     pub(super) fn capture(buffers: BufferConfig, is_tls: bool) -> Self {
-        match runtime::has_runtime() {
-            true => Self::from_camber(buffers, is_tls),
-            false => Self::standalone(buffers, is_tls),
+        Self {
+            runtime: runtime::try_current_runtime(),
+            buffers,
+            is_tls,
         }
     }
 
-    pub(super) fn standalone(buffers: BufferConfig, is_tls: bool) -> Self {
-        Self {
-            runtime_shutdown: None,
-            shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
-            keepalive_timeout: DEFAULT_KEEPALIVE_TIMEOUT,
-            connection_limit: None,
+    /// Whether the captured context came from a Camber runtime.
+    ///
+    /// The snapshot already resolved that question once. Asking the thread-local
+    /// again would put the same question twice and let the two answers disagree.
+    pub(super) fn is_camber(&self) -> bool {
+        self.runtime.is_some()
+    }
+
+    fn config(&self) -> Option<&crate::runtime_state::RuntimeConfig> {
+        self.runtime.as_ref().map(|runtime| &runtime.config)
+    }
+
+    fn runtime_shutdown(&self) -> Option<ShutdownSignal> {
+        self.runtime
+            .as_ref()
+            .map(|runtime| runtime.shutdown_signal())
+    }
+
+    fn shutdown_timeout(&self) -> Duration {
+        self.config()
+            .map_or(DEFAULT_SHUTDOWN_TIMEOUT, |config| config.shutdown_timeout)
+    }
+
+    fn keepalive_timeout(&self) -> Duration {
+        self.config()
+            .map_or(DEFAULT_KEEPALIVE_TIMEOUT, |config| config.keepalive_timeout)
+    }
+
+    fn connection_limit(&self) -> Option<usize> {
+        self.config().and_then(|config| config.connection_limit)
+    }
+
+    fn connection_context(&self) -> super::handle::ConnCtx {
+        match &self.runtime {
+            Some(runtime) => {
+                super::handle::ConnCtx::from_runtime(runtime, self.buffers, self.is_tls)
+            }
+            None => self.standalone_context(),
+        }
+    }
+
+    /// The context a server started outside a Camber runtime serves with: the
+    /// router's own buffer limits and the transport's TLS state, and nothing
+    /// that could only have come from a runtime.
+    fn standalone_context(&self) -> super::handle::ConnCtx {
+        super::handle::ConnCtx {
             tracing_enabled: false,
             metrics_handle: None,
             #[cfg(feature = "profiling")]
             profiling_enabled: false,
-            health_state: None,
-            buffers,
-            is_tls,
-        }
-    }
-
-    fn from_camber(buffers: BufferConfig, is_tls: bool) -> Self {
-        let current = runtime::current_runtime();
-        Self {
-            runtime_shutdown: Some(RuntimeShutdown {
-                requested: Arc::clone(&current.shutdown),
-                notify: Arc::clone(&current.shutdown_notify),
-            }),
-            shutdown_timeout: current.config.shutdown_timeout,
-            keepalive_timeout: current.config.keepalive_timeout,
-            connection_limit: current.config.connection_limit,
-            tracing_enabled: current.config.tracing_enabled,
-            metrics_handle: current.metrics_handle.clone(),
-            #[cfg(feature = "profiling")]
-            profiling_enabled: current.config.profiling_enabled,
-            health_state: current.health_state.clone(),
-            buffers,
-            is_tls,
-        }
-    }
-
-    fn connection_context(&self) -> super::handle::ConnCtx {
-        super::handle::ConnCtx {
-            tracing_enabled: self.tracing_enabled,
-            metrics_handle: self.metrics_handle.clone(),
-            #[cfg(feature = "profiling")]
-            profiling_enabled: self.profiling_enabled,
             max_request_body: self.buffers.max_request_body,
             sse_buffer_size: self.buffers.sse_buffer_size,
             #[cfg(feature = "ws")]
             ws_buffer_size: self.buffers.ws_buffer_size,
-            health_state: self.health_state.clone(),
+            health_state: None,
             is_tls: self.is_tls,
         }
     }
@@ -159,6 +165,12 @@ impl ConnectionPermit {
     }
 }
 
+/// Return the connection's slot in the limit when the last owner of the shared
+/// handle exits.
+///
+/// The permit is never read anywhere else — holding it IS the whole type — so
+/// this release is also the only read the field has, and without it the field
+/// is dead code.
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
         drop(self.permit.take());
@@ -226,10 +238,6 @@ impl ConnectionLifecycle {
     #[cfg(feature = "ws")]
     pub(super) fn permit(&self) -> Arc<ConnectionPermit> {
         Arc::clone(&self.permit)
-    }
-
-    pub(super) fn control(&self) -> Option<tokio::sync::watch::Receiver<ServerControl>> {
-        self.control.clone()
     }
 
     pub(super) fn script(&self) -> Option<Arc<LifecycleScript>> {
@@ -300,6 +308,18 @@ enum RegistrationDecision {
     Rejected,
 }
 
+/// Cancel a pending upgrade: publish the cancelled state, then abort.
+///
+/// The order is load-bearing, and every caller depends on it. The state is
+/// stored first so the supervisor's join reads the abort as a cancellation it
+/// asked for rather than a fault, and `Release` is what makes that store visible
+/// to the joining side. Stated once here so the seven cancellation sites cannot
+/// each get it wrong.
+fn cancel_upgrade(state: &AtomicU8, abort: &tokio::task::AbortHandle) {
+    state.store(UPGRADE_CANCELLED, Ordering::Release);
+    abort.abort();
+}
+
 pub(super) struct UpgradeTicket {
     handle: Option<tokio::task::JoinHandle<()>>,
     abort: tokio::task::AbortHandle,
@@ -325,8 +345,7 @@ impl UpgradeTicket {
 
     #[cfg(feature = "ws")]
     async fn abort_and_join(mut self) {
-        self.state.store(UPGRADE_CANCELLED, Ordering::Release);
-        self.abort.abort();
+        cancel_upgrade(&self.state, &self.abort);
         let handle = self.handle.take();
         if let Some(handle) = handle {
             let _ = handle.await;
@@ -337,8 +356,7 @@ impl UpgradeTicket {
 impl Drop for UpgradeTicket {
     fn drop(&mut self) {
         if self.handle.is_some() {
-            self.state.store(UPGRADE_CANCELLED, Ordering::Release);
-            self.abort.abort();
+            cancel_upgrade(&self.state, &self.abort);
         }
     }
 }
@@ -449,8 +467,8 @@ impl UpgradeRegistrar {
                 return SupervisedUpgradeRegistration::Unavailable;
             }
         }
-        pause(
-            &self.script,
+        LifecycleScript::pause_at(
+            self.script.as_deref(),
             LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
         )
         .await;
@@ -510,12 +528,11 @@ impl UpgradeRegistrar {
         self.state = None;
     }
 
+    /// `prepare` arms both halves together and `disarm` clears both together,
+    /// so either both are present or there is nothing armed to cancel.
     fn abort_expected(&self) {
-        if let Some(state) = self.state.as_ref() {
-            state.store(UPGRADE_CANCELLED, Ordering::Release);
-        }
-        if let Some(abort) = self.abort.as_ref() {
-            abort.abort();
+        if let (Some(state), Some(abort)) = (self.state.as_ref(), self.abort.as_ref()) {
+            cancel_upgrade(state, abort);
         }
     }
 }
@@ -546,8 +563,7 @@ pub(super) struct UpgradeCancellation {
 #[cfg(feature = "ws")]
 impl UpgradeCancellation {
     pub(super) fn cancel(&self) {
-        self.state.store(UPGRADE_CANCELLED, Ordering::Release);
-        self.abort.abort();
+        cancel_upgrade(&self.state, &self.abort);
     }
 }
 
@@ -564,15 +580,14 @@ impl UpgradeCommitment {
         self.armed = false;
     }
 
+    /// The two halves are taken from a registrar that armed them together, so
+    /// either both are present or there is nothing armed to cancel.
     pub(super) fn cancel(&mut self) {
         if !self.armed {
             return;
         }
-        if let Some(state) = self.state.as_ref() {
-            state.store(UPGRADE_CANCELLED, Ordering::Release);
-        }
-        if let Some(abort) = self.abort.as_ref() {
-            abort.abort();
+        if let (Some(state), Some(abort)) = (self.state.as_ref(), self.abort.as_ref()) {
+            cancel_upgrade(state, abort);
         }
         self.armed = false;
     }
@@ -739,6 +754,12 @@ impl Future for OwnedTask {
     }
 }
 
+/// Abort the task this owner is letting go of.
+///
+/// This is the whole field-drop path: dropping `OwnedHttpTasks` drops its
+/// `FuturesUnordered`, which drops every `OwnedTask` through here, so the set
+/// needs no `Drop` of its own. `abort_all` covers the explicit path, which is
+/// separate only because it also records that the supervisor asked.
 impl Drop for OwnedTask {
     fn drop(&mut self) {
         self.handle.abort();
@@ -796,12 +817,6 @@ impl OwnedHttpTasks {
     }
 }
 
-impl Drop for OwnedHttpTasks {
-    fn drop(&mut self) {
-        self.tasks.iter().for_each(|task| task.handle.abort());
-    }
-}
-
 struct PendingAccepted {
     stream: tokio::net::TcpStream,
     remote_addr: std::net::SocketAddr,
@@ -825,7 +840,8 @@ pub(super) struct ServerSupervisor {
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     keepalive_timeout: Duration,
     shutdown_timeout: Duration,
-    runtime_shutdown: Option<RuntimeShutdown>,
+    runtime_shutdown: Option<ShutdownSignal>,
+    runtime: Option<Arc<RuntimeInner>>,
     connection_limit: Option<Arc<tokio::sync::Semaphore>>,
     pending: Option<PendingAccepted>,
     control_sender: tokio::sync::watch::Sender<ServerControl>,
@@ -857,19 +873,21 @@ impl ServerSupervisor {
             tokio::sync::watch::channel(ServerControl::Running);
         let owner_control = control_sender.clone();
         let (registration_sender, registration_receiver) = tokio::sync::mpsc::channel(32);
-        let connection_limit = snapshot
-            .connection_limit
-            .map(|limit| Arc::new(tokio::sync::Semaphore::new(limit)));
+        let connection_limit = super::server::make_conn_limit(snapshot.connection_limit());
         let context = Arc::new(snapshot.connection_context());
+        let keepalive_timeout = snapshot.keepalive_timeout();
+        let shutdown_timeout = snapshot.shutdown_timeout();
+        let runtime_shutdown = snapshot.runtime_shutdown();
         (
             Self {
                 listener: Some(listener),
                 dispatch: Arc::new(dispatch),
                 context,
                 tls_acceptor,
-                keepalive_timeout: snapshot.keepalive_timeout,
-                shutdown_timeout: snapshot.shutdown_timeout,
-                runtime_shutdown: snapshot.runtime_shutdown,
+                keepalive_timeout,
+                shutdown_timeout,
+                runtime_shutdown,
+                runtime: snapshot.runtime,
                 connection_limit,
                 pending: None,
                 control_sender,
@@ -894,8 +912,7 @@ impl ServerSupervisor {
         match result {
             Ok(result) => result,
             Err(payload) => {
-                self.announce_abort();
-                self.close_pending().await;
+                self.begin_abort(None).await;
                 self.drain_owned_after_panic().await;
                 Err(panic_to_error(payload))
             }
@@ -904,165 +921,147 @@ impl ServerSupervisor {
 
     async fn run_core(&mut self) -> Result<(), RuntimeError> {
         loop {
-            self.start_abort_if_ready();
-            if self.abort_drain_complete() {
-                self.drain_owned().await;
-                return self.finish().await;
-            }
-            if self.graceful_drain_complete() {
-                return self.finish().await;
-            }
-            pause(&self.script, LifecycleCheckpoint::BeforeSupervisorSelect).await;
-            self.raise_supervisor_fault();
-            let event = self.select_event().await;
-            let should_finish = self.apply_event(event).await;
-            if should_finish {
-                self.drain_owned().await;
-                return self.finish().await;
+            match self.step().await {
+                ControlFlow::Break(result) => return result,
+                ControlFlow::Continue(()) => {}
             }
         }
     }
 
-    fn graceful_drain_complete(&mut self) -> bool {
-        if self.mode != ShutdownMode::Graceful || !self.tasks.is_empty() {
-            return false;
+    /// One supervisor pass: settle a drain that has finished, or take the next
+    /// event and apply it.
+    async fn step(&mut self) -> ControlFlow<Result<(), RuntimeError>> {
+        self.start_abort_if_ready();
+        if self.abort_drain_complete() {
+            self.drain_owned().await;
+            return ControlFlow::Break(self.finish().await);
         }
+        if self.graceful_drain_complete() {
+            return self.settle_graceful_drain().await;
+        }
+        LifecycleScript::pause_at(
+            self.script.as_deref(),
+            LifecycleCheckpoint::BeforeSupervisorSelect,
+        )
+        .await;
+        self.raise_supervisor_fault();
+        let event = self.select_event().await;
+        self.apply_event(event).await;
+        ControlFlow::Continue(())
+    }
+
+    /// Whether a graceful drain has nothing of its own left to wait for.
+    ///
+    /// A predicate and nothing else: the registration channel can still hold a
+    /// ticket submitted before admission closed, and disposing of that ticket
+    /// is the caller's step, not a side effect of asking the question.
+    fn graceful_drain_complete(&self) -> bool {
+        self.mode == ShutdownMode::Graceful && self.tasks.is_empty()
+    }
+
+    /// Finish the graceful drain, unless a late upgrade ticket is still
+    /// buffered. Rejecting one hands its task back to be joined, so the drain
+    /// is reconsidered on the next pass rather than declared over here.
+    async fn settle_graceful_drain(&mut self) -> ControlFlow<Result<(), RuntimeError>> {
         match self.registration_receiver.try_recv() {
             Ok(ticket) => {
                 self.reject_ticket(ticket);
-                false
+                ControlFlow::Continue(())
             }
             Err(
                 tokio::sync::mpsc::error::TryRecvError::Empty
                 | tokio::sync::mpsc::error::TryRecvError::Disconnected,
-            ) => true,
+            ) => ControlFlow::Break(self.finish().await),
         }
     }
 
+    /// Take the next event, and pause at the checkpoint it selected.
+    ///
+    /// The pause happens here rather than inside a `select!` arm so that it
+    /// always runs against a committed choice: an arm that awaits before the
+    /// outer race has resolved could have its already-selected event dropped
+    /// when a later arm becomes ready.
     async fn select_event(&mut self) -> SupervisorEvent {
-        match self.pending.is_some() {
+        let event = match self.pending.is_some() {
             true => self.select_pending_event().await,
             false => self.select_listener_event().await,
-        }
+        };
+        pause_selected(self.script.as_deref(), &event).await;
+        event
     }
 
+    /// Race the listener against the events every selector observes.
+    ///
+    /// The listener is the whole admission guard: it is taken by the same
+    /// `close_admission` step that leaves `Running`, so asking the mode as well
+    /// would store one fact twice. The guard cannot be dropped, though —
+    /// `accept_next` answers an injected accept fault before it looks at the
+    /// listener, so an unguarded arm would keep synthesising accept errors
+    /// after admission closed.
     async fn select_listener_event(&mut self) -> SupervisorEvent {
         let listener = self.listener.as_ref();
         tokio::select! {
             biased;
-            () = wait_deadline(self.deadline), if self.deadline.is_some() => {
-                pause(&self.script, LifecycleCheckpoint::SupervisorSelectedDeadline).await;
-                SupervisorEvent::Deadline
-            }
-            control = wait_control(&mut self.control_receiver) => {
-                pause(&self.script, LifecycleCheckpoint::SupervisorSelectedControl).await;
-                SupervisorEvent::Control(control)
-            }
-            () = wait_runtime(self.runtime_shutdown.as_ref(), self.script.as_ref()), if self.runtime_shutdown.is_some() => {
-                let selected_at = tokio::time::Instant::now();
-                pause(&self.script, LifecycleCheckpoint::SupervisorSelectedRuntime).await;
-                SupervisorEvent::Runtime(selected_at)
-            }
-            accepted = accept_next(listener, self.script.as_ref()), if listener.is_some() && self.mode == ShutdownMode::Running => {
-                pause(&self.script, LifecycleCheckpoint::SupervisorSelectedAccept).await;
+            event = select_lifecycle_event(self.deadline, &mut self.control_receiver, self.runtime_shutdown.as_ref(), self.script.as_deref()) => event,
+            accepted = accept_next(listener, self.script.as_deref()), if listener.is_some() => {
                 SupervisorEvent::Accept(accepted)
             }
-            ticket = self.registration_receiver.recv(), if !self.registration_closed => {
-                pause(&self.script, LifecycleCheckpoint::SupervisorSelectedRegistration).await;
-                SupervisorEvent::Registration(ticket)
-            }
-            completion = self.tasks.next(), if !self.tasks.is_empty() => {
-                pause(&self.script, LifecycleCheckpoint::SupervisorSelectedTask).await;
-                SupervisorEvent::Task(completion)
-            }
-            () = wait_for_script_wake(self.script.as_ref()), if self.script.is_some() => {
-                SupervisorEvent::ScriptWake
-            }
+            event = select_owned_work_event(&mut self.registration_receiver, self.registration_closed, &mut self.tasks, self.script.as_deref()) => event,
         }
     }
 
+    /// Race the connection limit against the events every selector observes.
+    ///
+    /// The permit arm needs no guard of its own: `acquire_connection_permit`
+    /// answers an absent limit with `pending()` before it does anything else.
     async fn select_pending_event(&mut self) -> SupervisorEvent {
-        let semaphore = self.connection_limit.as_ref();
         tokio::select! {
             biased;
-            () = wait_deadline(self.deadline), if self.deadline.is_some() => {
-                pause(&self.script, LifecycleCheckpoint::SupervisorSelectedDeadline).await;
-                SupervisorEvent::Deadline
-            }
-            control = wait_control(&mut self.control_receiver) => {
-                pause(&self.script, LifecycleCheckpoint::SupervisorSelectedControl).await;
-                SupervisorEvent::Control(control)
-            }
-            () = wait_runtime(self.runtime_shutdown.as_ref(), self.script.as_ref()), if self.runtime_shutdown.is_some() => {
-                let selected_at = tokio::time::Instant::now();
-                pause(&self.script, LifecycleCheckpoint::SupervisorSelectedRuntime).await;
-                SupervisorEvent::Runtime(selected_at)
-            }
-            permit = crate::net::accept::acquire_connection_permit(semaphore, self.script.as_ref()), if semaphore.is_some() => {
-                pause(&self.script, LifecycleCheckpoint::SupervisorSelectedPermit).await;
+            event = select_lifecycle_event(self.deadline, &mut self.control_receiver, self.runtime_shutdown.as_ref(), self.script.as_deref()) => event,
+            permit = crate::net::accept::acquire_connection_permit(self.connection_limit.as_ref(), self.script.as_deref()) => {
                 SupervisorEvent::Permit(permit)
             }
-            ticket = self.registration_receiver.recv(), if !self.registration_closed => {
-                pause(&self.script, LifecycleCheckpoint::SupervisorSelectedRegistration).await;
-                SupervisorEvent::Registration(ticket)
-            }
-            completion = self.tasks.next(), if !self.tasks.is_empty() => {
-                pause(&self.script, LifecycleCheckpoint::SupervisorSelectedTask).await;
-                SupervisorEvent::Task(completion)
-            }
-            () = wait_for_script_wake(self.script.as_ref()), if self.script.is_some() => {
-                SupervisorEvent::ScriptWake
-            }
+            event = select_owned_work_event(&mut self.registration_receiver, self.registration_closed, &mut self.tasks, self.script.as_deref()) => event,
         }
     }
 
-    async fn apply_event(&mut self, event: SupervisorEvent) -> bool {
+    async fn apply_event(&mut self, event: SupervisorEvent) {
         match event {
-            SupervisorEvent::Deadline => {
-                self.begin_abort(Some(TerminalOutcome::Timeout));
-                self.close_pending().await;
-                self.reject_buffered_tickets();
-                false
-            }
+            SupervisorEvent::Deadline => self.handle_deadline().await,
             SupervisorEvent::Control(ServerControl::Abort) => {
-                self.begin_abort(Some(TerminalOutcome::Cancelled));
-                self.close_pending().await;
-                self.reject_buffered_tickets();
-                false
+                self.begin_abort(Some(TerminalOutcome::Cancelled)).await;
             }
-            SupervisorEvent::Control(ServerControl::Graceful) => {
-                self.enter_graceful(None);
-                self.close_pending().await;
-                false
-            }
+            SupervisorEvent::Control(ServerControl::Graceful) => self.enter_graceful(None).await,
             SupervisorEvent::Runtime(selected_at) => {
                 self.runtime_shutdown = None;
-                self.enter_graceful_at(None, selected_at);
-                self.close_pending().await;
-                false
+                self.enter_graceful_at(None, selected_at).await;
             }
             SupervisorEvent::ScriptWake
             | SupervisorEvent::Control(ServerControl::Running)
-            | SupervisorEvent::Task(None) => false,
-            SupervisorEvent::Accept(result) => {
-                self.handle_accept(result).await;
-                false
-            }
-            SupervisorEvent::Permit(result) => {
-                self.handle_permit(result).await;
-                false
-            }
-            SupervisorEvent::Registration(Some(ticket)) => {
-                self.handle_ticket(ticket).await;
-                false
-            }
-            SupervisorEvent::Registration(None) => {
-                self.registration_closed = true;
-                false
-            }
+            | SupervisorEvent::Task(None) => {}
+            SupervisorEvent::Accept(result) => self.handle_accept(result).await,
+            SupervisorEvent::Permit(result) => self.handle_permit(result).await,
+            SupervisorEvent::Registration(Some(ticket)) => self.handle_ticket(ticket).await,
+            SupervisorEvent::Registration(None) => self.registration_closed = true,
             SupervisorEvent::Task(Some(completion)) => {
-                self.handle_task_completion(completion);
-                false
+                self.handle_task_completion(completion).await;
+            }
+        }
+    }
+
+    /// Answer the shutdown deadline: escalate a graceful drain into an abort,
+    /// or — already aborting — stop waiting on rejected connections and force
+    /// every owned task down.
+    ///
+    /// The forced arm is why an abort carries a deadline at all. A connection's
+    /// answer to abort is a protocol-level graceful shutdown, so one serving a
+    /// long-lived response holds its permit for as long as that response lives,
+    /// and waiting for every rejection to release would never end.
+    async fn handle_deadline(&mut self) {
+        match self.mode {
+            ShutdownMode::Abort => self.force_abort(),
+            ShutdownMode::Running | ShutdownMode::Graceful => {
+                self.begin_abort(Some(TerminalOutcome::Timeout)).await;
             }
         }
     }
@@ -1074,47 +1073,97 @@ impl ServerSupervisor {
         match result {
             Ok((stream, remote_addr)) => self.handle_accepted(stream, remote_addr).await,
             Err(error) if crate::error::is_transient_accept_error(&error) => {
-                tracing::warn!("accept: fd limit reached, backing off");
+                tracing::warn!(error = %error, "accept: fd limit reached, backing off");
                 // EMFILE/ENFILE retry throttling is product behavior, not an
                 // ordering barrier; immediate retries would spin the runtime.
                 tokio::time::sleep(TRANSIENT_ACCEPT_BACKOFF).await;
             }
-            Err(error) => self.enter_graceful(Some(RuntimeError::Io(error))),
+            Err(error) => self.enter_graceful(Some(RuntimeError::Io(error))).await,
         }
     }
 
+    /// Take a freshly accepted socket to whichever step answers the connection
+    /// limit: parking it to wait for a permit, or serving it straight away.
+    ///
+    /// A limited socket is only admitted, not serviced — admission is asked
+    /// again on the far side of the permit wait, which is a real suspension the
+    /// runtime shutdown signal can fire across — so the registration sender that
+    /// admission produced is taken then rather than carried across it.
     async fn handle_accepted(
         &mut self,
         stream: tokio::net::TcpStream,
         remote_addr: std::net::SocketAddr,
     ) {
-        pause(&self.script, LifecycleCheckpoint::AfterAccept).await;
-        if !self.admission_is_open() {
-            close_socket(stream).await;
-            return;
-        }
+        LifecycleScript::pause_at(self.script.as_deref(), LifecycleCheckpoint::AfterAccept).await;
         match self.connection_limit {
-            Some(_) => {
-                self.pending = Some(PendingAccepted {
-                    stream,
-                    remote_addr,
-                });
-            }
-            None => self.handle_unlimited_connection(stream, remote_addr).await,
+            Some(_) => self.park_for_permit(stream, remote_addr).await,
+            None => self.admit_and_spawn(stream, remote_addr, None).await,
         }
     }
 
-    async fn handle_unlimited_connection(
+    /// Hold an admitted socket until the connection limit has a permit for it.
+    async fn park_for_permit(
         &mut self,
         stream: tokio::net::TcpStream,
         remote_addr: std::net::SocketAddr,
     ) {
-        pause(&self.script, LifecycleCheckpoint::AfterPermit).await;
-        if !self.admission_is_open() {
-            close_socket(stream).await;
-            return;
+        if let Some((stream, _)) = self.admit_or_close(stream).await {
+            self.pending = Some(PendingAccepted {
+                stream,
+                remote_addr,
+            });
         }
-        self.spawn_connection(stream, remote_addr, None).await;
+    }
+
+    /// Hand back an accepted socket, together with the sender that registers
+    /// its upgrades, only while admission is open — and close the socket
+    /// otherwise.
+    ///
+    /// One question, asked once, answers both. `close_admission` takes the
+    /// registration sender in the same step that publishes the transition
+    /// `admission_is_open` reads, so the sender is present for exactly as long
+    /// as admission is open, and a connection spawned from this pair never has
+    /// to ask either half again. Every refusal of an accepted socket goes
+    /// through here too, so a socket this server will not serve is always shut
+    /// down rather than dropped raw.
+    async fn admit_or_close(
+        &self,
+        stream: tokio::net::TcpStream,
+    ) -> Option<(
+        tokio::net::TcpStream,
+        tokio::sync::mpsc::Sender<UpgradeTicket>,
+    )> {
+        let admitted = match self.admission_is_open() {
+            true => self.registration_sender.clone(),
+            false => None,
+        };
+        match admitted {
+            Some(registration) => Some((stream, registration)),
+            None => {
+                close_socket(stream).await;
+                None
+            }
+        }
+    }
+
+    /// Serve a socket that has answered the connection limit, if admission is
+    /// still open for it.
+    ///
+    /// Both ways of answering that limit end here — an unlimited server, and
+    /// one that waited for a permit — so the recheck a limit wait requires is
+    /// also the only admission check either path makes, and the `AfterPermit`
+    /// checkpoint marks the same moment for both.
+    async fn admit_and_spawn(
+        &mut self,
+        stream: tokio::net::TcpStream,
+        remote_addr: std::net::SocketAddr,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) {
+        LifecycleScript::pause_at(self.script.as_deref(), LifecycleCheckpoint::AfterPermit).await;
+        if let Some((stream, registration)) = self.admit_or_close(stream).await {
+            self.spawn_connection(stream, remote_addr, permit, registration)
+                .await;
+        }
     }
 
     async fn handle_permit(
@@ -1122,21 +1171,14 @@ impl ServerSupervisor {
         result: Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError>,
     ) {
         let accepted = self.pending.take();
-        let permit = match result {
-            Ok(permit) => permit,
-            Err(_) => return,
-        };
-        pause(&self.script, LifecycleCheckpoint::AfterPermit).await;
-        let accepted = match (self.admission_is_open(), accepted) {
-            (true, Some(accepted)) => accepted,
-            (false, Some(accepted)) => {
-                close_socket(accepted.stream).await;
-                return;
+        match (result, accepted) {
+            (Ok(permit), Some(accepted)) => {
+                self.admit_and_spawn(accepted.stream, accepted.remote_addr, Some(permit))
+                    .await;
             }
-            (_, None) => return,
-        };
-        self.spawn_connection(accepted.stream, accepted.remote_addr, Some(permit))
-            .await;
+            (Ok(_), None) => {}
+            (Err(error), accepted) => refuse_permit(&error, accepted).await,
+        }
     }
 
     async fn spawn_connection(
@@ -1144,36 +1186,45 @@ impl ServerSupervisor {
         stream: tokio::net::TcpStream,
         remote_addr: std::net::SocketAddr,
         permit: Option<tokio::sync::OwnedSemaphorePermit>,
+        registration: tokio::sync::mpsc::Sender<UpgradeTicket>,
     ) {
-        pause(
-            &self.script,
+        LifecycleScript::pause_at(
+            self.script.as_deref(),
             LifecycleCheckpoint::KeepaliveTimeoutConfigured(self.keepalive_timeout),
         )
         .await;
-        let registration = match self.registration_sender.as_ref() {
-            Some(sender) => sender.clone(),
-            None => return,
-        };
+        // One subscription is this connection's whole shutdown authority: the
+        // lifecycle carries it for the upgrade path and the serve path takes it
+        // by value, so no reader has to ask a second time or find it missing.
+        let control = self.control_sender.subscribe();
         let lifecycle = ConnectionLifecycle::owned(
             ConnectionPermit::new(permit),
-            self.control_sender.subscribe(),
+            control.clone(),
             registration,
             self.script.clone(),
         );
-        let future = super::conn::serve_owned_connection(
-            stream,
-            self.tls_acceptor.clone(),
+        let state = super::conn::ConnectionState::new(
             Arc::clone(&self.dispatch),
             Arc::clone(&self.context),
             lifecycle,
             self.keepalive_timeout,
-            remote_addr.ip(),
+            Some(remote_addr.ip()),
         );
+        let future =
+            super::conn::serve_owned_connection(stream, self.tls_acceptor.clone(), state, control);
         let fault = self
             .script
             .as_ref()
             .and_then(|script| script.take_owned_task_fault());
-        let handle = tokio::spawn(run_owned_connection(future, fault));
+        // A detached connection task inherits no runtime context, so the one
+        // this server was started under is carried in. It comes from the
+        // snapshot rather than from a fresh lookup here, so every connection
+        // carries the same runtime the rest of the server context was read
+        // from. Handlers served by an owned server keep that runtime.
+        let handle = tokio::spawn(carry_runtime(
+            self.runtime.clone(),
+            run_owned_connection(future, fault, self.script.clone()),
+        ));
         let abort = handle.abort_handle();
         self.tasks.insert(handle);
         if matches!(fault, Some(LifecycleFault::CancelNextOwnedTask)) {
@@ -1189,7 +1240,11 @@ impl ServerSupervisor {
         };
         self.tasks
             .insert_registered(handle, Arc::clone(&parts.state));
-        pause(&self.script, LifecycleCheckpoint::BeforeUpgradeAcknowledge).await;
+        LifecycleScript::pause_at(
+            self.script.as_deref(),
+            LifecycleCheckpoint::BeforeUpgradeAcknowledge,
+        )
+        .await;
         let decision_requested = parts
             .decision_request
             .take()
@@ -1199,14 +1254,9 @@ impl ServerSupervisor {
             None => false,
         };
         self.raise_supervisor_fault();
-        let runtime_requested = self
-            .runtime_shutdown
-            .as_ref()
-            .is_some_and(|shutdown| shutdown.requested.load(Ordering::Acquire));
-        let admission_open = self.current_control() == ServerControl::Running && !runtime_requested;
         let admitted = decision_requested
             && decision_ready
-            && admission_open
+            && self.admission_is_open()
             && parts
                 .state
                 .compare_exchange(
@@ -1218,7 +1268,7 @@ impl ServerSupervisor {
                 .is_ok();
         match admitted {
             true => Self::acknowledge_upgrade(&mut parts),
-            false => self.reject_upgrade(&mut parts).await,
+            false => self.reject_upgrade(&mut parts),
         }
     }
 
@@ -1228,26 +1278,31 @@ impl ServerSupervisor {
             .take()
             .is_some_and(|sender| sender.send(RegistrationDecision::Admitted).is_ok());
         if !sent {
-            parts.state.store(UPGRADE_CANCELLED, Ordering::Release);
-            parts.abort.abort();
+            cancel_upgrade(&parts.state, &parts.abort);
         }
     }
 
-    async fn reject_upgrade(&mut self, parts: &mut UpgradeTicketParts) {
-        parts.state.store(UPGRADE_CANCELLED, Ordering::Release);
-        parts.abort.abort();
+    /// Refuse a ticket the supervisor already holds the task for.
+    ///
+    /// The rejection is tracked against the abort wait when this supervisor is
+    /// already aborting — by control or by an expired deadline — because a
+    /// refused bridge still holds its connection's permit until the connection
+    /// itself lets go.
+    fn reject_upgrade(&mut self, parts: &mut UpgradeTicketParts) {
         if self.rejection_requires_abort() {
             self.rejected_connections.push(parts.connection.clone());
         }
-        if let Some(sender) = parts.acknowledgement.take() {
-            let _ = sender.send(RegistrationDecision::Rejected);
-        }
+        Self::cancel_and_answer(parts);
     }
 
+    /// Refuse a ticket taken straight off the registration channel, adopting
+    /// the task it carries so the drain still joins it.
+    ///
+    /// This one tracks the rejection against `mode` rather than the published
+    /// control: a ticket is only pulled off the channel by a drain that has
+    /// already decided how it is ending.
     fn reject_ticket(&mut self, ticket: UpgradeTicket) {
         let mut parts = ticket.into_parts();
-        parts.state.store(UPGRADE_CANCELLED, Ordering::Release);
-        parts.abort.abort();
         if self.mode == ShutdownMode::Abort {
             self.rejected_connections.push(parts.connection.clone());
         }
@@ -1255,67 +1310,138 @@ impl ServerSupervisor {
             self.tasks
                 .insert_registered(handle, Arc::clone(&parts.state));
         }
+        Self::cancel_and_answer(&mut parts);
+    }
+
+    /// Cancel a ticket's bridge and tell its registrar so.
+    ///
+    /// One definition for both refusals. The answer is what lets the registrar
+    /// produce its own `503` instead of waiting on an acknowledgement that never
+    /// comes. A closed answer channel means the registrar is already gone, and
+    /// the cancellation above is the whole disposition either way.
+    fn cancel_and_answer(parts: &mut UpgradeTicketParts) {
+        cancel_upgrade(&parts.state, &parts.abort);
         if let Some(sender) = parts.acknowledgement.take() {
             let _ = sender.send(RegistrationDecision::Rejected);
         }
     }
 
-    fn handle_task_completion(&mut self, completion: OwnedTaskCompletion) {
+    /// Read one task completion as the failure it carries, or as nothing to
+    /// report.
+    ///
+    /// Reading and disposal are separate because only the reading is shared.
+    /// The running supervisor turns a failure into the candidate that explains
+    /// the shutdown it starts; the post-panic drain already has its result and
+    /// can only log. One classifier keeps the two from disagreeing about which
+    /// cancellations are expected.
+    fn classify_completion(&self, completion: OwnedTaskCompletion) -> Option<RuntimeError> {
         match completion.result {
-            Ok(()) => {}
+            Ok(()) => None,
             Err(error)
                 if error.is_cancelled()
-                    && (self.tasks.supervisor_aborted || completion.expected_cancellation) => {}
-            Err(error) if error.is_cancelled() => self.enter_graceful(Some(
-                RuntimeError::TaskPanicked("owned HTTP task cancelled unexpectedly".into()),
-            )),
-            Err(error) => self.enter_graceful(Some(join_panic_to_error(error))),
+                    && (self.tasks.supervisor_aborted || completion.expected_cancellation) =>
+            {
+                None
+            }
+            // Every other join failure — panic or unexpected cancellation —
+            // reads through the one translation, so the cancellation message
+            // has a single definition.
+            Err(error) => Some(join_panic_to_error(error)),
         }
     }
 
-    fn enter_graceful(&mut self, candidate: Option<RuntimeError>) {
-        self.enter_graceful_at(candidate, tokio::time::Instant::now());
+    /// Dispose of one task completion the running supervisor observed. A join
+    /// failure starts a graceful shutdown and is recorded as its candidate; a
+    /// clean completion must not start one by arriving.
+    async fn handle_task_completion(&mut self, completion: OwnedTaskCompletion) {
+        match self.classify_completion(completion) {
+            Some(error) => self.enter_graceful(Some(error)).await,
+            None => {}
+        }
     }
 
-    fn enter_graceful_at(
+    async fn enter_graceful(&mut self, candidate: Option<RuntimeError>) {
+        self.enter_graceful_at(candidate, tokio::time::Instant::now())
+            .await;
+    }
+
+    async fn enter_graceful_at(
         &mut self,
         candidate: Option<RuntimeError>,
         selected_at: tokio::time::Instant,
     ) {
-        if let (Some(candidate), TerminalOutcome::Success) = (candidate, &self.terminal) {
-            self.terminal = TerminalOutcome::Fatal(candidate);
+        if let Some(candidate) = candidate {
+            self.record_candidate(candidate);
         }
         if self.mode != ShutdownMode::Running {
             return;
         }
         self.mode = ShutdownMode::Graceful;
         self.deadline = Some(selected_at + self.shutdown_timeout);
-        self.listener.take();
-        self.registration_sender.take();
-        ServerControl::send_graceful(&self.control_sender);
-        self.control_receiver.borrow_and_update();
+        self.close_admission(ServerControl::send_graceful).await;
     }
 
-    fn begin_abort(&mut self, outcome: Option<TerminalOutcome>) {
-        if let (false, Some(outcome)) = (matches!(self.terminal, TerminalOutcome::Timeout), outcome)
-        {
-            self.terminal = outcome;
+    /// Stop admitting and publish the control transition this shutdown makes.
+    ///
+    /// The five steps travel together: a listener or registration sender left
+    /// behind would keep admitting work the transition just refused, the edge
+    /// the supervisor publishes to its connections has to be consumed here or
+    /// its own selector answers a request it made itself, and a socket already
+    /// accepted into `pending` is one this server will now never serve, so it
+    /// is shut down here rather than left to be dropped raw. Both transitions
+    /// differ only in which request they publish.
+    async fn close_admission(&mut self, publish: fn(&tokio::sync::watch::Sender<ServerControl>)) {
+        self.listener.take();
+        self.registration_sender.take();
+        publish(&self.control_sender);
+        self.control_receiver.borrow_and_update();
+        self.close_pending().await;
+    }
+
+    /// Enter abort: stop admitting, tell every connection to shut down, and
+    /// close out whatever was already accepted or buffered.
+    ///
+    /// The deadline is rearmed rather than cleared, because abort asks a
+    /// connection for a protocol-level shutdown it can outlast — without a
+    /// deadline the forced abort would wait forever on a permit that a
+    /// long-lived response never releases.
+    async fn begin_abort(&mut self, outcome: Option<TerminalOutcome>) {
+        if let Some(outcome) = outcome {
+            self.record_escalation(outcome);
         }
         self.mode = ShutdownMode::Abort;
-        self.deadline = None;
-        self.listener.take();
-        self.registration_sender.take();
-        ServerControl::send_abort(&self.control_sender);
-        self.control_receiver.borrow_and_update();
+        self.deadline = Some(tokio::time::Instant::now() + self.shutdown_timeout);
+        self.close_admission(ServerControl::send_abort).await;
+        self.reject_all_pending().await;
     }
 
-    fn announce_abort(&mut self) {
-        self.mode = ShutdownMode::Abort;
-        self.deadline = None;
-        self.listener.take();
-        self.registration_sender.take();
-        ServerControl::send_abort(&self.control_sender);
-        self.control_receiver.borrow_and_update();
+    /// Record the failure a graceful shutdown carries provisionally. First
+    /// writer wins: the failure that started the drain is the one that explains
+    /// it, and a second failure observed while draining is a consequence of the
+    /// first, not a better account of it.
+    fn record_candidate(&mut self, candidate: RuntimeError) {
+        match self.terminal {
+            TerminalOutcome::Success => self.terminal = TerminalOutcome::Fatal(candidate),
+            TerminalOutcome::Fatal(_) | TerminalOutcome::Cancelled | TerminalOutcome::Timeout => {}
+        }
+    }
+
+    /// Record the outcome an escalation to abort reports, replacing whatever a
+    /// graceful drain had recorded provisionally.
+    ///
+    /// The two rules are deliberately opposite. A candidate is provisional
+    /// because the drain it belongs to might still finish; an escalation is how
+    /// the server actually ended, so an explicit cancel or an expired deadline
+    /// is what the caller is told, not the failure that was being drained. A
+    /// timeout already recorded is the one exception: the drain is over by
+    /// then, so nothing after it can restate why.
+    fn record_escalation(&mut self, outcome: TerminalOutcome) {
+        match self.terminal {
+            TerminalOutcome::Timeout => {}
+            TerminalOutcome::Success | TerminalOutcome::Fatal(_) | TerminalOutcome::Cancelled => {
+                self.terminal = outcome;
+            }
+        }
     }
 
     async fn close_pending(&mut self) {
@@ -1324,24 +1450,29 @@ impl ServerSupervisor {
         }
     }
 
-    fn reject_buffered_tickets(&mut self) {
-        self.registration_sender.take();
-        self.registration_receiver.close();
-        while let Ok(ticket) = self.registration_receiver.try_recv() {
-            self.reject_ticket(ticket);
+    fn start_abort_if_ready(&mut self) {
+        if self.mode == ShutdownMode::Abort && !self.abort_started && self.rejections_complete() {
+            self.force_abort();
         }
-        self.registration_closed = true;
     }
 
-    fn start_abort_if_ready(&mut self) {
-        let rejections_complete = self
-            .rejected_connections
-            .iter()
-            .all(|connection| connection.strong_count() == 0);
-        if self.mode == ShutdownMode::Abort && !self.abort_started && rejections_complete {
-            self.tasks.abort_all();
-            self.abort_started = true;
-        }
+    /// Whether every connection this supervisor rejected has released its
+    /// permit.
+    ///
+    /// Pruning as it goes: a released connection can never come back, so
+    /// keeping its `Weak` only makes the next pass rescan it.
+    fn rejections_complete(&mut self) -> bool {
+        self.rejected_connections
+            .retain(|connection| connection.strong_count() > 0);
+        self.rejected_connections.is_empty()
+    }
+
+    /// Abort every owned task, once, and disarm the deadline that was waiting
+    /// to do it.
+    fn force_abort(&mut self) {
+        self.deadline = None;
+        self.abort_started = true;
+        self.tasks.abort_all();
     }
 
     fn abort_drain_complete(&self) -> bool {
@@ -1355,35 +1486,65 @@ impl ServerSupervisor {
                 .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
     }
 
-    async fn drain_owned(&mut self) {
+    /// Close the registration channel and reject every ticket still on it.
+    ///
+    /// The one sweep for every path that stops taking tickets: a ticket left
+    /// buffered would hold a task nobody joins, whichever way the supervisor is
+    /// ending. The sender side is already gone by the time abort reaches here —
+    /// `close_admission` takes it — so a closed receiver yields what is buffered
+    /// and then `None` without ever suspending, and the flag records that the
+    /// selector has nothing left to poll for.
+    async fn reject_all_pending(&mut self) {
         self.registration_receiver.close();
         while let Some(ticket) = self.registration_receiver.recv().await {
             self.reject_ticket(ticket);
         }
+        self.registration_closed = true;
+    }
+
+    async fn drain_owned(&mut self) {
+        self.reject_all_pending().await;
         self.tasks.abort_and_drain().await;
     }
 
     async fn drain_owned_after_panic(&mut self) {
-        self.registration_receiver.close();
-        while let Some(ticket) = self.registration_receiver.recv().await {
-            self.reject_ticket(ticket);
-        }
+        self.reject_all_pending().await;
         // Preserve protocol-level shutdown after a supervisor fault, but never
         // let non-cooperative work outlive the configured shutdown deadline.
-        let deadline = tokio::time::Instant::now() + self.shutdown_timeout;
+        // The deadline is one timer for the whole drain, selected on by `&mut`:
+        // rebuilding it per completion would charge every task that finishes in
+        // time a timer registration for a deadline that has not moved.
+        let expiry = tokio::time::sleep_until(tokio::time::Instant::now() + self.shutdown_timeout);
+        tokio::pin!(expiry);
         while !self.tasks.is_empty() {
             let completion = tokio::select! {
                 biased;
                 completion = self.tasks.next() => completion,
-                () = tokio::time::sleep_until(deadline) => None,
+                () = &mut expiry => None,
             };
             match completion {
-                Some(completion) => self.handle_task_completion(completion),
+                Some(completion) => self.report_post_panic_completion(completion),
                 None => break,
             }
         }
         if !self.tasks.is_empty() {
             self.tasks.abort_and_drain().await;
+        }
+    }
+
+    /// Report a task that failed while the supervisor was already unwinding.
+    ///
+    /// Logged rather than recorded, because `run` returns the supervisor's own
+    /// panic on this path and never reads the terminal outcome: a failure
+    /// written there would be dropped with `self`. The message names the drain
+    /// so the connection's failure is not read as a second supervisor fault.
+    fn report_post_panic_completion(&self, completion: OwnedTaskCompletion) {
+        match self.classify_completion(completion) {
+            Some(error) => tracing::error!(
+                error = %error,
+                "owned HTTP task failed during the post-panic drain"
+            ),
+            None => {}
         }
     }
 
@@ -1396,7 +1557,7 @@ impl ServerSupervisor {
             ServerControl::Running => !self
                 .runtime_shutdown
                 .as_ref()
-                .is_some_and(|shutdown| shutdown.requested.load(Ordering::Acquire)),
+                .is_some_and(|shutdown| shutdown.is_fired()),
             ServerControl::Graceful | ServerControl::Abort => false,
         }
     }
@@ -1423,13 +1584,20 @@ impl ServerSupervisor {
 
     async fn finish(&mut self) -> Result<(), RuntimeError> {
         let result = self.take_result();
-        pause(&self.script, LifecycleCheckpoint::AfterSupervisorResultSend).await;
+        LifecycleScript::pause_at(
+            self.script.as_deref(),
+            LifecycleCheckpoint::AfterSupervisorResultSend,
+        )
+        .await;
         result
     }
 }
 
-async fn run_owned_connection<F>(future: F, fault: Option<LifecycleFault>)
-where
+async fn run_owned_connection<F>(
+    future: F,
+    fault: Option<LifecycleFault>,
+    script: Option<Arc<LifecycleScript>>,
+) where
     F: Future<Output = ()>,
 {
     match fault {
@@ -1443,28 +1611,112 @@ where
         | Some(LifecycleFault::Accept(_) | LifecycleFault::PanicSupervisorCore)
         | None => future.await,
     }
+    LifecycleScript::pause_at(
+        script.as_deref(),
+        LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted,
+    )
+    .await;
 }
 
-async fn pause(script: &Option<Arc<LifecycleScript>>, checkpoint: LifecycleCheckpoint) {
-    if let Some(script) = script {
-        script.pause(checkpoint).await;
-    }
-}
-
-async fn wait_for_script_wake(script: Option<&Arc<LifecycleScript>>) {
+async fn wait_for_script_wake(script: Option<&LifecycleScript>) {
     match script {
         Some(script) => script.wait_for_supervisor_wake().await,
         None => std::future::pending().await,
     }
 }
 
-async fn close_socket(stream: tokio::net::TcpStream) {
-    let handle = tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
-        let mut stream = stream;
-        let _ = stream.shutdown().await;
-    });
-    let _ = handle.await;
+/// Close the transport of a connection this server will not serve.
+///
+/// A refused socket is shut down rather than dropped, so the peer sees the
+/// refusal as a close it can read instead of an unexplained silence. A failed
+/// shutdown has nothing left to report to: the socket is going away either way.
+async fn close_socket(mut stream: tokio::net::TcpStream) {
+    use tokio::io::AsyncWriteExt;
+    let _ = stream.shutdown().await;
+}
+
+/// Report a refused connection permit and close the socket it was for.
+///
+/// The semaphore closes only when the server itself is going away, so the
+/// accepted socket has no owner left to serve it — and the error naming that is
+/// the only account of why this connection was dropped.
+async fn refuse_permit(error: &tokio::sync::AcquireError, accepted: Option<PendingAccepted>) {
+    tracing::warn!(%error, "connection permit unavailable; closing accepted socket");
+    if let Some(accepted) = accepted {
+        close_socket(accepted.stream).await;
+    }
+}
+
+/// Wait for the next event every selector observes first: the shutdown
+/// deadline, an owner control request, or runtime shutdown.
+///
+/// This is the `biased` shutdown priority, stated once. Both selectors race it
+/// ahead of their own admission arm, so neither can drift into answering a new
+/// connection before a shutdown that is already pending.
+async fn select_lifecycle_event(
+    deadline: Option<tokio::time::Instant>,
+    control: &mut tokio::sync::watch::Receiver<ServerControl>,
+    runtime_shutdown: Option<&ShutdownSignal>,
+    script: Option<&LifecycleScript>,
+) -> SupervisorEvent {
+    tokio::select! {
+        biased;
+        () = wait_deadline(deadline), if deadline.is_some() => SupervisorEvent::Deadline,
+        requested = wait_control(control) => SupervisorEvent::Control(requested),
+        () = wait_runtime(runtime_shutdown, script), if runtime_shutdown.is_some() => {
+            SupervisorEvent::Runtime(tokio::time::Instant::now())
+        }
+    }
+}
+
+/// Wait for the next event from work this supervisor already owns: an upgrade
+/// registration, a finished task, or a test script wake.
+///
+/// Both selectors race this last, so owned work is answered only once nothing
+/// more urgent is ready.
+async fn select_owned_work_event(
+    registration: &mut tokio::sync::mpsc::Receiver<UpgradeTicket>,
+    registration_closed: bool,
+    tasks: &mut OwnedHttpTasks,
+    script: Option<&LifecycleScript>,
+) -> SupervisorEvent {
+    tokio::select! {
+        biased;
+        ticket = registration.recv(), if !registration_closed => {
+            SupervisorEvent::Registration(ticket)
+        }
+        completion = tasks.next(), if !tasks.is_empty() => SupervisorEvent::Task(completion),
+        // Deliberately unguarded: it is what keeps this select from being fully
+        // disabled, which `select!` answers with a panic. The other two arms
+        // need their guards — a closed receiver and an empty task set are both
+        // ready at once and would spin — and `wait_for_script_wake` already
+        // answers a missing script with `pending()`, so a guard here would only
+        // repeat what the future already does.
+        () = wait_for_script_wake(script) => SupervisorEvent::ScriptWake,
+    }
+}
+
+/// Pause at the checkpoint one selected event names, if the test script names
+/// one for it. A script wake is the script's own event and has none.
+async fn pause_selected(script: Option<&LifecycleScript>, event: &SupervisorEvent) {
+    if let Some(checkpoint) = selected_checkpoint(event) {
+        LifecycleScript::pause_at(script, checkpoint).await;
+    }
+}
+
+fn selected_checkpoint(event: &SupervisorEvent) -> Option<LifecycleCheckpoint> {
+    match event {
+        SupervisorEvent::Deadline => Some(LifecycleCheckpoint::SupervisorSelectedDeadline),
+        SupervisorEvent::Control(_) => Some(LifecycleCheckpoint::SupervisorSelectedControl),
+        SupervisorEvent::Runtime(_) => Some(LifecycleCheckpoint::SupervisorSelectedRuntime),
+        SupervisorEvent::Accept(_) => Some(LifecycleCheckpoint::SupervisorSelectedAccept),
+        SupervisorEvent::Permit(_) => Some(LifecycleCheckpoint::SupervisorSelectedPermit),
+        SupervisorEvent::Registration(_) => {
+            Some(LifecycleCheckpoint::SupervisorSelectedRegistration)
+        }
+        SupervisorEvent::Task(_) => Some(LifecycleCheckpoint::SupervisorSelectedTask),
+        SupervisorEvent::ScriptWake => None,
+    }
 }
 
 async fn wait_deadline(deadline: Option<tokio::time::Instant>) {
@@ -1474,6 +1726,13 @@ async fn wait_deadline(deadline: Option<tokio::time::Instant>) {
     }
 }
 
+/// Wait for the next control value this server publishes.
+///
+/// A dropped sender is the one case that has to be silent: no authority is
+/// left to answer, and answering with the last value seen — always `Running`
+/// for a server that never left it — would tell a caller the server is live
+/// when nothing can say so any more. Every reader of this channel goes through
+/// here, so that rule is written once.
 async fn wait_control(receiver: &mut tokio::sync::watch::Receiver<ServerControl>) -> ServerControl {
     loop {
         match receiver.changed().await {
@@ -1483,28 +1742,37 @@ async fn wait_control(receiver: &mut tokio::sync::watch::Receiver<ServerControl>
     }
 }
 
-async fn wait_runtime(shutdown: Option<&RuntimeShutdown>, script: Option<&Arc<LifecycleScript>>) {
-    let shutdown = match shutdown {
-        Some(shutdown) => shutdown,
-        None => return std::future::pending().await,
-    };
-    loop {
-        let notified = shutdown.notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if let Some(script) = script {
-            script.pause(LifecycleCheckpoint::BeforeRuntimeWait).await;
+/// Wait until this server leaves `Running`, and answer with what it left for.
+///
+/// The current value is read before any `changed()`: a connection subscribing
+/// after the transition has no edge left to observe, and waiting for one would
+/// serve it as though the server were still accepting work.
+pub(super) async fn wait_shutdown_control(
+    receiver: &mut tokio::sync::watch::Receiver<ServerControl>,
+) -> ServerControl {
+    let mut control = *receiver.borrow_and_update();
+    while control == ServerControl::Running {
+        control = wait_control(receiver).await;
+    }
+    control
+}
+
+async fn wait_runtime(shutdown: Option<&ShutdownSignal>, script: Option<&LifecycleScript>) {
+    match shutdown {
+        None => std::future::pending().await,
+        Some(shutdown) => {
+            shutdown
+                .wait_observed(|| {
+                    LifecycleScript::pause_at(script, LifecycleCheckpoint::BeforeRuntimeWait)
+                })
+                .await;
         }
-        if shutdown.requested.load(Ordering::Acquire) {
-            return;
-        }
-        notified.await;
     }
 }
 
 async fn accept_next(
     listener: Option<&tokio::net::TcpListener>,
-    script: Option<&Arc<LifecycleScript>>,
+    script: Option<&LifecycleScript>,
 ) -> Result<(tokio::net::TcpStream, std::net::SocketAddr), std::io::Error> {
     if let Some(kind) = script.and_then(|script| script.take_accept_fault()) {
         return Err(std::io::Error::from(kind));
@@ -1533,18 +1801,13 @@ pub(super) fn poll_supervisor_join(
     context: &mut Context<'_>,
 ) -> Poll<Result<(), RuntimeError>> {
     match join {
-        SupervisorJoin::Camber(future) => Pin::new(future).poll(context).map(flatten_camber_join),
+        // A Camber join failure is already a `RuntimeError`, so flattening it
+        // is the inner result or that error unchanged.
+        SupervisorJoin::Camber(future) => Pin::new(future)
+            .poll(context)
+            .map(|result| result.unwrap_or_else(Err)),
         SupervisorJoin::Tokio(handle) => Pin::new(handle).poll(context).map(flatten_tokio_join),
         SupervisorJoin::Ready(future) => Pin::new(future).poll(context),
-    }
-}
-
-fn flatten_camber_join(
-    result: Result<Result<(), RuntimeError>, RuntimeError>,
-) -> Result<(), RuntimeError> {
-    match result {
-        Ok(server_result) => server_result,
-        Err(error) => Err(error),
     }
 }
 

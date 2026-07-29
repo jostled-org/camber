@@ -6,10 +6,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 struct StandaloneServer {
     runtime: tokio::runtime::Runtime,
@@ -84,14 +83,10 @@ fn standalone_server_drop_joins_after_assertion_unwind() {
 }
 
 fn wait_for_flag(flag: &AtomicBool, expected: bool) {
-    let deadline = Instant::now() + EVENT_TIMEOUT;
-    while flag.load(Ordering::Acquire) != expected {
-        assert!(
-            Instant::now() < deadline,
-            "health signal did not reach {expected}"
-        );
-        std::thread::sleep(POLL_INTERVAL);
-    }
+    assert!(
+        common::poll_until(EVENT_TIMEOUT, || flag.load(Ordering::Acquire) == expected),
+        "health signal did not reach {expected}"
+    );
 }
 
 struct HealthyResource(&'static str);
@@ -484,4 +479,67 @@ async fn spawn_health_checker_initial_probe_sets_unhealthy_flag_before_loop() {
     );
 
     runtime::request_shutdown();
+}
+
+#[camber::test]
+async fn proxy_health_resource_probes_from_async_context() {
+    let mut backend = Router::new();
+    backend.get("/up", |_req: &Request| async { Response::text(200, "ok") });
+    let backend_addr = common::spawn_server(backend);
+
+    let resource = ProxyHealthResource::new(&format!("http://{backend_addr}"), "/up");
+    let flag = resource.routing_flag();
+    flag.store(false, Ordering::Release);
+
+    // The call under test: a public method invoked straight from a poll on a
+    // multi-thread worker, which is where a bare `Handle::block_on` aborts the
+    // process with "Cannot start a runtime from within a runtime".
+    resource.health_check().unwrap();
+
+    assert!(
+        flag.load(Ordering::Acquire),
+        "a successful probe must publish the healthy flag"
+    );
+
+    runtime::request_shutdown();
+}
+
+#[camber::test]
+async fn proxy_health_resource_reports_unreachable_backend_from_async_context() {
+    // TCP port zero is not a connectable service endpoint and needs no reservation race.
+    let dead = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+
+    let resource = ProxyHealthResource::new(&format!("http://{dead}"), "/up");
+    let flag = resource.routing_flag();
+
+    let error = resource.health_check().unwrap_err();
+    assert!(
+        matches!(error, RuntimeError::Http(_)),
+        "an unreachable backend is a probe failure, not a bridge failure: {error}"
+    );
+    assert!(
+        !flag.load(Ordering::Acquire),
+        "a failed probe must publish the unhealthy flag"
+    );
+
+    runtime::request_shutdown();
+}
+
+#[tokio::test]
+async fn proxy_health_resource_refuses_current_thread_runtime() {
+    // A current-thread runtime has no worker core to hand off, so the bridge
+    // cannot leave the poll context to block. The refusal is typed; the
+    // alternative is an abort inside a method whose signature promises an error.
+    let resource = ProxyHealthResource::new("http://127.0.0.1:0", "/up");
+
+    let error = resource.health_check().unwrap_err();
+    // Pinned to the message, not only the variant. The old `NoRuntime`
+    // assertion passed for either origin in this method — a missing context and
+    // a wrong flavor — so it could not tell which branch answered. The flavor
+    // text names the one under test.
+    assert!(
+        matches!(&error, RuntimeError::Http(message)
+            if &**message == "backend health check requires a multi-thread runtime"),
+        "got {error}"
+    );
 }

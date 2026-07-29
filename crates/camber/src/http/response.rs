@@ -41,7 +41,7 @@ enum BodyStore {
 /// Trait for types that can be converted into an HTTP response.
 ///
 /// Implemented for `Response` (passthrough) and `Result<Response, RuntimeError>`
-/// (maps `BadRequest` to 400, other errors to 500).
+/// (maps `BadRequest` to 400, `ScopeClosed` to 503, other errors to 500).
 pub trait IntoResponse {
     /// Convert this value into a concrete [`Response`].
     fn into_response(self) -> Response;
@@ -58,6 +58,12 @@ impl IntoResponse for Result<Response, RuntimeError> {
         match self {
             Ok(resp) => resp,
             Err(RuntimeError::BadRequest(msg)) => Response::build_text(400, &msg),
+            // A handler that asks the root scope for a child after admission
+            // closed is reporting an orderly drain, not a server fault. 503 is
+            // the status a load balancer reads as "drain this instance"; 500 is
+            // the one it reads as "this instance is broken". `NoRuntime` keeps
+            // its 500 — that one IS a misconfiguration of the server.
+            Err(RuntimeError::ScopeClosed) => Response::build_text(503, "service is shutting down"),
             Err(e) => Response::build_text(500, &e.to_string()),
         }
     }

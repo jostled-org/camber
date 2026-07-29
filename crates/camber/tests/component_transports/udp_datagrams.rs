@@ -9,10 +9,7 @@ async fn udp_echo_loopback() {
     let addr_a = socket_a.local_addr().unwrap();
     let addr_b = socket_b.local_addr().unwrap();
 
-    let sent = socket_a
-        .send_to(b"hello", &addr_b.to_string())
-        .await
-        .unwrap();
+    let sent = socket_a.send_to(b"hello", addr_b).await.unwrap();
     assert_eq!(sent, 5);
 
     let mut buf = [0_u8; 64];
@@ -20,10 +17,7 @@ async fn udp_echo_loopback() {
     assert_eq!(&buf[..count], b"hello");
     assert_eq!(sender, addr_a);
 
-    let sent = socket_b
-        .send_to(b"world", &addr_a.to_string())
-        .await
-        .unwrap();
+    let sent = socket_b.send_to(b"world", addr_a).await.unwrap();
     assert_eq!(sent, 5);
     let (count, _) = bounded(socket_a.recv_from(&mut buf)).await.unwrap();
     assert_eq!(&buf[..count], b"world");
@@ -62,7 +56,7 @@ fn spawn_echo_server(
 ) -> camber::AsyncJoinHandle<Result<(), camber::RuntimeError>> {
     camber::spawn_async(async move {
         camber::net::serve_udp_on(listener, |datagram, src, socket| async move {
-            socket.send_to(&datagram, &src.to_string()).await?;
+            socket.send_to(&datagram, src).await?;
             Ok(())
         })
         .await
@@ -76,7 +70,7 @@ async fn udp_echo_server_via_serve() {
     let handle = spawn_echo_server(listener);
 
     let client = camber::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    client.send_to(b"hello", &addr.to_string()).await.unwrap();
+    client.send_to(b"hello", addr).await.unwrap();
     let mut buf = [0_u8; 64];
     let (count, sender) = bounded(client.recv_from(&mut buf)).await.unwrap();
     assert_eq!(&buf[..count], b"hello");
@@ -97,7 +91,7 @@ async fn udp_server_handles_multiple_clients() {
             tokio::spawn(async move {
                 let client = camber::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
                 let payload = [byte; 8];
-                client.send_to(&payload, &addr.to_string()).await.unwrap();
+                client.send_to(&payload, addr).await.unwrap();
                 let mut buf = [0_u8; 64];
                 let (count, _) = client.recv_from(&mut buf).await.unwrap();
                 assert_eq!(&buf[..count], &payload);
@@ -120,7 +114,7 @@ async fn udp_server_stops_on_shutdown() {
     let handle = spawn_echo_server(listener);
 
     let client = camber::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    client.send_to(b"ping", &addr.to_string()).await.unwrap();
+    client.send_to(b"ping", addr).await.unwrap();
     let mut buf = [0_u8; 64];
     let (count, _) = bounded(client.recv_from(&mut buf)).await.unwrap();
     assert_eq!(&buf[..count], b"ping");

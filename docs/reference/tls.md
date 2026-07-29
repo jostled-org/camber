@@ -39,6 +39,19 @@ Use `connect_with(addr, server_name, config)` when you need a custom rustls `Cli
 
 Both return `camber::net::TlsStream`.
 
+## ACME DNS-01 Renewal
+
+`AcmeDns01::spawn_renewal(provider, store)` returns a caller-owned `JoinHandle`. It has two completion paths, and neither means renewal failed:
+
+| Completion path | What it means |
+|---|---|
+| the Camber runtime it was spawned in closes its root scope or latches shutdown | the loop stopped with the runtime that owns it |
+| spawned outside a Camber runtime | never — the captured signals are inert and the loop renews forever |
+
+A failed renewal attempt is logged and the loop continues to the next interval, so the handle stays live. The task is caller-owned and is not admitted to the root scope, so the drain does not wait for it.
+
+It panics if called outside a Tokio runtime context.
+
 ## ALPN
 
 Server TLS configs built by Camber advertise `h2` and `http/1.1`, matching the HTTP server surface Camber supports.
