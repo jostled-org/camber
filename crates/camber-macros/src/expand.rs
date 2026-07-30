@@ -1,7 +1,7 @@
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
-use syn::{ItemFn, ReturnType, Signature};
+use syn::{FnModifiers, ItemFn, ReturnType, Safety, Signature};
 
 pub(crate) fn expand_test(arguments: TokenStream, input: ItemFn) -> TokenStream {
     let sig = &input.sig;
@@ -11,6 +11,7 @@ pub(crate) fn expand_test(arguments: TokenStream, input: ItemFn) -> TokenStream 
     let name = &sig.ident;
 
     let mut errors = validate_arguments(&arguments);
+    validate_modifiers(&input.modifiers, &mut errors);
     validate_signature(sig, &mut errors);
     if let Some(errors) = errors {
         return errors.to_compile_error();
@@ -31,6 +32,13 @@ pub(crate) fn expand_test(arguments: TokenStream, input: ItemFn) -> TokenStream 
                 }
             }
         }
+    }
+}
+
+fn validate_modifiers(modifiers: &FnModifiers, errors: &mut Option<syn::Error>) {
+    match modifiers.require_empty() {
+        Ok(()) => {}
+        Err(error) => push_error(errors, error),
     }
 }
 
@@ -122,11 +130,12 @@ fn validate_signature(signature: &Signature, errors: &mut Option<syn::Error>) {
         );
     }
 
-    if let Some(unsafety) = &signature.unsafety {
-        push_error(
+    match &signature.safety {
+        Safety::Unsafe(unsafety) => push_error(
             errors,
             syn::Error::new_spanned(unsafety, "camber::test does not support unsafe functions"),
-        );
+        ),
+        Safety::Safe(_) | Safety::Default => {}
     }
 
     if let Some(constness) = &signature.constness {

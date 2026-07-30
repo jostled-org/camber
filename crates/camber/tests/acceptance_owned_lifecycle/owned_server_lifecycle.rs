@@ -21,6 +21,7 @@ const HTTP_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
 const CLOSE_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 const PROBE_PANIC: &str = "supervisor join probe panic";
 const OWNED_TASK_PANIC: &str = "injected owned HTTP task panic";
+#[cfg(feature = "ws")]
 const SUPERVISOR_PANIC: &str = "injected server supervisor panic";
 // Every observation in this file carries this bound, so an event production
 // never reaches fails the case instead of parking the binary on it.
@@ -228,6 +229,7 @@ fn assert_eof_with_socket_deadline(stream: tokio::net::TcpStream) {
     assert_eq!(read, 0, "expected EOF, received transport data");
 }
 
+#[cfg(feature = "ws")]
 async fn assert_eof_with_independent_deadline(stream: tokio::net::TcpStream) {
     tokio::task::spawn_blocking(move || assert_eof_with_socket_deadline(stream))
         .await
@@ -1337,6 +1339,7 @@ async fn apply_selected(
     .await;
 }
 
+#[cfg(feature = "ws")]
 async fn apply_selected_event_then_release_upgrade(
     controller: &LifecycleController,
     selected: LifecycleCheckpoint,
