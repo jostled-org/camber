@@ -380,18 +380,18 @@ pub fn wait_for_http_response(addr: SocketAddr, timeout: Duration) -> io::Result
     let mut last_error = io::Error::from(io::ErrorKind::TimedOut);
     let probed = poll_value(timeout, || {
         let attempt = remaining(deadline).min(PROBE_ATTEMPT);
-        match attempt.is_zero() {
-            // The budget is spent and the poll is about to end anyway. A zero
-            // connect bound is refused outright, and that refusal would displace
-            // the diagnosis this wait exists to carry out.
-            true => None,
-            false => match probe_transport(addr, attempt) {
-                Ok(response) => Some(response),
-                Err(error) => {
-                    last_error = error;
-                    None
-                }
-            },
+        // The budget is spent and the poll is about to end anyway. A zero connect
+        // bound is refused outright, and that refusal would displace the
+        // diagnosis this wait exists to carry out.
+        if attempt.is_zero() {
+            return None;
+        }
+        match probe_transport(addr, attempt) {
+            Ok(response) => Some(response),
+            Err(error) => {
+                last_error = error;
+                None
+            }
         }
     });
     probed.ok_or_else(|| {
