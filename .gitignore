@@ -1,6 +1,7 @@
 /target
 .DS_Store
 .mcp.json
+.manifest.toml
 docs/rust_profile.md
 docs/.codebase-snapshot.md
 docs/specs/
