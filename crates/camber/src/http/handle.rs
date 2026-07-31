@@ -273,7 +273,7 @@ fn classify_pre_body(
     };
     let internal = match_internal_route_from_path(head.path(), ctx);
     #[cfg(feature = "profiling")]
-    let internal = internal.or_else(|| match_profiling_route(head.path(), head.query(), ctx));
+    let internal = internal.or_else(|| match_profiling_route(head.path(), head.raw_query(), ctx));
     match internal {
         Some(route) => PreBodyRoute::Internal(route, head.method()),
         None => PreBodyRoute::Class(dispatch.classify_route(&head), head.method()),

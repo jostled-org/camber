@@ -38,6 +38,30 @@
 //!   once, to the peer going away, this stream being reset, the server
 //!   shutting down, or the response finishing
 //!
+//! # Two Query Views
+//!
+//! [`Request::query`](self::Request::query) and
+//! [`Request::query_all`](self::Request::query_all) look values up by decoded
+//! key. [`Request::query_pairs`](self::Request::query_pairs) iterates every
+//! decoded pair in the order the peer sent it, duplicates and blank keys
+//! included. [`Request::raw_query`](self::Request::raw_query) returns the query
+//! exactly as it arrived, without the leading `?`.
+//!
+//! A request target with no `?` has no raw query. One that ends in `?` has an
+//! empty one. Both yield zero decoded pairs, so `raw_query` is what separates
+//! them. An empty lookup name stays absent from `query` and `query_all` even
+//! though `query_pairs` exposes blank keys.
+//!
+//! Decoding is permissive and never fails. A valid `%HH` escape decodes one
+//! byte, `+` and `%20` both decode to a space, a malformed escape stays
+//! literal, and invalid UTF-8 becomes the replacement character. No pair is
+//! rejected or dropped. Read `raw_query` and apply your own policy when a
+//! signature check or a strict decoder needs the accepted bytes.
+//!
+//! The URI owns the raw query, so `raw_query` borrows it and allocates nothing.
+//! The first decoded accessor parses the whole query once into a cache the
+//! request owns; every later call borrows from that one sequence.
+//!
 //! # HTTP Client
 //!
 //! For one-off calls, use the free functions like [`self::get`], [`self::post`],

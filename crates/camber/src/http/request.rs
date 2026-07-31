@@ -72,8 +72,14 @@ impl<'a> RequestHead<'a> {
         header_str(self.headers, name)
     }
 
+    /// The borrowed head's view of [`Request::raw_query`].
+    ///
+    /// Named for what it returns, so the head and the owned request spell the
+    /// raw query the same way. `query` belongs to the keyed decoded lookup on
+    /// `Request`, and one concept per name is what keeps a reader from
+    /// expecting a decoded value here.
     #[cfg(feature = "profiling")]
-    pub(super) fn query(&self) -> Option<&str> {
+    pub(super) fn raw_query(&self) -> Option<&str> {
         self.uri.query()
     }
 
@@ -273,22 +279,66 @@ impl Request {
         multipart::parse(content_type, &self.body_raw)
     }
 
+    /// Return the query string exactly as the peer sent it, without the `?`.
+    ///
+    /// `None` when the request target carried no `?`, and `Some("")` when it
+    /// ended in one. Percent-escape letter case, `+`, `%20`, `=`, and `&` are
+    /// all unchanged: this is the representation the URI parser accepted, which
+    /// is what a signature check, a generic forwarder, or a protocol that
+    /// distinguishes encoded spellings has to read.
+    ///
+    /// Borrowed from the URI this request already owns. Reading it decodes
+    /// nothing and initializes no query state — [`Request::query_pairs`] is the
+    /// decoded view.
+    pub fn raw_query(&self) -> Option<&str> {
+        self.uri.query()
+    }
+
     /// Return the first query parameter value for the given key, or `None`.
+    ///
+    /// An empty name matches nothing, even where [`Request::query_pairs`]
+    /// exposes a blank key the peer sent.
     pub fn query(&self, name: &str) -> Option<&str> {
-        find_in_pairs(self.parsed_query(), name)
+        self.parsed_query()
+            .iter()
+            .find(|(key, _)| keyed_match(key, name))
+            .map(|(_, value)| value.as_ref())
     }
 
     /// Return an iterator over all query parameter values for the given key.
+    ///
+    /// An empty name yields nothing, even where [`Request::query_pairs`]
+    /// exposes a blank key the peer sent.
     pub fn query_all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
         self.parsed_query()
             .iter()
-            .filter(move |(k, _)| k.as_ref() == name)
-            .map(|(_, v)| v.as_ref())
+            .filter(move |(key, _)| keyed_match(key, name))
+            .map(|(_, value)| value.as_ref())
     }
 
+    /// Iterate over every decoded query pair in the order the peer sent them.
+    ///
+    /// Duplicate keys, dotted keys, blank keys, and blank values are all
+    /// retained; an empty segment yields no pair. Decoding follows the same
+    /// percent, plus, and lossy-UTF-8 rules the keyed helpers use, so a caller
+    /// that must distinguish malformed escapes reads [`Request::raw_query`]
+    /// instead.
+    pub fn query_pairs(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
+        self.parsed_query()
+            .iter()
+            .map(|(key, value)| (key.as_ref(), value.as_ref()))
+    }
+
+    /// The decoded query, parsed once.
+    ///
+    /// Decodes what [`Request::raw_query`] returns, rather than reaching for the
+    /// URI a second time: the raw view is what this request accepted, and the
+    /// cache is that view decoded. An absent query decodes as an empty one, so
+    /// the two targets `raw_query` separates yield the same empty sequence here.
     fn parsed_query(&self) -> &[(Box<str>, Box<str>)] {
-        self.query_params
-            .get_or_init(|| parse_urlencoded(self.uri.query().unwrap_or("")))
+        self.query_params.get_or_init(|| {
+            parse_urlencoded(self.raw_query().unwrap_or(""), SegmentAdmission::AnyKey)
+        })
     }
 
     /// Return the first form field value for the given key, or `None`.
@@ -300,7 +350,7 @@ impl Request {
 
     fn parsed_form(&self) -> &[(Box<str>, Box<str>)] {
         self.form_params
-            .get_or_init(|| parse_urlencoded(self.body()))
+            .get_or_init(|| parse_urlencoded(self.body(), SegmentAdmission::NamedKey))
     }
 
     /// Return the value of a cookie by name, or `None` if not present.
@@ -489,32 +539,88 @@ fn header_str<'a>(headers: &'a hyper::HeaderMap, name: &str) -> Option<&'a str> 
     headers.get(name).and_then(header_value_str)
 }
 
+/// Whether a decoded query pair answers a keyed query lookup for `name`.
+///
+/// An empty name matches nothing. The decoded query cache retains blank keys so
+/// [`Request::query_pairs`] can expose the ones the peer actually sent, and
+/// without this rule `query("")` would start answering with the first of them —
+/// a value the released keyed helpers never returned.
+///
+/// The rule is stated once for [`Request::query`] and [`Request::query_all`],
+/// and reaches no further. Form and cookie parsing drop blank keys before a
+/// lookup can see one, so neither needs it. Route parameters are the one other
+/// keyed surface that can hold an empty name — `parse_segments` reads a bare `:`
+/// segment as a parameter named `""` — and changing what `param("")` answers is
+/// public path access this contract leaves alone.
+fn keyed_match(key: &str, name: &str) -> bool {
+    !name.is_empty() && key == name
+}
+
 /// Find the first value in a slice of key-value pairs where the key matches `name`.
 fn find_in_pairs<'a, K: AsRef<str>>(pairs: &'a [(K, Box<str>)], name: &str) -> Option<&'a str> {
     pairs
         .iter()
-        .find(|(k, _)| k.as_ref() == name)
-        .map(|(_, v)| v.as_ref())
+        .find(|(key, _)| key.as_ref() == name)
+        .map(|(_, value)| value.as_ref())
+}
+
+/// Which segments a URL-encoded parser keeps.
+///
+/// Query strings and form bodies decode identically and differ only here, so
+/// the policy is a value the one parser reads rather than a second parser with
+/// its own copy of the decoding rules. A query keeps `=value` and `=`, because
+/// a blank name is part of the identity the peer sent and `query_pairs` has to
+/// expose it. A form body names fields, and a field with no name is not one.
+#[derive(Clone, Copy)]
+enum SegmentAdmission {
+    /// Keep every non-empty segment, blank key included.
+    AnyKey,
+    /// Keep only segments that name a field.
+    NamedKey,
+}
+
+impl SegmentAdmission {
+    fn admits(self, key: &str) -> bool {
+        match self {
+            Self::AnyKey => true,
+            Self::NamedKey => !key.is_empty(),
+        }
+    }
 }
 
 /// Parse a URL-encoded string into key-value pairs with percent-decoding.
-/// Uses a single scratch buffer across all pairs to avoid per-pair allocation.
-pub(crate) fn parse_urlencoded(input: &str) -> Box<[(Box<str>, Box<str>)]> {
+///
+/// Segments are split structurally before anything is decoded, so an escaped
+/// `%26` or `%3D` stays inside its component instead of opening a new pair or
+/// key boundary. An empty segment — from an empty input, or from a leading,
+/// consecutive, or trailing `&` — yields no pair under either admission policy.
+/// A single scratch buffer serves every component, so decoding allocates per
+/// retained component rather than per segment.
+fn parse_urlencoded(input: &str, admission: SegmentAdmission) -> KvPairs {
     if input.is_empty() {
         return Box::new([]);
     }
     let mut scratch = Vec::with_capacity(input.len());
     input
         .split('&')
-        .filter_map(|pair| parse_urlencoded_pair(pair, &mut scratch))
+        .filter(|segment| !segment.is_empty())
+        .filter_map(|segment| decode_segment(segment, admission, &mut scratch))
         .collect()
 }
 
-fn parse_urlencoded_pair(pair: &str, scratch: &mut Vec<u8>) -> Option<(Box<str>, Box<str>)> {
-    let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-    match key.is_empty() {
-        true => None,
-        false => {
+/// Decode one admitted segment into its key and value.
+///
+/// The segment splits at its first literal `=`; a segment without one has a
+/// blank value.
+fn decode_segment(
+    segment: &str,
+    admission: SegmentAdmission,
+    scratch: &mut Vec<u8>,
+) -> Option<(Box<str>, Box<str>)> {
+    let (key, value) = segment.split_once('=').unwrap_or((segment, ""));
+    match admission.admits(key) {
+        false => None,
+        true => {
             let decoded_key = percent_decode_into(key, scratch);
             let decoded_value = percent_decode_into(value, scratch);
             Some((decoded_key, decoded_value))

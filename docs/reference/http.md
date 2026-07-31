@@ -34,12 +34,56 @@ Supported registration methods include:
 - `req.param("id")`
 - `req.query("key")`
 - `req.query_all("tag")`
+- `req.query_pairs()`
+- `req.raw_query()`
 - `req.header("host")`
 - `req.cookie("session")`
 - `req.body()`
 - `req.json::<T>()`
 - `req.multipart()`
 - `req.on_disconnect()` — see [Observing Disconnect](#observing-disconnect)
+
+### Query Views
+
+`query` and `query_all` look values up by decoded key. `query_pairs` iterates every decoded pair in wire order. `raw_query` returns the query exactly as the peer sent it, without the leading `?`.
+
+```rust
+router.get("/search", |req| {
+    // For "/search?q=a%2Bb&tag=x&tag=y":
+    let raw = req.raw_query().unwrap_or("").to_owned();  // "q=a%2Bb&tag=x&tag=y"
+    let keys = req                                        // "q,tag,tag"
+        .query_pairs()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>()
+        .join(",");
+    async move { Response::text(200, &format!("{raw}|{keys}")) }
+});
+```
+
+Raw and decoded answer different questions:
+
+| Target | `raw_query()` | `query_pairs()` |
+|---|---|---|
+| `/items` | `None` | empty |
+| `/items?` | `Some("")` | empty |
+| `/items?a=1&a=2` | `Some("a=1&a=2")` | `("a", "1")`, `("a", "2")` |
+| `/items?=blank&bare&x=` | `Some("=blank&bare&x=")` | `("", "blank")`, `("bare", "")`, `("x", "")` |
+| `/items?a=1%262` | `Some("a=1%262")` | `("a", "1&2")` |
+
+Pairs split before they decode, so `%26` and `%3D` cannot open a new pair or key boundary. An empty segment — from an empty query, or from a leading, consecutive, or trailing `&` — yields no pair.
+
+Decoding is permissive and never fails:
+
+- A valid `%HH` escape decodes one byte. Hexadecimal digits are case-insensitive.
+- `+` and `%20` both decode to a space. `%2B` decodes to a literal plus.
+- A malformed or incomplete escape stays literal text. The pair survives.
+- Invalid UTF-8 becomes the Unicode replacement character.
+
+Use `raw_query` when you must distinguish malformed escapes, validate UTF-8 strictly, or sign the request. It gives you the representation the URI parser accepted, and you apply your own policy to it.
+
+An empty lookup name is absent from `query` and `query_all` even though `query_pairs` exposes blank keys. Form fields keep their own rule: `form` never sees a blank field name.
+
+The URI owns the raw query, so `raw_query` borrows it and allocates nothing. The first call to `query`, `query_all`, or `query_pairs` decodes the whole query once into a cache the request owns. Every later call borrows from that one sequence.
 
 ### Handler Ownership Rule
 

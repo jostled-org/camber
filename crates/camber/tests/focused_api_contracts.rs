@@ -17,6 +17,8 @@ mod owned_server_api;
 mod public_trait_contracts;
 #[path = "focused_api_contracts/published_compatibility.rs"]
 mod published_compatibility;
+#[path = "focused_api_contracts/query_identity.rs"]
+mod query_identity;
 #[path = "focused_api_contracts/request_validation.rs"]
 mod request_validation;
 #[path = "focused_api_contracts/response_validation.rs"]

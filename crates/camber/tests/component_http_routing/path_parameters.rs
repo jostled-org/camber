@@ -133,6 +133,47 @@ async fn dispatch_wildcard_route_captures_remainder() {
     runtime::request_shutdown();
 }
 
+/// A bare `:` route segment captures under a blank name, and the empty-name
+/// query rule does not reach that lookup.
+///
+/// `parse_segments` reads `:` as a parameter named `""`, so `param("")` answers
+/// with the capture — what the released crate returns. Admitting blank query
+/// keys put a blank key within reach of a keyed lookup for the first time, and
+/// the guard that keeps `query("")` unanswered belongs to the query accessors
+/// alone. One request asserts both halves, so a guard that migrates back into
+/// the shared pair lookup and silently changes path access fails here.
+#[tokio::test(flavor = "multi_thread")]
+async fn blank_name_path_param_answers_while_blank_query_name_does_not() {
+    let mut router = Router::new();
+    router.get("/users/:", |req: &Request| {
+        let captured = req.param("").unwrap_or("missing").to_owned();
+        let queried = req.query("").unwrap_or("absent").to_owned();
+        async move { Response::text(200, &format!("{captured}:{queried}")) }
+    });
+
+    let server = crate::http::spawn_server_ready(router, Duration::from_secs(2)).unwrap();
+    let probe = server.cleanup_probe();
+
+    let response = http::get(&format!("http://{}/users/42?=blank", server.local_addr()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.body(),
+        "42:absent",
+        "the bare `:` capture still answers a blank name; the blank query key does not"
+    );
+
+    server.shutdown_bounded(Duration::from_secs(2)).unwrap();
+    assert!(probe.joined(), "path parameter server joined");
+    assert_eq!(
+        probe.cleanup_error(),
+        None,
+        "path parameter server cleanup error"
+    );
+}
+
 #[camber::test]
 async fn static_routes_still_match_exactly() {
     let mut router = Router::new();
