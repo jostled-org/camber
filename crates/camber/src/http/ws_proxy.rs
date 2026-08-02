@@ -1276,19 +1276,7 @@ async fn drain_proxy_close<C, B>(
     C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    use futures_util::StreamExt;
-    loop {
-        tokio::select! {
-            client_message = client.next() => match client_message {
-                Some(Ok(message)) if !message.is_close() => {}
-                _ => return,
-            },
-            backend_message = backend.next() => match backend_message {
-                Some(Ok(message)) if !message.is_close() => {}
-                _ => return,
-            },
-        }
-    }
+    let ((), ()) = tokio::join!(drain_until_close(client), drain_until_close(backend));
 }
 
 /// Build an HTTP request for the backend WebSocket connection with forwarded headers.

@@ -13,7 +13,7 @@ use camber::http::{
     self, DisconnectCause, DisconnectSignal, Next, Request, Response, Router, WsConn,
 };
 use camber::runtime;
-use futures_util::{FutureExt, SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use std::future::IntoFuture;
 use std::io::Write;
 use std::net::TcpStream;
@@ -665,12 +665,26 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
                 controller
                     .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
                     .expect("release pending proxy permit wait into shutdown");
+                let (opcode, _) =
+                    read_async_ws_frame_or_eof(&mut websocket, "the permit-holding proxy close")
+                        .await
+                        .expect("graceful proxy shutdown sends a close frame");
+                assert_eq!(opcode, 0x8, "expected graceful proxied close frame");
                 let mut owner = Box::pin(handle.into_future());
                 assert!(
-                    owner.as_mut().now_or_never().is_none(),
+                    tokio::time::timeout(UNRESOLVED_WINDOW, owner.as_mut())
+                        .await
+                        .is_err(),
                     "owner completed while the proxy bridge still owned its transport"
                 );
-                assert_graceful_close_then_eof(&mut websocket, "permit-holding proxy").await;
+                write_async_ws_frame(
+                    &mut websocket,
+                    0x8,
+                    &[],
+                    "the permit-holding proxy close reply",
+                )
+                .await;
+                assert_transport_eof(&mut websocket, "the permit-holding proxy transport").await;
                 assert_transport_eof(&mut second, "the permit-waiting proxy transport").await;
                 assert!(
                     lifecycle_event("owned proxy bridge completion", owner.as_mut())
