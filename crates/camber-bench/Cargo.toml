@@ -1,6 +1,6 @@
 [package]
 name = "camber-bench"
-version.workspace = true
+version = "0.2.2"
 edition.workspace = true
 autotests = false
 publish = false

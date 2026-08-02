@@ -1,6 +1,6 @@
 [package]
 name = "camber"
-version.workspace = true
+version = "0.2.2"
 edition.workspace = true
 autotests = false
 description = "Opinionated async Rust for IO-bound services on top of Tokio"
@@ -72,7 +72,7 @@ opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.32", optional = true, features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.32", optional = true, features = ["grpc-tonic"] }
 tracing-opentelemetry = { version = "0.33", optional = true }
-camber-macros = { version = "0.2.1", path = "../camber-macros" }
+camber-macros = { version = "0.2.2", path = "../camber-macros" }
 
 [dev-dependencies]
 allocation-counter = "=0.8.1"
@@ -100,7 +100,7 @@ rustls-acme = { version = "0.15", default-features = false, features = ["aws-lc-
 wiremock = "0.6"
 
 [build-dependencies]
-camber-build = { version = "0.2.1", path = "../camber-build" }
+camber-build = { version = "0.2.2", path = "../camber-build" }
 
 [[test]]
 name = "acceptance_e2e"

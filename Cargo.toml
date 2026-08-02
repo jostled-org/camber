@@ -3,8 +3,9 @@ members = ["crates/*"]
 default-members = ["crates/camber", "crates/camber-build", "crates/camber-cli", "crates/camber-macros"]
 resolver = "2"
 
+# Package versions stay in member manifests so release-plz can bump one crate
+# without first making every local path dependency impossible to resolve.
 [workspace.package]
-version = "0.2.2"
 edition = "2024"
 
 [workspace.lints.rust]

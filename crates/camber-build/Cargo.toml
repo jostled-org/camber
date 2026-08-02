@@ -1,6 +1,6 @@
 [package]
 name = "camber-build"
-version.workspace = true
+version = "0.2.2"
 edition.workspace = true
 autotests = false
 description = "Build helpers for Camber code generation"

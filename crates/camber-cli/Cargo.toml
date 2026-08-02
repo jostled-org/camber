@@ -1,6 +1,6 @@
 [package]
 name = "camber-cli"
-version.workspace = true
+version = "0.2.2"
 edition.workspace = true
 autotests = false
 description = "CLI, project scaffolding, and config-driven proxy for Camber"
