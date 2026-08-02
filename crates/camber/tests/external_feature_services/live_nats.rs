@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
+const ASYNC_REQUEST_COUNT: usize = 5;
+
 fn nats_url() -> String {
     std::env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_owned())
 }
@@ -38,6 +40,81 @@ fn nats_publish_and_subscribe() {
     witness
         .emit(&run, &[&subject])
         .expect("emit cleanup witness after NATS resources drop");
+}
+
+fn async_nats_router(
+    nats_url: Arc<str>,
+    subject: Arc<str>,
+    entered_sender: mpsc::Sender<()>,
+    overlap_barrier: Arc<tokio::sync::Barrier>,
+) -> Router {
+    let mut router = Router::new();
+    router.get("/nats-async", move |_req: &Request| {
+        let url = Arc::clone(&nats_url);
+        let subject = Arc::clone(&subject);
+        let entered_sender = entered_sender.clone();
+        let overlap_barrier = Arc::clone(&overlap_barrier);
+        Box::pin(async move {
+            let conn = match nats::connect_async(&url).await {
+                Ok(connection) => connection,
+                Err(error) => return Response::text(500, &format!("connect: {error}")),
+            };
+            let subscription = match conn.subscribe_async(&subject).await {
+                Ok(subscription) => subscription,
+                Err(error) => return Response::text(500, &format!("subscribe: {error}")),
+            };
+            match conn.publish_async(&subject, b"ping").await {
+                Ok(()) => {}
+                Err(error) => return Response::text(500, &format!("publish: {error}")),
+            };
+            match entered_sender.send(()) {
+                Ok(()) => {}
+                Err(error) => {
+                    return Response::text(500, &format!("evidence channel: {error}"));
+                }
+            }
+            match tokio::time::timeout(Duration::from_secs(5), overlap_barrier.wait()).await {
+                Ok(_) => {}
+                Err(error) => {
+                    return Response::text(500, &format!("overlap barrier: {error}"));
+                }
+            }
+            drop(subscription);
+            drop(conn);
+            Response::text(200, "ok")
+        })
+    });
+    router
+}
+
+fn spawn_async_nats_requests(addr: std::net::SocketAddr) -> Vec<std::thread::JoinHandle<Box<str>>> {
+    (0..ASYNC_REQUEST_COUNT)
+        .map(|_| {
+            std::thread::spawn(move || crate::http::raw_request(addr, "GET", "/nats-async", &[]))
+        })
+        .collect()
+}
+
+fn wait_for_async_overlap(entered_receiver: &mpsc::Receiver<()>) {
+    (0..ASYNC_REQUEST_COUNT).for_each(|_| {
+        entered_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("all request tasks entered the overlap barrier");
+    });
+}
+
+fn assert_async_nats_responses(handles: Vec<std::thread::JoinHandle<Box<str>>>) {
+    let results: Box<[Box<str>]> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    for response in &results {
+        assert_eq!(
+            crate::http::status_from_raw(response),
+            200,
+            "expected 200, got: {response}"
+        );
+    }
 }
 
 #[test]
@@ -140,8 +217,6 @@ fn nats_async_subscribe() {
 #[test]
 #[ignore = "external lane nats; owner: Camber runtime integrations; run: gh workflow run external-evidence.yml -f lane=nats"]
 fn nats_async_connect_does_not_block_worker() {
-    const REQUEST_COUNT: usize = 5;
-
     let run = ExternalRun::from_environment().expect("valid CAMBER_EXTERNAL_RUN_ID");
     let witness =
         CleanupWitness::from_environment().expect("valid CAMBER_EXTERNAL_CLEANUP_WITNESS path");
@@ -149,84 +224,24 @@ fn nats_async_connect_does_not_block_worker() {
     let url = nats_url();
     let nats_url: Arc<str> = url.into();
 
-    common::test_runtime().run(|| {
-        let (entered_sender, entered_receiver) = mpsc::channel();
-        let overlap_barrier = Arc::new(tokio::sync::Barrier::new(REQUEST_COUNT));
-        let mut router = Router::new();
-        let url = Arc::clone(&nats_url);
-        let route_subject = Arc::clone(&subject);
-        router.get("/nats-async", move |_req: &Request| {
-            let url = Arc::clone(&url);
-            let subject = Arc::clone(&route_subject);
-            let entered_sender = entered_sender.clone();
-            let overlap_barrier = Arc::clone(&overlap_barrier);
-            Box::pin(async move {
-                let conn = match nats::connect_async(&url).await {
-                    Ok(c) => c,
-                    Err(e) => return Response::text(500, &format!("connect: {e}")),
-                };
-                let sub = match conn.subscribe_async(&subject).await {
-                    Ok(s) => s,
-                    Err(e) => return Response::text(500, &format!("subscribe: {e}")),
-                };
-                match conn.publish_async(&subject, b"ping").await {
-                    Ok(()) => {}
-                    Err(e) => return Response::text(500, &format!("publish: {e}")),
-                };
-                match entered_sender.send(()) {
-                    Ok(()) => {}
-                    Err(e) => return Response::text(500, &format!("evidence channel: {e}")),
-                }
-                match tokio::time::timeout(Duration::from_secs(5), overlap_barrier.wait()).await {
-                    Ok(_) => {}
-                    Err(e) => return Response::text(500, &format!("overlap barrier: {e}")),
-                }
-                drop(sub);
-                drop(conn);
-                Response::text(200, "ok")
-            })
-        });
-
-        let addr = common::spawn_server(router);
-
-        let handles: Vec<_> = (0..REQUEST_COUNT)
-            .map(|_| {
-                std::thread::spawn(move || {
-                    use std::io::{Read, Write};
-                    let mut stream = std::net::TcpStream::connect(addr).unwrap();
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(5)))
-                        .unwrap();
-                    stream
-                        .write_all(
-                            b"GET /nats-async HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-                        )
-                        .unwrap();
-                    let mut buf = String::new();
-                    stream.read_to_string(&mut buf).unwrap();
-                    buf
-                })
-            })
-            .collect();
-
-        (0..REQUEST_COUNT).for_each(|_| {
-            entered_receiver
-                .recv_timeout(Duration::from_secs(5))
-                .expect("all request tasks entered the overlap barrier");
-        });
-        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-
-        for resp in &results {
-            assert_eq!(
-                crate::http::status_from_raw(resp),
-                200,
-                "expected 200, got: {resp}"
+    common::test_runtime()
+        .run(|| {
+            let (entered_sender, entered_receiver) = mpsc::channel();
+            let overlap_barrier = Arc::new(tokio::sync::Barrier::new(ASYNC_REQUEST_COUNT));
+            let router = async_nats_router(
+                Arc::clone(&nats_url),
+                Arc::clone(&subject),
+                entered_sender,
+                overlap_barrier,
             );
-        }
+            let addr = common::spawn_server(router);
+            let handles = spawn_async_nats_requests(addr);
+            wait_for_async_overlap(&entered_receiver);
+            assert_async_nats_responses(handles);
 
-        runtime::request_shutdown();
-    })
-    .unwrap();
+            runtime::request_shutdown();
+        })
+        .unwrap();
 
     witness
         .emit(&run, &[&subject])

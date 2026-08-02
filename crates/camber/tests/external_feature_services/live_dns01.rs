@@ -144,6 +144,33 @@ fn api_request_error(error: reqwest::Error) -> Box<str> {
     format!("Cloudflare request failed: {error}").into_boxed_str()
 }
 
+/// Observe provider cleanup, then remove any run-scoped challenge residue.
+///
+/// A failed ACME finalization can bypass the library cleanup path, so the
+/// fallback deletion completes before the original provisioning result is
+/// reported.
+async fn remove_challenge_records(probe: &CloudflareCleanupProbe, fqdn: &str) -> bool {
+    let residual_records = probe
+        .txt_records(fqdn)
+        .await
+        .expect("query TXT records after provisioning");
+    let provider_cleanup_completed = residual_records.is_empty();
+    probe
+        .delete_records(&residual_records)
+        .await
+        .expect("remove residual TXT records");
+    let cleanup_visible = probe
+        .txt_records(fqdn)
+        .await
+        .expect("verify TXT cleanup through Cloudflare")
+        .is_empty();
+    assert!(
+        cleanup_visible,
+        "Cloudflare still exposes challenge TXT records"
+    );
+    provider_cleanup_completed
+}
+
 #[tokio::test]
 #[ignore = "external lane dns; owner: Camber ACME and DNS integrations; run: gh workflow run external-evidence.yml -f lane=dns"]
 async fn acme_dns01_provisions_cert() {
@@ -181,27 +208,7 @@ async fn acme_dns01_provisions_cert() {
         .staging(true);
 
     let provision_result = config.provision_cert(&provider).await;
-    let residual_records = probe
-        .txt_records(&challenge_fqdn)
-        .await
-        .expect("query TXT records after provisioning");
-    let provider_cleanup_completed = residual_records.is_empty();
-
-    // A failed ACME finalization can bypass the library cleanup path. Remove any
-    // run-scoped residue before reporting the original result.
-    probe
-        .delete_records(&residual_records)
-        .await
-        .expect("remove residual TXT records");
-    let cleanup_visible = probe
-        .txt_records(&challenge_fqdn)
-        .await
-        .expect("verify TXT cleanup through Cloudflare")
-        .is_empty();
-    assert!(
-        cleanup_visible,
-        "Cloudflare still exposes challenge TXT records"
-    );
+    let provider_cleanup_completed = remove_challenge_records(&probe, &challenge_fqdn).await;
 
     let cert_cached = cache_dir.path().join("cert.pem").exists();
     let key_cached = cache_dir.path().join("key.pem").exists();

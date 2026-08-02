@@ -1,0 +1,47 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "65a76b10f237c3bc06111ad7d0a16045352bba69c2b359046b39ef6a9cb14669",
+  "crate_name": "aws-smithy-query",
+  "crate_version": "0.62.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1785556144,
+  "analysis_completeness": {
+    "analyzed_files": 4,
+    "skipped_files": 0
+  },
+  "rust_version": "1.94.1",
+  "profile": {
+    "findings": [
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/protocol.rs",
+          "line": 189,
+          "column": 54
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/protocol.rs",
+          "line": 201,
+          "column": 54
+        },
+        "evidence": "https://example.com",
+        "origin": "string_literal"
+      },
+      {
+        "capability": "network",
+        "location": {
+          "file": "./src/protocol.rs",
+          "line": 215,
+          "column": 17
+        },
+        "evidence": "https://sqs.us-east-1.amazonaws.com",
+        "origin": "string_literal"
+      }
+    ]
+  }
+}

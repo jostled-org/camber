@@ -39,6 +39,22 @@ pub fn server_tls_config(cert_pem: &[u8], key_pem: &[u8]) -> Arc<rustls::ServerC
     camber::tls::build_tls_config_from_resolver(store).unwrap()
 }
 
+/// Builds a matched server config and client connector from one self-signed cert.
+///
+/// The pair is produced together because the client must trust exactly the cert
+/// the server presents. Handing the two halves out separately invites a
+/// mismatched pair and a handshake failure that reads as a server bug.
+pub fn self_signed_server_and_connector() -> (Arc<rustls::ServerConfig>, tokio_rustls::TlsConnector)
+{
+    let (cert_pem, key_pem) = generate_self_signed_cert();
+    let server_config = server_tls_config(&cert_pem, &key_pem);
+    let client_config = tls_client_config(&[&cert_pem]);
+    (
+        server_config,
+        tokio_rustls::TlsConnector::from(Arc::new(client_config)),
+    )
+}
+
 pub fn tls_client_config(cert_pems: &[&[u8]]) -> rustls::ClientConfig {
     let mut root_store = rustls::RootCertStore::empty();
     cert_pems.iter().for_each(|pem| {

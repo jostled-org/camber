@@ -6,6 +6,7 @@ docs/rust_profile.md
 docs/.codebase-snapshot.md
 docs/specs/
 docs/plans/
+crates/camber-bench/examples/*/Cargo.lock
 docs/scripts/*
 docs/internal/
 docs/planning_guidelines.md

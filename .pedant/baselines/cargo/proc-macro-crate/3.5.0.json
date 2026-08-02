@@ -1,0 +1,47 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "cccaae9eaa7b0ef570f8f73922cd163239448aeea456a4fb4d4fb3a9a4736a74",
+  "crate_name": "proc-macro-crate",
+  "crate_version": "3.5.0",
+  "analysis_tier": "syntactic",
+  "timestamp": 1785556149,
+  "analysis_completeness": {
+    "analyzed_files": 1,
+    "skipped_files": 0
+  },
+  "rust_version": "1.82.0",
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 88,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "process_exec",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 88,
+          "column": 1
+        },
+        "evidence": "std::process::Command",
+        "origin": "import"
+      },
+      {
+        "capability": "system_time",
+        "location": {
+          "file": "./src/lib.rs",
+          "line": 88,
+          "column": 1
+        },
+        "evidence": "std::time::SystemTime",
+        "origin": "import"
+      }
+    ]
+  }
+}

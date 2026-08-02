@@ -279,39 +279,41 @@ fn drain_data_checkpoints(
         .collect()
 }
 
-#[camber::test]
-async fn adversarial_proxy_stream_obeys_downstream_http2_flow_control() {
-    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test-owned upstream listener");
-    let upstream_addr = upstream_listener
-        .local_addr()
-        .expect("read test-owned upstream address");
-    let body_control = Arc::new(BodyControl::new());
-    let (checkpoint_tx, mut checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
+struct FlowControlScenario {
+    body_control: Arc<BodyControl>,
+    checkpoints: tokio::sync::mpsc::UnboundedReceiver<BodyPollCheckpoint>,
+    client: h2::client::SendRequest<Bytes>,
+    downstream_connection: tokio::task::JoinHandle<Result<(), h2::Error>>,
+    upstream: ConnectionController,
+    upstream_task: tokio::task::JoinHandle<Result<(), hyper::Error>>,
+    body: h2::RecvStream,
+    actual: Vec<u8>,
+}
 
-    let mut proxy = Router::new();
-    proxy.proxy_stream("/api", &format!("http://{upstream_addr}"));
-    let proxy_addr = common::spawn_server(proxy);
-
+async fn downstream_request(
+    proxy_addr: std::net::SocketAddr,
+) -> (
+    h2::client::SendRequest<Bytes>,
+    tokio::task::JoinHandle<Result<(), h2::Error>>,
+    h2::client::ResponseFuture,
+) {
     let tcp = event(
         "the local proxy connection",
         tokio::net::TcpStream::connect(proxy_addr),
     )
     .await
     .expect("connect local HTTP/2 client");
-    let mut h2_builder = h2::client::Builder::new();
-    h2_builder
+    let mut builder = h2::client::Builder::new();
+    builder
         .initial_window_size(DOWNSTREAM_WINDOW_BYTES as u32)
         .initial_connection_window_size(DOWNSTREAM_WINDOW_BYTES as u32);
-    let (mut client, downstream_connection) = event(
+    let (mut client, connection) = event(
         "the local HTTP/2 handshake",
-        h2_builder.handshake::<_, Bytes>(tcp),
+        builder.handshake::<_, Bytes>(tcp),
     )
     .await
     .expect("complete local HTTP/2 handshake");
-    let downstream_connection = tokio::spawn(downstream_connection);
-
+    let downstream_connection = tokio::spawn(connection);
     let request = ::http::Request::get(format!("http://{proxy_addr}/api/flow"))
         .version(::http::Version::HTTP_2)
         .body(())
@@ -322,13 +324,25 @@ async fn adversarial_proxy_stream_obeys_downstream_http2_flow_control() {
     let (response, _) = client
         .send_request(request, true)
         .expect("send HTTP/2 flow-control request");
+    (client, downstream_connection, response)
+}
 
-    let (upstream_stream, _) = event(
-        "the proxy's upstream connection",
-        upstream_listener.accept(),
-    )
-    .await
-    .expect("accept the proxy's upstream connection");
+async fn start_flow_control_scenario() -> FlowControlScenario {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test-owned upstream listener");
+    let upstream_addr = listener
+        .local_addr()
+        .expect("read test-owned upstream address");
+    let body_control = Arc::new(BodyControl::new());
+    let (checkpoint_tx, checkpoints) = tokio::sync::mpsc::unbounded_channel();
+    let mut proxy = Router::new();
+    proxy.proxy_stream("/api", &format!("http://{upstream_addr}"));
+    let proxy_addr = common::spawn_server(proxy);
+    let (client, downstream_connection, response) = downstream_request(proxy_addr).await;
+    let (upstream_stream, _) = event("the proxy's upstream connection", listener.accept())
+        .await
+        .expect("accept the proxy's upstream connection");
     let (mut upstream, upstream_task) =
         spawn_gated_upstream(upstream_stream, Arc::clone(&body_control), checkpoint_tx).await;
     let response = event(
@@ -337,7 +351,6 @@ async fn adversarial_proxy_stream_obeys_downstream_http2_flow_control() {
     )
     .await;
     assert_eq!(response.status(), 200);
-
     let mut body = response.into_body();
     let first = event(
         "the first decoded downstream DATA frame",
@@ -354,27 +367,40 @@ async fn adversarial_proxy_stream_obeys_downstream_http2_flow_control() {
         !body_control.complete.load(Ordering::Acquire),
         "upstream completed before the first downstream DATA frame was observed"
     );
+    FlowControlScenario {
+        body_control,
+        checkpoints,
+        client,
+        downstream_connection,
+        upstream,
+        upstream_task,
+        body,
+        actual: first.to_vec(),
+    }
+}
 
-    let mut actual = first.to_vec();
-    while actual.len() < DOWNSTREAM_WINDOW_BYTES {
+async fn fill_downstream_window(scenario: &mut FlowControlScenario) {
+    while scenario.actual.len() < DOWNSTREAM_WINDOW_BYTES {
         let chunk = event(
             "DATA that consumes the configured downstream window",
-            data_while_driving(&mut body, &mut upstream),
+            data_while_driving(&mut scenario.body, &mut scenario.upstream),
         )
         .await
         .expect("stream remains open while filling its receive window")
         .expect("window-filling DATA decodes successfully");
-        actual.extend_from_slice(&chunk);
+        scenario.actual.extend_from_slice(&chunk);
     }
     assert_eq!(
-        actual.len(),
+        scenario.actual.len(),
         DOWNSTREAM_WINDOW_BYTES,
         "decoded DATA must consume the deliberately small receive window exactly"
     );
+}
 
+async fn await_upstream_stall(scenario: &mut FlowControlScenario) -> usize {
     let blocked_report = event("upstream transport saturation", async {
         loop {
-            let report = upstream.poll_once().await;
+            let report = scenario.upstream.poll_once().await;
             match report.body_polls_after == report.body_polls_before {
                 true => return report,
                 false => {}
@@ -389,54 +415,70 @@ async fn adversarial_proxy_stream_obeys_downstream_http2_flow_control() {
         "the direct upstream body must enter transport flow before it stalls"
     );
     assert!(
-        !body_control.complete.load(Ordering::Acquire),
+        !scenario.body_control.complete.load(Ordering::Acquire),
         "upstream exhausted its safety frame limit instead of being flow-controlled"
     );
+    emitted_before_release
+}
 
-    let checkpoints = drain_data_checkpoints(&mut checkpoint_rx);
+async fn assert_capacity_withheld(
+    scenario: &mut FlowControlScenario,
+    emitted_before_release: usize,
+) {
+    let checkpoints = drain_data_checkpoints(&mut scenario.checkpoints);
     assert_eq!(
         checkpoints,
         (0..emitted_before_release).collect::<Vec<_>>(),
         "upstream body poll checkpoints were missing or reordered"
     );
-    let withheld_probe = event(
+    let withheld = event(
         "the explicit withheld-capacity body-poll probe",
-        upstream.poll_once(),
+        scenario.upstream.poll_once(),
     )
     .await;
     assert_eq!(
-        withheld_probe.body_polls_after, withheld_probe.body_polls_before,
+        withheld.body_polls_after, withheld.body_polls_before,
         "proxy polled another upstream body frame while downstream capacity was withheld"
     );
     assert!(
         matches!(
-            checkpoint_rx.try_recv(),
+            scenario.checkpoints.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ),
         "a body poll checkpoint appeared while downstream capacity was withheld"
     );
+}
 
+async fn release_downstream_capacity(
+    scenario: &mut FlowControlScenario,
+    emitted_before_release: usize,
+) -> usize {
     let final_frame_count = emitted_before_release + 2;
-    body_control
+    scenario
+        .body_control
         .end_at
         .store(final_frame_count, Ordering::Release);
-    body.flow_control()
-        .release_capacity(actual.len())
+    scenario
+        .body
+        .flow_control()
+        .release_capacity(scenario.actual.len())
         .expect("release retained downstream HTTP/2 capacity");
-
-    let resumed_report = event("upstream body polling after flow-control release", async {
+    let resumed = event("upstream body polling after flow-control release", async {
         loop {
-            let report = upstream.poll_once().await;
+            let report = scenario.upstream.poll_once().await;
             match report.body_polls_after > report.body_polls_before {
                 true => return report,
                 false => {
-                    let chunk = body
+                    let chunk = scenario
+                        .body
                         .data()
                         .await
                         .expect("buffered proxy DATA precedes resumed upstream polling")
                         .expect("buffered proxy DATA decodes during flow-control release");
-                    actual.extend_from_slice(&chunk);
-                    body.flow_control()
+                    scenario.actual.extend_from_slice(&chunk);
+                    scenario
+                        .body
+                        .flow_control()
                         .release_capacity(chunk.len())
                         .expect("return capacity while draining the proxy transport");
                 }
@@ -444,44 +486,62 @@ async fn adversarial_proxy_stream_obeys_downstream_http2_flow_control() {
         }
     })
     .await;
-    assert!(!resumed_report.connection_finished);
+    assert!(!resumed.connection_finished);
     assert_eq!(
-        event("the resumed body poll checkpoint", checkpoint_rx.recv()).await,
+        event(
+            "the resumed body poll checkpoint",
+            scenario.checkpoints.recv()
+        )
+        .await,
         Some(BodyPollCheckpoint::Data(emitted_before_release)),
         "downstream capacity release did not resume at the exact upstream boundary"
     );
+    final_frame_count
+}
 
-    upstream.run_continuously();
-    while let Some(chunk) = event("ordered downstream completion", body.data()).await {
+async fn finish_flow_control_scenario(mut scenario: FlowControlScenario, final_frame_count: usize) {
+    scenario.upstream.run_continuously();
+    while let Some(chunk) = event("ordered downstream completion", scenario.body.data()).await {
         let chunk = chunk.expect("downstream DATA decodes after capacity release");
-        actual.extend_from_slice(&chunk);
-        body.flow_control()
+        scenario.actual.extend_from_slice(&chunk);
+        scenario
+            .body
+            .flow_control()
             .release_capacity(chunk.len())
             .expect("return consumed HTTP/2 capacity");
     }
     assert_eq!(
         event(
             "the terminal upstream body checkpoint",
-            checkpoint_rx.recv()
+            scenario.checkpoints.recv()
         )
         .await,
         Some(BodyPollCheckpoint::Data(final_frame_count - 1))
     );
     assert_eq!(
-        event("upstream body completion", checkpoint_rx.recv()).await,
+        event("upstream body completion", scenario.checkpoints.recv()).await,
         Some(BodyPollCheckpoint::End(final_frame_count))
     );
-
-    let expected = expected_body(final_frame_count);
     assert_eq!(
-        actual, expected,
+        scenario.actual,
+        expected_body(final_frame_count),
         "proxied bytes or frame boundaries changed"
     );
-    assert!(actual.starts_with(FIRST_BOUNDARY));
-    assert!(actual.ends_with(FINAL_BOUNDARY));
-
-    drop(client);
-    downstream_connection.abort();
-    upstream_task.abort();
+    assert!(scenario.actual.starts_with(FIRST_BOUNDARY));
+    assert!(scenario.actual.ends_with(FINAL_BOUNDARY));
+    drop(scenario.client);
+    scenario.downstream_connection.abort();
+    scenario.upstream_task.abort();
     runtime::request_shutdown();
+}
+
+#[camber::test]
+async fn adversarial_proxy_stream_obeys_downstream_http2_flow_control() {
+    let mut scenario = start_flow_control_scenario().await;
+    fill_downstream_window(&mut scenario).await;
+    let emitted_before_release = await_upstream_stall(&mut scenario).await;
+    assert_capacity_withheld(&mut scenario, emitted_before_release).await;
+    let final_frame_count =
+        release_downstream_capacity(&mut scenario, emitted_before_release).await;
+    finish_flow_control_scenario(scenario, final_frame_count).await;
 }

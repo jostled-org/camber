@@ -8,6 +8,16 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 type ChunkPermits = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<()>>>>;
+type ProducerResultReceiver = mpsc::Receiver<Result<(), &'static str>>;
+
+const LARGE_STREAM_CHUNKS: usize = 10;
+const LARGE_STREAM_CHUNK_BYTES: usize = 100_000;
+
+#[derive(Clone, Copy)]
+enum ProxyRegistration {
+    Buffered,
+    Streaming,
+}
 
 fn chunk_permit_channel() -> (tokio::sync::mpsc::UnboundedSender<()>, ChunkPermits) {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -28,91 +38,128 @@ fn release_chunks(sender: &tokio::sync::mpsc::UnboundedSender<()>, count: usize)
         .expect("streaming upstream still waits for chunk permits");
 }
 
+fn large_stream_backend(
+    byte: u8,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::mpsc::UnboundedSender<()>,
+    ProducerResultReceiver,
+) {
+    let (chunk_permit_tx, chunk_permits) = chunk_permit_channel();
+    let (producer_result_tx, producer_result_rx) = mpsc::sync_channel(1);
+    let mut backend = Router::new();
+    backend.get_stream("/data", move |_req: &Request| {
+        let mut chunk_permits = take_chunk_permits(&chunk_permits);
+        let producer_result_tx = producer_result_tx.clone();
+        Box::pin(async move {
+            let (response, sender) = StreamResponse::new(200);
+            tokio::spawn(async move {
+                let chunk = vec![byte; LARGE_STREAM_CHUNK_BYTES];
+                for _ in 0..LARGE_STREAM_CHUNKS {
+                    match chunk_permits.recv().await {
+                        Some(()) => {}
+                        None => {
+                            producer_result_tx
+                                .send(Err("chunk permit channel closed"))
+                                .expect("streaming test still observes producer completion");
+                            return;
+                        }
+                    }
+                    match sender.send(chunk.clone()).await {
+                        Ok(()) => {}
+                        Err(_) => return,
+                    }
+                }
+                producer_result_tx
+                    .send(Ok(()))
+                    .expect("streaming test still observes producer completion");
+            });
+            response
+        })
+    });
+    (
+        common::spawn_server(backend),
+        chunk_permit_tx,
+        producer_result_rx,
+    )
+}
+
+fn large_response_proxy(
+    backend_addr: std::net::SocketAddr,
+    registration: ProxyRegistration,
+) -> std::net::SocketAddr {
+    let mut proxy = Router::new();
+    let backend = format!("http://{backend_addr}");
+    match registration {
+        ProxyRegistration::Buffered => proxy.proxy("/api", &backend),
+        ProxyRegistration::Streaming => proxy.proxy_stream("/api", &backend),
+    }
+    common::spawn_server(proxy)
+}
+
+fn receive_large_proxy_response(
+    proxy_addr: std::net::SocketAddr,
+    chunk_permits: &tokio::sync::mpsc::UnboundedSender<()>,
+    producer_result: &ProducerResultReceiver,
+) -> Vec<u8> {
+    let mut stream = TcpStream::connect(proxy_addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "GET /api/data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    stream.flush().unwrap();
+    release_chunks(chunk_permits, LARGE_STREAM_CHUNKS);
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    producer_result
+        .recv_timeout(Duration::from_secs(5))
+        .expect("streaming producer reports bounded completion")
+        .expect("streaming producer completed without synchronization failure");
+    response
+}
+
+fn assert_large_proxy_response(response: &[u8], byte: u8) {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("no header/body separator");
+    let header = String::from_utf8_lossy(&response[..header_end]);
+    assert!(
+        header.starts_with("HTTP/1.1 200"),
+        "expected 200, got: {header}"
+    );
+    // The proxy delivers the body with chunked transfer-encoding, so the raw
+    // response interleaves chunk-size lines with payload. Count matching bytes
+    // instead of comparing lengths.
+    let byte_count = response[header_end + 4..]
+        .iter()
+        .filter(|candidate| **candidate == byte)
+        .count();
+    assert!(
+        byte_count >= LARGE_STREAM_CHUNKS * LARGE_STREAM_CHUNK_BYTES,
+        "expected at least {} bytes of {}, got {byte_count}",
+        LARGE_STREAM_CHUNKS * LARGE_STREAM_CHUNK_BYTES,
+        char::from(byte)
+    );
+}
+
+fn run_large_response_case(registration: ProxyRegistration, byte: u8) {
+    let (backend_addr, chunk_permits, producer_result) = large_stream_backend(byte);
+    let proxy_addr = large_response_proxy(backend_addr, registration);
+    let response = receive_large_proxy_response(proxy_addr, &chunk_permits, &producer_result);
+    assert_large_proxy_response(&response, byte);
+    runtime::request_shutdown();
+}
+
 #[test]
 fn proxy_streams_large_response() {
     common::test_runtime()
         .shutdown_timeout(Duration::from_secs(5))
-        .run(|| {
-            let (chunk_permit_tx, chunk_permits) = chunk_permit_channel();
-            let (producer_result_tx, producer_result_rx) = mpsc::sync_channel(1);
-            let mut backend = Router::new();
-            backend.get_stream("/data", move |_req: &Request| {
-                let mut chunk_permits = take_chunk_permits(&chunk_permits);
-                let producer_result_tx = producer_result_tx.clone();
-                Box::pin(async move {
-                    let (resp, sender) = StreamResponse::new(200);
-
-                    tokio::spawn(async move {
-                        let chunk = vec![b'A'; 100_000]; // 100KB
-                        for _ in 0..10 {
-                            match chunk_permits.recv().await {
-                                Some(()) => {}
-                                None => {
-                                    producer_result_tx
-                                        .send(Err("chunk permit channel closed"))
-                                        .expect(
-                                            "streaming test still observes producer completion",
-                                        );
-                                    return;
-                                }
-                            }
-                            if sender.send(chunk.clone()).await.is_err() {
-                                return;
-                            }
-                        }
-                        producer_result_tx
-                            .send(Ok(()))
-                            .expect("streaming test still observes producer completion");
-                    });
-
-                    resp
-                })
-            });
-            let backend_addr = common::spawn_server(backend);
-
-            let mut proxy = Router::new();
-            proxy.proxy("/api", &format!("http://{backend_addr}"));
-            let proxy_addr = common::spawn_server(proxy);
-
-            let mut stream = TcpStream::connect(proxy_addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            write!(
-                stream,
-                "GET /api/data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-            )
-            .unwrap();
-            stream.flush().unwrap();
-            release_chunks(&chunk_permit_tx, 10);
-
-            let mut buf = Vec::new();
-            stream.read_to_end(&mut buf).unwrap();
-            producer_result_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("streaming producer reports bounded completion")
-                .expect("streaming producer completed without synchronization failure");
-            let header_end = buf
-                .windows(4)
-                .position(|w| w == b"\r\n\r\n")
-                .expect("no header/body separator");
-            let header = String::from_utf8_lossy(&buf[..header_end]);
-
-            assert!(
-                header.starts_with("HTTP/1.1 200"),
-                "expected 200, got: {header}"
-            );
-
-            // Body is 10 * 100KB = 1MB of 'A's (transported via chunked encoding)
-            let body = &buf[header_end + 4..];
-            let a_count = body.iter().filter(|&&b| b == b'A').count();
-            assert!(
-                a_count >= 1_000_000,
-                "expected at least 1MB of A bytes, got {a_count}"
-            );
-
-            runtime::request_shutdown();
-        })
+        .run(|| run_large_response_case(ProxyRegistration::Buffered, b'A'))
         .unwrap();
 }
 
@@ -272,86 +319,7 @@ fn proxy_handles_upstream_error_mid_stream() {
 fn proxy_stream_forwards_large_response_incrementally() {
     common::test_runtime()
         .shutdown_timeout(Duration::from_secs(5))
-        .run(|| {
-            let (chunk_permit_tx, chunk_permits) = chunk_permit_channel();
-            let (producer_result_tx, producer_result_rx) = mpsc::sync_channel(1);
-            let mut backend = Router::new();
-            backend.get_stream("/data", move |_req: &Request| {
-                let mut chunk_permits = take_chunk_permits(&chunk_permits);
-                let producer_result_tx = producer_result_tx.clone();
-                Box::pin(async move {
-                    let (resp, sender) = StreamResponse::new(200);
-
-                    tokio::spawn(async move {
-                        let chunk = vec![b'B'; 100_000]; // 100KB
-                        for _ in 0..10 {
-                            match chunk_permits.recv().await {
-                                Some(()) => {}
-                                None => {
-                                    producer_result_tx
-                                        .send(Err("chunk permit channel closed"))
-                                        .expect(
-                                            "streaming test still observes producer completion",
-                                        );
-                                    return;
-                                }
-                            }
-                            if sender.send(chunk.clone()).await.is_err() {
-                                return;
-                            }
-                        }
-                        producer_result_tx
-                            .send(Ok(()))
-                            .expect("streaming test still observes producer completion");
-                    });
-
-                    resp
-                })
-            });
-            let backend_addr = common::spawn_server(backend);
-
-            let mut proxy = Router::new();
-            proxy.proxy_stream("/api", &format!("http://{backend_addr}"));
-            let proxy_addr = common::spawn_server(proxy);
-
-            let mut stream = TcpStream::connect(proxy_addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            write!(
-                stream,
-                "GET /api/data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-            )
-            .unwrap();
-            stream.flush().unwrap();
-            release_chunks(&chunk_permit_tx, 10);
-
-            let mut buf = Vec::new();
-            stream.read_to_end(&mut buf).unwrap();
-            producer_result_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("streaming producer reports bounded completion")
-                .expect("streaming producer completed without synchronization failure");
-            let header_end = buf
-                .windows(4)
-                .position(|w| w == b"\r\n\r\n")
-                .expect("no header/body separator");
-            let header = String::from_utf8_lossy(&buf[..header_end]);
-
-            assert!(
-                header.starts_with("HTTP/1.1 200"),
-                "expected 200, got: {header}"
-            );
-
-            let body = &buf[header_end + 4..];
-            let b_count = body.iter().filter(|&&b| b == b'B').count();
-            assert!(
-                b_count >= 1_000_000,
-                "expected at least 1MB of B bytes, got {b_count}"
-            );
-
-            runtime::request_shutdown();
-        })
+        .run(|| run_large_response_case(ProxyRegistration::Streaming, b'B'))
         .unwrap();
 }
 

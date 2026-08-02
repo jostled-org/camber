@@ -14,30 +14,21 @@ use std::time::Duration;
 use ws_frame_io::read_until_double_crlf;
 use ws_text_helpers::{read_ws_text_frame, write_ws_close_frame, write_ws_text_frame};
 
-#[camber::test]
-async fn single_server_rest_sse_websocket() {
+fn unified_protocol_router() -> Router {
     let mut router = Router::new();
-
-    // Middleware: add X-Server header to all responses
     router.use_middleware(|req: &Request, next| {
         let fut = next.call(req);
         Box::pin(async move { fut.await.with_header("X-Server", "camber") })
     });
-
-    // REST endpoint
     router.get("/hello", |_req: &Request| async {
         Response::text(200, "hello")
     });
-
-    // SSE endpoint: sends 3 events
     router.get_sse("/events", |_req: &Request, writer: &mut SseWriter| {
         for i in 0..3 {
             writer.event("message", &format!("event-{i}"))?;
         }
         Ok(())
     });
-
-    // WebSocket endpoint: echo
     router.ws("/ws", |_req: &Request, mut conn: WsConn| {
         while let Some(msg) = conn.recv() {
             if conn.send(&msg).is_err() {
@@ -46,24 +37,25 @@ async fn single_server_rest_sse_websocket() {
         }
         Ok(())
     });
+    router
+}
 
-    let addr = common::spawn_server(router);
-
-    // --- REST ---
-    let resp = http::get(&format!("http://{addr}/hello")).await.unwrap();
-    assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hello");
-    let has_server_header = resp
+async fn assert_rest_journey(addr: std::net::SocketAddr) {
+    let response = http::get(&format!("http://{addr}/hello")).await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.body(), "hello");
+    let has_server_header = response
         .headers()
         .iter()
         .any(|(k, v)| k.eq_ignore_ascii_case("x-server") && v.as_ref() == "camber");
     assert!(
         has_server_header,
         "missing X-Server header on REST response, got: {:?}",
-        resp.headers()
+        response.headers()
     );
+}
 
-    // --- SSE ---
+fn open_sse_stream(addr: std::net::SocketAddr) -> BufReader<TcpStream> {
     let mut stream = TcpStream::connect(addr).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -74,10 +66,10 @@ async fn single_server_rest_sse_websocket() {
     )
     .unwrap();
     stream.flush().unwrap();
+    BufReader::new(stream)
+}
 
-    let mut reader = BufReader::new(stream);
-
-    // Verify status line
+fn assert_sse_response_head(reader: &mut BufReader<TcpStream>) {
     let mut status_line = String::new();
     reader.read_line(&mut status_line).unwrap();
     assert_eq!(
@@ -85,8 +77,6 @@ async fn single_server_rest_sse_websocket() {
         200,
         "SSE expected 200, got: {status_line}"
     );
-
-    // Skip headers to reach body
     let mut line = String::new();
     loop {
         line.clear();
@@ -95,8 +85,12 @@ async fn single_server_rest_sse_websocket() {
             break;
         }
     }
+}
 
-    // Read 3 SSE events
+/// Returns the SSE socket so the caller decides when it closes.
+fn assert_sse_journey(addr: std::net::SocketAddr) -> BufReader<TcpStream> {
+    let mut reader = open_sse_stream(addr);
+    assert_sse_response_head(&mut reader);
     let events = read_sse_events(&mut reader, 3);
     assert_eq!(events.len(), 3, "expected 3 SSE events, got: {events:?}");
     for (i, event) in events.iter().enumerate() {
@@ -106,8 +100,11 @@ async fn single_server_rest_sse_websocket() {
             "SSE event {i} mismatch"
         );
     }
+    reader
+}
 
-    // --- WebSocket ---
+/// Returns the WebSocket socket so the caller decides when it closes.
+fn assert_websocket_journey(addr: std::net::SocketAddr) -> TcpStream {
     let mut ws_stream = TcpStream::connect(addr).unwrap();
     ws_stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -131,16 +128,21 @@ async fn single_server_rest_sse_websocket() {
         101,
         "expected 101 switching protocols: {ws_resp}"
     );
-
-    // Echo test
     write_ws_text_frame(&mut ws_stream, "ping");
     let msg = read_ws_text_frame(&mut ws_stream);
     assert_eq!(&*msg, "ping", "WebSocket echo failed");
-
-    // Close
     write_ws_close_frame(&mut ws_stream);
+    ws_stream
+}
 
-    // --- Clean shutdown ---
+#[camber::test]
+async fn single_server_rest_sse_websocket() {
+    let addr = common::spawn_server(unified_protocol_router());
+    assert_rest_journey(addr).await;
+    // Both sockets stay open across the shutdown request, so shutdown has to
+    // drain live client connections rather than an already-idle server.
+    let _sse = assert_sse_journey(addr);
+    let _ws = assert_websocket_journey(addr);
     runtime::request_shutdown();
 }
 

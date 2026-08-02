@@ -1,0 +1,46 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "e9e46cdf414b43e350b332a16a336ef31352477d5a7d0493166ecb861532c933",
+  "crate_name": "allocation-counter",
+  "crate_version": "0.8.1",
+  "analysis_tier": "syntactic",
+  "timestamp": 1785551853,
+  "analysis_completeness": {
+    "analyzed_files": 2,
+    "skipped_files": 0
+  },
+  "profile": {
+    "findings": [
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/allocator.rs",
+          "line": 23,
+          "column": 1
+        },
+        "evidence": "unsafe impl",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/allocator.rs",
+          "line": 24,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/allocator.rs",
+          "line": 49,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

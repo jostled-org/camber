@@ -3,3 +3,6 @@ check_dyn_field = false
 check_dyn_param = false
 check_clone_in_loop = false
 check_vec_box_dyn = false
+max_depth = 2
+check_long_function_body = true
+max_function_body_lines = 80

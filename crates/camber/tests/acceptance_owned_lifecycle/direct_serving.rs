@@ -141,17 +141,52 @@ fn serve_async_variants_capture_first_poll_context_and_own_transports() {
     dropping_pure_tokio_direct_future_aborts_owned_transports();
 }
 
+struct DirectVariant {
+    name: &'static str,
+    gate: GateControl,
+    client: tokio::task::JoinHandle<Vec<u8>>,
+    server: camber::AsyncJoinHandle<Result<(), RuntimeError>>,
+}
+
+async fn assert_direct_variants_shutdown(variants: [DirectVariant; 4]) {
+    let [plain, tls, hosts, hosts_tls] = variants;
+    let names = [plain.name, tls.name, hosts.name, hosts_tls.name];
+    let mut gates = [
+        plain.gate.entered().await,
+        tls.gate.entered().await,
+        hosts.gate.entered().await,
+        hosts_tls.gate.entered().await,
+    ];
+    let clients = [plain.client, tls.client, hosts.client, hosts_tls.client];
+    let mut servers = [
+        Box::pin(plain.server.into_future()),
+        Box::pin(tls.server.into_future()),
+        Box::pin(hosts.server.into_future()),
+        Box::pin(hosts_tls.server.into_future()),
+    ];
+
+    camber::runtime::request_shutdown();
+    for (server, name) in servers.iter_mut().zip(names) {
+        assert_server_remains_pending(server, name).await;
+    }
+    gates.iter().for_each(EnteredGate::release);
+    for (client, name) in clients.into_iter().zip(names) {
+        assert_http_ok(join_client(client).await, name);
+    }
+    for gate in &mut gates {
+        gate.wait_for_drop().await;
+    }
+    for (server, name) in servers.into_iter().zip(names) {
+        assert_camber_server_ok(join_camber_server(server).await, name);
+    }
+}
+
 fn direct_variants_join_transports_on_camber_shutdown() {
     camber::runtime::builder()
         .shutdown_timeout(Duration::from_secs(1))
         .run(|| {
             camber::runtime::block_on(async {
-                let (cert_pem, key_pem) = common::generate_self_signed_cert();
-                let tls_config = common::server_tls_config(&cert_pem, &key_pem);
-                let connector =
-                    tokio_rustls::TlsConnector::from(Arc::new(common::tls_client_config(&[
-                        &cert_pem,
-                    ])));
+                let (tls_config, connector) = common::self_signed_server_and_connector();
 
                 let (plain_router, plain_gate) = gated_router();
                 let plain_listener = bind_listener().await;
@@ -192,44 +227,33 @@ fn direct_variants_join_transports_on_camber_shutdown() {
                 let hosts_tls_client =
                     tokio::spawn(tls_request(connector, hosts_tls_addr, "direct.test"));
 
-                let mut plain_gate = plain_gate.entered().await;
-                let mut tls_gate = tls_gate.entered().await;
-                let mut hosts_gate = hosts_gate.entered().await;
-                let mut hosts_tls_gate = hosts_tls_gate.entered().await;
-                let mut plain_server = Box::pin(plain_server.into_future());
-                let mut tls_server = Box::pin(tls_server.into_future());
-                let mut hosts_server = Box::pin(hosts_server.into_future());
-                let mut hosts_tls_server = Box::pin(hosts_tls_server.into_future());
-
-                camber::runtime::request_shutdown();
-
-                assert_server_remains_pending(&mut plain_server, "plain").await;
-                assert_server_remains_pending(&mut tls_server, "TLS").await;
-                assert_server_remains_pending(&mut hosts_server, "host").await;
-                assert_server_remains_pending(&mut hosts_tls_server, "host-plus-TLS").await;
-
-                plain_gate.release();
-                tls_gate.release();
-                hosts_gate.release();
-                hosts_tls_gate.release();
-
-                assert_http_ok(join_client(plain_client).await, "plain");
-                assert_http_ok(join_client(tls_client).await, "TLS");
-                assert_http_ok(join_client(hosts_client).await, "host");
-                assert_http_ok(join_client(hosts_tls_client).await, "host-plus-TLS");
-
-                plain_gate.wait_for_drop().await;
-                tls_gate.wait_for_drop().await;
-                hosts_gate.wait_for_drop().await;
-                hosts_tls_gate.wait_for_drop().await;
-
-                assert_camber_server_ok(join_camber_server(plain_server).await, "plain");
-                assert_camber_server_ok(join_camber_server(tls_server).await, "TLS");
-                assert_camber_server_ok(join_camber_server(hosts_server).await, "host");
-                assert_camber_server_ok(
-                    join_camber_server(hosts_tls_server).await,
-                    "host-plus-TLS",
-                );
+                assert_direct_variants_shutdown([
+                    DirectVariant {
+                        name: "plain",
+                        gate: plain_gate,
+                        client: plain_client,
+                        server: plain_server,
+                    },
+                    DirectVariant {
+                        name: "TLS",
+                        gate: tls_gate,
+                        client: tls_client,
+                        server: tls_server,
+                    },
+                    DirectVariant {
+                        name: "host",
+                        gate: hosts_gate,
+                        client: hosts_client,
+                        server: hosts_server,
+                    },
+                    DirectVariant {
+                        name: "host-plus-TLS",
+                        gate: hosts_tls_gate,
+                        client: hosts_tls_client,
+                        server: hosts_tls_server,
+                    },
+                ])
+                .await;
             })
         })
         .unwrap();

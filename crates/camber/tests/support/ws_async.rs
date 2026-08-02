@@ -220,6 +220,44 @@ pub async fn assert_transport_eof(stream: &mut TcpStream, context: &str) {
     .await;
 }
 
+/// Require the close handshake a graceful teardown owes its peer, then a
+/// transport that is given up.
+///
+/// A graceful shutdown sends a close frame, takes the peer's reply, and lets the
+/// socket end. Five harnesses claimed exactly that in five copies of the same
+/// read, assertion, write, and end-of-stream check, differing only in the words
+/// their failures used. `subject` supplies those words.
+pub async fn assert_graceful_close_then_eof(stream: &mut TcpStream, subject: &str) {
+    let (opcode, _) = read_async_ws_frame_or_eof(stream, &format!("the {subject} close"))
+        .await
+        .unwrap_or_else(|| panic!("{subject}: the transport ended without a close frame"));
+    assert_eq!(
+        opcode, 0x8,
+        "{subject}: expected a close frame, got opcode {opcode:#x}"
+    );
+    write_async_ws_frame(stream, 0x8, &[], &format!("the {subject} close reply")).await;
+    assert_transport_eof(stream, &format!("the {subject} transport")).await;
+}
+
+/// Require a close frame if one comes, then a transport that is given up.
+///
+/// [`assert_graceful_close_then_eof`] for a teardown entitled to skip the
+/// courtesy: a forced abort or a supervisor unwind may drop the transport
+/// outright, so end of stream answers the case as well as a close frame does.
+/// Any other frame is neither, and fails.
+pub async fn assert_optional_close_then_eof(stream: &mut TcpStream, subject: &str) {
+    match read_async_ws_frame_or_eof(stream, &format!("the {subject} close")).await {
+        None => {}
+        Some((0x8, _)) => {
+            write_async_ws_frame(stream, 0x8, &[], &format!("the {subject} close reply")).await;
+            assert_transport_eof(stream, &format!("the {subject} transport")).await;
+        }
+        Some((opcode, payload)) => {
+            panic!("{subject} emitted opcode {opcode:#x} with payload {payload:?}")
+        }
+    }
+}
+
 /// Require that a plain HTTP request to `path` still answers `200`.
 ///
 /// The liveness half of a transport case: a listener that stopped serving

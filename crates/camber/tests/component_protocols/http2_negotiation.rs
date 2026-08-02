@@ -2,6 +2,7 @@ use std::future::{Future, IntoFuture};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use camber::http::{Request, Response, Router};
 use camber::{RuntimeError, runtime};
 use futures_util::FutureExt;
@@ -28,13 +29,7 @@ async fn h2c_get(addr: std::net::SocketAddr, path: &str) -> (u16, Box<[u8]>) {
             let (response, _) = client.send_request(request, true).unwrap();
             let response = response.await.unwrap();
             let status = response.status().as_u16();
-            let mut body = response.into_body();
-            let mut body_bytes = Vec::new();
-            while let Some(chunk) = body.data().await {
-                let chunk = chunk.unwrap();
-                body_bytes.extend_from_slice(&chunk);
-                body.flow_control().release_capacity(chunk.len()).unwrap();
-            }
+            let body_bytes = drain_h2_body(response.into_body(), "response body frame").await;
             drop(client);
             // The response is complete. Abort the client driver rather than waiting for
             // the server's independent keepalive policy to close the connection.
@@ -45,11 +40,81 @@ async fn h2c_get(addr: std::net::SocketAddr, path: &str) -> (u16, Box<[u8]>) {
                 Ok(Err(error)) => panic!("HTTP/2 client driver failed: {error}"),
                 Err(error) => panic!("HTTP/2 client driver join failed: {error}"),
             }
-            (status, body_bytes.into_boxed_slice())
+            (status, body_bytes)
         },
         "request",
     )
     .await
+}
+
+fn retained_stream_router() -> (
+    Router,
+    tokio::sync::oneshot::Receiver<()>,
+    Arc<tokio::sync::Semaphore>,
+) {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let handler_release = Arc::clone(&release);
+    let mut router = Router::new();
+    router.get("/retained", move |_: &Request| {
+        let entered_tx = Arc::clone(&entered_tx);
+        let release = Arc::clone(&handler_release);
+        async move {
+            let sender = entered_tx
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let Some(sender) = sender {
+                let _ = sender.send(());
+            }
+            let permit = release.acquire().await.unwrap();
+            drop(permit);
+            Response::text(200, "drained")
+        }
+    });
+    (router, entered_rx, release)
+}
+
+async fn open_http2_client(
+    addr: std::net::SocketAddr,
+) -> (
+    h2::client::SendRequest<Bytes>,
+    tokio::task::JoinHandle<Result<(), h2::Error>>,
+) {
+    let tcp = bounded(tokio::net::TcpStream::connect(addr), "connect")
+        .await
+        .unwrap();
+    let (client, connection) = bounded(h2::client::handshake(tcp), "handshake")
+        .await
+        .unwrap();
+    (client, tokio::spawn(connection))
+}
+
+async fn await_goaway(client: &mut h2::client::SendRequest<Bytes>) -> h2::Error {
+    bounded(
+        std::future::poll_fn(|context| match client.poll_ready(context) {
+            std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(error),
+            std::task::Poll::Ready(Ok(())) | std::task::Poll::Pending => {
+                context.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        }),
+        "GOAWAY",
+    )
+    .await
+}
+
+/// Read one HTTP/2 response body to end of stream, releasing flow-control
+/// capacity per frame so the sender is never stalled by an unread window.
+async fn drain_h2_body(mut body: h2::RecvStream, operation: &str) -> Box<[u8]> {
+    let mut body_bytes = Vec::new();
+    while let Some(chunk) = bounded(body.data(), operation).await {
+        let chunk = chunk.unwrap();
+        body_bytes.extend_from_slice(&chunk);
+        body.flow_control().release_capacity(chunk.len()).unwrap();
+    }
+    body_bytes.into_boxed_slice()
 }
 
 #[test]
@@ -91,39 +156,11 @@ async fn http1_and_http2_same_port() {
 
 #[camber::test]
 async fn graceful_http2_sends_goaway_drains_stream_and_then_joins() {
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
-    let release = Arc::new(tokio::sync::Semaphore::new(0));
-    let handler_release = Arc::clone(&release);
-
-    let mut router = Router::new();
-    router.get("/retained", move |_: &Request| {
-        let entered_tx = Arc::clone(&entered_tx);
-        let release = Arc::clone(&handler_release);
-        async move {
-            let sender = entered_tx
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take();
-            if let Some(sender) = sender {
-                let _ = sender.send(());
-            }
-            let permit = release.acquire().await.unwrap();
-            drop(permit);
-            Response::text(200, "drained")
-        }
-    });
-
+    let (router, entered_rx, release) = retained_stream_router();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = camber::http::serve_background(listener, router);
-    let tcp = bounded(tokio::net::TcpStream::connect(addr), "connect")
-        .await
-        .unwrap();
-    let (mut client, connection) = bounded(h2::client::handshake(tcp), "handshake")
-        .await
-        .unwrap();
-    let connection = tokio::spawn(connection);
+    let (mut client, connection) = open_http2_client(addr).await;
 
     let request = ::http::Request::get(format!("http://{addr}/retained"))
         .version(::http::Version::HTTP_2)
@@ -134,17 +171,7 @@ async fn graceful_http2_sends_goaway_drains_stream_and_then_joins() {
     bounded(entered_rx, "handler entry").await.unwrap();
 
     runtime::request_shutdown();
-    let new_stream_rejection = bounded(
-        std::future::poll_fn(|cx| match client.poll_ready(cx) {
-            std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(error),
-            std::task::Poll::Ready(Ok(())) | std::task::Poll::Pending => {
-                cx.waker().wake_by_ref();
-                std::task::Poll::Pending
-            }
-        }),
-        "GOAWAY",
-    )
-    .await;
+    let new_stream_rejection = await_goaway(&mut client).await;
     assert!(new_stream_rejection.is_go_away());
     assert!(new_stream_rejection.is_remote());
     assert_eq!(new_stream_rejection.reason(), Some(h2::Reason::NO_ERROR));
@@ -160,14 +187,8 @@ async fn graceful_http2_sends_goaway_drains_stream_and_then_joins() {
         .await
         .expect("retained HTTP/2 stream was not drained");
     assert_eq!(response.status(), 200);
-    let mut body = response.into_body();
-    let mut body_bytes = Vec::new();
-    while let Some(chunk) = bounded(body.data(), "retained body frame").await {
-        let chunk = chunk.unwrap();
-        body_bytes.extend_from_slice(&chunk);
-        body.flow_control().release_capacity(chunk.len()).unwrap();
-    }
-    assert_eq!(body_bytes, b"drained");
+    let body_bytes = drain_h2_body(response.into_body(), "retained body frame").await;
+    assert_eq!(body_bytes.as_ref(), b"drained");
 
     let result: Result<(), RuntimeError> = bounded(completion, "server join").await;
     assert!(result.is_ok(), "graceful ServerHandle result: {result:?}");

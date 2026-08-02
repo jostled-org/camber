@@ -10,6 +10,18 @@ use std::time::Duration;
 
 const OVERLAP_REQUEST_COUNT: usize = 4;
 const OVERLAP_TIMEOUT: Duration = Duration::from_secs(2);
+const GENERATED_FORWARDING_CASE_COUNT: u64 = 32;
+const FIXED_HOP_HEADERS: [&str; 9] = [
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
 
 type ReceivedHeaders = Vec<(String, String)>;
 
@@ -107,6 +119,94 @@ fn generated_connection_value(
             value.push_str(token);
             value
         })
+}
+
+struct GeneratedForwardingCase {
+    request: Box<str>,
+    first_token: Box<str>,
+    second_token: Box<str>,
+    end_to_end_value: Box<str>,
+    label: Box<str>,
+}
+
+fn generated_forwarding_case(
+    index: u64,
+    generator: &common::DeterministicGenerator,
+) -> GeneratedForwardingCase {
+    let mut case = generator.case(index);
+    let connection_name = generated_header_case("connection", &mut case);
+    let first_token = generated_header_case("x-generated-hop-one", &mut case);
+    let second_token = generated_header_case("x-generated-hop-two", &mut case);
+    let close_token = generated_header_case("close", &mut case);
+    let tokens = [
+        close_token.as_str(),
+        first_token.as_str(),
+        second_token.as_str(),
+    ];
+    let connection_tokens = generated_connection_value(&tokens, &mut case);
+    let edge_ows = ["", " ", "\t"];
+    let leading_ows = case.select(&edge_ows).copied().expect("non-empty OWS set");
+    let trailing_ows = case.select(&edge_ows).copied().expect("non-empty OWS set");
+    let connection_value = format!("{leading_ows}{connection_tokens}{trailing_ows}");
+    let first_header_name = generated_header_case("x-generated-hop-one", &mut case);
+    let second_header_name = generated_header_case("x-generated-hop-two", &mut case);
+    let end_to_end_value = format!("preserved-{index}");
+    let request = format!(
+        concat!(
+            "GET /api/headers HTTP/1.1\r\n",
+            "Host: client.example\r\n",
+            "{connection_name}: {connection_value}\r\n",
+            "{first_header_name}: remove-one\r\n",
+            "{second_header_name}: remove-two\r\n",
+            "Keep-Alive: timeout=5\r\n",
+            "Proxy-Authenticate: Basic realm=test\r\n",
+            "Proxy-Authorization: Basic dGVzdA==\r\n",
+            "Proxy-Connection: keep-alive\r\n",
+            "TE: trailers\r\n",
+            "Trailer: X-Checksum\r\n",
+            "Upgrade: h2c\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "X-Forwarded-For: 203.0.113.7\r\n",
+            "X-Forwarded-Host: spoofed.example\r\n",
+            "X-Forwarded-Proto: https\r\n",
+            "X-Real-IP: 198.51.100.8\r\n",
+            "Forwarded: for=192.0.2.9;proto=https\r\n",
+            "X-End-To-End: {end_to_end_value}\r\n",
+            "\r\n",
+            "0\r\n\r\n"
+        ),
+        connection_name = connection_name,
+        connection_value = connection_value,
+        first_header_name = first_header_name,
+        second_header_name = second_header_name,
+        end_to_end_value = end_to_end_value,
+    );
+    GeneratedForwardingCase {
+        request: request.into_boxed_str(),
+        first_token: first_token.into_boxed_str(),
+        second_token: second_token.into_boxed_str(),
+        end_to_end_value: end_to_end_value.into_boxed_str(),
+        label: case.to_string().into_boxed_str(),
+    }
+}
+
+fn assert_generated_forwarding_case(received: &ReceivedHeaders, case: &GeneratedForwardingCase) {
+    assert_header_absent(received, &case.first_token, &case.label);
+    assert_header_absent(received, &case.second_token, &case.label);
+    FIXED_HOP_HEADERS
+        .iter()
+        .for_each(|name| assert_header_absent(received, name, &case.label));
+    assert_header_absent(received, "forwarded", &case.label);
+    assert_single_header(
+        received,
+        "x-end-to-end",
+        &case.end_to_end_value,
+        &case.label,
+    );
+    assert_single_header(received, "x-forwarded-for", "127.0.0.1", &case.label);
+    assert_single_header(received, "x-forwarded-host", "client.example", &case.label);
+    assert_single_header(received, "x-forwarded-proto", "http", &case.label);
+    assert_single_header(received, "x-real-ip", "127.0.0.1", &case.label);
 }
 
 async fn wait_for_request_overlap(gate: &tokio::sync::Barrier) {
@@ -551,94 +651,16 @@ async fn connection_header_tokens_are_removed_from_proxy_responses() {
 
 #[camber::test]
 async fn generated_forwarding_headers_strip_spoofed_and_connection_named_fields() {
-    const CASE_COUNT: u64 = 32;
-    const FIXED_HOP_HEADERS: [&str; 9] = [
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "proxy-connection",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-    ];
-
     let upstream_addr = complete_header_echo_upstream();
     let mut proxy = Router::new();
     proxy.proxy("/api", &format!("http://{upstream_addr}"));
     let proxy_addr = common::spawn_server(proxy);
     let generator = common::DeterministicGenerator::stable();
 
-    for index in 0..CASE_COUNT {
-        let mut case = generator.case(index);
-        let connection_name = generated_header_case("connection", &mut case);
-        let first_token = generated_header_case("x-generated-hop-one", &mut case);
-        let second_token = generated_header_case("x-generated-hop-two", &mut case);
-        let close_token = generated_header_case("close", &mut case);
-        let tokens = [
-            close_token.as_str(),
-            first_token.as_str(),
-            second_token.as_str(),
-        ];
-        let connection_tokens = generated_connection_value(&tokens, &mut case);
-        let edge_ows = ["", " ", "\t"];
-        let leading_ows = case
-            .select(&edge_ows)
-            .copied()
-            .expect("OWS set is not empty");
-        let trailing_ows = case
-            .select(&edge_ows)
-            .copied()
-            .expect("OWS set is not empty");
-        let connection_value = format!("{leading_ows}{connection_tokens}{trailing_ows}");
-        let first_header_name = generated_header_case("x-generated-hop-one", &mut case);
-        let second_header_name = generated_header_case("x-generated-hop-two", &mut case);
-        let end_to_end_value = format!("preserved-{index}");
-        let request = format!(
-            concat!(
-                "GET /api/headers HTTP/1.1\r\n",
-                "Host: client.example\r\n",
-                "{connection_name}: {connection_value}\r\n",
-                "{first_header_name}: remove-one\r\n",
-                "{second_header_name}: remove-two\r\n",
-                "Keep-Alive: timeout=5\r\n",
-                "Proxy-Authenticate: Basic realm=test\r\n",
-                "Proxy-Authorization: Basic dGVzdA==\r\n",
-                "Proxy-Connection: keep-alive\r\n",
-                "TE: trailers\r\n",
-                "Trailer: X-Checksum\r\n",
-                "Upgrade: h2c\r\n",
-                "Transfer-Encoding: chunked\r\n",
-                "X-Forwarded-For: 203.0.113.7\r\n",
-                "X-Forwarded-Host: spoofed.example\r\n",
-                "X-Forwarded-Proto: https\r\n",
-                "X-Real-IP: 198.51.100.8\r\n",
-                "Forwarded: for=192.0.2.9;proto=https\r\n",
-                "X-End-To-End: {end_to_end_value}\r\n",
-                "\r\n",
-                "0\r\n\r\n"
-            ),
-            connection_name = connection_name,
-            connection_value = connection_value,
-            first_header_name = first_header_name,
-            second_header_name = second_header_name,
-            end_to_end_value = end_to_end_value,
-        );
-        let received = raw_proxy_header_request(proxy_addr, &request);
-        let case_label = case.to_string();
-
-        assert_header_absent(&received, &first_token, &case_label);
-        assert_header_absent(&received, &second_token, &case_label);
-        FIXED_HOP_HEADERS
-            .iter()
-            .for_each(|name| assert_header_absent(&received, name, &case_label));
-        assert_header_absent(&received, "forwarded", &case_label);
-        assert_single_header(&received, "x-end-to-end", &end_to_end_value, &case_label);
-        assert_single_header(&received, "x-forwarded-for", "127.0.0.1", &case_label);
-        assert_single_header(&received, "x-forwarded-host", "client.example", &case_label);
-        assert_single_header(&received, "x-forwarded-proto", "http", &case_label);
-        assert_single_header(&received, "x-real-ip", "127.0.0.1", &case_label);
+    for index in 0..GENERATED_FORWARDING_CASE_COUNT {
+        let case = generated_forwarding_case(index, &generator);
+        let received = raw_proxy_header_request(proxy_addr, &case.request);
+        assert_generated_forwarding_case(&received, &case);
     }
 
     runtime::request_shutdown();

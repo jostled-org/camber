@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use camber::RuntimeError;
-use camber::http::{self, Router, ServerHandle};
+use camber::http::{self, Request, Response, Router, ServerHandle};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// The gap between attempts in every bounded poll the suite runs.
@@ -330,6 +330,36 @@ pub fn serve_background_ready(
     timeout: Duration,
 ) -> Result<ServerHandle, FixtureError> {
     ReadyServer::start(listener, router, timeout).map(ReadyServer::into_handle)
+}
+
+/// Add a `/second` route that reports its first dispatch, and hand back the
+/// receiver that observes it.
+///
+/// A connection-permit case reads the same one-shot twice: empty while a bridge
+/// still holds the permit, closed once the owner has completed and dropped the
+/// route with it. The take-once guard is what keeps a route dispatched more than
+/// once from sending twice on a sender that only carries one value.
+///
+/// Stated here rather than beside either case, because the direct and proxied
+/// halves of the claim live in different test binaries and a copy in each would
+/// let the probe they share drift.
+pub fn attach_dispatch_probe(router: &mut Router) -> tokio::sync::oneshot::Receiver<()> {
+    let (dispatched_tx, dispatched_rx) = tokio::sync::oneshot::channel();
+    let dispatched_tx = Arc::new(Mutex::new(Some(dispatched_tx)));
+    router.get("/second", move |_request: &Request| {
+        let dispatched_tx = Arc::clone(&dispatched_tx);
+        async move {
+            if let Some(sender) = dispatched_tx
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+            {
+                let _ = sender.send(());
+            }
+            Response::text(200, "second")
+        }
+    });
+    dispatched_rx
 }
 
 #[derive(Debug)]

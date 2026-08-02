@@ -355,6 +355,142 @@ pub(super) fn refuse_head(
     answer(ctx, name, path, is_head, refusal, start)
 }
 
+/// Shared facts needed after a request head has selected a dispatch route.
+struct RequestDispatch<'a> {
+    dispatch: &'a ServerDispatch,
+    ctx: &'a ConnCtx,
+    origin: RequestOrigin<'a>,
+    lifecycle: &'a ConnectionLifecycle,
+    start: std::time::Instant,
+}
+
+/// Dispatch a classified route without losing its body-collection contract.
+async fn dispatch_classified_route(
+    hyper_req: hyper::Request<hyper::body::Incoming>,
+    route_class: RouteClass,
+    method: super::method::Method,
+    request_dispatch: &RequestDispatch<'_>,
+) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    let &RequestDispatch {
+        dispatch,
+        ctx,
+        origin,
+        lifecycle,
+        start,
+    } = request_dispatch;
+    #[cfg(feature = "ws")]
+    let is_ws_upgrade = ws_proxy::is_ws_upgrade_head(hyper_req.headers());
+    #[cfg(not(feature = "ws"))]
+    let is_ws_upgrade = false;
+
+    let skip_body_collection = matches!(route_class, RouteClass::HeadOnly)
+        || (matches!(&route_class, RouteClass::StreamingProxy(_)) && is_ws_upgrade);
+    match route_class {
+        RouteClass::StreamingProxy(target) if !is_ws_upgrade => {
+            return dispatch_streaming_proxy(
+                hyper_req, dispatch, ctx, target, origin, method, start,
+            )
+            .await;
+        }
+        RouteClass::StreamingProxyUnhealthy => {
+            let path = hyper_req.uri().path();
+            return Ok(refuse_unhealthy_upstream(ctx, method, path, start));
+        }
+        RouteClass::HostRejected(refusal) => {
+            let path = hyper_req.uri().path();
+            return Ok(refuse_head(ctx, Some(method), path, refusal, start));
+        }
+        // Listed rather than wildcarded, so a new `RouteClass` is a compile
+        // error here instead of a silent fall-through into body collection.
+        // `StreamingProxy(_)` appears because the guarded arm above it does not
+        // cover the WS-upgrade case.
+        RouteClass::HeadOnly | RouteClass::Buffered | RouteClass::StreamingProxy(_) => {}
+    }
+
+    let input = match build_dispatch_input(
+        hyper_req,
+        ctx,
+        origin,
+        lifecycle,
+        skip_body_collection,
+        method,
+    )
+    .await
+    {
+        Ok(input) => input,
+        Err(refused) => {
+            let Refused {
+                refusal,
+                method: refused_method,
+                uri,
+            } = *refused;
+            return Ok(refuse_head(ctx, refused_method, uri.path(), refusal, start));
+        }
+    };
+    dispatch_built_request(input, request_dispatch).await
+}
+
+/// Run middleware gates and finish a request whose wire representation is built.
+async fn dispatch_built_request(
+    input: DispatchInput,
+    request_dispatch: &RequestDispatch<'_>,
+) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    let &RequestDispatch {
+        dispatch,
+        ctx,
+        lifecycle,
+        start,
+        ..
+    } = request_dispatch;
+    #[cfg(feature = "ws")]
+    let (req, ws_upgrade) = input;
+    #[cfg(not(feature = "ws"))]
+    let req = input;
+    let Routed { result, router } = dispatch.dispatch(req);
+    let gate_blocked = match pending_middleware_gate(&result, router) {
+        None => None,
+        Some(GateCheck { reached, fut }) => gate_result(reached, fut.await),
+    };
+    if let Some(blocked) = gate_blocked {
+        return Ok(refuse(ctx, &result, blocked, start));
+    }
+
+    #[cfg(feature = "ws")]
+    if let Some(rejected) = result
+        .is_websocket()
+        .then(|| ws_proxy::check_ws_origin(result.request_ref()))
+        .flatten()
+    {
+        return Ok(refuse(ctx, &result, rejected, start));
+    }
+
+    match result {
+        DispatchResult::Async(fut, req) => finish_async(ctx, &req, fut.await, start),
+        DispatchResult::Stream(fut, req) => handle_stream_response(fut.await, req, ctx, start),
+        DispatchResult::Sse(handler, req) => {
+            record_request(ctx, req.method(), req.path(), 200, start);
+            handle_sse(handler, req, ctx.sse_buffer_size, lifecycle).await
+        }
+        #[cfg(feature = "ws")]
+        DispatchResult::WebSocket(handler, req) => {
+            record_upgrade(ctx, req, start, |req| {
+                ws_proxy::handle_ws_upgrade(ws_upgrade, handler, req, ctx.ws_buffer_size, lifecycle)
+            })
+            .await
+        }
+        #[cfg(feature = "ws")]
+        DispatchResult::ProxyWebSocket(req, backend, prefix) => {
+            record_upgrade(ctx, req, start, |req| {
+                ws_proxy::handle_proxy_ws(ws_upgrade, req, backend, prefix, lifecycle)
+            })
+            .await
+        }
+        DispatchResult::ProxyStream(req, backend, prefix) => {
+            handle_proxy_stream_response(req, &backend, &prefix, ctx, start).await
+        }
+    }
+}
+
 /// Route a request and dispatch to the appropriate handler.
 ///
 /// The request clock starts here, as the first thing this function does. It is
@@ -371,7 +507,6 @@ pub(super) async fn handle_request(
     disconnect: DisconnectSignal,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let start = std::time::Instant::now();
-
     // Built once and copied down every dispatch path, so no path can pair this
     // peer with another request's lifetime signal.
     let origin = RequestOrigin {
@@ -410,122 +545,14 @@ pub(super) async fn handle_request(
         }
         PreBodyRoute::Class(class, method) => (class, method),
     };
-
-    #[cfg(feature = "ws")]
-    let is_ws_upgrade = ws_proxy::is_ws_upgrade_head(hyper_req.headers());
-    #[cfg(not(feature = "ws"))]
-    let is_ws_upgrade = false;
-
-    let skip_body_collection = matches!(route_class, RouteClass::HeadOnly)
-        || (matches!(&route_class, RouteClass::StreamingProxy(_)) && is_ws_upgrade);
-
-    match route_class {
-        RouteClass::StreamingProxy(target) if !is_ws_upgrade => {
-            return dispatch_streaming_proxy(
-                hyper_req, dispatch, ctx, target, origin, method, start,
-            )
-            .await;
-        }
-        RouteClass::StreamingProxyUnhealthy => {
-            return Ok(refuse_unhealthy_upstream(
-                ctx,
-                method,
-                hyper_req.uri().path(),
-                start,
-            ));
-        }
-        RouteClass::HostRejected(refusal) => {
-            return Ok(refuse_head(
-                ctx,
-                Some(method),
-                hyper_req.uri().path(),
-                refusal,
-                start,
-            ));
-        }
-        // Listed rather than wildcarded, so a new `RouteClass` is a compile
-        // error here instead of a silent fall-through into body collection.
-        // `StreamingProxy(_)` appears because the guarded arm above it does not
-        // cover the WS-upgrade case.
-        RouteClass::HeadOnly | RouteClass::Buffered | RouteClass::StreamingProxy(_) => {}
-    }
-
-    let input = match build_dispatch_input(
-        hyper_req,
+    let request_dispatch = RequestDispatch {
+        dispatch,
         ctx,
         origin,
         lifecycle,
-        skip_body_collection,
-        method,
-    )
-    .await
-    {
-        Ok(input) => input,
-        Err(refused) => {
-            let Refused {
-                refusal,
-                method: refused_method,
-                uri,
-            } = *refused;
-            return Ok(refuse_head(ctx, refused_method, uri.path(), refusal, start));
-        }
+        start,
     };
-    #[cfg(feature = "ws")]
-    let (req, ws_upgrade) = input;
-    #[cfg(not(feature = "ws"))]
-    let req = input;
-
-    // Dispatch through the trie. Internal routes are already handled above.
-    // The router that answered comes back with the result, so the gate below
-    // does not resolve the same request a second time.
-    let Routed { result, router } = dispatch.dispatch(req);
-
-    // Non-standard dispatch types (WS, SSE, Stream) need a middleware gate check.
-    // Async already runs middleware inside dispatch.
-    let gate_blocked = match pending_middleware_gate(&result, router) {
-        None => None,
-        Some(GateCheck { reached, fut }) => gate_result(reached, fut.await),
-    };
-
-    if let Some(blocked) = gate_blocked {
-        return Ok(refuse(ctx, &result, blocked, start));
-    }
-
-    // Validate WebSocket Origin before accepting any upgrade.
-    #[cfg(feature = "ws")]
-    if let Some(rejected) = result
-        .is_websocket()
-        .then(|| ws_proxy::check_ws_origin(result.request_ref()))
-        .flatten()
-    {
-        return Ok(refuse(ctx, &result, rejected, start));
-    }
-
-    match result {
-        DispatchResult::Async(fut, req) => finish_async(ctx, &req, fut.await, start),
-        DispatchResult::Stream(fut, req) => handle_stream_response(fut.await, req, ctx, start),
-        DispatchResult::Sse(handler, req) => {
-            record_request(ctx, req.method(), req.path(), 200, start);
-            handle_sse(handler, req, ctx.sse_buffer_size, lifecycle).await
-        }
-        #[cfg(feature = "ws")]
-        DispatchResult::WebSocket(handler, req) => {
-            record_upgrade(ctx, req, start, |req| {
-                ws_proxy::handle_ws_upgrade(ws_upgrade, handler, req, ctx.ws_buffer_size, lifecycle)
-            })
-            .await
-        }
-        #[cfg(feature = "ws")]
-        DispatchResult::ProxyWebSocket(req, backend, prefix) => {
-            record_upgrade(ctx, req, start, |req| {
-                ws_proxy::handle_proxy_ws(ws_upgrade, req, backend, prefix, lifecycle)
-            })
-            .await
-        }
-        DispatchResult::ProxyStream(req, backend, prefix) => {
-            handle_proxy_stream_response(req, &backend, &prefix, ctx, start).await
-        }
-    }
+    dispatch_classified_route(hyper_req, route_class, method, &request_dispatch).await
 }
 
 /// Refuse a streaming-proxy route whose upstream is failing its health check.

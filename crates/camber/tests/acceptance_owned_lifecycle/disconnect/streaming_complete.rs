@@ -291,6 +291,29 @@ struct WindowOutcome {
     sse_body: usize,
 }
 
+fn assert_window_response(probed: &WindowOutcome) {
+    assert!(
+        matches!(probed.refusal, Some(RuntimeError::ScopeClosed)),
+        "the closed scope did not refuse the producer: {:?}",
+        probed.refusal
+    );
+    assert_eq!(probed.stream_status, 200, "the 200 was not produced");
+    assert_eq!(
+        probed.stream_body, 0,
+        "a refused producer's response carried chunks"
+    );
+    assert_eq!(
+        probed.cause,
+        DisconnectCause::Completed,
+        "a refused producer left its produced response unresolved"
+    );
+    assert_eq!(probed.sse_status, 200, "the SSE 200 was not produced");
+    assert_eq!(
+        probed.sse_body, 0,
+        "a refused SSE producer's response carried events"
+    );
+}
+
 #[test]
 fn refused_producer_in_the_shutdown_window_completes_at_end_of_stream() {
     let mut router = probe_router();
@@ -343,26 +366,7 @@ fn refused_producer_in_the_shutdown_window_completes_at_end_of_stream() {
     let probed = observed
         .probed
         .expect("the drain never reported the child count the window is defined by");
-    assert!(
-        matches!(probed.refusal, Some(RuntimeError::ScopeClosed)),
-        "the closed scope did not refuse the producer: {:?}",
-        probed.refusal
-    );
-    assert_eq!(probed.stream_status, 200, "the 200 was not produced");
-    assert_eq!(
-        probed.stream_body, 0,
-        "a refused producer's response carried chunks"
-    );
-    assert_eq!(
-        probed.cause,
-        DisconnectCause::Completed,
-        "a refused producer left its produced response unresolved"
-    );
-    assert_eq!(probed.sse_status, 200, "the SSE 200 was not produced");
-    assert_eq!(
-        probed.sse_body, 0,
-        "a refused SSE producer's response carried events"
-    );
+    assert_window_response(&probed);
     assert!(
         recorded.recorded(&[
             "producer=sse",

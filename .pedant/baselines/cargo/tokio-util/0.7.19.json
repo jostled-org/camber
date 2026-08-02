@@ -1,12 +1,12 @@
 {
   "spec_version": "0.1.0",
-  "source_hash": "404fd941a26321350f1c1d3c423a6a7601ad398055f732623c3150826e7363d6",
+  "source_hash": "50a055273bcbfcd35cb9cf6eac85fe493e56066457b799eff7ca3d785cae5288",
   "crate_name": "tokio-util",
-  "crate_version": "0.7.18",
+  "crate_version": "0.7.19",
   "analysis_tier": "syntactic",
-  "timestamp": 1784286765,
+  "timestamp": 1785556152,
   "analysis_completeness": {
-    "analyzed_files": 58,
+    "analyzed_files": 60,
     "skipped_files": 0
   },
   "rust_version": "1.71",
@@ -55,8 +55,18 @@
       {
         "capability": "unsafe_code",
         "location": {
+          "file": "./src/io/write_all_vectored.rs",
+          "line": 159,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
           "file": "./src/sync/cancellation_token.rs",
-          "line": 367,
+          "line": 387,
           "column": 40
         },
         "evidence": "unsafe block",
@@ -66,7 +76,7 @@
         "capability": "unsafe_code",
         "location": {
           "file": "./src/sync/cancellation_token.rs",
-          "line": 375,
+          "line": 395,
           "column": 5
         },
         "evidence": "unsafe fn",
@@ -76,7 +86,7 @@
         "capability": "unsafe_code",
         "location": {
           "file": "./src/sync/cancellation_token.rs",
-          "line": 408,
+          "line": 428,
           "column": 48
         },
         "evidence": "unsafe block",
@@ -176,7 +186,17 @@
         "capability": "unsafe_code",
         "location": {
           "file": "./src/task/abort_on_drop.rs",
-          "line": 56,
+          "line": 61,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/task/abort_on_drop.rs",
+          "line": 131,
           "column": 9
         },
         "evidence": "unsafe block",
@@ -226,7 +246,7 @@
         "capability": "unsafe_code",
         "location": {
           "file": "./src/udp/frame.rs",
-          "line": 86,
+          "line": 92,
           "column": 27
         },
         "evidence": "unsafe block",
@@ -236,7 +256,7 @@
         "capability": "unsafe_code",
         "location": {
           "file": "./src/udp/frame.rs",
-          "line": 97,
+          "line": 103,
           "column": 17
         },
         "evidence": "unsafe block",
@@ -258,6 +278,46 @@
           "file": "./src/util/maybe_dangling.rs",
           "line": 48,
           "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "ffi",
+        "location": {
+          "file": "./src/util/memchr.rs",
+          "line": 16,
+          "column": 25
+        },
+        "evidence": "libc::memchr",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/util/memchr.rs",
+          "line": 16,
+          "column": 16
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/util/memchr.rs",
+          "line": 29,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/util/memchr.rs",
+          "line": 44,
+          "column": 5
         },
         "evidence": "unsafe block",
         "origin": "code_site"

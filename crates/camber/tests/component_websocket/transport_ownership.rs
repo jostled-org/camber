@@ -5,10 +5,10 @@ use crate::common;
 mod deterministic;
 
 use crate::common::{
-    ASYNC_EVENT_TIMEOUT, assert_http_ok, assert_transport_eof, lifecycle_event,
-    read_async_http_head, read_async_ws_frame_or_eof, read_ws_binary_frame, read_ws_text_frame,
-    status_from_raw, write_async_ws_frame, write_ws_binary_frame, write_ws_close_frame,
-    write_ws_text_frame,
+    ASYNC_EVENT_TIMEOUT, assert_graceful_close_then_eof, assert_http_ok,
+    assert_optional_close_then_eof, assert_transport_eof, attach_dispatch_probe, lifecycle_event,
+    read_async_http_head, read_ws_binary_frame, read_ws_text_frame, status_from_raw,
+    write_ws_binary_frame, write_ws_close_frame, write_ws_text_frame,
 };
 use camber::RuntimeError;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, LifecycleFault, lifecycle};
@@ -25,6 +25,64 @@ use std::time::{Duration, Instant};
 const FLAG_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const VALID_WEBSOCKET_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 const VALID_WEBSOCKET_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
+
+struct InvalidHandshakeCase {
+    label: &'static str,
+    connection: Option<&'static str>,
+    version: Option<&'static str>,
+    key: &'static str,
+    expected_status: u16,
+    /// The version a rejection must advertise, for the one case that owes the
+    /// client one.
+    ///
+    /// Carried on the case rather than re-derived from `label`, which is display
+    /// text: a reworded label would silently retire the `426` claim instead of
+    /// failing.
+    expected_version_header: Option<&'static str>,
+}
+
+const INVALID_HANDSHAKE_CASES: [InvalidHandshakeCase; 5] = [
+    InvalidHandshakeCase {
+        label: "missing version",
+        connection: Some("Upgrade"),
+        version: None,
+        key: VALID_WEBSOCKET_KEY,
+        expected_status: 400,
+        expected_version_header: None,
+    },
+    InvalidHandshakeCase {
+        label: "wrong version",
+        connection: Some("Upgrade"),
+        version: Some("12"),
+        key: VALID_WEBSOCKET_KEY,
+        expected_status: 426,
+        expected_version_header: Some("13"),
+    },
+    InvalidHandshakeCase {
+        label: "malformed Base64 key",
+        connection: Some("Upgrade"),
+        version: Some("13"),
+        key: "not@@base64",
+        expected_status: 400,
+        expected_version_header: None,
+    },
+    InvalidHandshakeCase {
+        label: "decoded key is not 16 bytes",
+        connection: Some("Upgrade"),
+        version: Some("13"),
+        key: "dG9vIHNob3J0",
+        expected_status: 400,
+        expected_version_header: None,
+    },
+    InvalidHandshakeCase {
+        label: "missing Connection Upgrade",
+        connection: None,
+        version: Some("13"),
+        key: VALID_WEBSOCKET_KEY,
+        expected_status: 400,
+        expected_version_header: None,
+    },
+];
 
 /// Every value a response head carries under `name`, in order.
 ///
@@ -246,6 +304,85 @@ fn assert_connected_frame(stream: &mut TcpStream, context: &str) {
     write_ws_close_frame(stream);
 }
 
+fn assert_invalid_handshake_matrix(addr: std::net::SocketAddr, dispatch_count: &AtomicUsize) {
+    INVALID_HANDSHAKE_CASES.iter().for_each(|case| {
+        let request =
+            raw_ws_upgrade_request("localhost", case.connection, case.key, case.version, "");
+        let (_, head) = perform_raw_ws_handshake(addr, &request);
+        assert_handshake_rejected(&head, case.expected_status, case.label);
+        match case.expected_version_header {
+            Some(version) => assert_eq!(
+                *header_values(&head, "sec-websocket-version"),
+                [version],
+                "{}: rejection must advertise the supported version",
+                case.label
+            ),
+            None => {}
+        }
+        assert_eq!(
+            dispatch_count.load(Ordering::Acquire),
+            0,
+            "{}: invalid handshake reached the WebSocket handler",
+            case.label
+        );
+    });
+}
+
+fn assert_strict_handshake_rejections(addr: std::net::SocketAddr, dispatch_count: &AtomicUsize) {
+    let invalid_protocol = raw_ws_upgrade_request(
+        "localhost",
+        Some("Upgrade"),
+        VALID_WEBSOCKET_KEY,
+        Some("13"),
+        "Sec-WebSocket-Protocol: chat, invalid protocol\r\n",
+    );
+    let (_, head) = perform_raw_ws_handshake(addr, &invalid_protocol);
+    assert_handshake_rejected(&head, 400, "malformed subprotocol offer");
+    let http_10 = raw_ws_upgrade_request(
+        "localhost",
+        Some("Upgrade"),
+        VALID_WEBSOCKET_KEY,
+        Some("13"),
+        "",
+    )
+    .replacen("HTTP/1.1", "HTTP/1.0", 1);
+    let (_, head) = perform_raw_ws_handshake(addr, &http_10);
+    assert_handshake_rejected(&head, 400, "HTTP/1.0 upgrade");
+    assert_eq!(
+        dispatch_count.load(Ordering::Acquire),
+        0,
+        "strict handshake rejections reached the WebSocket handler"
+    );
+}
+
+fn assert_valid_handshake_after_rejections(
+    addr: std::net::SocketAddr,
+    dispatch_count: &AtomicUsize,
+) {
+    let valid = raw_ws_upgrade_request(
+        "localhost",
+        Some("Upgrade"),
+        VALID_WEBSOCKET_KEY,
+        Some("13"),
+        "",
+    );
+    let (mut stream, head) = perform_raw_ws_handshake(addr, &valid);
+    assert_websocket_switch(&head, "valid handshake after rejection matrix");
+    assert!(
+        header_values(&head, "sec-websocket-protocol").is_empty(),
+        "unsolicited subprotocol in valid probe: {head:?}"
+    );
+    assert_connected_frame(&mut stream, "valid handshake did not dispatch");
+    assert_eq!(dispatch_count.load(Ordering::Acquire), 1);
+}
+
+/// How many origin categories [`generated_origin`] can produce.
+///
+/// The modulus and the arm count are the same number, named once: a category
+/// added without widening this — or the reverse — fails the generator's own
+/// `unreachable!` instead of silently narrowing what the case set covers.
+const ORIGIN_CATEGORIES: u64 = 11;
+
 #[derive(Debug)]
 struct GeneratedOrigin {
     label: &'static str,
@@ -284,7 +421,7 @@ fn generated_origin(
         .copied()
         .expect("origin port set is non-empty");
 
-    let origin = match index % 11 {
+    let origin = match index % ORIGIN_CATEGORIES {
         0 => GeneratedOrigin {
             label: "normalized scheme and authority case",
             headers: format!("Origin: HtTp://{mixed_host}\r\n"),
@@ -355,107 +492,9 @@ fn websocket_rejects_invalid_version_and_key() {
         .run(|| {
             let dispatch_count = Arc::new(AtomicUsize::new(0));
             let addr = common::spawn_server(websocket_probe_router(Arc::clone(&dispatch_count)));
-            let invalid = [
-                (
-                    "missing version",
-                    Some("Upgrade"),
-                    None,
-                    VALID_WEBSOCKET_KEY,
-                    400,
-                ),
-                (
-                    "wrong version",
-                    Some("Upgrade"),
-                    Some("12"),
-                    VALID_WEBSOCKET_KEY,
-                    426,
-                ),
-                (
-                    "malformed Base64 key",
-                    Some("Upgrade"),
-                    Some("13"),
-                    "not@@base64",
-                    400,
-                ),
-                (
-                    "decoded key is not 16 bytes",
-                    Some("Upgrade"),
-                    Some("13"),
-                    "dG9vIHNob3J0",
-                    400,
-                ),
-                (
-                    "missing Connection Upgrade",
-                    None,
-                    Some("13"),
-                    VALID_WEBSOCKET_KEY,
-                    400,
-                ),
-            ];
-
-            invalid
-                .iter()
-                .for_each(|(label, connection, version, key, expected_status)| {
-                    let request =
-                        raw_ws_upgrade_request("localhost", *connection, key, *version, "");
-                    let (_, head) = perform_raw_ws_handshake(addr, &request);
-                    assert_handshake_rejected(&head, *expected_status, label);
-                    match *label {
-                        "wrong version" => assert_eq!(
-                            *header_values(&head, "sec-websocket-version"),
-                            ["13"],
-                            "wrong-version rejection must advertise version 13"
-                        ),
-                        _ => {}
-                    }
-                    assert_eq!(
-                        dispatch_count.load(Ordering::Acquire),
-                        0,
-                        "{label}: invalid handshake reached the WebSocket handler"
-                    );
-                });
-
-            let invalid_protocol = raw_ws_upgrade_request(
-                "localhost",
-                Some("Upgrade"),
-                VALID_WEBSOCKET_KEY,
-                Some("13"),
-                "Sec-WebSocket-Protocol: chat, invalid protocol\r\n",
-            );
-            let (_, head) = perform_raw_ws_handshake(addr, &invalid_protocol);
-            assert_handshake_rejected(&head, 400, "malformed subprotocol offer");
-
-            let http_10 = raw_ws_upgrade_request(
-                "localhost",
-                Some("Upgrade"),
-                VALID_WEBSOCKET_KEY,
-                Some("13"),
-                "",
-            )
-            .replacen("HTTP/1.1", "HTTP/1.0", 1);
-            let (_, head) = perform_raw_ws_handshake(addr, &http_10);
-            assert_handshake_rejected(&head, 400, "HTTP/1.0 upgrade");
-            assert_eq!(
-                dispatch_count.load(Ordering::Acquire),
-                0,
-                "strict handshake rejections reached the WebSocket handler"
-            );
-
-            let valid = raw_ws_upgrade_request(
-                "localhost",
-                Some("Upgrade"),
-                VALID_WEBSOCKET_KEY,
-                Some("13"),
-                "",
-            );
-            let (mut stream, head) = perform_raw_ws_handshake(addr, &valid);
-            assert_websocket_switch(&head, "valid handshake after rejection matrix");
-            assert!(
-                header_values(&head, "sec-websocket-protocol").is_empty(),
-                "unsolicited subprotocol in valid probe: {head:?}"
-            );
-            assert_connected_frame(&mut stream, "valid handshake did not dispatch");
-            assert_eq!(dispatch_count.load(Ordering::Acquire), 1);
+            assert_invalid_handshake_matrix(addr, &dispatch_count);
+            assert_strict_handshake_rejections(addr, &dispatch_count);
+            assert_valid_handshake_after_rejections(addr, &dispatch_count);
 
             runtime::request_shutdown();
         })
@@ -1004,23 +1043,8 @@ fn direct_websocket_bridge_holds_permit_and_finishes_before_owned_completion() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             runtime::block_on(async {
-                let (dispatched_tx, mut dispatched_rx) = tokio::sync::oneshot::channel();
-                let dispatched_tx = Arc::new(Mutex::new(Some(dispatched_tx)));
                 let mut router = lifecycle_websocket_router();
-                router.get("/second", move |_request: &Request| {
-                    let dispatched_tx = Arc::clone(&dispatched_tx);
-                    async move {
-                        if let Some(sender) = dispatched_tx
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .take()
-                        {
-                            let _ = sender.send(());
-                        }
-                        Response::text(200, "second")
-                    }
-                });
-
+                let mut dispatched = attach_dispatch_probe(&mut router);
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
                     .expect("bind owned listener");
@@ -1028,7 +1052,6 @@ fn direct_websocket_bridge_holds_permit_and_finishes_before_owned_completion() {
                 let controller = lifecycle(addr).expect("install lifecycle controller");
                 let handle = camber::http::serve_background(listener, router);
                 let mut websocket = connect_async_websocket(addr, "/ws").await;
-
                 controller
                     .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
                     .expect("pause once the second client waits for a permit");
@@ -1049,7 +1072,7 @@ fn direct_websocket_bridge_holds_permit_and_finishes_before_owned_completion() {
                 .expect("production permit acquisition returned Pending");
                 assert!(
                     matches!(
-                        dispatched_rx.try_recv(),
+                        dispatched.try_recv(),
                         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
                     ),
                     "second request dispatched while the direct bridge held the permit"
@@ -1064,19 +1087,7 @@ fn direct_websocket_bridge_holds_permit_and_finishes_before_owned_completion() {
                     owner.as_mut().now_or_never().is_none(),
                     "owner completed while the direct bridge still owned its transport"
                 );
-                let (opcode, _) =
-                    read_async_ws_frame_or_eof(&mut websocket, "the permit-holding direct close")
-                        .await
-                        .expect("graceful shutdown sends a close frame");
-                assert_eq!(opcode, 0x8, "expected graceful WebSocket close frame");
-                write_async_ws_frame(
-                    &mut websocket,
-                    0x8,
-                    &[],
-                    "the permit-holding direct close reply",
-                )
-                .await;
-                assert_transport_eof(&mut websocket, "owned direct WebSocket transport EOF").await;
+                assert_graceful_close_then_eof(&mut websocket, "permit-holding direct").await;
                 assert_transport_eof(&mut second, "permit-waiting transport EOF").await;
                 assert!(
                     lifecycle_event("owned direct bridge completion", owner.as_mut())
@@ -1085,7 +1096,7 @@ fn direct_websocket_bridge_holds_permit_and_finishes_before_owned_completion() {
                 );
                 assert!(
                     matches!(
-                        dispatched_rx.try_recv(),
+                        dispatched.try_recv(),
                         Err(tokio::sync::oneshot::error::TryRecvError::Closed)
                     ),
                     "permit-waiting dispatch sender remained live after owner completion"
@@ -1095,101 +1106,121 @@ fn direct_websocket_bridge_holds_permit_and_finishes_before_owned_completion() {
         .unwrap();
 }
 
-// 1.T15.
-#[camber::test]
-async fn owner_releases_direct_transport_without_claiming_blocking_callback_exit() {
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+fn blocking_callback_router(
+    entered_tx: tokio::sync::oneshot::Sender<()>,
+    release_rx: std::sync::mpsc::Receiver<()>,
+    callback_result_tx: tokio::sync::oneshot::Sender<bool>,
+    callback_dropped: Arc<AtomicBool>,
+) -> Router {
     let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = Arc::new(Mutex::new(release_rx));
-    let (callback_result_tx, mut callback_result_rx) = tokio::sync::oneshot::channel();
     let callback_result_tx = Arc::new(Mutex::new(Some(callback_result_tx)));
-    let callback_dropped = Arc::new(AtomicBool::new(false));
-
     let mut router = Router::new();
-    router.ws("/ws", {
-        let entered_tx = Arc::clone(&entered_tx);
-        let release_rx = Arc::clone(&release_rx);
-        let callback_result_tx = Arc::clone(&callback_result_tx);
-        let callback_dropped = Arc::clone(&callback_dropped);
-        move |_request: &Request, connection: WsConn| {
-            let _probe = CallbackDropProbe(Arc::clone(&callback_dropped));
-            if let Some(sender) = entered_tx
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take()
-            {
-                let _ = sender.send(());
-            }
-            let _ = release_rx
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .recv();
-            let peers_were_closed = connection.send("after owner completion").is_err();
-            if let Some(sender) = callback_result_tx
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take()
-            {
-                let _ = sender.send(peers_were_closed);
-            }
-            Ok(())
+    router.ws("/ws", move |_request: &Request, connection: WsConn| {
+        let _probe = CallbackDropProbe(Arc::clone(&callback_dropped));
+        if let Some(sender) = entered_tx
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            let _ = sender.send(());
         }
+        let _ = release_rx
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .recv();
+        let peers_were_closed = connection.send("after owner completion").is_err();
+        if let Some(sender) = callback_result_tx
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            let _ = sender.send(peers_were_closed);
+        }
+        Ok(())
     });
+    router
+}
 
+struct BlockingCallbackScenario {
+    release: std::sync::mpsc::Sender<()>,
+    callback_result: tokio::sync::oneshot::Receiver<bool>,
+    callback_dropped: Arc<AtomicBool>,
+    handle: camber::http::ServerHandle,
+    websocket: tokio::net::TcpStream,
+}
+
+async fn start_blocking_callback_scenario() -> BlockingCallbackScenario {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (callback_result_tx, callback_result_rx) = tokio::sync::oneshot::channel();
+    let callback_dropped = Arc::new(AtomicBool::new(false));
+    let router = blocking_callback_router(
+        entered_tx,
+        release_rx,
+        callback_result_tx,
+        Arc::clone(&callback_dropped),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind callback-boundary listener");
     let addr = listener.local_addr().expect("callback listener address");
     let handle = camber::http::serve_background(listener, router);
-    let mut websocket = connect_async_websocket(addr, "/ws").await;
+    let websocket = connect_async_websocket(addr, "/ws").await;
     lifecycle_event("blocking WebSocket callback entry", entered_rx)
         .await
         .expect("blocking callback reports entry");
+    BlockingCallbackScenario {
+        release: release_tx,
+        callback_result: callback_result_rx,
+        callback_dropped,
+        handle,
+        websocket,
+    }
+}
 
+async fn finish_blocking_callback_scenario(mut scenario: BlockingCallbackScenario) {
     runtime::request_shutdown();
-    let mut owner = Box::pin(handle.into_future());
-    let (opcode, _) = read_async_ws_frame_or_eof(&mut websocket, "the callback-boundary close")
-        .await
-        .expect("graceful shutdown sends a close frame");
-    assert_eq!(opcode, 0x8, "expected graceful WebSocket close frame");
-    write_async_ws_frame(
-        &mut websocket,
-        0x8,
-        &[],
-        "the callback-boundary close reply",
-    )
-    .await;
-    assert_transport_eof(&mut websocket, "callback-boundary transport EOF").await;
+    let mut owner = Box::pin(scenario.handle.into_future());
+    assert_graceful_close_then_eof(&mut scenario.websocket, "callback-boundary").await;
     assert!(
         lifecycle_event("owner completion across callback boundary", owner.as_mut())
             .await
             .is_ok()
     );
     assert!(
-        !callback_dropped.load(Ordering::Acquire),
+        !scenario.callback_dropped.load(Ordering::Acquire),
         "owner completion incorrectly claimed blocking callback exit"
     );
     assert!(
         matches!(
-            callback_result_rx.try_recv(),
+            scenario.callback_result.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
         ),
         "blocking callback returned before its explicit release"
     );
-
-    release_tx.send(()).expect("release blocking callback");
+    scenario
+        .release
+        .send(())
+        .expect("release blocking callback");
     assert!(
-        lifecycle_event("callback-side channel failure", callback_result_rx)
+        lifecycle_event("callback-side channel failure", scenario.callback_result)
             .await
             .expect("callback reports post-owner send result"),
         "callback-side WsConn retained a live supervisor peer after owner completion"
     );
     wait_for_dropped_flag(
-        &callback_dropped,
+        &scenario.callback_dropped,
         "blocking callback did not drop after reporting its result",
     )
     .await;
+}
+
+// 1.T15.
+#[camber::test]
+async fn owner_releases_direct_transport_without_claiming_blocking_callback_exit() {
+    let scenario = start_blocking_callback_scenario().await;
+    finish_blocking_callback_scenario(scenario).await;
 }
 
 // 1.T18, graceful direct WebSocket portion.
@@ -1204,12 +1235,7 @@ async fn graceful_direct_websocket_shutdown_sends_close_before_eof_and_join() {
 
     runtime::request_shutdown();
     let mut owner = Box::pin(handle.into_future());
-    let (opcode, _) = read_async_ws_frame_or_eof(&mut websocket, "the graceful direct close")
-        .await
-        .expect("graceful shutdown sends a frame before EOF");
-    assert_eq!(opcode, 0x8, "expected graceful WebSocket close frame");
-    write_async_ws_frame(&mut websocket, 0x8, &[], "the graceful direct close reply").await;
-    assert_transport_eof(&mut websocket, "graceful direct WebSocket transport EOF").await;
+    assert_graceful_close_then_eof(&mut websocket, "graceful direct").await;
     assert!(
         lifecycle_event("graceful direct bridge join", owner.as_mut())
             .await
@@ -1229,16 +1255,7 @@ async fn forced_direct_websocket_abort_releases_transport_before_cancelled() {
 
     handle.cancel();
     let mut owner = Box::pin(handle.into_future());
-    match read_async_ws_frame_or_eof(&mut websocket, "the forced direct close").await {
-        None => {}
-        Some((0x8, _)) => {
-            write_async_ws_frame(&mut websocket, 0x8, &[], "the forced direct close reply").await;
-            assert_transport_eof(&mut websocket, "forced direct WebSocket transport EOF").await;
-        }
-        Some((opcode, payload)) => {
-            panic!("forced shutdown emitted opcode {opcode:#x} with payload {payload:?}")
-        }
-    }
+    assert_optional_close_then_eof(&mut websocket, "forced direct").await;
     assert_cancelled(lifecycle_event("forced direct bridge join", owner.as_mut()).await);
 }
 
@@ -1383,22 +1400,7 @@ async fn supervisor_unwind_joins_acknowledged_and_pending_direct_upgrades() {
         .expect("release supervisor into unwind");
 
     let mut owner = Box::pin(handle.into_future());
-    match read_async_ws_frame_or_eof(&mut acknowledged, "the unwound direct close").await {
-        None => {}
-        Some((0x8, _)) => {
-            write_async_ws_frame(
-                &mut acknowledged,
-                0x8,
-                &[],
-                "the unwound direct close reply",
-            )
-            .await;
-            assert_transport_eof(&mut acknowledged, "unwound acknowledged transport EOF").await;
-        }
-        Some((opcode, payload)) => {
-            panic!("supervisor unwind emitted opcode {opcode:#x} with payload {payload:?}")
-        }
-    }
+    assert_optional_close_then_eof(&mut acknowledged, "unwound direct").await;
     let pending_response =
         read_async_http_head(&mut pending, "the unwound direct-upgrade response").await;
     assert_eq!(

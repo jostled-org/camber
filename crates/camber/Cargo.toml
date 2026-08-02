@@ -75,6 +75,7 @@ tracing-opentelemetry = { version = "0.33", optional = true }
 camber-macros = { version = "0.2.1", path = "../camber-macros" }
 
 [dev-dependencies]
+allocation-counter = "=0.8.1"
 flate2 = "1"
 h2 = "0.4.4"
 http = "1"

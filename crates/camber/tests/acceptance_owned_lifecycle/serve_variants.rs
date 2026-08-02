@@ -2,9 +2,10 @@ use crate::common;
 
 use camber::RuntimeError;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, lifecycle};
-use camber::http::{HostRouter, Request, Response, Router};
+use camber::http::{HostRouter, Request, Response, Router, ServerHandle, ServerHandleFuture};
 use futures_util::FutureExt;
 use std::future::IntoFuture;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -17,14 +18,14 @@ struct RetainedRequest {
     response: &'static str,
 }
 
-fn retained_router(
-    response: &'static str,
-) -> (
-    Router,
-    tokio::sync::oneshot::Receiver<()>,
-    tokio::sync::oneshot::Sender<()>,
-    Weak<()>,
-) {
+struct RetainedRoute {
+    router: Router,
+    entered: tokio::sync::oneshot::Receiver<()>,
+    release: tokio::sync::oneshot::Sender<()>,
+    ownership: Weak<()>,
+}
+
+fn retained_router(response: &'static str) -> RetainedRoute {
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let ownership = Arc::new(());
@@ -51,7 +52,12 @@ fn retained_router(
         }
     });
 
-    (router, entered_rx, release_tx, ownership_probe)
+    RetainedRoute {
+        router,
+        entered: entered_rx,
+        release: release_tx,
+        ownership: ownership_probe,
+    }
 }
 
 fn host_dispatch(router: Router) -> HostRouter {
@@ -144,8 +150,7 @@ async fn https_get(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn serve_async_tls_accepts_https_connection() {
-    let (cert_pem, key_pem) = common::generate_self_signed_cert();
-    let tls_config = common::server_tls_config(&cert_pem, &key_pem);
+    let (tls_config, connector) = common::self_signed_server_and_connector();
 
     let mut router = Router::new();
     router.get("/tls-hello", |_req: &Request| async {
@@ -156,8 +161,6 @@ async fn serve_async_tls_accepts_https_connection() {
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(camber::http::serve_async_tls(listener, router, tls_config));
 
-    let client_config = common::tls_client_config(&[&cert_pem]);
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
     let response = https_get(&connector, addr, "/tls-hello").await;
 
     server.abort();
@@ -205,8 +208,7 @@ async fn serve_async_hosts_dispatches_by_host() {
 
 #[camber::test]
 async fn serve_background_tls_runs_in_background() {
-    let (cert_pem, key_pem) = common::generate_self_signed_cert();
-    let tls_config = common::server_tls_config(&cert_pem, &key_pem);
+    let (tls_config, connector) = common::self_signed_server_and_connector();
 
     let mut router = Router::new();
     router.get("/bg-tls", |_req: &Request| async {
@@ -217,8 +219,6 @@ async fn serve_background_tls_runs_in_background() {
     let addr = listener.local_addr().unwrap();
     let handle = camber::http::serve_background_tls(listener, router, tls_config);
 
-    let client_config = common::tls_client_config(&[&cert_pem]);
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
     let response = https_get(&connector, addr, "/bg-tls").await;
 
     handle.cancel();
@@ -244,8 +244,7 @@ async fn serve_background_tls_runs_in_background() {
                 "TLS handshake should fail after cancel"
             );
         }
-        Ok(Err(_)) => {} // Connection refused — expected
-        Err(_) => {}     // Timeout — expected
+        Ok(Err(_)) | Err(_) => {} // Connection refusal or timeout is expected.
     }
 }
 
@@ -274,191 +273,283 @@ async fn serve_background_handle_exposes_flat_error() {
     );
 }
 
+type VariantClient = tokio::task::JoinHandle<Result<(u16, String), Box<str>>>;
+type VariantJoin = Pin<Box<ServerHandleFuture>>;
+
+/// Identity and observation points for one background variant. Every consuming
+/// stage borrows these; the one-shot resources travel in separate owned arrays.
+struct VariantProof {
+    name: &'static str,
+    expected_body: &'static str,
+    addr: std::net::SocketAddr,
+    lifecycle: LifecycleController,
+    ownership: Weak<()>,
+}
+
+type VariantProofs = [VariantProof; 4];
+
+struct StartedVariant {
+    proof: VariantProof,
+    handle: ServerHandle,
+    entered: tokio::sync::oneshot::Receiver<()>,
+    release: tokio::sync::oneshot::Sender<()>,
+}
+
+async fn variant_listener() -> (
+    tokio::net::TcpListener,
+    std::net::SocketAddr,
+    LifecycleController,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let lifecycle = lifecycle(addr).unwrap();
+    lifecycle
+        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+        .unwrap();
+    (listener, addr, lifecycle)
+}
+
+async fn start_variant<S>(
+    name: &'static str,
+    expected_body: &'static str,
+    route: RetainedRoute,
+    serve: S,
+) -> StartedVariant
+where
+    S: FnOnce(tokio::net::TcpListener, Router) -> ServerHandle,
+{
+    let (listener, addr, lifecycle) = variant_listener().await;
+    let handle = serve(listener, route.router);
+    StartedVariant {
+        proof: VariantProof {
+            name,
+            expected_body,
+            addr,
+            lifecycle,
+            ownership: route.ownership,
+        },
+        handle,
+        entered: route.entered,
+        release: route.release,
+    }
+}
+
+async fn boxed_http_get(
+    addr: std::net::SocketAddr,
+    host: Option<&str>,
+) -> Result<(u16, String), Box<str>> {
+    http_get(addr, host, "/retained")
+        .await
+        .map_err(|error| format!("plain HTTP GET failed: {error:?}").into_boxed_str())
+}
+
+fn spawn_variant_clients(
+    addrs: [std::net::SocketAddr; 4],
+    connector: tokio_rustls::TlsConnector,
+) -> [VariantClient; 4] {
+    let [plain_addr, tls_addr, host_addr, host_tls_addr] = addrs;
+    let tls_connector = connector.clone();
+    [
+        tokio::spawn(boxed_http_get(plain_addr, None)),
+        tokio::spawn(async move { https_get(&tls_connector, tls_addr, "/retained").await }),
+        tokio::spawn(boxed_http_get(host_addr, Some("localhost"))),
+        tokio::spawn(async move { https_get(&connector, host_tls_addr, "/retained").await }),
+    ]
+}
+
+struct BackgroundVariants {
+    proofs: VariantProofs,
+    handles: [ServerHandle; 4],
+    entered: [tokio::sync::oneshot::Receiver<()>; 4],
+    releases: [tokio::sync::oneshot::Sender<()>; 4],
+    clients: [VariantClient; 4],
+}
+
+impl BackgroundVariants {
+    async fn start() -> Self {
+        let (tls_config, connector) = common::self_signed_server_and_connector();
+        let plain = start_variant(
+            "plain",
+            "plain",
+            retained_router("plain"),
+            camber::http::serve_background,
+        )
+        .await;
+        let tls = start_variant("TLS", "tls", retained_router("tls"), |listener, router| {
+            camber::http::serve_background_tls(listener, router, Arc::clone(&tls_config))
+        })
+        .await;
+        let host = start_variant(
+            "host",
+            "host",
+            retained_router("host"),
+            |listener, router| {
+                camber::http::serve_background_hosts(listener, host_dispatch(router))
+            },
+        )
+        .await;
+        let host_tls = start_variant(
+            "host-plus-TLS",
+            "host-tls",
+            retained_router("host-tls"),
+            |listener, router| {
+                camber::http::serve_background_hosts_tls(
+                    listener,
+                    host_dispatch(router),
+                    tls_config,
+                )
+            },
+        )
+        .await;
+        let addrs = [
+            plain.proof.addr,
+            tls.proof.addr,
+            host.proof.addr,
+            host_tls.proof.addr,
+        ];
+        let clients = spawn_variant_clients(addrs, connector);
+        Self::from_started([plain, tls, host, host_tls], clients)
+    }
+
+    fn from_started(started: [StartedVariant; 4], clients: [VariantClient; 4]) -> Self {
+        let [plain, tls, host, host_tls] = started;
+        Self {
+            proofs: [plain.proof, tls.proof, host.proof, host_tls.proof],
+            handles: [plain.handle, tls.handle, host.handle, host_tls.handle],
+            entered: [plain.entered, tls.entered, host.entered, host_tls.entered],
+            releases: [plain.release, tls.release, host.release, host_tls.release],
+            clients,
+        }
+    }
+}
+
+async fn wait_for_all(proofs: &VariantProofs, checkpoint: LifecycleCheckpoint) {
+    let [plain, tls, host, host_tls] = proofs;
+    tokio::join!(
+        wait_for_checkpoint(&plain.lifecycle, checkpoint),
+        wait_for_checkpoint(&tls.lifecycle, checkpoint),
+        wait_for_checkpoint(&host.lifecycle, checkpoint),
+        wait_for_checkpoint(&host_tls.lifecycle, checkpoint),
+    );
+}
+
+async fn await_retained_requests(
+    proofs: &VariantProofs,
+    entered: [tokio::sync::oneshot::Receiver<()>; 4],
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for receiver in entered {
+            receiver.await.unwrap();
+        }
+    })
+    .await
+    .expect("not every background variant dispatched its retained request");
+    for proof in proofs {
+        assert!(proof.ownership.upgrade().is_some());
+    }
+}
+
+fn pin_joins(handles: [ServerHandle; 4]) -> [VariantJoin; 4] {
+    handles.map(|handle| Box::pin(handle.into_future()))
+}
+
+async fn stop_admission(proofs: &VariantProofs) {
+    wait_for_all(proofs, LifecycleCheckpoint::SupervisorSelectedRuntime).await;
+    for proof in proofs {
+        proof
+            .lifecycle
+            .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+            .unwrap();
+        proof
+            .lifecycle
+            .release(LifecycleCheckpoint::SupervisorSelectedRuntime)
+            .unwrap();
+    }
+    wait_for_all(proofs, LifecycleCheckpoint::BeforeSupervisorSelect).await;
+    let [plain, tls, host, host_tls] = proofs;
+    tokio::join!(
+        common::assert_admission_closed(plain.addr, EVENT_TIMEOUT),
+        common::assert_admission_closed(tls.addr, EVENT_TIMEOUT),
+        common::assert_admission_closed(host.addr, EVENT_TIMEOUT),
+        common::assert_admission_closed(host_tls.addr, EVENT_TIMEOUT),
+    );
+    for proof in proofs {
+        proof
+            .lifecycle
+            .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+            .unwrap();
+    }
+}
+
+fn assert_joins_pending(proofs: &VariantProofs, joins: &mut [VariantJoin; 4]) {
+    for (proof, join) in proofs.iter().zip(joins) {
+        assert!(
+            join.as_mut().now_or_never().is_none(),
+            "{} handle completed while request ownership was retained",
+            proof.name
+        );
+    }
+}
+
+fn release_requests(releases: [tokio::sync::oneshot::Sender<()>; 4]) {
+    for release in releases {
+        release.send(()).unwrap();
+    }
+}
+
+async fn assert_responses(proofs: &VariantProofs, clients: [VariantClient; 4]) {
+    let [plain, tls, host, host_tls] = clients;
+    let responses = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(plain, tls, host, host_tls)
+    })
+    .await
+    .expect("retained requests did not complete after release");
+    for (proof, response) in proofs
+        .iter()
+        .zip([responses.0, responses.1, responses.2, responses.3])
+    {
+        assert_eq!(
+            response.unwrap().unwrap(),
+            (200, proof.expected_body.to_owned())
+        );
+    }
+}
+
+async fn assert_joined_and_released(proofs: &VariantProofs, joins: [VariantJoin; 4]) {
+    let [plain, tls, host, host_tls] = joins;
+    let results = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(plain, tls, host, host_tls)
+    })
+    .await
+    .expect("background variants did not join after retained requests completed");
+    for (proof, result) in proofs
+        .iter()
+        .zip([results.0, results.1, results.2, results.3])
+    {
+        assert_flat_ok(result, proof.name);
+    }
+    for proof in proofs {
+        assert!(proof.ownership.upgrade().is_none());
+    }
+}
+
 /// 1.T8: Every background constructor stops admission, drains retained work,
 /// releases request ownership, and exposes the same flat successful result.
 #[camber::test]
 async fn all_background_variants_share_internal_lifecycle_behavior() {
-    let (plain_router, plain_entered, plain_release, plain_ownership) = retained_router("plain");
-    let (tls_router, tls_entered, tls_release, tls_ownership) = retained_router("tls");
-    let (host_router, host_entered, host_release, host_ownership) = retained_router("host");
-    let (host_tls_router, host_tls_entered, host_tls_release, host_tls_ownership) =
-        retained_router("host-tls");
-
-    let (cert_pem, key_pem) = common::generate_self_signed_cert();
-    let tls_config = common::server_tls_config(&cert_pem, &key_pem);
-    let client_config = common::tls_client_config(&[&cert_pem]);
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
-
-    let plain_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let plain_addr = plain_listener.local_addr().unwrap();
-    let plain_lifecycle = lifecycle(plain_addr).unwrap();
-    plain_lifecycle
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
-        .unwrap();
-    let plain_handle = camber::http::serve_background(plain_listener, plain_router);
-
-    let tls_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let tls_addr = tls_listener.local_addr().unwrap();
-    let tls_lifecycle = lifecycle(tls_addr).unwrap();
-    tls_lifecycle
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
-        .unwrap();
-    let tls_handle =
-        camber::http::serve_background_tls(tls_listener, tls_router, Arc::clone(&tls_config));
-
-    let host_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let host_addr = host_listener.local_addr().unwrap();
-    let host_lifecycle = lifecycle(host_addr).unwrap();
-    host_lifecycle
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
-        .unwrap();
-    let host_handle =
-        camber::http::serve_background_hosts(host_listener, host_dispatch(host_router));
-
-    let host_tls_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let host_tls_addr = host_tls_listener.local_addr().unwrap();
-    let host_tls_lifecycle = lifecycle(host_tls_addr).unwrap();
-    host_tls_lifecycle
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
-        .unwrap();
-    let host_tls_handle = camber::http::serve_background_hosts_tls(
-        host_tls_listener,
-        host_dispatch(host_tls_router),
-        tls_config,
-    );
-
-    let plain_client = tokio::spawn(http_get(plain_addr, None, "/retained"));
-    let tls_connector = connector.clone();
-    let tls_client =
-        tokio::spawn(async move { https_get(&tls_connector, tls_addr, "/retained").await });
-    let host_client = tokio::spawn(http_get(host_addr, Some("localhost"), "/retained"));
-    let host_tls_client =
-        tokio::spawn(async move { https_get(&connector, host_tls_addr, "/retained").await });
-
-    tokio::time::timeout(Duration::from_secs(5), async {
-        plain_entered.await.unwrap();
-        tls_entered.await.unwrap();
-        host_entered.await.unwrap();
-        host_tls_entered.await.unwrap();
-    })
-    .await
-    .expect("not every background variant dispatched its retained request");
-
-    assert!(plain_ownership.upgrade().is_some());
-    assert!(tls_ownership.upgrade().is_some());
-    assert!(host_ownership.upgrade().is_some());
-    assert!(host_tls_ownership.upgrade().is_some());
-
-    let mut plain_join = Box::pin(plain_handle.into_future());
-    let mut tls_join = Box::pin(tls_handle.into_future());
-    let mut host_join = Box::pin(host_handle.into_future());
-    let mut host_tls_join = Box::pin(host_tls_handle.into_future());
-
+    let BackgroundVariants {
+        proofs,
+        handles,
+        entered,
+        releases,
+        clients,
+    } = BackgroundVariants::start().await;
+    await_retained_requests(&proofs, entered).await;
+    let mut joins = pin_joins(handles);
     camber::runtime::request_shutdown();
-    tokio::join!(
-        wait_for_checkpoint(
-            &plain_lifecycle,
-            LifecycleCheckpoint::SupervisorSelectedRuntime
-        ),
-        wait_for_checkpoint(
-            &tls_lifecycle,
-            LifecycleCheckpoint::SupervisorSelectedRuntime
-        ),
-        wait_for_checkpoint(
-            &host_lifecycle,
-            LifecycleCheckpoint::SupervisorSelectedRuntime
-        ),
-        wait_for_checkpoint(
-            &host_tls_lifecycle,
-            LifecycleCheckpoint::SupervisorSelectedRuntime
-        ),
-    );
-    for controller in [
-        &plain_lifecycle,
-        &tls_lifecycle,
-        &host_lifecycle,
-        &host_tls_lifecycle,
-    ] {
-        controller
-            .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
-            .unwrap();
-        controller
-            .release(LifecycleCheckpoint::SupervisorSelectedRuntime)
-            .unwrap();
-    }
-    tokio::join!(
-        wait_for_checkpoint(
-            &plain_lifecycle,
-            LifecycleCheckpoint::BeforeSupervisorSelect
-        ),
-        wait_for_checkpoint(&tls_lifecycle, LifecycleCheckpoint::BeforeSupervisorSelect),
-        wait_for_checkpoint(&host_lifecycle, LifecycleCheckpoint::BeforeSupervisorSelect),
-        wait_for_checkpoint(
-            &host_tls_lifecycle,
-            LifecycleCheckpoint::BeforeSupervisorSelect
-        ),
-    );
-    tokio::join!(
-        common::assert_admission_closed(plain_addr, EVENT_TIMEOUT),
-        common::assert_admission_closed(tls_addr, EVENT_TIMEOUT),
-        common::assert_admission_closed(host_addr, EVENT_TIMEOUT),
-        common::assert_admission_closed(host_tls_addr, EVENT_TIMEOUT),
-    );
-    for controller in [
-        &plain_lifecycle,
-        &tls_lifecycle,
-        &host_lifecycle,
-        &host_tls_lifecycle,
-    ] {
-        controller
-            .release(LifecycleCheckpoint::BeforeSupervisorSelect)
-            .unwrap();
-    }
-
-    assert!(
-        plain_join.as_mut().now_or_never().is_none(),
-        "plain handle completed while request ownership was retained"
-    );
-    assert!(
-        tls_join.as_mut().now_or_never().is_none(),
-        "TLS handle completed while request ownership was retained"
-    );
-    assert!(
-        host_join.as_mut().now_or_never().is_none(),
-        "host handle completed while request ownership was retained"
-    );
-    assert!(
-        host_tls_join.as_mut().now_or_never().is_none(),
-        "host-plus-TLS handle completed while request ownership was retained"
-    );
-
-    plain_release.send(()).unwrap();
-    tls_release.send(()).unwrap();
-    host_release.send(()).unwrap();
-    host_tls_release.send(()).unwrap();
-
-    let responses = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(plain_client, tls_client, host_client, host_tls_client)
-    })
-    .await
-    .expect("retained requests did not complete after release");
-    assert_eq!(responses.0.unwrap().unwrap(), (200, "plain".to_owned()));
-    assert_eq!(responses.1.unwrap().unwrap(), (200, "tls".to_owned()));
-    assert_eq!(responses.2.unwrap().unwrap(), (200, "host".to_owned()));
-    assert_eq!(responses.3.unwrap().unwrap(), (200, "host-tls".to_owned()));
-
-    let results = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(plain_join, tls_join, host_join, host_tls_join)
-    })
-    .await
-    .expect("background variants did not join after retained requests completed");
-    assert_flat_ok(results.0, "plain");
-    assert_flat_ok(results.1, "TLS");
-    assert_flat_ok(results.2, "host");
-    assert_flat_ok(results.3, "host-plus-TLS");
-
-    assert!(plain_ownership.upgrade().is_none());
-    assert!(tls_ownership.upgrade().is_none());
-    assert!(host_ownership.upgrade().is_none());
-    assert!(host_tls_ownership.upgrade().is_none());
+    stop_admission(&proofs).await;
+    assert_joins_pending(&proofs, &mut joins);
+    release_requests(releases);
+    assert_responses(&proofs, clients).await;
+    assert_joined_and_released(&proofs, joins).await;
 }

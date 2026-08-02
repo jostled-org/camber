@@ -145,6 +145,57 @@ fn query_accessors_share_one_cached_pair_sequence() {
     );
 }
 
+/// What the accessors cost, measured rather than read off the source.
+///
+/// `allocation-counter` owns the counting `GlobalAlloc`, so it is referenced
+/// only when Camber leaves the process allocator alone: `jemalloc` and
+/// `mimalloc` each install their own, and two global allocators do not link.
+#[cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
+#[test]
+fn query_accessors_obey_allocation_contract() {
+    let request = request_for("/items?tag=a&tag=b&note=a%20b");
+
+    let calibration = allocation_counter::measure(|| {
+        drop(std::hint::black_box(Box::new(1_u32)));
+    });
+    assert!(
+        calibration.count_total > 0,
+        "a probe that counts nothing would make every zero below meaningless"
+    );
+
+    let raw = allocation_counter::measure(|| {
+        std::hint::black_box(request.raw_query());
+    });
+    assert_eq!(
+        raw.count_total, 0,
+        "raw_query borrows the accepted target and allocates nothing"
+    );
+
+    let cold = allocation_counter::measure(|| {
+        request.query_pairs().for_each(|pair| {
+            std::hint::black_box(pair);
+        });
+    });
+    assert!(
+        cold.count_total > 0,
+        "raw access left the decoded cache cold, so this first pass pays to fill it"
+    );
+
+    let warm = allocation_counter::measure(|| {
+        std::hint::black_box(request.query("tag"));
+        request.query_all("tag").for_each(|value| {
+            std::hint::black_box(value);
+        });
+        request.query_pairs().for_each(|pair| {
+            std::hint::black_box(pair);
+        });
+    });
+    assert_eq!(
+        warm.count_total, 0,
+        "an initialized decoded sequence is borrowed, never rebuilt or copied"
+    );
+}
+
 #[test]
 fn form_blank_keys_remain_filtered_after_query_admission_changes() {
     let request = Request::builder()

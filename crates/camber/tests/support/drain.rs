@@ -646,6 +646,38 @@ impl ScopeOwnedProof {
     }
 }
 
+fn scope_owned_builder<C>(configure: C, controller: &RuntimeController) -> RuntimeBuilder
+where
+    C: FnOnce(RuntimeBuilder) -> RuntimeBuilder,
+{
+    configure(
+        runtime::builder()
+            .worker_threads(WORKER_THREADS)
+            .shutdown_timeout(DRAIN_ESCALATION),
+    )
+    .with_test_schedule(controller)
+}
+
+fn reported_scope_owned<T>(
+    reported_rx: Receiver<(usize, T)>,
+    bound: Duration,
+    drained: Result<(), RuntimeError>,
+    entries_at_drain: Option<usize>,
+) -> (ScopeOwnedProof, T) {
+    let (occupants, value) = match reported_rx.recv_timeout(bound) {
+        Ok(reported) => reported,
+        Err(_) => panic!("the runtime closure never reported its occupancy: {drained:?}"),
+    };
+    (
+        ScopeOwnedProof {
+            occupants,
+            entries_at_drain,
+            drained,
+        },
+        value,
+    )
+}
+
 /// Run one runtime whose closure admits Camber-owned loops and then returns
 /// WITHOUT requesting shutdown, so only `ScopeClosing` can end them.
 ///
@@ -677,12 +709,7 @@ where
     let (armed_tx, armed_rx) = channel::<()>();
     let (reported_tx, reported_rx) = channel::<(usize, T)>();
 
-    let builder = configure(
-        runtime::builder()
-            .worker_threads(WORKER_THREADS)
-            .shutdown_timeout(DRAIN_ESCALATION),
-    )
-    .with_test_schedule(&controller);
+    let builder = scope_owned_builder(configure, &controller);
 
     // The holder is freed by this observer alone, so an observer that gives up
     // — by panicking, or by never seeing the window — owes production that
@@ -742,16 +769,5 @@ where
         },
     );
 
-    let (occupants, value) = match reported_rx.recv_timeout(bound) {
-        Ok(reported) => reported,
-        Err(_) => panic!("the runtime closure never reported its occupancy: {drained:?}"),
-    };
-    (
-        ScopeOwnedProof {
-            occupants,
-            entries_at_drain,
-            drained,
-        },
-        value,
-    )
+    reported_scope_owned(reported_rx, bound, drained, entries_at_drain)
 }

@@ -2,12 +2,13 @@
 
 use crate::common;
 use crate::common::{
-    assert_http_ok, assert_transport_eof, lifecycle_event, read_async_http_head,
+    assert_graceful_close_then_eof, assert_http_ok, assert_optional_close_then_eof,
+    assert_transport_eof, attach_dispatch_probe, lifecycle_event, read_async_http_head,
     read_async_ws_frame_or_eof, read_until_double_crlf, read_ws_text_frame, status_from_raw,
     write_async_ws_frame, write_ws_close_frame, write_ws_text_frame,
 };
 use camber::RuntimeError;
-use camber::http::mock::{LifecycleCheckpoint, LifecycleFault, lifecycle};
+use camber::http::mock::{LifecycleCheckpoint, LifecycleController, LifecycleFault, lifecycle};
 use camber::http::{
     self, DisconnectCause, DisconnectSignal, Next, Request, Response, Router, WsConn,
 };
@@ -16,8 +17,8 @@ use futures_util::{FutureExt, SinkExt, StreamExt};
 use std::future::IntoFuture;
 use std::io::Write;
 use std::net::TcpStream;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 async fn send_async_proxy_upgrade(stream: &mut tokio::net::TcpStream) {
@@ -625,34 +626,17 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
             runtime::block_on(async {
                 let backend_connections = Arc::new(AtomicUsize::new(0));
                 let backend = spawn_lifecycle_ws_backend(Arc::clone(&backend_connections)).await;
-                let backend_addr = backend.addr;
-                let (dispatched_tx, mut dispatched_rx) = tokio::sync::oneshot::channel();
-                let dispatched_tx = Arc::new(Mutex::new(Some(dispatched_tx)));
-                let mut proxy = lifecycle_proxy_router(backend_addr);
-                proxy.get("/second", move |_request: &Request| {
-                    let dispatched_tx = Arc::clone(&dispatched_tx);
-                    async move {
-                        if let Some(sender) = dispatched_tx
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .take()
-                        {
-                            let _ = sender.send(());
-                        }
-                        Response::text(200, "second")
-                    }
-                });
-
+                let mut proxy = lifecycle_proxy_router(backend.addr);
+                let mut dispatched = attach_dispatch_probe(&mut proxy);
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
                     .expect("bind owned proxy listener");
                 let proxy_addr = listener.local_addr().expect("owned proxy listener address");
-                let controller = lifecycle(proxy_addr).expect("install proxy lifecycle controller");
+                let controller = lifecycle(proxy_addr).expect("install proxy controller");
                 let handle = camber::http::serve_background(listener, proxy);
                 let mut websocket = connect_async_proxy_websocket(proxy_addr).await;
                 assert_proxy_echo(&mut websocket).await;
                 assert_eq!(backend_connections.load(Ordering::Acquire), 1);
-
                 controller
                     .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
                     .expect("pause when the proxy permit wait becomes pending");
@@ -671,7 +655,7 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
                     .expect("proxy semaphore acquisition returned pending");
                 assert!(
                     matches!(
-                        dispatched_rx.try_recv(),
+                        dispatched.try_recv(),
                         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
                     ),
                     "second request dispatched while the proxy bridge held the permit"
@@ -686,19 +670,7 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
                     owner.as_mut().now_or_never().is_none(),
                     "owner completed while the proxy bridge still owned its transport"
                 );
-                let (opcode, _) =
-                    read_async_ws_frame_or_eof(&mut websocket, "the permit-holding proxy close")
-                        .await
-                        .expect("graceful proxy shutdown sends a close frame");
-                assert_eq!(opcode, 0x8, "expected graceful proxied close frame");
-                write_async_ws_frame(
-                    &mut websocket,
-                    0x8,
-                    &[],
-                    "the permit-holding proxy close reply",
-                )
-                .await;
-                assert_transport_eof(&mut websocket, "the permit-holding proxy transport").await;
+                assert_graceful_close_then_eof(&mut websocket, "permit-holding proxy").await;
                 assert_transport_eof(&mut second, "the permit-waiting proxy transport").await;
                 assert!(
                     lifecycle_event("owned proxy bridge completion", owner.as_mut())
@@ -707,7 +679,7 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
                 );
                 assert!(
                     matches!(
-                        dispatched_rx.try_recv(),
+                        dispatched.try_recv(),
                         Err(tokio::sync::oneshot::error::TryRecvError::Closed)
                     ),
                     "permit-waiting proxy dispatch sender remained live after owner completion"
@@ -733,12 +705,7 @@ async fn graceful_proxy_websocket_shutdown_sends_close_before_eof_and_join() {
 
     runtime::request_shutdown();
     let mut owner = Box::pin(handle.into_future());
-    let (opcode, _) = read_async_ws_frame_or_eof(&mut websocket, "the graceful proxy close")
-        .await
-        .expect("graceful proxy shutdown sends a frame before EOF");
-    assert_eq!(opcode, 0x8, "expected graceful proxied close frame");
-    write_async_ws_frame(&mut websocket, 0x8, &[], "the graceful proxy close reply").await;
-    assert_transport_eof(&mut websocket, "the graceful proxy transport").await;
+    assert_graceful_close_then_eof(&mut websocket, "graceful proxy").await;
     assert!(
         lifecycle_event("graceful proxy bridge join", owner.as_mut())
             .await
@@ -762,16 +729,7 @@ async fn forced_proxy_websocket_abort_releases_transport_before_cancelled() {
 
     handle.cancel();
     let mut owner = Box::pin(handle.into_future());
-    match read_async_ws_frame_or_eof(&mut websocket, "the forced proxy close").await {
-        None => {}
-        Some((0x8, _)) => {
-            write_async_ws_frame(&mut websocket, 0x8, &[], "the forced proxy close reply").await;
-            assert_transport_eof(&mut websocket, "the forced proxy transport").await;
-        }
-        Some((opcode, payload)) => {
-            panic!("forced proxy shutdown emitted opcode {opcode:#x} with payload {payload:?}")
-        }
-    }
+    assert_optional_close_then_eof(&mut websocket, "forced proxy").await;
     assert_cancelled(lifecycle_event("forced proxy bridge join", owner.as_mut()).await);
     backend.shutdown().await;
 }
@@ -930,22 +888,33 @@ async fn forced_shutdown_rejects_unacknowledged_proxy_upgrade() {
     pending_proxy_upgrade_shutdown_is_rejected(true).await;
 }
 
-// 1.T21, proxied WebSocket supervisor-unwind portion.
-#[camber::test]
-async fn supervisor_unwind_joins_acknowledged_and_pending_proxy_upgrades() {
+struct ProxyUnwindScenario {
+    backend: LifecycleWsBackend,
+    backend_connections: Arc<AtomicUsize>,
+    /// Held for the whole case, not just its setup.
+    ///
+    /// Dropping the controller closes its script and unregisters the address, so
+    /// a controller left behind in the setup would retire the injected fault
+    /// before the unwind it arms is observed. The case owns the fault until it
+    /// has read every verdict that depends on it.
+    controller: LifecycleController,
+    handle: camber::http::ServerHandle,
+    acknowledged: tokio::net::TcpStream,
+    pending: tokio::net::TcpStream,
+}
+
+async fn start_proxy_unwind_scenario() -> ProxyUnwindScenario {
     let backend_connections = Arc::new(AtomicUsize::new(0));
     let backend = spawn_lifecycle_ws_backend(Arc::clone(&backend_connections)).await;
-    let backend_addr = backend.addr;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind proxy unwind listener");
     let proxy_addr = listener.local_addr().expect("proxy unwind address");
     let controller = lifecycle(proxy_addr).expect("install proxy unwind controller");
-    let handle = camber::http::serve_background(listener, lifecycle_proxy_router(backend_addr));
+    let handle = camber::http::serve_background(listener, lifecycle_proxy_router(backend.addr));
     let mut acknowledged = connect_async_proxy_websocket(proxy_addr).await;
     assert_proxy_echo(&mut acknowledged).await;
     assert_eq!(backend_connections.load(Ordering::Acquire), 1);
-
     controller
         .pause_once(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
         .expect("pause after second proxy ticket submission");
@@ -973,25 +942,21 @@ async fn supervisor_unwind_joins_acknowledged_and_pending_proxy_upgrades() {
     controller
         .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
         .expect("release proxy supervisor into unwind");
-
-    let mut owner = Box::pin(handle.into_future());
-    match read_async_ws_frame_or_eof(&mut acknowledged, "the unwound proxy close").await {
-        None => {}
-        Some((0x8, _)) => {
-            write_async_ws_frame(&mut acknowledged, 0x8, &[], "the unwound proxy close reply")
-                .await;
-            assert_transport_eof(
-                &mut acknowledged,
-                "the unwound acknowledged proxy transport",
-            )
-            .await;
-        }
-        Some((opcode, payload)) => {
-            panic!("proxy supervisor unwind emitted opcode {opcode:#x} with payload {payload:?}")
-        }
+    ProxyUnwindScenario {
+        backend,
+        backend_connections,
+        controller,
+        handle,
+        acknowledged,
+        pending,
     }
+}
+
+async fn finish_proxy_unwind_scenario(mut scenario: ProxyUnwindScenario) {
+    let mut owner = Box::pin(scenario.handle.into_future());
+    assert_optional_close_then_eof(&mut scenario.acknowledged, "unwound proxy").await;
     let pending_response =
-        read_async_http_head(&mut pending, "the unwound proxy-upgrade response").await;
+        read_async_http_head(&mut scenario.pending, "the unwound proxy-upgrade response").await;
     let pending_status = status_from_raw(&pending_response);
     assert_eq!(
         pending_status, 500,
@@ -1004,14 +969,22 @@ async fn supervisor_unwind_joins_acknowledged_and_pending_proxy_upgrades() {
         "pending proxy unwind response omitted Connection: close: {pending_response}"
     );
     assert_eq!(
-        backend_connections.load(Ordering::Acquire),
+        scenario.backend_connections.load(Ordering::Acquire),
         1,
         "pending proxy upgrade reached its backend during unwind"
     );
-    assert_transport_eof(&mut pending, "the unwound pending proxy transport").await;
+    assert_transport_eof(&mut scenario.pending, "the unwound pending proxy transport").await;
     match lifecycle_event("proxy supervisor unwind drain", owner.as_mut()).await {
         Err(RuntimeError::TaskPanicked(message)) => assert!(!message.is_empty()),
         other => panic!("expected TaskPanicked after proxy upgrade drain, got {other:?}"),
     }
-    backend.shutdown().await;
+    scenario.backend.shutdown().await;
+    drop(scenario.controller);
+}
+
+// 1.T21, proxied WebSocket supervisor-unwind portion.
+#[camber::test]
+async fn supervisor_unwind_joins_acknowledged_and_pending_proxy_upgrades() {
+    let scenario = start_proxy_unwind_scenario().await;
+    finish_proxy_unwind_scenario(scenario).await;
 }
