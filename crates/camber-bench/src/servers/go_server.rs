@@ -44,13 +44,20 @@ pub fn start(
             BenchError::ServerStart(format!("failed to spawn go server: {e}").into_boxed_str())
         })?;
 
-    let addr = read_addr_from_child(&mut child)?;
+    let addr = match read_addr_from_child(&mut child) {
+        Ok(addr) => addr,
+        Err(error) => {
+            terminate_failed_start(&mut child);
+            return Err(error);
+        }
+    };
 
-    let thread = std::thread::spawn(move || {
-        let _ = child.wait();
-    });
+    Ok((addr, ServerHandle::from_child(child)))
+}
 
-    Ok((addr, ServerHandle::new(thread)))
+fn terminate_failed_start(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 pub fn prepare_binary() -> Result<PathBuf, BenchError> {

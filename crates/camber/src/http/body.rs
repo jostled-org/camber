@@ -1,5 +1,11 @@
 use super::disconnect::ResponseGuard;
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum BodyError {
+    #[error("upstream proxy body read failed: {0}")]
+    UpstreamProxy(std::sync::Arc<str>),
+}
+
 /// Response body that owns this response's disconnect guard.
 ///
 /// The guard moves here from the per-request service future, so the body is
@@ -88,7 +94,7 @@ impl GuardedBody {
 
 impl hyper::body::Body for GuardedBody {
     type Data = bytes::Bytes;
-    type Error = std::convert::Infallible;
+    type Error = BodyError;
 
     fn poll_frame(
         self: std::pin::Pin<&mut Self>,
@@ -188,27 +194,70 @@ fn completes_at_construction(
 /// open for, and allocating one purely to close it buys nothing.
 pub(super) enum StreamBody {
     Channel(tokio::sync::mpsc::Receiver<bytes::Bytes>),
+    Proxy(tokio::sync::mpsc::Receiver<Result<bytes::Bytes, BodyError>>),
     Drained,
+}
+
+type BodyFramePoll = std::task::Poll<Option<Result<hyper::body::Frame<bytes::Bytes>, BodyError>>>;
+
+fn impossible_body_error(never: std::convert::Infallible) -> BodyError {
+    match never {}
+}
+
+fn poll_byte_receiver(
+    receiver: &mut tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    cx: &mut std::task::Context<'_>,
+) -> BodyFramePoll {
+    match receiver.poll_recv(cx) {
+        std::task::Poll::Ready(Some(data)) => {
+            std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(data))))
+        }
+        std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+        std::task::Poll::Pending => std::task::Poll::Pending,
+    }
+}
+
+fn poll_proxy_receiver(
+    receiver: &mut tokio::sync::mpsc::Receiver<Result<bytes::Bytes, BodyError>>,
+    cx: &mut std::task::Context<'_>,
+) -> BodyFramePoll {
+    match receiver.poll_recv(cx) {
+        std::task::Poll::Ready(Some(Ok(data))) => {
+            std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(data))))
+        }
+        std::task::Poll::Ready(Some(Err(error))) => std::task::Poll::Ready(Some(Err(error))),
+        std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+        std::task::Poll::Pending => std::task::Poll::Pending,
+    }
+}
+
+fn map_infallible_frame(
+    poll: std::task::Poll<
+        Option<Result<hyper::body::Frame<bytes::Bytes>, std::convert::Infallible>>,
+    >,
+) -> BodyFramePoll {
+    match poll {
+        std::task::Poll::Ready(Some(Ok(frame))) => std::task::Poll::Ready(Some(Ok(frame))),
+        std::task::Poll::Ready(Some(Err(never))) => {
+            std::task::Poll::Ready(Some(Err(impossible_body_error(never))))
+        }
+        std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+        std::task::Poll::Pending => std::task::Poll::Pending,
+    }
 }
 
 impl hyper::body::Body for StreamBody {
     type Data = bytes::Bytes;
-    type Error = std::convert::Infallible;
+    type Error = BodyError;
 
     fn poll_frame(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
-        let receiver = match self.get_mut() {
-            StreamBody::Channel(receiver) => receiver,
-            StreamBody::Drained => return std::task::Poll::Ready(None),
-        };
-        match receiver.poll_recv(cx) {
-            std::task::Poll::Ready(Some(data)) => {
-                std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(data))))
-            }
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Pending => std::task::Poll::Pending,
+        match self.get_mut() {
+            StreamBody::Channel(receiver) => poll_byte_receiver(receiver, cx),
+            StreamBody::Proxy(receiver) => poll_proxy_receiver(receiver, cx),
+            StreamBody::Drained => std::task::Poll::Ready(None),
         }
     }
 }
@@ -222,17 +271,21 @@ pub(super) enum HyperResponseBody {
 
 impl hyper::body::Body for HyperResponseBody {
     type Data = bytes::Bytes;
-    type Error = std::convert::Infallible;
+    type Error = BodyError;
 
     fn poll_frame(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
         match self.get_mut() {
-            HyperResponseBody::Full(body) => std::pin::Pin::new(body).poll_frame(cx),
+            HyperResponseBody::Full(body) => {
+                map_infallible_frame(std::pin::Pin::new(body).poll_frame(cx))
+            }
             HyperResponseBody::Streaming(body) => std::pin::Pin::new(body).poll_frame(cx),
             #[cfg(feature = "grpc")]
-            HyperResponseBody::Grpc(body) => std::pin::Pin::new(body).poll_frame(cx),
+            HyperResponseBody::Grpc(body) => {
+                map_infallible_frame(std::pin::Pin::new(body).poll_frame(cx))
+            }
         }
     }
 

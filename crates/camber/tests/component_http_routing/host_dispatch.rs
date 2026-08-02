@@ -245,3 +245,28 @@ fn host_router_matches_mixed_case_host_header_with_port() {
         })
         .unwrap();
 }
+
+#[test]
+fn malformed_authorities_are_rejected_before_default_routing() {
+    common::test_runtime()
+        .run(|| {
+            let mut fallback = Router::new();
+            fallback.get("/hello", |_req: &Request| async {
+                Response::text(200, "default")
+            });
+            let mut host_router = http::HostRouter::new();
+            host_router.set_default(fallback);
+            let addr = spawn_host_server(host_router);
+
+            for authority in ["example.com:not-a-port", "[::1", "user@example.com"] {
+                let response = get_with_host(addr, "/hello", authority);
+                assert_eq!(
+                    response.status, 400,
+                    "malformed authority reached the default router: {authority}"
+                );
+            }
+
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}

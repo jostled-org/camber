@@ -150,6 +150,106 @@ fn resource_shutdown_error_is_logged_but_does_not_block_others() {
     );
 }
 
+#[test]
+fn cancellation_watcher_stops_before_resource_shutdown() {
+    struct WatcherProbe(Arc<AtomicBool>);
+
+    impl Resource for WatcherProbe {
+        fn name(&self) -> &str {
+            "watcher-probe"
+        }
+
+        fn health_check(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+
+        fn shutdown(&self) -> Result<(), RuntimeError> {
+            assert!(
+                self.0.load(Ordering::Acquire),
+                "external cancellation watcher was live during resource shutdown"
+            );
+            Ok(())
+        }
+    }
+
+    struct DropProbe(Arc<AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let watcher_stopped = Arc::new(AtomicBool::new(false));
+    let future_probe = DropProbe(Arc::clone(&watcher_stopped));
+
+    runtime::builder()
+        .resource(WatcherProbe(Arc::clone(&watcher_stopped)))
+        .run(move || {
+            runtime::on_cancel(async move {
+                let probe = future_probe;
+                std::future::pending::<()>().await;
+                drop(probe);
+            });
+        })
+        .unwrap();
+}
+
+#[test]
+fn resource_shutdown_panic_is_reported_after_other_callbacks_finish() {
+    struct PanickingResource;
+
+    impl Resource for PanickingResource {
+        fn name(&self) -> &str {
+            "panicking"
+        }
+
+        fn health_check(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+
+        fn shutdown(&self) -> Result<(), RuntimeError> {
+            panic!("resource shutdown panic");
+        }
+    }
+
+    struct FinalizationProbe(Arc<AtomicBool>);
+
+    impl Resource for FinalizationProbe {
+        fn name(&self) -> &str {
+            "finalization-probe"
+        }
+
+        fn health_check(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+
+        fn shutdown(&self) -> Result<(), RuntimeError> {
+            self.0.store(true, Ordering::Release);
+            Ok(())
+        }
+    }
+
+    let finalized = Arc::new(AtomicBool::new(false));
+    let outcome = runtime::builder()
+        .resource(PanickingResource)
+        .resource(FinalizationProbe(Arc::clone(&finalized)))
+        .run(|| ());
+
+    assert!(
+        matches!(&outcome, Err(RuntimeError::TaskPanicked(message)) if &**message == "resource shutdown panic"),
+        "resource panic was not reported through the runtime result: {outcome:?}"
+    );
+    assert!(
+        finalized.load(Ordering::Acquire),
+        "a panicking callback skipped another resource's finalization"
+    );
+    assert!(
+        runtime::run(|| ()).is_ok(),
+        "runtime context was not restored"
+    );
+}
+
 struct HealthyResource(&'static str);
 
 impl Resource for HealthyResource {

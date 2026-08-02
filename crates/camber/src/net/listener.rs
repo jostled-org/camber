@@ -24,17 +24,12 @@ fn listen_tcp(addr: &str) -> Result<Listener, RuntimeError> {
 
 fn listen_unix(path: &str) -> Result<Listener, RuntimeError> {
     let socket_path = PathBuf::from(path);
-
-    // Remove stale socket file if it exists
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
-    }
-
     let std_listener = std::os::unix::net::UnixListener::bind(&socket_path)?;
+    let owned_path = OwnedSocketPath::new(socket_path)?;
     std_listener.set_nonblocking(true)?;
     let tokio_listener = tokio::net::UnixListener::from_std(std_listener)?;
     Ok(Listener {
-        inner: ListenerInner::Unix(tokio_listener, socket_path),
+        inner: ListenerInner::Unix(tokio_listener, owned_path),
     })
 }
 
@@ -45,7 +40,30 @@ pub struct Listener {
 
 pub(crate) enum ListenerInner {
     Tcp(tokio::net::TcpListener),
-    Unix(tokio::net::UnixListener, PathBuf),
+    Unix(tokio::net::UnixListener, OwnedSocketPath),
+}
+
+pub(crate) struct OwnedSocketPath {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl OwnedSocketPath {
+    fn new(path: PathBuf) -> Result<Self, RuntimeError> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        Ok(Self {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn matches(&self, metadata: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        metadata.dev() == self.device && metadata.ino() == self.inode
+    }
 }
 
 impl Listener {
@@ -56,7 +74,7 @@ impl Listener {
                 .local_addr()
                 .map(ListenerAddr::Tcp)
                 .map_err(RuntimeError::from),
-            ListenerInner::Unix(_, path) => Ok(ListenerAddr::Unix(path.clone())),
+            ListenerInner::Unix(_, socket) => Ok(ListenerAddr::Unix(socket.path.clone())),
         }
     }
 
@@ -64,24 +82,36 @@ impl Listener {
     pub fn cleanup(&self) -> Result<(), RuntimeError> {
         match &self.inner {
             ListenerInner::Tcp(_) => Ok(()),
-            ListenerInner::Unix(_, path) => cleanup_unix_socket(path),
+            ListenerInner::Unix(_, socket) => cleanup_unix_socket(socket),
         }
     }
 }
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        if let ListenerInner::Unix(_, path) = &self.inner
-            && let Err(err) = cleanup_unix_socket(path)
+        if let ListenerInner::Unix(_, socket) = &self.inner
+            && let Err(err) = cleanup_unix_socket(socket)
         {
-            tracing::warn!("failed to remove unix socket {}: {err}", path.display());
+            tracing::warn!(
+                "failed to remove unix socket {}: {err}",
+                socket.path.display()
+            );
         }
     }
 }
 
-fn cleanup_unix_socket(path: &std::path::Path) -> Result<(), RuntimeError> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
+fn cleanup_unix_socket(socket: &OwnedSocketPath) -> Result<(), RuntimeError> {
+    match std::fs::symlink_metadata(&socket.path) {
+        Ok(metadata) if socket.matches(&metadata) => {
+            std::fs::remove_file(&socket.path).map_err(RuntimeError::from)
+        }
+        Ok(_) => Err(RuntimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "unix socket path {} was replaced; refusing to delete it",
+                socket.path.display()
+            ),
+        ))),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err.into()),
     }

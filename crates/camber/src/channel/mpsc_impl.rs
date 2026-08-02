@@ -24,8 +24,35 @@ pub struct MpscSender<T> {
 }
 
 impl<T> MpscSender<T> {
-    /// Blocking send. Safe from sync contexts (camber::spawn tasks).
+    /// Blocking send. Safe from sync contexts and multi-thread Tokio runtimes.
+    ///
+    /// A current-thread runtime cannot make progress while this call blocks,
+    /// so that context is refused with `BlockingInAsyncContext` instead of
+    /// allowing Tokio's `blocking_send` panic to escape a `Result` API.
     pub fn send(&self, value: T) -> Result<(), RuntimeError> {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => self.send_from_runtime(handle.runtime_flavor(), value),
+            Err(_) => self.blocking_send(value),
+        }
+    }
+
+    fn send_from_runtime(
+        &self,
+        flavor: tokio::runtime::RuntimeFlavor,
+        value: T,
+    ) -> Result<(), RuntimeError> {
+        match flavor {
+            tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| self.blocking_send(value))
+            }
+            tokio::runtime::RuntimeFlavor::CurrentThread => {
+                Err(RuntimeError::BlockingInAsyncContext)
+            }
+            _ => Err(RuntimeError::BlockingInAsyncContext),
+        }
+    }
+
+    fn blocking_send(&self, value: T) -> Result<(), RuntimeError> {
         self.inner
             .blocking_send(value)
             .map_err(|_| RuntimeError::ChannelClosed)

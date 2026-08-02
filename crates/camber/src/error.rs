@@ -16,6 +16,10 @@ pub enum RuntimeError {
     #[error("channel full")]
     ChannelFull,
 
+    /// A blocking operation was requested from a single-thread async executor.
+    #[error("blocking operation is unavailable in a current-thread async context")]
+    BlockingInAsyncContext,
+
     /// An operation exceeded its configured timeout.
     #[error("operation timed out")]
     Timeout,

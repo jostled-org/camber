@@ -8,7 +8,7 @@ edition = "2024"
 [workspace]
 
 [dependencies]
-camber = "0.1"
+camber = "0"
 "#;
 
 pub const HTTP_MAIN_RS: &str = r#"use camber::RuntimeError;
@@ -65,7 +65,7 @@ edition = "2024"
 [workspace]
 
 [dependencies]
-camber = "0.1"
+camber = "0"
 "#;
 
 pub const FANOUT_MAIN_RS: &str = r#"use camber::http;
@@ -118,14 +118,14 @@ ws = ["camber/ws"]
 grpc = ["camber/grpc"]
 
 [dependencies]
-camber = "0.1"
+camber = "0"
 tokio = { version = "1", default-features = false }
 tonic = { version = "0.14", default-features = false }
 tonic-prost = "0.14"
 prost = "0.14"
 
 [build-dependencies]
-camber-build = "0.1"
+camber-build = "0"
 "#;
 
 pub const ADVANCED_MAIN_RS: &str = r#"mod proto {
@@ -200,7 +200,7 @@ impl echo_service::Echo for EchoService {
 }
 "#;
 
-pub const ADVANCED_BUILD_RS: &str = r#"fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub const ADVANCED_BUILD_RS: &str = r#"fn main() -> std::io::Result<()> {
     camber_build::compile_protos(&["proto/echo.proto"], &["proto"])?;
     Ok(())
 }

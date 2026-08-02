@@ -4,7 +4,7 @@ use crate::resource_lifecycle::{
 };
 use crate::runtime_state::{
     RuntimeConfig, RuntimeContextGuard, RuntimeInner, drain_root_scope, install_runtime,
-    teardown_runtime,
+    stop_cancel_watcher, teardown_runtime,
 };
 use crate::runtime_test_support::{RuntimeController, RuntimeSchedule};
 use crate::tls::CertStore;
@@ -385,7 +385,7 @@ where
     let scoped = run_scoped(&tokio_rt, &inner, f);
     let drain = close_and_drain(&inner, &tokio_rt);
 
-    finish_runtime(&inner, tokio_rt, context, drain, scoped)
+    finish_runtime(&inner, tokio_rt, context, drain, None, scoped)
 }
 
 /// Tokio's own default worker count.
@@ -494,10 +494,11 @@ fn close_and_drain(
 
 /// Order the runtime-level failures that displace the closure's value.
 ///
-/// A recorded internal panic outranks a drain timeout: a timeout is frequently
-/// the consequence of a wedged panicking child, so reporting the panic
-/// localizes the fault. The closure's value is never inspected — `T` is opaque,
-/// so it is either returned or displaced.
+/// A recorded internal panic outranks a resource panic, and either panic
+/// outranks a drain timeout: a timeout is frequently the consequence of a
+/// wedged panicking child, so reporting the panic localizes the fault. The
+/// closure's value is never inspected — `T` is opaque, so it is either returned
+/// or displaced.
 ///
 /// The displaced timeout is LOGGED rather than dropped. Exactly one error
 /// leaves through the `Result`, and this is the case the precedence above calls
@@ -507,14 +508,29 @@ fn close_and_drain(
 /// stop's own warning fires only when its grace expires.
 fn runtime_failure(
     inner: &RuntimeInner,
+    resource_failure: Option<crate::RuntimeError>,
     drain: Option<crate::RuntimeError>,
 ) -> Option<crate::RuntimeError> {
-    match (inner.take_internal_panic(), drain) {
+    let panic = select_runtime_panic(inner.take_internal_panic(), resource_failure);
+    match (panic, drain) {
         (Some(panicked), Some(displaced)) => {
-            tracing::warn!(%displaced, "drain timeout displaced by a recorded internal panic");
+            tracing::warn!(%displaced, "drain timeout displaced by a recorded runtime panic");
             Some(panicked)
         }
         (panicked, drain) => panicked.or(drain),
+    }
+}
+
+fn select_runtime_panic(
+    internal: Option<crate::RuntimeError>,
+    resource: Option<crate::RuntimeError>,
+) -> Option<crate::RuntimeError> {
+    match (internal, resource) {
+        (Some(primary), Some(displaced)) => {
+            tracing::warn!(%displaced, "resource panic displaced by an internal runtime panic");
+            Some(primary)
+        }
+        (panic, None) | (None, panic) => panic,
     }
 }
 
@@ -623,12 +639,24 @@ where
     // stop may still reach a registered resource once shutdown starts.
     let drain = close_and_drain(&inner, &tokio_rt);
 
-    shutdown_resources(&resources);
+    let resource_failure = shutdown_runtime_services(&inner, &tokio_rt, &resources);
+
+    finish_runtime(&inner, tokio_rt, context, drain, resource_failure, scoped)
+}
+
+/// Stop services outside the root scope in their required teardown order.
+fn shutdown_runtime_services(
+    inner: &RuntimeInner,
+    tokio_rt: &tokio::runtime::Runtime,
+    resources: &[Box<dyn Resource>],
+) -> Option<crate::RuntimeError> {
+    stop_cancel_watcher(inner, tokio_rt.handle());
+    let resource_failure = shutdown_resources(resources);
 
     #[cfg(feature = "otel")]
     crate::http::otel::shutdown_exporter();
 
-    finish_runtime(&inner, tokio_rt, context, drain, scoped)
+    resource_failure
 }
 
 /// Provision or load the DNS-01 certificate before the server starts, folding
@@ -785,6 +813,7 @@ fn finish_runtime<T>(
     tokio_rt: tokio::runtime::Runtime,
     runtime_guard: RuntimeContextGuard,
     drain: Option<crate::RuntimeError>,
+    resource_failure: Option<crate::RuntimeError>,
     scoped: ScopedOutcome<T>,
 ) -> Result<T, crate::RuntimeError> {
     teardown_runtime(inner);
@@ -796,7 +825,7 @@ fn finish_runtime<T>(
 
     // Read BEFORE the unwind resumes: `resume_unwind` diverges, and the panic
     // slot has exactly one reader.
-    match (scoped, runtime_failure(inner, drain)) {
+    match (scoped, runtime_failure(inner, resource_failure, drain)) {
         (Ok(value), None) => Ok(value),
         (Ok(_), Some(error)) => Err(error),
         (Err(payload), failure) => resume_past_failure(failure, payload),

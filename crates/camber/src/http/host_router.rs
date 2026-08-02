@@ -95,10 +95,38 @@ pub(super) struct FrozenHostRouter {
     default: Option<FrozenRouter>,
 }
 
-/// Reject hosts containing path separators or control characters
-/// that could be used for request smuggling.
+/// Reject values that are not an HTTP authority.
 fn is_valid_host(host: &str) -> bool {
-    !host.bytes().any(|b| matches!(b, b'/' | b'\\' | 0..=31))
+    !host.is_empty()
+        && !host.contains('@')
+        && host.parse::<hyper::http::uri::Authority>().is_ok()
+        && has_valid_authority_port(host)
+}
+
+fn has_valid_authority_port(host: &str) -> bool {
+    match host.strip_prefix('[') {
+        Some(bracketed) => has_valid_bracketed_port(bracketed),
+        None => has_valid_named_port(host),
+    }
+}
+
+fn has_valid_bracketed_port(bracketed: &str) -> bool {
+    match bracketed.split_once(']') {
+        Some((_, "")) => true,
+        Some((_, suffix)) => suffix
+            .strip_prefix(':')
+            .is_some_and(|port| port.parse::<u16>().is_ok()),
+        None => false,
+    }
+}
+
+fn has_valid_named_port(host: &str) -> bool {
+    match host.split_once(':') {
+        Some((hostname, port)) => {
+            !hostname.is_empty() && !port.contains(':') && port.parse::<u16>().is_ok()
+        }
+        None => true,
+    }
 }
 
 /// Extract the hostname from a Host header value, stripping the port if present.

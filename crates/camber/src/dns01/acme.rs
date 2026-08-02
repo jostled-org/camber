@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::path::PathBuf;
@@ -315,10 +316,108 @@ impl AcmeDns01 {
         let account_path = self.base.cache_dir.join("account.json");
         cache_io(|| {
             std::fs::create_dir_all(&self.base.cache_dir)?;
-            std::fs::write(&account_path, json)?;
-            restrict_key_permissions(&account_path)
+            write_credentials_file(&account_path, &json)
         })
     }
+}
+
+pub(crate) fn write_credentials_file(path: &Path, contents: &[u8]) -> Result<(), RuntimeError> {
+    let pending = PendingCredentials::create(path)?;
+    pending.commit(path, contents)?;
+    Ok(())
+}
+
+struct PendingCredentials {
+    file: std::fs::File,
+    path: PathBuf,
+    committed: bool,
+}
+
+impl PendingCredentials {
+    fn create(destination: &Path) -> Result<Self, std::io::Error> {
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = destination
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("account.json");
+        for attempt in 0..16 {
+            let path = parent.join(format!(
+                ".{file_name}.{:016x}.{attempt}.tmp",
+                crate::prng::next_u64(),
+            ));
+            match open_private_file(&path) {
+                Ok(file) => {
+                    return Ok(Self {
+                        file,
+                        path,
+                        committed: false,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate a unique credentials cache file",
+        ))
+    }
+
+    fn commit(mut self, destination: &Path, contents: &[u8]) -> Result<(), std::io::Error> {
+        self.file.write_all(contents)?;
+        self.file.sync_all()?;
+        std::fs::rename(&self.path, destination)?;
+        self.committed = true;
+        sync_parent_directory(destination)?;
+        Ok(())
+    }
+}
+
+impl Drop for PendingCredentials {
+    fn drop(&mut self) {
+        match self.committed {
+            true => {}
+            false => remove_pending_credentials(&self.path),
+        }
+    }
+}
+
+fn remove_pending_credentials(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            path = %path.display(),
+            %error,
+            "failed to remove temporary ACME credentials file"
+        ),
+    }
+}
+
+fn open_private_file(path: &Path) -> Result<std::fs::File, std::io::Error> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> Result<(), std::io::Error> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(path: &Path) -> Result<(), std::io::Error> {
+    tracing::debug!(
+        path = %path.display(),
+        "dns01 acme: parent directory sync is unavailable on this platform"
+    );
+    Ok(())
 }
 
 /// Why a provisioning step ended early.

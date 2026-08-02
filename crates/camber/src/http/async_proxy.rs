@@ -9,6 +9,7 @@ use std::sync::{Arc, LazyLock};
 static PROXY_CLIENT: LazyLock<Result<reqwest::Client, Arc<str>>> = LazyLock::new(|| {
     reqwest::Client::builder()
         .no_proxy()
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| -> Arc<str> { e.to_string().into() })
 });
@@ -33,9 +34,9 @@ fn is_hop_by_hop(name: &str) -> bool {
         || name.eq_ignore_ascii_case("host")
 }
 
-fn is_rfc_token(value: &str) -> bool {
+fn is_rfc_token(value: &[u8]) -> bool {
     !value.is_empty()
-        && value.bytes().all(|byte| {
+        && value.iter().copied().all(|byte| {
             matches!(
                 byte,
                 b'!' | b'#'
@@ -60,20 +61,20 @@ fn is_rfc_token(value: &str) -> bool {
 }
 
 fn connection_header_tokens<'a>(
-    headers: impl Iterator<Item = (&'a str, &'a str)>,
-) -> Box<[&'a str]> {
+    headers: impl Iterator<Item = (&'a str, &'a [u8])>,
+) -> Box<[&'a [u8]]> {
     headers
         .filter(|(name, _)| name.eq_ignore_ascii_case("connection"))
-        .flat_map(|(_, value)| value.split(','))
-        .map(|token| token.trim_matches(|character| matches!(character, ' ' | '\t')))
+        .flat_map(|(_, value)| value.split(|byte| *byte == b','))
+        .map(|token| token.trim_ascii())
         .filter(|token| is_rfc_token(token))
         .collect()
 }
 
-fn is_connection_named(name: &str, connection_tokens: &[&str]) -> bool {
+fn is_connection_named(name: &str, connection_tokens: &[&[u8]]) -> bool {
     connection_tokens
         .iter()
-        .any(|token| token.eq_ignore_ascii_case(name))
+        .any(|token| token.eq_ignore_ascii_case(name.as_bytes()))
 }
 
 /// Check whether a header is a forwarded-metadata header that Camber sets itself.
@@ -199,7 +200,7 @@ fn to_reqwest_method(method: Method) -> reqwest::Method {
 fn filter_request_headers<'a>(
     mut builder: reqwest::RequestBuilder,
     headers: impl Iterator<Item = (&'a str, &'a str)>,
-    connection_tokens: &[&str],
+    connection_tokens: &[&[u8]],
 ) -> (reqwest::RequestBuilder, Option<&'a str>) {
     let mut original_host = None;
     for (name, value) in headers {
@@ -276,7 +277,7 @@ fn build_upstream_request(
     let connection_tokens = connection_header_tokens(
         req.headers
             .iter()
-            .map(|(name, value)| (name.as_ref(), value.as_ref())),
+            .map(|(name, value)| (name.as_ref(), value.as_bytes())),
     );
     let headers = req
         .headers
@@ -306,12 +307,12 @@ fn build_upstream_request_streaming(
 ) -> Result<reqwest::RequestBuilder, RuntimeError> {
     let builder = upstream_builder(parts.method, &parts.path_and_query, backend, prefix)?;
 
-    let connection_tokens = connection_header_tokens(parts.headers.iter().map(|(name, value)| {
-        (
-            name.as_str(),
-            std::str::from_utf8(value.as_bytes()).unwrap_or(""),
-        )
-    }));
+    let connection_tokens = connection_header_tokens(
+        parts
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+    );
     let headers = parts.headers.iter().map(|(name, value)| {
         (
             name.as_str(),
@@ -335,12 +336,11 @@ fn build_upstream_request_streaming(
 
 /// Collect non-hop-by-hop headers from an upstream response.
 fn collect_response_headers(resp: &reqwest::Response) -> Box<[HeaderPair]> {
-    let connection_tokens = connection_header_tokens(resp.headers().iter().map(|(name, value)| {
-        (
-            name.as_str(),
-            std::str::from_utf8(value.as_bytes()).unwrap_or(""),
-        )
-    }));
+    let connection_tokens = connection_header_tokens(
+        resp.headers()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+    );
     let mut headers: Vec<HeaderPair> = Vec::with_capacity(resp.headers().len());
     for (name, value) in resp.headers() {
         match is_hop_by_hop(name.as_str()) || is_connection_named(name.as_str(), &connection_tokens)
@@ -409,32 +409,47 @@ pub fn proxy_forward(
 pub(super) struct StreamingProxyResponse {
     pub(super) status: u16,
     pub(super) headers: Box<[HeaderPair]>,
-    pub(super) rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    pub(super) rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, super::body::BodyError>>,
 }
 
 /// Spawn a task that streams response body chunks into an mpsc channel.
 ///
 /// Shared between buffered-request and incoming-streaming proxy paths.
-fn spawn_response_streamer(resp: reqwest::Response) -> tokio::sync::mpsc::Receiver<bytes::Bytes> {
+fn spawn_response_streamer(
+    resp: reqwest::Response,
+) -> tokio::sync::mpsc::Receiver<Result<bytes::Bytes, super::body::BodyError>> {
     let (tx, rx) = tokio::sync::mpsc::channel(super::DEFAULT_CHANNEL_BUFFER);
     tokio::spawn(async move {
         use futures_util::StreamExt;
         let mut stream = resp.bytes_stream();
-        while let Some(result) = stream.next().await {
-            let bytes = match result {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!(error = %e, "proxy upstream body read failed");
-                    break;
-                }
+        loop {
+            let result = tokio::select! {
+                biased;
+                () = tx.closed() => break,
+                result = stream.next() => result,
             };
-            match tx.send(bytes).await {
-                Ok(()) => {}
-                Err(_) => break,
+            if !forward_stream_result(&tx, result).await {
+                break;
             }
         }
     });
     rx
+}
+
+async fn forward_stream_result(
+    tx: &tokio::sync::mpsc::Sender<Result<bytes::Bytes, super::body::BodyError>>,
+    result: Option<Result<bytes::Bytes, reqwest::Error>>,
+) -> bool {
+    match result {
+        Some(Ok(bytes)) => tx.send(Ok(bytes)).await.is_ok(),
+        Some(Err(error)) => {
+            tracing::warn!(error = %error, "proxy upstream body read failed");
+            let body_error = super::body::BodyError::UpstreamProxy(error.to_string().into());
+            let _ = tx.send(Err(body_error)).await;
+            false
+        }
+        None => false,
+    }
 }
 
 /// Forward a request to upstream and stream the response body via a channel.

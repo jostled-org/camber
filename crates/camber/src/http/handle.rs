@@ -19,6 +19,9 @@ use super::{BufferConfig, Request, Response};
 use crate::resource::HealthState;
 use crate::runtime_state::RuntimeInner;
 use std::sync::Arc;
+use std::time::Duration;
+
+const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(feature = "grpc")]
 use super::grpc_support::is_grpc_request;
@@ -137,9 +140,10 @@ async fn collect_body(
     )
     .await;
     let limited = http_body_util::Limited::new(body, max_body);
-    match limited.collect().await {
-        Ok(collected) => Ok(collected.to_bytes()),
-        Err(_) => Err(Response::text_raw(413, "request body too large")),
+    match tokio::time::timeout(REQUEST_BODY_TIMEOUT, limited.collect()).await {
+        Ok(Ok(collected)) => Ok(collected.to_bytes()),
+        Ok(Err(_)) => Err(Response::text_raw(413, "request body too large")),
+        Err(_) => Err(Response::text_raw(408, "request body timeout")),
     }
 }
 
@@ -209,10 +213,10 @@ async fn collect_request(
 
 /// Read the wire the way the head classification decided it should be read.
 ///
-/// Head-only routes — WebSocket and SSE — never look at a body, so collecting
-/// one would buffer bytes no handler can reach. Both arms answer with the
-/// refusal the request earned, so the entry point has one `?`-shaped decision
-/// rather than one per build configuration.
+/// Head-only and unmatched routes never expose a body to a handler, so
+/// collecting one would buffer bytes no handler can reach. Both arms answer
+/// with the refusal the request earned, so the entry point has one `?`-shaped
+/// decision rather than one per build configuration.
 async fn build_dispatch_input(
     hyper_req: hyper::Request<hyper::body::Incoming>,
     ctx: &ConnCtx,
@@ -383,7 +387,7 @@ async fn dispatch_classified_route(
     #[cfg(not(feature = "ws"))]
     let is_ws_upgrade = false;
 
-    let skip_body_collection = matches!(route_class, RouteClass::HeadOnly)
+    let skip_body_collection = matches!(route_class, RouteClass::HeadOnly | RouteClass::Unmatched)
         || (matches!(&route_class, RouteClass::StreamingProxy(_)) && is_ws_upgrade);
     match route_class {
         RouteClass::StreamingProxy(target) if !is_ws_upgrade => {
@@ -392,11 +396,7 @@ async fn dispatch_classified_route(
             )
             .await;
         }
-        RouteClass::StreamingProxyUnhealthy => {
-            let path = hyper_req.uri().path();
-            return Ok(refuse_unhealthy_upstream(ctx, method, path, start));
-        }
-        RouteClass::HostRejected(refusal) => {
+        RouteClass::Refused(refusal) => {
             let path = hyper_req.uri().path();
             return Ok(refuse_head(ctx, Some(method), path, refusal, start));
         }
@@ -404,7 +404,10 @@ async fn dispatch_classified_route(
         // error here instead of a silent fall-through into body collection.
         // `StreamingProxy(_)` appears because the guarded arm above it does not
         // cover the WS-upgrade case.
-        RouteClass::HeadOnly | RouteClass::Buffered | RouteClass::StreamingProxy(_) => {}
+        RouteClass::HeadOnly
+        | RouteClass::Unmatched
+        | RouteClass::Buffered
+        | RouteClass::StreamingProxy(_) => {}
     }
 
     let input = match build_dispatch_input(
@@ -553,27 +556,6 @@ pub(super) async fn handle_request(
         start,
     };
     dispatch_classified_route(hyper_req, route_class, method, &request_dispatch).await
-}
-
-/// Refuse a streaming-proxy route whose upstream is failing its health check.
-///
-/// The method arrives already parsed, from the classification that produced
-/// this route class. A method Camber cannot name never reaches a proxy route —
-/// it is answered as `Unnameable` before classification runs — so there is no
-/// second answer for this to hold.
-fn refuse_unhealthy_upstream(
-    ctx: &ConnCtx,
-    method: super::method::Method,
-    path: &str,
-    start: std::time::Instant,
-) -> hyper::Response<HyperResponseBody> {
-    refuse_head(
-        ctx,
-        Some(method),
-        path,
-        super::dispatch::service_unavailable(),
-        start,
-    )
 }
 
 /// Finish a buffered dispatch against the request that produced it.

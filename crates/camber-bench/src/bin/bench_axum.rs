@@ -43,7 +43,23 @@ fn main() {
         }
     }
 
+    let thread = match camber_bench::servers::axum_server::spawn_axum_runtime(listener, app) {
+        Ok(thread) => thread,
+        Err(error) => {
+            let _ = writeln!(std::io::stderr(), "server error: {error}");
+            std::process::exit(1);
+        }
+    };
     println!("ready");
-    let thread = camber_bench::servers::axum_server::spawn_axum_runtime(listener, app);
-    let _ = thread.join();
+    match thread.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            let _ = writeln!(std::io::stderr(), "server error: {error}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            let _ = writeln!(std::io::stderr(), "server thread panicked");
+            std::process::exit(1);
+        }
+    }
 }

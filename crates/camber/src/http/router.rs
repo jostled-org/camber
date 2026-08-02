@@ -350,9 +350,9 @@ impl Router {
 
     /// Serve static files from `dir` under the given URL `prefix`.
     pub fn static_files(&mut self, prefix: &str, dir: &str) {
-        let exact_base_dir: Box<std::path::Path> = std::path::PathBuf::from(dir).into_boxed_path();
-        let wildcard_base_dir: Box<std::path::Path> =
-            std::path::PathBuf::from(dir).into_boxed_path();
+        let base_dir: Arc<std::path::Path> = Arc::from(std::path::PathBuf::from(dir));
+        let exact_base_dir = Arc::clone(&base_dir);
+        let wildcard_base_dir = Arc::clone(&base_dir);
         let wildcard_pattern = format!("{prefix}/*filepath");
         let exact_pattern = match prefix.is_empty() {
             true => "/".to_owned(),
@@ -362,17 +362,21 @@ impl Router {
             Method::Get,
             &exact_pattern,
             RouteHandler::Async(Box::new(move |_req: &Request| {
-                let resp = super::static_files::serve_file(&exact_base_dir, "index.html");
-                Box::pin(async move { resp }) as Pin<Box<dyn Future<Output = Response> + Send>>
+                let base_dir = Arc::clone(&exact_base_dir);
+                Box::pin(async move {
+                    super::static_files::serve_file_async(&base_dir, "index.html").await
+                }) as Pin<Box<dyn Future<Output = Response> + Send>>
             })),
         );
         self.root.insert_route(
             Method::Get,
             &wildcard_pattern,
             RouteHandler::Async(Box::new(move |req: &Request| {
-                let file_path = req.param("filepath").unwrap_or("");
-                let resp = super::static_files::serve_file(&wildcard_base_dir, file_path);
-                Box::pin(async move { resp }) as Pin<Box<dyn Future<Output = Response> + Send>>
+                let base_dir = Arc::clone(&wildcard_base_dir);
+                let file_path: Box<str> = req.param("filepath").unwrap_or("").into();
+                Box::pin(async move {
+                    super::static_files::serve_file_async(&base_dir, &file_path).await
+                }) as Pin<Box<dyn Future<Output = Response> + Send>>
             })),
         );
     }

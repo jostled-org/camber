@@ -562,3 +562,210 @@ fn proxy_stream_middleware_sees_params_and_remote_addr() {
         })
         .unwrap();
 }
+
+#[test]
+fn streaming_proxy_does_not_turn_truncated_upstream_body_into_clean_chunked_eof() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let upstream_addr = listener.local_addr().unwrap();
+            let upstream = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n",
+                    )
+                    .unwrap();
+            });
+            let mut proxy = Router::new();
+            proxy.proxy_stream("/api", &format!("http://{upstream_addr}"));
+            let proxy_addr = common::spawn_server(proxy);
+
+            let mut stream = TcpStream::connect(proxy_addr).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .write_all(
+                    b"GET /api/data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+
+            assert!(response.windows(5).any(|window| window == b"hello"));
+            assert!(
+                !response.ends_with(b"0\r\n\r\n"),
+                "a truncated upstream stream was framed as a successful downstream EOF"
+            );
+            upstream.join().unwrap();
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn streaming_proxy_drops_stalled_upstream_after_downstream_disconnect() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let upstream_addr = listener.local_addr().unwrap();
+            let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+            let upstream = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                    .unwrap();
+                let mut byte = [0_u8; 1];
+                closed_tx.send(stream.read(&mut byte)).unwrap();
+            });
+            let mut proxy = Router::new();
+            proxy.proxy_stream("/api", &format!("http://{upstream_addr}"));
+            let proxy_addr = common::spawn_server(proxy);
+
+            let mut downstream = BufReader::new(TcpStream::connect(proxy_addr).unwrap());
+            downstream
+                .get_mut()
+                .write_all(
+                    b"GET /api/data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                downstream.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            drop(downstream);
+
+            assert_eq!(
+                closed_rx
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap()
+                    .unwrap(),
+                0,
+                "upstream connection remained open after downstream disconnect"
+            );
+            upstream.join().unwrap();
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn non_utf8_connection_value_still_strips_its_valid_named_header() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let mut backend = Router::new();
+            backend.get("/headers", |req: &Request| {
+                let leaked = req.header("x-remove").is_some();
+                async move { Response::text(200, if leaked { "leaked" } else { "stripped" }) }
+            });
+            let backend_addr = common::spawn_server(backend);
+            let mut proxy = Router::new();
+            proxy.proxy_stream("/api", &format!("http://{backend_addr}"));
+            let proxy_addr = common::spawn_server(proxy);
+
+            let mut request =
+                b"GET /api/headers HTTP/1.1\r\nHost: localhost\r\nConnection: X-Remove, ".to_vec();
+            request.push(0xff);
+            request.extend_from_slice(b"\r\nX-Remove: first-hop-only\r\nConnection: close\r\n\r\n");
+            let mut stream = TcpStream::connect(proxy_addr).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream.write_all(&request).unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+
+            assert!(
+                response.windows(8).any(|window| window == b"stripped"),
+                "connection-named header leaked through proxy: {}",
+                String::from_utf8_lossy(&response)
+            );
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn non_utf8_upstream_connection_value_still_strips_its_named_response_header() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let upstream_addr = listener.local_addr().unwrap();
+            let upstream = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut response =
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: X-Remove, ".to_vec();
+                response.push(0xff);
+                response.extend_from_slice(b"\r\nX-Remove: first-hop-only\r\n\r\nok");
+                stream.write_all(&response).unwrap();
+            });
+            let mut proxy = Router::new();
+            proxy.proxy_stream("/api", &format!("http://{upstream_addr}"));
+            let proxy_addr = common::spawn_server(proxy);
+
+            let mut stream = TcpStream::connect(proxy_addr).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .write_all(
+                    b"GET /api/data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            let header_end = response
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            let headers = response[..header_end].to_ascii_lowercase();
+
+            assert!(
+                !headers.windows(9).any(|window| window == b"x-remove:"),
+                "connection-named upstream header leaked downstream: {}",
+                String::from_utf8_lossy(&response)
+            );
+            upstream.join().unwrap();
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}

@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::resources::{ExternalInvocation, ObservedAddressChild, ReleaseMarker, UniqueTree};
+use crate::resources::{ExternalInvocation, ReleaseMarker, UniqueTree, wait_for_listener_release};
 use crate::support::FixtureError;
-use crate::support::address_process::{AddressChild, run_command};
+use crate::support::address_process::run_command;
 
 const GO_BUILD_TIMEOUT: Duration = Duration::from_secs(120);
-const GO_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const GO_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct GoBuild {
     tree: UniqueTree,
@@ -84,16 +84,15 @@ fn build_go_server(invocation: &mut ExternalInvocation) -> Result<GoBuild, Fixtu
 pub fn run_go_server_response_check() -> Result<(), FixtureError> {
     let mut invocation = ExternalInvocation::start("go-server-responds-if-go-available")?;
     let build = build_go_server(&mut invocation)?;
-    let mut command = Command::new(build.binary());
-    command.args(["--bench", "hello_text", "--port", "0"]);
-    let mut child = AddressChild::spawn(&mut command)?;
-    let addr = child.wait_for_address(GO_READY_TIMEOUT)?;
+    let (addr, server) = camber_bench::servers::go_server::start(build.binary(), "hello_text", &[])
+        .map_err(|error| FixtureError::new(error.to_string()))?;
     let release = invocation.track_listener("go-server", addr);
-    let server = ObservedAddressChild::new(child, addr, release);
     let response = crate::support::http::get(addr, "/", Duration::from_secs(5))?;
     assert_eq!(response.status, 200);
     assert_eq!(response.body.as_ref(), b"Hello, world!");
-    server.shutdown()?;
+    drop(server);
+    wait_for_listener_release(addr, GO_RELEASE_TIMEOUT)?;
+    release.mark_released();
     drop(build);
     invocation.finish()
 }

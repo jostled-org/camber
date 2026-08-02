@@ -88,6 +88,12 @@ impl<T> Receiver<T> {
     pub fn as_crossbeam(&self) -> &cb::Receiver<T> {
         &self.inner
     }
+
+    /// Build the typed cancellation result used by `camber::select!`.
+    #[doc(hidden)]
+    pub fn __cancelled_receive(&self) -> Result<T, RuntimeError> {
+        Err(RuntimeError::Cancelled)
+    }
 }
 
 impl<T> Clone for Receiver<T> {
@@ -96,6 +102,18 @@ impl<T> Clone for Receiver<T> {
             inner: self.inner.clone(),
         }
     }
+}
+
+/// Return the cancellation receiver installed for the current blocking task.
+#[doc(hidden)]
+pub fn __task_cancel_receiver() -> Option<crossbeam_channel::Receiver<()>> {
+    runtime::cancel_channel()
+}
+
+/// Report whether the current blocking task's sticky cancellation flag fired.
+#[doc(hidden)]
+pub fn __task_cancelled() -> bool {
+    matches!(runtime::check_cancel(), Err(RuntimeError::Cancelled))
 }
 
 /// Iterator that checks cancellation between items.

@@ -64,14 +64,30 @@ where
     // every accepted connection, and again on every permit wait.
     let stop = signals.wait();
     tokio::pin!(stop);
+    let mut handlers = tokio::task::JoinSet::new();
     loop {
         // `biased` gives the stop signals priority over a ready connection, and
         // states the stop condition once. The accept future is dropped unpolled
         // when they win, so the connection stays queued on the listener.
-        let accepted = tokio::select! {
+        let event = tokio::select! {
             biased;
-            () = &mut stop => return Ok(()),
-            result = listener.accept() => result,
+            () = &mut stop => AcceptLoopEvent::Stop,
+            result = handlers.join_next(), if !handlers.is_empty() => {
+                AcceptLoopEvent::HandlerFinished(result)
+            }
+            result = listener.accept() => AcceptLoopEvent::Accepted(result),
+        };
+        let accepted = match event {
+            AcceptLoopEvent::Stop => {
+                stop_handlers(&mut handlers).await;
+                return Ok(());
+            }
+            AcceptLoopEvent::HandlerFinished(Some(Ok(())) | None) => continue,
+            AcceptLoopEvent::HandlerFinished(Some(Err(error))) => {
+                tracing::warn!(%error, "transport handler task failed");
+                continue;
+            }
+            AcceptLoopEvent::Accepted(result) => result,
         };
         let connection = match accepted {
             Ok(connection) => connection,
@@ -80,13 +96,37 @@ where
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                stop_handlers(&mut handlers).await;
+                return Err(error.into());
+            }
         };
-        match spawn_with_limit(conn_limit, stop.as_mut(), on_accept(connection)).await {
-            true => return Ok(()),
+        match spawn_with_limit(
+            conn_limit,
+            stop.as_mut(),
+            &mut handlers,
+            on_accept(connection),
+        )
+        .await
+        {
+            true => {
+                stop_handlers(&mut handlers).await;
+                return Ok(());
+            }
             false => {}
         }
     }
+}
+
+enum AcceptLoopEvent<T> {
+    Stop,
+    Accepted(Result<T, std::io::Error>),
+    HandlerFinished(Option<Result<(), tokio::task::JoinError>>),
+}
+
+async fn stop_handlers(handlers: &mut tokio::task::JoinSet<()>) {
+    handlers.abort_all();
+    while handlers.join_next().await.is_some() {}
 }
 
 /// Run the synchronous HTTP accept loop while transferring an acquired permit
@@ -182,6 +222,7 @@ pub(crate) async fn acquire_connection_permit(
 async fn spawn_with_limit<Stop, Fut>(
     conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
     stop: Pin<&mut Stop>,
+    handlers: &mut tokio::task::JoinSet<()>,
     fut: Fut,
 ) -> bool
 where
@@ -190,7 +231,7 @@ where
 {
     let permit = match conn_limit {
         None => {
-            tokio::spawn(fut);
+            handlers.spawn(fut);
             return false;
         }
         Some(sem) => tokio::select! {
@@ -202,7 +243,7 @@ where
         },
     };
     if let Ok(permit) = permit {
-        tokio::spawn(async move {
+        handlers.spawn(async move {
             fut.await;
             drop(permit);
         });

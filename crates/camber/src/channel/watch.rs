@@ -101,8 +101,11 @@ impl<T> WatchReceiver<T> {
 
     /// Check if the value has changed since the receiver was created, or
     /// since the last call to `changed()` or `borrow_and_update()`.
-    pub fn has_changed(&self) -> bool {
-        self.inner.has_changed().unwrap_or(false)
+    /// Returns `ChannelClosed` when all senders have been dropped.
+    pub fn has_changed(&self) -> Result<bool, RuntimeError> {
+        self.inner
+            .has_changed()
+            .map_err(|_| RuntimeError::ChannelClosed)
     }
 }
 

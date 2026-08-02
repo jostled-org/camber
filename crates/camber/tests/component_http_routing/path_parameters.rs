@@ -197,3 +197,24 @@ async fn static_routes_still_match_exactly() {
 
     runtime::request_shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn structurally_identical_routes_keep_their_own_capture_names() {
+    let mut router = Router::new();
+    router.get("/accounts/:account_id", |req: &Request| {
+        let account_id = req.param("account_id").unwrap_or("missing").to_owned();
+        async move { Response::text(200, &account_id) }
+    });
+    router.post("/accounts/:organization_id", |req: &Request| {
+        let organization_id = req.param("organization_id").unwrap_or("missing").to_owned();
+        async move { Response::text(200, &organization_id) }
+    });
+
+    let server = crate::http::spawn_server_ready(router, Duration::from_secs(2)).unwrap();
+    let base = format!("http://{}/accounts/acme", server.local_addr());
+
+    assert_eq!(http::get(&base).await.unwrap().body(), "acme");
+    assert_eq!(http::post(&base, "").await.unwrap().body(), "acme");
+
+    server.shutdown_bounded(Duration::from_secs(2)).unwrap();
+}

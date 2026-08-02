@@ -106,3 +106,23 @@ fn cancel_detected_after_io_completes() {
     })
     .unwrap();
 }
+
+#[test]
+fn select_unparks_when_task_is_cancelled() {
+    runtime::run(|| {
+        let (sender, receiver) = channel::bounded::<i32>(1);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let handle = spawn(move || -> Result<i32, RuntimeError> {
+            started_tx.send(()).unwrap();
+            camber::select! {
+                value = receiver => value,
+            }
+        });
+
+        started_rx.recv().unwrap();
+        handle.cancel();
+        assert!(matches!(handle.join(), Ok(Err(RuntimeError::Cancelled))));
+        drop(sender);
+    })
+    .unwrap();
+}

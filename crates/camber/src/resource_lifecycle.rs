@@ -5,24 +5,53 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Shut down all registered resources in parallel.
-/// Errors are logged but do not prevent others.
-pub(crate) fn shutdown_resources(resources: &[Box<dyn Resource>]) {
-    std::thread::scope(|scope| spawn_shutdown_tasks(scope, resources));
+/// Returned errors are logged without preventing siblings. The first callback
+/// panic is returned after every shutdown thread has joined.
+pub(crate) fn shutdown_resources(resources: &[Box<dyn Resource>]) -> Option<crate::RuntimeError> {
+    let panic = std::sync::Mutex::new(None);
+    std::thread::scope(|scope| spawn_shutdown_tasks(scope, resources, &panic));
+    crate::runtime_state::recover_poisoned(panic.into_inner())
 }
 
 fn spawn_shutdown_tasks<'scope, 'env>(
     scope: &'scope std::thread::Scope<'scope, 'env>,
     resources: &'env [Box<dyn Resource>],
+    panic: &'env std::sync::Mutex<Option<crate::RuntimeError>>,
 ) {
     for resource in resources.iter() {
         let resource = resource.as_ref();
-        scope.spawn(move || shutdown_one(resource));
+        scope.spawn(move || shutdown_one(resource, panic));
     }
 }
 
-fn shutdown_one(resource: &dyn Resource) {
-    if let Err(e) = resource.shutdown() {
-        tracing::error!(resource = resource.name(), error = %e, "resource shutdown failed");
+fn shutdown_one(resource: &dyn Resource, panic: &std::sync::Mutex<Option<crate::RuntimeError>>) {
+    let mut name = None;
+    let outcome = crate::task::catch_panic(|| {
+        name = Some(resource.name());
+        resource.shutdown()
+    });
+    let name = name.unwrap_or("<unnamed resource>");
+    match outcome {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::error!(resource = name, %error, "resource shutdown failed");
+        }
+        Err(error) => record_shutdown_panic(name, error, panic),
+    }
+}
+
+fn record_shutdown_panic(
+    resource: &str,
+    error: crate::RuntimeError,
+    panic: &std::sync::Mutex<Option<crate::RuntimeError>>,
+) {
+    let mut first = crate::runtime_state::recover_poisoned(panic.lock());
+    match first.as_ref() {
+        Some(_) => tracing::warn!(resource, %error, "further resource shutdown panic"),
+        None => {
+            tracing::error!(resource, %error, "resource shutdown panicked");
+            *first = Some(error);
+        }
     }
 }
 

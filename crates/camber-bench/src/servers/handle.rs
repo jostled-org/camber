@@ -1,29 +1,79 @@
 use crate::error::BenchError;
 use std::net::SocketAddr;
+use std::process::Child;
 use std::thread::JoinHandle;
 
 pub struct ServerHandle {
-    join_handle: JoinHandle<()>,
+    owner: Option<ServerOwner>,
+}
+
+enum ServerOwner {
+    Thread(JoinHandle<Result<(), BenchError>>),
+    Process(Child),
 }
 
 impl ServerHandle {
-    pub(crate) fn new(join_handle: JoinHandle<()>) -> Self {
-        Self { join_handle }
+    pub(crate) fn new(join_handle: JoinHandle<Result<(), BenchError>>) -> Self {
+        Self {
+            owner: Some(ServerOwner::Thread(join_handle)),
+        }
+    }
+
+    pub(crate) fn from_child(child: Child) -> Self {
+        Self {
+            owner: Some(ServerOwner::Process(child)),
+        }
     }
 
     /// Wait for the server thread to finish.
-    pub fn join(self) -> Result<(), BenchError> {
-        self.join_handle.join().map_err(|payload| {
-            let msg = match (
-                payload.downcast_ref::<&str>(),
-                payload.downcast_ref::<String>(),
-            ) {
-                (Some(s), _) => (*s).into(),
-                (_, Some(s)) => s.as_str().into(),
-                _ => Box::from("server thread panicked"),
-            };
-            BenchError::ServerStart(msg)
-        })
+    pub fn join(mut self) -> Result<(), BenchError> {
+        match self.owner.take() {
+            Some(ServerOwner::Thread(join_handle)) => join_thread(join_handle),
+            Some(ServerOwner::Process(mut child)) => wait_for_child(&mut child),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for ServerHandle {
+    fn drop(&mut self) {
+        if let Some(ServerOwner::Process(child)) = self.owner.as_mut() {
+            terminate_child(child);
+        }
+    }
+}
+
+fn join_thread(join_handle: JoinHandle<Result<(), BenchError>>) -> Result<(), BenchError> {
+    join_handle.join().map_err(|payload| {
+        let message = match (
+            payload.downcast_ref::<&str>(),
+            payload.downcast_ref::<String>(),
+        ) {
+            (Some(message), _) => (*message).into(),
+            (_, Some(message)) => message.as_str().into(),
+            _ => Box::from("server thread panicked"),
+        };
+        BenchError::ServerStart(message)
+    })?
+}
+
+fn wait_for_child(child: &mut Child) -> Result<(), BenchError> {
+    let status = child.wait()?;
+    match status.success() {
+        true => Ok(()),
+        false => Err(BenchError::ServerStart(
+            format!("server process exited with {status}").into_boxed_str(),
+        )),
+    }
+}
+
+fn terminate_child(child: &mut Child) {
+    match child.try_wait() {
+        Ok(Some(_)) => {}
+        Ok(None) | Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -33,9 +83,10 @@ pub(crate) fn bind_and_spawn(
     let (addr_tx, addr_rx) = std::sync::mpsc::channel();
 
     let thread = std::thread::spawn(move || {
-        let _ = camber::runtime::builder()
+        camber::runtime::builder()
             .shutdown_timeout(std::time::Duration::from_secs(1))
-            .run(|| setup(addr_tx));
+            .run(|| setup(addr_tx))
+            .map_err(|error| BenchError::ServerStart(error.to_string().into_boxed_str()))
     });
 
     let addr = addr_rx

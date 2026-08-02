@@ -46,8 +46,14 @@ pub(super) enum RouteHandler {
 // ── Trie internals ─────────────────────────────────────────────────
 
 type Params = Box<[(Arc<str>, Box<str>)]>;
-type ParamVec = Vec<(Arc<str>, Box<str>)>;
-type MethodHandlers = Vec<(Method, RouteHandler)>;
+type CaptureVec = Vec<Box<str>>;
+struct RegisteredHandler {
+    method: Method,
+    handler: RouteHandler,
+    capture_names: Box<[Arc<str>]>,
+}
+
+type MethodHandlers = Vec<RegisteredHandler>;
 type LookupResult<'a> = Option<(&'a RouteHandler, Params)>;
 
 /// A segment in a route pattern: literal, named parameter, or wildcard catch-all.
@@ -71,8 +77,8 @@ fn parse_segments(path: &str) -> Box<[Segment]> {
 /// Mutable trie node used during route registration.
 pub(crate) struct TrieNode {
     static_children: BTreeMap<Box<str>, TrieNode>,
-    param_child: Option<(Box<str>, Box<TrieNode>)>,
-    wildcard: Option<(Box<str>, MethodHandlers)>,
+    param_child: Option<Box<TrieNode>>,
+    wildcard: Option<MethodHandlers>,
     handlers: MethodHandlers,
 }
 
@@ -88,32 +94,53 @@ impl TrieNode {
 
     pub(crate) fn insert_route(&mut self, method: Method, path: &str, handler: RouteHandler) {
         let segments = parse_segments(path);
-        self.insert_segments(method, &segments, handler);
+        let capture_names = segments
+            .iter()
+            .filter_map(|segment| match segment {
+                Segment::Param(name) | Segment::Wildcard(name) => {
+                    Some(Arc::<str>::from(name.as_ref()))
+                }
+                Segment::Static(_) => None,
+            })
+            .collect();
+        self.insert_segments(method, &segments, handler, capture_names);
     }
 
-    fn insert_segments(&mut self, method: Method, segments: &[Segment], handler: RouteHandler) {
+    fn insert_segments(
+        &mut self,
+        method: Method,
+        segments: &[Segment],
+        handler: RouteHandler,
+        capture_names: Box<[Arc<str>]>,
+    ) {
         match segments.first() {
             None => {
-                self.handlers.push((method, handler));
+                self.handlers.push(RegisteredHandler {
+                    method,
+                    handler,
+                    capture_names,
+                });
             }
             Some(Segment::Static(name)) => {
                 let child = self
                     .static_children
                     .entry(name.clone())
                     .or_insert_with(TrieNode::new);
-                child.insert_segments(method, &segments[1..], handler);
+                child.insert_segments(method, &segments[1..], handler, capture_names);
             }
-            Some(Segment::Param(name)) => {
-                let (_, child) = self
+            Some(Segment::Param(_)) => {
+                let child = self
                     .param_child
-                    .get_or_insert_with(|| (name.clone(), Box::new(TrieNode::new())));
-                child.insert_segments(method, &segments[1..], handler);
+                    .get_or_insert_with(|| Box::new(TrieNode::new()));
+                child.insert_segments(method, &segments[1..], handler, capture_names);
             }
-            Some(Segment::Wildcard(name)) => {
-                let (_, handlers) = self
-                    .wildcard
-                    .get_or_insert_with(|| (name.clone(), Vec::new()));
-                handlers.push((method, handler));
+            Some(Segment::Wildcard(_)) => {
+                let handlers = self.wildcard.get_or_insert_with(Vec::new);
+                handlers.push(RegisteredHandler {
+                    method,
+                    handler,
+                    capture_names,
+                });
             }
         }
     }
@@ -126,22 +153,25 @@ impl TrieNode {
             .map(|(k, v)| (k, v.freeze()))
             .collect();
 
-        let param_child = self
-            .param_child
-            .map(|(name, node)| (Arc::<str>::from(&*name), Box::new(node.freeze())));
+        let param_child = self.param_child.map(|node| Box::new(node.freeze()));
 
-        let wildcard = self.wildcard.map(|(name, handlers)| {
-            let arc_name: Arc<str> = Arc::from(&*name);
+        let wildcard = self.wildcard.map(|handlers| {
             let mut method_array: FrozenMethodHandlers = Default::default();
-            for (method, handler) in handlers {
-                method_array[method.ordinal()] = Some(handler);
+            for registered in handlers {
+                method_array[registered.method.ordinal()] = Some(FrozenHandler {
+                    handler: registered.handler,
+                    capture_names: registered.capture_names,
+                });
             }
-            (arc_name, method_array)
+            method_array
         });
 
         let mut handlers: FrozenMethodHandlers = Default::default();
-        for (method, handler) in self.handlers {
-            handlers[method.ordinal()] = Some(handler);
+        for registered in self.handlers {
+            handlers[registered.method.ordinal()] = Some(FrozenHandler {
+                handler: registered.handler,
+                capture_names: registered.capture_names,
+            });
         }
 
         FrozenNode {
@@ -154,13 +184,18 @@ impl TrieNode {
 }
 
 /// Method handlers indexed by `Method::ordinal()`. One slot per HTTP method.
-type FrozenMethodHandlers = [Option<RouteHandler>; Method::COUNT];
+struct FrozenHandler {
+    handler: RouteHandler,
+    capture_names: Box<[Arc<str>]>,
+}
+
+type FrozenMethodHandlers = [Option<FrozenHandler>; Method::COUNT];
 
 /// Immutable trie node for request dispatch.
 pub(crate) struct FrozenNode {
     static_children: Box<[(Box<str>, FrozenNode)]>,
-    param_child: Option<(Arc<str>, Box<FrozenNode>)>,
-    wildcard: Option<(Arc<str>, FrozenMethodHandlers)>,
+    param_child: Option<Box<FrozenNode>>,
+    wildcard: Option<FrozenMethodHandlers>,
     handlers: FrozenMethodHandlers,
 }
 
@@ -168,8 +203,15 @@ impl FrozenNode {
     /// Match a path and return the route handler + extracted params.
     /// Priority: static children > param child > wildcard catch-all.
     pub(crate) fn lookup(&self, method: Method, path: &str, segments: &[&str]) -> LookupResult<'_> {
-        let (handler, params) = self.resolve(method, path, segments)?;
-        Some((handler, params.into_boxed_slice()))
+        let (registered, mut captures) = self.resolve(method, path, segments)?;
+        captures.reverse();
+        let params = registered
+            .capture_names
+            .iter()
+            .cloned()
+            .zip(captures)
+            .collect();
+        Some((&registered.handler, params))
     }
 
     fn resolve(
@@ -177,11 +219,11 @@ impl FrozenNode {
         method: Method,
         path: &str,
         segments: &[&str],
-    ) -> Option<(&RouteHandler, ParamVec)> {
+    ) -> Option<(&FrozenHandler, Vec<Box<str>>)> {
         match segments.first() {
             None => {
                 let handler = self.handler_for(method)?;
-                Some((handler, ParamVec::new()))
+                Some((handler, CaptureVec::new()))
             }
             Some(segment) => self
                 .resolve_static(method, path, segment, &segments[1..])
@@ -191,7 +233,7 @@ impl FrozenNode {
     }
 
     /// Return the handler for a method, falling back from HEAD to GET.
-    fn handler_for(&self, method: Method) -> Option<&RouteHandler> {
+    fn handler_for(&self, method: Method) -> Option<&FrozenHandler> {
         lookup_method_handler(&self.handlers, method)
     }
 
@@ -201,7 +243,7 @@ impl FrozenNode {
         path: &str,
         segment: &str,
         rest: &[&str],
-    ) -> Option<(&RouteHandler, ParamVec)> {
+    ) -> Option<(&FrozenHandler, Vec<Box<str>>)> {
         let idx = self
             .static_children
             .binary_search_by_key(&segment, |(k, _)| k)
@@ -215,10 +257,10 @@ impl FrozenNode {
         path: &str,
         segment: &str,
         rest: &[&str],
-    ) -> Option<(&RouteHandler, ParamVec)> {
-        let (param_name, child) = self.param_child.as_ref()?;
+    ) -> Option<(&FrozenHandler, Vec<Box<str>>)> {
+        let child = self.param_child.as_ref()?;
         let mut result = child.resolve(method, path, rest)?;
-        result.1.push((Arc::clone(param_name), segment.into()));
+        result.1.push(segment.into());
         Some(result)
     }
 
@@ -227,17 +269,19 @@ impl FrozenNode {
         method: Method,
         path: &str,
         segments: &[&str],
-    ) -> Option<(&RouteHandler, ParamVec)> {
-        let (wildcard_name, handlers) = self.wildcard.as_ref()?;
+    ) -> Option<(&FrozenHandler, Vec<Box<str>>)> {
+        let handlers = self.wildcard.as_ref()?;
         let handler = lookup_method_handler(handlers, method)?;
         let captured: Box<str> = wildcard_span(path, segments).into();
-        let params = vec![(Arc::clone(wildcard_name), captured)];
-        Some((handler, params))
+        Some((handler, vec![captured]))
     }
 }
 
 /// Look up a handler by method, falling back from HEAD to GET.
-fn lookup_method_handler(handlers: &FrozenMethodHandlers, method: Method) -> Option<&RouteHandler> {
+fn lookup_method_handler(
+    handlers: &FrozenMethodHandlers,
+    method: Method,
+) -> Option<&FrozenHandler> {
     handlers[method.ordinal()]
         .as_ref()
         .or_else(|| match method {

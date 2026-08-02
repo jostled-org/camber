@@ -49,9 +49,9 @@ jobs:
 
       - run: cargo fmt --check
       - run: cargo clippy --workspace --features "${CAMBER_CI_FEATURES}" -- -D warnings
-      # camber-bench is a benchmark crate and has no place in CI: a shared
-      # runner cannot produce meaningful measurements. It is excluded here, from
-      # both pedant matrices, and from default-members. Run it locally.
+      # camber-bench measurements have no place on a shared runner, so its tests
+      # stay out of this lane. Static source and test policy still covers it in
+      # the Pedant matrices below.
       #
       # `timeout` enforces the deadline from a plain OS process. A step-level
       # timeout-minutes is enforced by the runner agent itself, so a test that
@@ -83,14 +83,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [camber, camber-build, camber-cli, camber-macros]
+        package: [camber, camber-bench, camber-build, camber-cli, camber-macros]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install pedant
       - name: Check package source tree
-        run: pedant check --format github $(git ls-files "crates/${{ matrix.package }}/src")
+        run: |
+          files=()
+          while IFS= read -r file; do
+            files+=("$file")
+          done < <(git ls-files "crates/${{ matrix.package }}/src")
+          pedant check --format github "${files[@]}"
 
   pedant-tests:
     needs: changes
@@ -99,14 +104,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [camber, camber-build, camber-cli, camber-macros]
+        package: [camber, camber-bench, camber-build, camber-cli, camber-macros]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install pedant
       - name: Check package test tree
-        run: pedant check --format github $(git ls-files "crates/${{ matrix.package }}/tests")
+        run: |
+          files=()
+          while IFS= read -r file; do
+            files+=("$file")
+          done < <(git ls-files "crates/${{ matrix.package }}/tests")
+          pedant check --format github "${files[@]}"
 
   supply-chain:
     needs: changes

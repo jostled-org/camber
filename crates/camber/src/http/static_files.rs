@@ -45,6 +45,19 @@ pub fn serve_file(base_dir: &Path, file_path: &str) -> Response {
     }
 }
 
+/// Serve a static file without blocking the async runtime's worker thread.
+pub(super) async fn serve_file_async(base_dir: &Path, file_path: &str) -> Response {
+    let base_dir = base_dir.to_path_buf().into_boxed_path();
+    let file_path: Box<str> = file_path.into();
+    match tokio::task::spawn_blocking(move || serve_file(&base_dir, &file_path)).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!(%error, "static file task failed");
+            Response::text_raw(500, "internal server error")
+        }
+    }
+}
+
 fn content_type_for(ext: Option<&str>) -> &'static str {
     match ext {
         Some("html") => "text/html",

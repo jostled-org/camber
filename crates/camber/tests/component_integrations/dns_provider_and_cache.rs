@@ -258,6 +258,8 @@ mod cloudflare_provider_simulation {
 
 #[cfg(feature = "dns01")]
 mod certificate_cache {
+    #[cfg(unix)]
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -317,6 +319,34 @@ mod certificate_cache {
         assert!(
             !config_far.needs_renewal(),
             "cert expiring in 60 days should not need renewal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credentials_are_atomically_replaced_with_private_permissions() {
+        let cache_dir = TempDir::new().expect("temp dir");
+        let credentials_path = cache_dir.path().join("account.json");
+        std::fs::write(&credentials_path, b"old credentials").expect("seed credentials");
+        std::fs::set_permissions(&credentials_path, std::fs::Permissions::from_mode(0o644))
+            .expect("set permissive mode");
+        let original_inode = std::fs::metadata(&credentials_path)
+            .expect("original metadata")
+            .ino();
+
+        camber::__private::write_dns01_credentials(&credentials_path, b"new credentials")
+            .expect("replace credentials");
+
+        let metadata = std::fs::metadata(&credentials_path).expect("replacement metadata");
+        assert_ne!(
+            metadata.ino(),
+            original_inode,
+            "replacement must use rename"
+        );
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::read(&credentials_path).unwrap(),
+            b"new credentials"
         );
     }
 }

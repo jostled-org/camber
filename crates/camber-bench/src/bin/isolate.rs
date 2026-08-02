@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 //! Minimal isolation test: camber async handler vs bare hyper async handler vs axum.
 //! Proves framework dispatch overhead by hitting a shared upstream mock.
 //! This is a diagnostic tool, not a benchmark — use camber-bench for real numbers.
@@ -10,26 +8,35 @@ use std::time::{Duration, Instant};
 type HyperResponse = hyper::Response<http_body_util::Full<bytes::Bytes>>;
 
 fn main() {
+    match run() {
+        Ok(()) => {}
+        Err(error) => {
+            let _ = writeln!(std::io::stderr(), "isolation error: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run() -> Result<(), camber_bench::error::BenchError> {
     // Start upstream mock
-    let upstream = camber_bench::servers::upstream::start().unwrap();
+    let upstream = camber_bench::servers::upstream::start()?;
     println!("Upstream at {upstream}");
 
     // Run camber server hitting upstream
-    let camber_addr = start_camber(upstream);
+    let camber_addr = start_camber(upstream)?;
     println!("Camber at {camber_addr}");
 
     // Run bare hyper server hitting same upstream
-    let hyper_addr = start_bare_hyper(upstream);
+    let hyper_addr = start_bare_hyper(upstream)?;
     println!("Bare hyper at {hyper_addr}");
 
     // Run axum server hitting same upstream
-    let axum_addr = start_axum(upstream);
+    let axum_addr = start_axum(upstream)?;
     println!("Axum at {axum_addr}");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()
-        .unwrap();
+        .build()?;
 
     println!("\nWarmup...");
     rt.block_on(load("camber", camber_addr, 50, Duration::from_secs(2)));
@@ -40,6 +47,7 @@ fn main() {
     rt.block_on(load("camber", camber_addr, 100, Duration::from_secs(10)));
     rt.block_on(load("bare_hyper", hyper_addr, 100, Duration::from_secs(10)));
     rt.block_on(load("axum", axum_addr, 100, Duration::from_secs(10)));
+    Ok(())
 }
 
 async fn load(name: &str, addr: std::net::SocketAddr, connections: u32, duration: Duration) {
@@ -77,7 +85,9 @@ async fn load(name: &str, addr: std::net::SocketAddr, connections: u32, duration
     println!("  {name}: {rps:.0} req/s ({count} total)");
 }
 
-fn start_camber(upstream: std::net::SocketAddr) -> std::net::SocketAddr {
+fn start_camber(
+    upstream: std::net::SocketAddr,
+) -> Result<std::net::SocketAddr, camber_bench::error::BenchError> {
     let upstream_url: std::sync::Arc<str> = format!("http://{upstream}/").into();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -85,7 +95,7 @@ fn start_camber(upstream: std::net::SocketAddr) -> std::net::SocketAddr {
             let _ = writeln!(std::io::stderr(), "runtime error: {e}");
         }
     });
-    rx.recv().unwrap()
+    Ok(rx.recv()?)
 }
 
 fn run_camber_runtime(
@@ -94,42 +104,53 @@ fn run_camber_runtime(
 ) -> Result<(), camber::RuntimeError> {
     camber::runtime::builder()
         .shutdown_timeout(Duration::from_secs(1))
-        .run(|| run_camber_server(tx, upstream_url))
+        .run(|| run_camber_server(tx, upstream_url))?
 }
 
 fn run_camber_server(
     tx: std::sync::mpsc::Sender<std::net::SocketAddr>,
     upstream_url: std::sync::Arc<str>,
-) {
+) -> Result<(), camber::RuntimeError> {
     let client = reqwest::Client::builder()
         .pool_max_idle_per_host(200)
         .build()
-        .unwrap();
-    let listener = camber::net::listen("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap().tcp().unwrap();
-    tx.send(addr).unwrap();
+        .map_err(|error| camber::RuntimeError::Http(error.to_string().into()))?;
+    let listener = camber::net::listen("127.0.0.1:0")?;
+    let addr = listener.local_addr()?.tcp().ok_or_else(|| {
+        camber::RuntimeError::Io(std::io::Error::other(
+            "TCP listener returned a non-TCP address",
+        ))
+    })?;
+    tx.send(addr)
+        .map_err(|_| camber::RuntimeError::ChannelClosed)?;
     let mut router = camber::http::Router::new();
     register_camber_query_route(&mut router, client, upstream_url);
-    let _ = camber::http::serve_listener(listener, router);
+    camber::http::serve_listener(listener, router)
 }
 
-fn start_bare_hyper(upstream: std::net::SocketAddr) -> std::net::SocketAddr {
+fn start_bare_hyper(
+    upstream: std::net::SocketAddr,
+) -> Result<std::net::SocketAddr, camber_bench::error::BenchError> {
     let upstream_url: std::sync::Arc<str> = format!("http://{upstream}/").into();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    listener.set_nonblocking(true)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let runtime_guard = runtime.enter();
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+    drop(runtime_guard);
 
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let client = reqwest::Client::builder()
+        runtime.block_on(async {
+            let client = match reqwest::Client::builder()
                 .pool_max_idle_per_host(200)
                 .build()
-                .unwrap();
-            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            {
+                Ok(client) => client,
+                Err(_) => return,
+            };
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
@@ -142,7 +163,7 @@ fn start_bare_hyper(upstream: std::net::SocketAddr) -> std::net::SocketAddr {
             }
         });
     });
-    addr
+    Ok(addr)
 }
 
 fn register_camber_query_route(
@@ -186,45 +207,39 @@ async fn serve_bare_hyper_connection(
 }
 
 fn make_hyper_json_response() -> HyperResponse {
-    let body = serde_json::to_vec(&serde_json::json!({"id": 1, "name": "Alice"})).unwrap();
-    hyper::Response::builder()
-        .status(200)
-        .header("content-type", "application/json")
-        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
-        .unwrap()
+    let body = bytes::Bytes::from_static(br#"{"id":1,"name":"Alice"}"#);
+    let mut response = hyper::Response::new(http_body_util::Full::new(body));
+    *response.status_mut() = hyper::StatusCode::OK;
+    response.headers_mut().insert(
+        hyper::header::CONTENT_TYPE,
+        hyper::header::HeaderValue::from_static("application/json"),
+    );
+    response
 }
 
-fn start_axum(upstream: std::net::SocketAddr) -> std::net::SocketAddr {
+fn start_axum(
+    upstream: std::net::SocketAddr,
+) -> Result<std::net::SocketAddr, camber_bench::error::BenchError> {
     use axum::routing::get;
     let upstream_url: std::sync::Arc<str> = format!("http://{upstream}/").into();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    listener.set_nonblocking(true).unwrap();
-
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let client = reqwest::Client::builder()
-                .pool_max_idle_per_host(200)
-                .build()
-                .unwrap();
-            let app = axum::Router::new().route(
-                "/query",
-                get(move || {
-                    let client = client.clone();
-                    let url = std::sync::Arc::clone(&upstream_url);
-                    async move {
-                        let _ = client.get(&*url).send().await;
-                        axum::Json(serde_json::json!({"id": 1, "name": "Alice"}))
-                    }
-                }),
-            );
-            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            axum::serve(listener, app).await.unwrap();
-        });
-    });
-    addr
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    listener.set_nonblocking(true)?;
+    let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(200)
+        .build()?;
+    let app = axum::Router::new().route(
+        "/query",
+        get(move || {
+            let client = client.clone();
+            let url = std::sync::Arc::clone(&upstream_url);
+            async move {
+                let _ = client.get(&*url).send().await;
+                axum::Json(serde_json::json!({"id": 1, "name": "Alice"}))
+            }
+        }),
+    );
+    let server = camber_bench::servers::axum_server::spawn_axum_runtime(listener, app)?;
+    drop(server);
+    Ok(addr)
 }

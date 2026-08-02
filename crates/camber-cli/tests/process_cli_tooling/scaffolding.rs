@@ -77,6 +77,19 @@ fn read_file(project_dir: &Path, relative: &str) -> Result<String, FixtureError>
     Ok(std::fs::read_to_string(project_dir.join(relative))?)
 }
 
+fn assert_current_camber_requirement(project_dir: &Path) -> Result<(), FixtureError> {
+    let manifest = read_file(project_dir, "Cargo.toml")?;
+    assert!(
+        manifest.contains("camber = \"0\""),
+        "generated manifest should select the current pre-1.0 Camber release: {manifest}"
+    );
+    assert!(
+        !manifest.contains("camber = \"0.1\""),
+        "generated manifest retained the obsolete 0.1 requirement"
+    );
+    Ok(())
+}
+
 #[test]
 fn http_template_compiles_and_runs() -> Result<(), FixtureError> {
     let dir = tempfile::tempdir()?;
@@ -87,6 +100,7 @@ fn http_template_compiles_and_runs() -> Result<(), FixtureError> {
     assert!(project_dir.join("Cargo.toml").exists());
     assert!(project_dir.join("src/main.rs").exists());
     assert!(project_dir.join("llms.txt").exists(), "llms.txt missing");
+    assert_current_camber_requirement(&project_dir)?;
     let main_rs = read_file(&project_dir, "src/main.rs")?;
     assert!(
         main_rs.contains("use_middleware"),
@@ -118,6 +132,7 @@ fn fanout_template_compiles_and_runs() -> Result<(), FixtureError> {
     assert!(project_dir.join("Cargo.toml").exists());
     assert!(project_dir.join("src/main.rs").exists());
     assert!(project_dir.join("llms.txt").exists(), "llms.txt missing");
+    assert_current_camber_requirement(&project_dir)?;
     let main_rs = read_file(&project_dir, "src/main.rs")?;
     assert!(
         main_rs.contains("spawn"),
@@ -145,6 +160,7 @@ fn advanced_template_compiles() -> Result<(), FixtureError> {
     assert!(project_dir.join("Cargo.toml").exists());
     assert!(project_dir.join("src/main.rs").exists());
     assert!(project_dir.join("llms.txt").exists(), "llms.txt missing");
+    assert_current_camber_requirement(&project_dir)?;
     let main_rs = read_file(&project_dir, "src/main.rs")?;
     assert!(
         main_rs.contains("grpc"),
@@ -170,6 +186,14 @@ fn advanced_template_compiles() -> Result<(), FixtureError> {
         project_dir.join("build.rs").exists(),
         "advanced template needs build.rs for protobuf"
     );
+    let manifest = read_file(&project_dir, "Cargo.toml")?;
+    assert!(
+        manifest.contains("camber-build = \"0\""),
+        "advanced template should select the current pre-1.0 build helper: {manifest}"
+    );
+    let build_rs = read_file(&project_dir, "build.rs")?;
+    assert!(build_rs.contains("std::io::Result<()>"));
+    assert!(!build_rs.contains("Box<dyn"));
     let proto_files: Vec<_> = std::fs::read_dir(project_dir.join("proto"))?
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "proto"))

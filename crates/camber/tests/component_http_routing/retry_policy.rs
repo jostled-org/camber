@@ -263,6 +263,43 @@ async fn generated_retry_attempt_arithmetic_is_exact() {
     server.shutdown_bounded(Duration::from_secs(2)).unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn transient_response_is_released_before_retry_backoff() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/retry-release", listener.local_addr().unwrap());
+    let upstream = tokio::spawn(async move {
+        let mut first = accept_request(&listener).await;
+        first
+            .write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 100\r\nConnection: keep-alive\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        let closed = tokio::time::timeout(Duration::from_millis(200), first.read(&mut byte))
+            .await
+            .expect("transient response stayed alive during retry backoff")
+            .unwrap();
+        assert_eq!(closed, 0, "transient response connection remained open");
+
+        let mut second = accept_request(&listener).await;
+        second
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await
+            .unwrap();
+    });
+
+    let response = http::client()
+        .retries(1)
+        .backoff(Duration::from_millis(500))
+        .get(&url)
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    upstream.await.unwrap();
+}
+
 #[camber::test]
 async fn client_retries_on_transient_error() {
     let count = Arc::new(AtomicU32::new(0));

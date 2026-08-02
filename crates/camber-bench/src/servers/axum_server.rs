@@ -13,7 +13,7 @@ fn bind_and_spawn(app: axum::Router) -> Result<(SocketAddr, ServerHandle), Bench
     let addr = listener.local_addr()?;
     listener.set_nonblocking(true)?;
 
-    let thread = spawn_axum_runtime(listener, app);
+    let thread = spawn_axum_runtime(listener, app)?;
 
     Ok((addr, ServerHandle::new(thread)))
 }
@@ -23,26 +23,21 @@ fn bind_and_spawn(app: axum::Router) -> Result<(SocketAddr, ServerHandle), Bench
 pub fn spawn_axum_runtime(
     listener: std::net::TcpListener,
     app: axum::Router,
-) -> std::thread::JoinHandle<()> {
+) -> Result<std::thread::JoinHandle<Result<(), BenchError>>, BenchError> {
     let worker_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()?;
+    let runtime_guard = runtime.enter();
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+    drop(runtime_guard);
 
-    std::thread::spawn(move || {
-        let Ok(rt) = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(worker_threads)
-            .enable_all()
-            .build()
-        else {
-            return;
-        };
-        rt.block_on(async {
-            let Ok(listener) = tokio::net::TcpListener::from_std(listener) else {
-                return;
-            };
-            let _ = axum::serve(listener, app).await;
-        });
-    })
+    Ok(std::thread::spawn(move || {
+        runtime.block_on(async { axum::serve(listener, app).await.map_err(BenchError::from) })
+    }))
 }
 
 // --- Router builders (shared by in-process tests and standalone binaries) ---

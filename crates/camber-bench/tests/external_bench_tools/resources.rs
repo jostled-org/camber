@@ -329,7 +329,10 @@ fn validate_witness_path(path: &Path) -> Result<(), FixtureError> {
     }
 }
 
-fn wait_for_listener_release(addr: SocketAddr, timeout: Duration) -> Result<(), FixtureError> {
+pub(crate) fn wait_for_listener_release(
+    addr: SocketAddr,
+    timeout: Duration,
+) -> Result<(), FixtureError> {
     match TcpStream::connect_timeout(&addr, timeout) {
         Ok(_) => Err(FixtureError::new(format!(
             "listener {addr} still accepted connections after child teardown"

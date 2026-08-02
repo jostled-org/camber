@@ -44,7 +44,7 @@ pub fn connect() -> Result<Client, RuntimeError> {
     runtime::check_cancel()?;
     let config = block_on(aws_config::load_defaults(
         aws_config::BehaviorVersion::latest(),
-    ));
+    ))?;
     let inner = aws_sdk_sqs::Client::new(&config);
     Ok(Client { inner })
 }
@@ -73,6 +73,35 @@ fn validate_max_messages(n: i32) -> Result<(), RuntimeError> {
     }
 }
 
+fn wait_time_seconds(wait_time: Duration) -> Result<i32, RuntimeError> {
+    const MAX_WAIT_TIME: Duration = Duration::from_secs(20);
+    match wait_time <= MAX_WAIT_TIME {
+        true => i32::try_from(wait_time.as_secs()).map_err(|error| {
+            RuntimeError::MessageQueue(format!("invalid SQS wait time: {error}").into())
+        }),
+        false => Err(RuntimeError::MessageQueue(
+            format!("wait_time must not exceed 20 seconds, got {wait_time:?}").into(),
+        )),
+    }
+}
+
+pub(crate) fn validate_receive_parameters(
+    max_messages: i32,
+    wait_time: Duration,
+) -> Result<i32, RuntimeError> {
+    validate_max_messages(max_messages)?;
+    wait_time_seconds(wait_time)
+}
+
+pub(crate) fn required_message_id(message_id: Option<&str>) -> Result<Box<str>, RuntimeError> {
+    match message_id {
+        Some(message_id) if !message_id.is_empty() => Ok(message_id.into()),
+        _ => Err(RuntimeError::MessageQueue(
+            "SQS send response did not include a message ID".into(),
+        )),
+    }
+}
+
 impl Client {
     /// Send a message to an SQS queue.
     pub fn send_message(&self, queue_url: &str, body: &str) -> Result<Box<str>, RuntimeError> {
@@ -83,11 +112,10 @@ impl Client {
                 .queue_url(queue_url)
                 .message_body(body)
                 .send(),
-        )
+        )?
         .map_err(mq_error)?;
         runtime::check_cancel()?;
-        let id: Box<str> = result.message_id().unwrap_or("").into();
-        Ok(id)
+        required_message_id(result.message_id())
     }
 
     /// Receive messages from an SQS queue.
@@ -100,16 +128,16 @@ impl Client {
         max_messages: i32,
         wait_time: Duration,
     ) -> Result<Vec<Message>, RuntimeError> {
-        validate_max_messages(max_messages)?;
+        let wait_time_seconds = validate_receive_parameters(max_messages, wait_time)?;
         runtime::check_cancel()?;
         let result = block_on(
             self.inner
                 .receive_message()
                 .queue_url(queue_url)
                 .max_number_of_messages(max_messages)
-                .wait_time_seconds(wait_time.as_secs() as i32)
+                .wait_time_seconds(wait_time_seconds)
                 .send(),
-        )
+        )?
         .map_err(mq_error)?;
         runtime::check_cancel()?;
         Ok(result.messages().iter().map(map_sqs_message).collect())
@@ -128,7 +156,7 @@ impl Client {
                 .queue_url(queue_url)
                 .receipt_handle(receipt_handle)
                 .send(),
-        )
+        )?
         .map_err(mq_error)?;
         runtime::check_cancel()?;
         Ok(())
@@ -148,8 +176,7 @@ impl Client {
             .send()
             .await
             .map_err(mq_error)?;
-        let id: Box<str> = result.message_id().unwrap_or("").into();
-        Ok(id)
+        required_message_id(result.message_id())
     }
 
     /// Receive messages asynchronously. For use in async handlers.
@@ -159,13 +186,13 @@ impl Client {
         max_messages: i32,
         wait_time: Duration,
     ) -> Result<Vec<Message>, RuntimeError> {
-        validate_max_messages(max_messages)?;
+        let wait_time_seconds = validate_receive_parameters(max_messages, wait_time)?;
         let result = self
             .inner
             .receive_message()
             .queue_url(queue_url)
             .max_number_of_messages(max_messages)
-            .wait_time_seconds(wait_time.as_secs() as i32)
+            .wait_time_seconds(wait_time_seconds)
             .send()
             .await
             .map_err(mq_error)?;

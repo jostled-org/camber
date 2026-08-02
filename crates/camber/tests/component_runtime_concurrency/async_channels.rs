@@ -38,6 +38,31 @@ async fn mpsc_try_send_full() {
 }
 
 #[camber::test]
+async fn mpsc_send_is_total_inside_async_runtime() {
+    let (tx, mut rx) = camber::channel::mpsc::<u32>(1).unwrap();
+    tx.try_send(1).unwrap();
+
+    let received = camber::spawn_async(async move { (rx.recv().await, rx.recv().await) });
+    let sent = tx.send(2);
+    assert!(sent.is_ok(), "async-context send failed: {sent:?}");
+    assert_eq!(received.await.unwrap(), (Some(1), Some(2)));
+}
+
+#[test]
+fn mpsc_blocking_send_refuses_current_thread_async_context() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (tx, rx) = camber::channel::mpsc::<u32>(1).unwrap();
+
+    let result = runtime.block_on(async move { tx.send(1) });
+
+    assert!(matches!(result, Err(RuntimeError::BlockingInAsyncContext)));
+    drop(rx);
+}
+
+#[camber::test]
 async fn mpsc_recv_returns_none_on_close() {
     let (tx, mut rx) = camber::channel::mpsc::<u32>(16).unwrap();
     drop(tx);

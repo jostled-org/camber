@@ -318,7 +318,7 @@ fn run_one_benchmark(
         let binary = go_binary.ok_or_else(|| {
             BenchError::ServerStart("go benchmark binary was not prepared".into())
         })?;
-        let (addr, _handle) = go_server::start(binary, spec.name, &upstream_addrs)?;
+        let (addr, server) = go_server::start(binary, spec.name, &upstream_addrs)?;
         let fw_run = bench_server(
             generator,
             addr.port(),
@@ -330,6 +330,7 @@ fn run_one_benchmark(
             framework: "Go".into(),
             results: fw_run,
         });
+        drop(server);
         std::thread::sleep(Duration::from_secs(2));
     }
 

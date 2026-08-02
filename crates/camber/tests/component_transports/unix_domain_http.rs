@@ -92,3 +92,32 @@ fn uds_cleans_up_socket_file() {
         "socket file should be removed after shutdown"
     );
 }
+
+#[test]
+fn uds_bind_does_not_delete_an_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("occupied.sock");
+    std::fs::write(&path, b"do not delete").unwrap();
+    let address = format!("unix:{}", path.display());
+
+    let error = camber::net::listen(&address)
+        .err()
+        .expect("binding over an existing file must fail");
+
+    assert!(matches!(error, RuntimeError::Io(_)));
+    assert_eq!(std::fs::read(&path).unwrap(), b"do not delete");
+}
+
+#[tokio::test]
+async fn uds_drop_does_not_delete_a_replacement_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replaced.sock");
+    let address = format!("unix:{}", path.display());
+    let listener = camber::net::listen(&address).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, b"replacement").unwrap();
+
+    drop(listener);
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+}

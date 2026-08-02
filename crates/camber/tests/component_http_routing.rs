@@ -7,6 +7,8 @@ pub mod runtime_support;
 
 #[path = "component_http_routing/async_client.rs"]
 mod async_client;
+#[path = "component_http_routing/audit_http_rate_limit.rs"]
+mod audit_http_rate_limit;
 #[path = "component_http_routing/client_methods.rs"]
 mod client_methods;
 #[path = "component_http_routing/client_timeouts.rs"]

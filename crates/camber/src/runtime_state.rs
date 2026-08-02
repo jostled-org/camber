@@ -85,11 +85,20 @@ pub(crate) struct RuntimeInner {
     shutdown: LatchSignal,
     scope: TaskScope,
     test_schedule: Option<Arc<RuntimeSchedule>>,
-    cancel_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    cancel_task: Mutex<CancelWatcherState>,
     pub(crate) config: RuntimeConfig,
     pub(crate) metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
     pub(crate) tokio_handle: Option<tokio::runtime::Handle>,
     pub(crate) health_state: Option<HealthState>,
+}
+
+struct CancelWatcherState {
+    current: Option<CancelWatcher>,
+}
+
+struct CancelWatcher {
+    identity: Arc<tokio::sync::Notify>,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 /// Sticky one-shot signal: a latching flag plus waiter notification.
@@ -267,7 +276,7 @@ impl RuntimeInner {
             shutdown: LatchSignal::new(),
             scope: TaskScope::new(),
             test_schedule,
-            cancel_task: Mutex::new(None),
+            cancel_task: Mutex::new(CancelWatcherState { current: None }),
             config,
             metrics_handle: None,
             tokio_handle: None,
@@ -458,34 +467,75 @@ impl RuntimeInner {
                 "external cancellation watcher not registered: the runtime has no executor"
             ),
             Some(executor) => {
+                let gate = Arc::new(tokio::sync::Notify::new());
                 let task_inner = Arc::clone(self);
+                let mut state = recover_poisoned(self.cancel_task.lock());
+                let task_gate = Arc::clone(&gate);
                 let handle = executor.spawn(async move {
-                    future.await;
-                    task_inner.request_shutdown();
+                    task_gate.notified().await;
+                    let outcome = crate::task::catch_panic_async(future).await;
+                    task_inner.finish_cancel_watcher(&task_gate, outcome);
                 });
-                self.set_cancel_task(Some(handle));
+                let displaced = state.current.replace(CancelWatcher {
+                    identity: Arc::clone(&gate),
+                    handle,
+                });
+                drop(state);
+                abort_cancel_watcher(displaced);
+                gate.notify_one();
             }
         }
     }
 
-    /// Displace the external cancellation watcher, aborting whichever task the
-    /// slot held.
-    ///
-    /// One lock, one replace, one abort: registering a successor and clearing
-    /// the slot at teardown differ only in what they leave behind, so the
-    /// recover-displace-abort sequence is written once. The abort runs after
-    /// the guard is released — `abort` can drop a never-polled task inline.
-    fn set_cancel_task(&self, next: Option<tokio::task::JoinHandle<()>>) {
-        let mut current = recover_poisoned(self.cancel_task.lock());
-        let displaced = std::mem::replace(&mut *current, next);
-        drop(current);
-        if let Some(task) = displaced {
-            task.abort();
+    fn finish_cancel_watcher(
+        &self,
+        identity: &Arc<tokio::sync::Notify>,
+        outcome: Result<(), crate::RuntimeError>,
+    ) {
+        match outcome {
+            Ok(()) => self.request_shutdown_if_current(identity),
+            Err(error) => {
+                drop(self.take_cancel_watcher(identity));
+                self.scope.record_internal_panic(error);
+            }
         }
     }
 
-    fn abort_cancel_task(&self) {
-        self.set_cancel_task(None);
+    /// Apply a completed watcher while its identity is still current.
+    ///
+    /// The state guard remains held through the shutdown request. A replacement
+    /// therefore linearizes either before this check and makes the completion
+    /// stale, or after shutdown is already applied; it cannot return between
+    /// the check and the request.
+    fn request_shutdown_if_current(&self, identity: &Arc<tokio::sync::Notify>) {
+        let mut state = recover_poisoned(self.cancel_task.lock());
+        match state.current.as_ref() {
+            Some(current) if Arc::ptr_eq(&current.identity, identity) => {
+                let completed = state.current.take();
+                self.request_shutdown();
+                drop(state);
+                drop(completed);
+            }
+            Some(_) | None => {}
+        }
+    }
+
+    fn take_cancel_watcher(&self, identity: &Arc<tokio::sync::Notify>) -> Option<CancelWatcher> {
+        let mut state = recover_poisoned(self.cancel_task.lock());
+        match state.current.as_ref() {
+            Some(current) if Arc::ptr_eq(&current.identity, identity) => state.current.take(),
+            Some(_) | None => None,
+        }
+    }
+
+    fn take_current_cancel_watcher(&self) -> Option<CancelWatcher> {
+        recover_poisoned(self.cancel_task.lock()).current.take()
+    }
+}
+
+fn abort_cancel_watcher(watcher: Option<CancelWatcher>) {
+    if let Some(watcher) = watcher {
+        watcher.handle.abort();
     }
 }
 
@@ -1141,7 +1191,30 @@ where
 
 /// Abort a lingering external cancellation watcher for this runtime.
 pub(crate) fn teardown_runtime(inner: &RuntimeInner) {
-    inner.abort_cancel_task();
+    abort_cancel_watcher(inner.take_current_cancel_watcher());
+}
+
+/// Revoke, abort, and join the external cancellation watcher before resources
+/// begin shutting down. Clearing the identity first makes a watcher already
+/// inside `poll` stale before its abort can be observed.
+pub(crate) fn stop_cancel_watcher(inner: &RuntimeInner, executor: &tokio::runtime::Handle) {
+    let watcher = inner.take_current_cancel_watcher();
+    let handle = match watcher {
+        Some(watcher) => watcher.handle,
+        None => return,
+    };
+    handle.abort();
+    let joined =
+        executor.block_on(async move { tokio::time::timeout(FORCED_JOIN_GRACE, handle).await });
+    match joined {
+        Ok(Err(error)) if error.is_panic() => inner
+            .scope
+            .record_internal_panic(crate::task::panic_to_error(error.into_panic())),
+        Ok(Ok(())) | Ok(Err(_)) => {}
+        Err(_) => tracing::warn!(
+            "external cancellation watcher did not stop within the forced join grace"
+        ),
+    }
 }
 
 /// Drain the root scope, reporting the failure that outranks the closure's

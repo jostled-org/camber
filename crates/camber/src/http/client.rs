@@ -185,41 +185,35 @@ async fn do_request_with_retry(
     let mut remaining = retries;
     loop {
         let result = build_and_send(client, &method, url, body).await;
-
-        let (is_transient, retry_after) = match &result {
-            Ok(resp) => (
-                is_transient_status(resp.status().as_u16()),
-                parse_retry_after(resp),
-            ),
-            Err(error) => (is_transient_transport_error(error), None),
-        };
-
         let attempt = retries - remaining;
-        match (remaining > 0 && is_transient, result) {
-            (true, Ok(ref resp)) => {
+        match result {
+            Ok(resp) if remaining > 0 && is_transient_status(resp.status().as_u16()) => {
+                let status = resp.status().as_u16();
+                let retry_after = parse_retry_after(&resp);
+                drop(resp);
                 tracing::debug!(
                     method = %method,
                     url = url,
-                    status = resp.status().as_u16(),
+                    status,
                     attempt = attempt + 1,
                     "retrying transient HTTP status"
                 );
                 sleep_backoff(backoff, attempt, retry_after).await;
                 remaining -= 1;
             }
-            (true, Err(ref e)) => {
+            Err(error) if remaining > 0 && is_transient_transport_error(&error) => {
                 tracing::debug!(
                     method = %method,
                     url = url,
-                    error = %e,
+                    error = %error,
                     attempt = attempt + 1,
                     "retrying transient HTTP error"
                 );
-                sleep_backoff(backoff, attempt, retry_after).await;
+                sleep_backoff(backoff, attempt, None).await;
                 remaining -= 1;
             }
-            (false, Ok(resp)) => return read_response(resp).await,
-            (false, Err(e)) => return Err(map_reqwest_error(e)),
+            Ok(resp) => return read_response(resp).await,
+            Err(error) => return Err(map_reqwest_error(error)),
         }
     }
 }

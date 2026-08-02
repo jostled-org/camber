@@ -239,23 +239,26 @@ pub fn parse_oha_json(stdout: &[u8]) -> Result<BenchResult, BenchError> {
     })?;
 
     let summary = &json["summary"];
-    let req_per_sec = summary["requestsPerSec"].as_f64().unwrap_or(0.0);
-    let latency_avg_ms = summary["average"].as_f64().unwrap_or(0.0) * 1000.0;
+    let req_per_sec = required_oha_number(&summary["requestsPerSec"], "summary.requestsPerSec")?;
+    let latency_avg_ms = required_oha_number(&summary["average"], "summary.average")? * 1000.0;
 
     let percentiles = &json["latencyPercentiles"];
-    let latency_p50_ms = oha_percentile(percentiles, 50.0);
-    let latency_p90_ms = oha_percentile(percentiles, 90.0);
-    let latency_p99_ms = oha_percentile(percentiles, 99.0);
+    let latency_p50_ms = oha_percentile(percentiles, 50.0)?;
+    let latency_p90_ms = oha_percentile(percentiles, 90.0)?;
+    let latency_p99_ms = oha_percentile(percentiles, 99.0)?;
 
-    let error_count = json["statusCodeDistribution"]
+    let status_codes = json["statusCodeDistribution"]
         .as_object()
-        .map(|m| {
-            m.iter()
-                .filter(|(k, _)| !k.starts_with("200"))
-                .filter_map(|(_, v)| v.as_u64())
-                .sum::<u64>()
-        })
-        .unwrap_or(0);
+        .ok_or_else(|| oha_schema_error("statusCodeDistribution"))?;
+    let error_count = status_codes
+        .iter()
+        .filter(|(status, _)| !status.starts_with("200"))
+        .try_fold(0_u64, |total, (status, count)| {
+            count
+                .as_u64()
+                .and_then(|count| total.checked_add(count))
+                .ok_or_else(|| oha_schema_error(&format!("statusCodeDistribution.{status}")))
+        })?;
 
     Ok(BenchResult {
         req_per_sec,
@@ -267,16 +270,24 @@ pub fn parse_oha_json(stdout: &[u8]) -> Result<BenchResult, BenchError> {
     })
 }
 
-fn oha_percentile(percentiles: &serde_json::Value, pct: f64) -> f64 {
+fn required_oha_number(value: &serde_json::Value, field: &str) -> Result<f64, BenchError> {
+    value.as_f64().ok_or_else(|| oha_schema_error(field))
+}
+
+fn oha_percentile(percentiles: &serde_json::Value, percentile: f64) -> Result<f64, BenchError> {
     percentiles
         .as_array()
         .and_then(|arr| {
             arr.iter()
-                .find(|v| v["percentile"].as_f64() == Some(pct))
+                .find(|value| value["percentile"].as_f64() == Some(percentile))
                 .and_then(|v| v["latency"].as_f64())
         })
-        .unwrap_or(0.0)
-        * 1000.0
+        .map(|latency| latency * 1000.0)
+        .ok_or_else(|| oha_schema_error(&format!("latencyPercentiles[{percentile}]")))
+}
+
+fn oha_schema_error(field: &str) -> BenchError {
+    BenchError::LoadGenerator(format!("oha json missing or invalid '{field}'").into_boxed_str())
 }
 
 /// Dispatch a load test to the appropriate tool based on the generator variant.

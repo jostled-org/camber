@@ -29,18 +29,12 @@ pub(super) enum RouteClass {
     Buffered,
     /// Streaming proxy — forward hyper body directly to upstream.
     StreamingProxy(StreamingProxyTarget),
-    /// Streaming proxy health check failed — return 503 without body collection.
-    StreamingProxyUnhealthy,
     /// Head-only route (WebSocket, SSE) — dispatch from request metadata, skip body collection.
     HeadOnly,
-    /// The Host header cannot name a router — it holds a path separator or a
-    /// control character — so the request can only be the `400` carried here.
-    ///
-    /// Carried out of classification rather than re-derived after the body is
-    /// read: the head already proved the answer, and reading the body first
-    /// would buffer up to `max_request_body` for a request no router, handler,
-    /// or middleware will ever see.
-    HostRejected(Response),
+    /// No route matches. Middleware still runs, but no body can reach a handler.
+    Unmatched,
+    /// The request head already determines the response, so its body is not read.
+    Refused(Response),
 }
 
 #[cfg(feature = "grpc")]
@@ -170,22 +164,21 @@ impl FrozenRouter {
     /// Classify a route before body collection.
     ///
     /// Returns `StreamingProxy` for proxy_stream routes so the incoming body
-    /// can be forwarded without buffering. All other routes return `Buffered`.
+    /// can be forwarded without buffering. Routes with handlers return
+    /// `Buffered`; unmatched and already-refused heads never read a body.
     pub(super) fn classify_route(&self, head: &RequestHead<'_>) -> RouteClass {
         let path = head.path();
         let segments = match split_path_segments(path) {
             Some(s) => s,
-            None => return RouteClass::Buffered,
+            None => return RouteClass::Refused(Response::text_raw(414, "URI too long")),
         };
         match self.root.lookup(head.method(), path, &segments) {
-            Some((
-                RouteHandler::ProxyStream {
-                    healthy,
-                    backend,
-                    prefix,
-                },
-                _,
-            )) if upstream_unhealthy(healthy) => RouteClass::StreamingProxyUnhealthy,
+            Some((RouteHandler::Proxy { healthy, .. }, _))
+            | Some((RouteHandler::ProxyStream { healthy, .. }, _))
+                if upstream_unhealthy(healthy) =>
+            {
+                RouteClass::Refused(service_unavailable())
+            }
             Some((
                 RouteHandler::ProxyStream {
                     backend, prefix, ..
@@ -199,7 +192,8 @@ impl FrozenRouter {
             Some((RouteHandler::Sse(_), _)) => RouteClass::HeadOnly,
             #[cfg(feature = "ws")]
             Some((RouteHandler::WebSocket(_), _)) => RouteClass::HeadOnly,
-            _ => RouteClass::Buffered,
+            Some(_) => RouteClass::Buffered,
+            None => RouteClass::Unmatched,
         }
     }
 
@@ -402,15 +396,13 @@ pub(super) enum ServerDispatch {
 impl ServerDispatch {
     /// Classify a route from request-head metadata before body collection.
     ///
-    /// A Host header that resolves to no router at all is still buffered — some
-    /// later arm answers it with a `404`. A Host header that is itself invalid
-    /// is not: it leaves as `HostRejected`, carrying the refusal it already
-    /// earned.
+    /// A Host header that resolves to no router at all is unmatched. A Host
+    /// header that is itself invalid carries the refusal it already earned.
     pub(super) fn classify_route(&self, head: &RequestHead<'_>) -> RouteClass {
         match self.resolve_from_head(head) {
             Ok(Some(router)) => router.classify_route(head),
-            Ok(None) => RouteClass::Buffered,
-            Err(refusal) => RouteClass::HostRejected(refusal),
+            Ok(None) => RouteClass::Unmatched,
+            Err(refusal) => RouteClass::Refused(refusal),
         }
     }
 

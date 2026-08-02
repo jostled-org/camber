@@ -54,6 +54,9 @@ pub fn parse_certified_key(cert_pem: &[u8], key_pem: &[u8]) -> Result<CertifiedK
     let certs: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| RuntimeError::Tls(format!("failed to parse TLS cert PEM: {e}").into()))?;
+    if certs.is_empty() {
+        return Err(RuntimeError::Tls("TLS certificate chain is empty".into()));
+    }
 
     let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem)
         .map_err(|e| RuntimeError::Tls(format!("failed to parse TLS key PEM: {e}").into()))?;
@@ -61,7 +64,11 @@ pub fn parse_certified_key(cert_pem: &[u8], key_pem: &[u8]) -> Result<CertifiedK
     let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
         .map_err(|e| RuntimeError::Tls(format!("unsupported private key type: {e}").into()))?;
 
-    Ok(CertifiedKey::new(certs, signing_key))
+    let certified_key = CertifiedKey::new(certs, signing_key);
+    certified_key.keys_match().map_err(|error| {
+        RuntimeError::Tls(format!("TLS private key does not match certificate: {error}").into())
+    })?;
+    Ok(certified_key)
 }
 
 /// Load a `CertifiedKey` from PEM file paths.

@@ -109,7 +109,7 @@ fn streaming_response_or_empty(
 fn build_streaming_response(
     status: u16,
     headers: &[HeaderPair],
-    rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    body: StreamBody,
     is_head: bool,
 ) -> hyper::Response<HyperResponseBody> {
     let mut builder = hyper::Response::builder().status(status);
@@ -118,7 +118,7 @@ fn build_streaming_response(
     }
     let body = match is_head {
         true => StreamBody::Drained,
-        false => StreamBody::Channel(rx),
+        false => body,
     };
     streaming_response_or_empty(builder, body, hyper::StatusCode::BAD_GATEWAY)
 }
@@ -149,8 +149,12 @@ fn finish_upstream_stream(
     // Recorded from the built response, not from the upstream's status: a
     // response that could not be built answers with its own status, and the
     // metric names what the peer was given.
-    let response =
-        build_streaming_response(upstream.status, &upstream.headers, upstream.rx, is_head);
+    let response = build_streaming_response(
+        upstream.status,
+        &upstream.headers,
+        StreamBody::Proxy(upstream.rx),
+        is_head,
+    );
     record_request(ctx, method, path, response.status().as_u16(), start);
     response
 }
@@ -163,7 +167,12 @@ pub(super) fn handle_stream_response(
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let is_head = req.is_head();
     let parts = stream_resp.into_parts();
-    let response = build_streaming_response(parts.status, &parts.headers, parts.rx, is_head);
+    let response = build_streaming_response(
+        parts.status,
+        &parts.headers,
+        StreamBody::Channel(parts.rx),
+        is_head,
+    );
     record_request(
         ctx,
         req.method(),

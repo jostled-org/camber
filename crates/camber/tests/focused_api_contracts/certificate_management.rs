@@ -1,4 +1,4 @@
-use camber::tls::{CertStore, load_certified_key, resolve_tls};
+use camber::tls::{CertStore, load_certified_key, parse_certified_key, resolve_tls};
 
 use crate::{temp_support, tls_support};
 
@@ -85,4 +85,25 @@ fn resolve_tls_partial_returns_error() {
 
     let result = resolve_tls(None, Some(cert_path), None);
     assert!(result.is_err());
+}
+
+#[test]
+fn parse_certified_key_rejects_empty_certificate_chain() {
+    let (_, key_pem) = tls_support::generate_self_signed_cert();
+
+    let error = parse_certified_key(&[], &key_pem)
+        .expect_err("a private key without a certificate must be rejected");
+
+    assert!(error.to_string().contains("certificate chain is empty"));
+}
+
+#[test]
+fn parse_certified_key_rejects_mismatched_private_key() {
+    let (cert_pem, _) = tls_support::generate_self_signed_cert();
+    let (_, other_key_pem) = tls_support::generate_self_signed_cert();
+
+    let error = parse_certified_key(&cert_pem, &other_key_pem)
+        .expect_err("a private key from another certificate must be rejected");
+
+    assert!(error.to_string().contains("does not match"));
 }

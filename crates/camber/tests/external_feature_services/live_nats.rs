@@ -13,6 +13,41 @@ use std::time::Duration;
 
 const ASYNC_REQUEST_COUNT: usize = 5;
 
+#[tokio::test(flavor = "current_thread")]
+async fn nats_sync_facade_rejects_current_thread_runtime() {
+    let error = match nats::connect("nats://127.0.0.1:1") {
+        Ok(_) => panic!("sync NATS unexpectedly accepted a current-thread runtime"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, RuntimeError::MessageQueue(_)));
+    assert!(error.to_string().contains("multi-thread"));
+}
+
+#[test]
+fn nats_sync_facade_rejects_missing_tokio_runtime() {
+    let error = match nats::connect("nats://127.0.0.1:1") {
+        Ok(_) => panic!("sync NATS unexpectedly accepted a missing Tokio runtime"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, RuntimeError::MessageQueue(_)));
+    assert!(error.to_string().contains("multi-thread"));
+}
+
+#[test]
+fn nats_try_next_reports_subscription_closure() {
+    let try_next: fn(&mut nats::Subscription) -> Result<Option<nats::Message>, RuntimeError> =
+        nats::Subscription::try_next;
+
+    std::hint::black_box(try_next);
+    let error = match camber::__private::closed_nats_try_next() {
+        Ok(_) => panic!("a closed subscription looked temporarily empty"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, RuntimeError::ChannelClosed));
+}
+
 fn nats_url() -> String {
     std::env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_owned())
 }

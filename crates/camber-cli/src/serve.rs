@@ -143,13 +143,19 @@ fn overlay_handler(
         let backend = std::sync::Arc::clone(&backend);
         let proxy_fut = camber::http::proxy_forward(req, &backend, "");
         Box::pin(async move {
-            let file_resp = camber::http::serve_file(&base, &file_path);
-            match file_resp.status() {
-                404 => proxy_fut.await,
-                _ => file_resp,
+            match serve_overlay_file(base, file_path).await {
+                Ok(file_resp) if file_resp.status() != 404 => file_resp,
+                Ok(_) | Err(_) => proxy_fut.await,
             }
         })
     }
+}
+
+async fn serve_overlay_file(
+    base: std::sync::Arc<std::path::Path>,
+    file_path: Box<str>,
+) -> Result<camber::http::Response, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || camber::http::serve_file(&base, &file_path)).await
 }
 
 fn load_dns_token(tls: &camber_cli::config::TlsConfig) -> Result<Box<str>, CliError> {

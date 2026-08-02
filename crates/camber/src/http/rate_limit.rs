@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 fn now_ns() -> u64 {
-    Instant::now().duration_since(*EPOCH).as_nanos() as u64
+    u64::try_from(Instant::now().duration_since(*EPOCH).as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// Lock-free token bucket for rate limiting.
@@ -30,13 +30,13 @@ struct TokenBucket {
 }
 
 impl TokenBucket {
-    fn new(rate: u64, interval: Duration, burst: u64) -> Self {
+    fn new(rate: u64, interval_ns: u64, burst: u64) -> Self {
         Self {
             tokens: AtomicU64::new(burst),
             last_refill_ns: AtomicU64::new(now_ns()),
             rate,
             burst,
-            interval_ns: interval.as_nanos() as u64,
+            interval_ns,
         }
     }
 
@@ -78,7 +78,8 @@ impl TokenBucket {
             if intervals == 0 {
                 return;
             }
-            let new_last = last + intervals * self.interval_ns;
+            let advanced = intervals.saturating_mul(self.interval_ns);
+            let new_last = last.saturating_add(advanced);
             match self.last_refill_ns.compare_exchange_weak(
                 last,
                 new_last,
@@ -86,7 +87,7 @@ impl TokenBucket {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    let add = intervals * self.rate;
+                    let add = intervals.saturating_mul(self.rate);
                     self.add_tokens(add);
                     return;
                 }
@@ -99,7 +100,7 @@ impl TokenBucket {
     fn add_tokens(&self, add: u64) {
         loop {
             let current = self.tokens.load(Ordering::Acquire);
-            let new = (current + add).min(self.burst);
+            let new = current.saturating_add(add).min(self.burst);
             match self.tokens.compare_exchange_weak(
                 current,
                 new,
@@ -229,7 +230,12 @@ impl RateLimitBuilder {
             }
             false => {}
         }
-        let bucket = Arc::new(TokenBucket::new(self.tokens, self.interval, burst));
+        let interval_ns = u64::try_from(self.interval.as_nanos()).map_err(|_| {
+            RuntimeError::InvalidArgument(
+                "rate_limit: interval exceeds the monotonic clock range".into(),
+            )
+        })?;
+        let bucket = Arc::new(TokenBucket::new(self.tokens, interval_ns, burst));
         Ok(Box::new(move |req, next| {
             rate_limit_check(&bucket, req, next)
         }))

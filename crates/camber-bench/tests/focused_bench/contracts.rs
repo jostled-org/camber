@@ -174,6 +174,35 @@ fn oha_json_parsed_correctly() -> Result<(), FixtureError> {
 }
 
 #[test]
+fn oha_json_rejects_missing_summary_measurements() {
+    let json = br#"{
+        "summary": {"average": 0.00053},
+        "latencyPercentiles": [
+            {"percentile": 50.0, "latency": 0.00052},
+            {"percentile": 90.0, "latency": 0.00065},
+            {"percentile": 99.0, "latency": 0.00082}
+        ],
+        "statusCodeDistribution": {"200": 1}
+    }"#;
+
+    assert!(camber_bench::load::parse_oha_json(json).is_err());
+}
+
+#[test]
+fn oha_json_rejects_missing_required_percentile() {
+    let json = br#"{
+        "summary": {"average": 0.00053, "requestsPerSec": 10.0},
+        "latencyPercentiles": [
+            {"percentile": 50.0, "latency": 0.00052},
+            {"percentile": 90.0, "latency": 0.00065}
+        ],
+        "statusCodeDistribution": {"200": 1}
+    }"#;
+
+    assert!(camber_bench::load::parse_oha_json(json).is_err());
+}
+
+#[test]
 fn loc_comparison_counts_lines() -> Result<(), FixtureError> {
     use camber_bench::loc;
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

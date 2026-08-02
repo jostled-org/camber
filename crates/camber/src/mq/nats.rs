@@ -39,7 +39,7 @@ impl Subscription {
                 self.inner.next()
             })
             .await
-        });
+        })?;
         runtime::check_cancel()?;
         match msg {
             Ok(Some(m)) => Ok(Message { inner: m }),
@@ -48,15 +48,28 @@ impl Subscription {
         }
     }
 
-    /// Try to receive a message without blocking. Returns `None` if no message is ready.
-    pub fn try_next(&mut self) -> Option<Message> {
+    /// Try to receive a message without blocking.
+    ///
+    /// Returns `Ok(None)` if no message is ready and [`RuntimeError::ChannelClosed`]
+    /// when the subscription has ended.
+    pub fn try_next(&mut self) -> Result<Option<Message>, RuntimeError> {
+        runtime::check_cancel()?;
         use futures_util::StreamExt;
-        block_on(async {
-            match tokio::time::timeout(Duration::from_millis(1), self.inner.next()).await {
-                Ok(Some(m)) => Some(Message { inner: m }),
-                _ => None,
-            }
-        })
+        let next = block_on(async {
+            tokio::time::timeout(Duration::from_millis(1), self.inner.next()).await
+        })?;
+        runtime::check_cancel()?;
+        map_try_next_result(next)
+    }
+}
+
+pub(crate) fn map_try_next_result(
+    result: Result<Option<async_nats::Message>, tokio::time::error::Elapsed>,
+) -> Result<Option<Message>, RuntimeError> {
+    match result {
+        Ok(Some(message)) => Ok(Some(Message { inner: message })),
+        Ok(None) => Err(RuntimeError::ChannelClosed),
+        Err(_) => Ok(None),
     }
 }
 
@@ -74,7 +87,7 @@ pub struct Connection {
 /// Suitable for sync handlers. For async handlers, use [`connect_async`].
 pub fn connect(url: &str) -> Result<Connection, RuntimeError> {
     runtime::check_cancel()?;
-    let client = block_on(async_nats::connect(url)).map_err(mq_error)?;
+    let client = block_on(async_nats::connect(url))?.map_err(mq_error)?;
     Ok(Connection { client })
 }
 
@@ -94,9 +107,9 @@ impl Connection {
         block_on(
             self.client
                 .publish(subject.to_owned(), Bytes::copy_from_slice(payload)),
-        )
+        )?
         .map_err(mq_error)?;
-        block_on(self.client.flush()).map_err(mq_error)?;
+        block_on(self.client.flush())?.map_err(mq_error)?;
         runtime::check_cancel()?;
         Ok(())
     }
@@ -104,7 +117,7 @@ impl Connection {
     /// Subscribe to a subject. Returns a [`Subscription`] that delivers messages synchronously.
     pub fn subscribe(&self, subject: &str) -> Result<Subscription, RuntimeError> {
         runtime::check_cancel()?;
-        let sub = block_on(self.client.subscribe(subject.to_owned())).map_err(mq_error)?;
+        let sub = block_on(self.client.subscribe(subject.to_owned()))?.map_err(mq_error)?;
         Ok(Subscription { inner: sub })
     }
 
@@ -121,7 +134,7 @@ impl Connection {
         let sub = block_on(
             self.client
                 .queue_subscribe(subject.to_owned(), queue_group.to_owned()),
-        )
+        )?
         .map_err(mq_error)?;
         Ok(Subscription { inner: sub })
     }

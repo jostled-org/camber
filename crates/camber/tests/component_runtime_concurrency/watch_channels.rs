@@ -69,13 +69,13 @@ async fn changed_returns_channel_closed_when_sender_dropped() {
 fn has_changed_tracks_seen_state() {
     let (tx, mut rx) = watch(0_u32);
     drop(rx.borrow_and_update());
-    assert!(!rx.has_changed());
+    assert!(!rx.has_changed().unwrap());
 
     tx.send(1).unwrap();
-    assert!(rx.has_changed());
+    assert!(rx.has_changed().unwrap());
 
     drop(rx.borrow_and_update());
-    assert!(!rx.has_changed());
+    assert!(!rx.has_changed().unwrap());
 }
 
 #[test]
@@ -84,7 +84,15 @@ fn borrow_does_not_mark_as_seen() {
     tx.send(1).unwrap();
 
     drop(rx.borrow());
-    assert!(rx.has_changed());
+    assert!(rx.has_changed().unwrap());
+}
+
+#[test]
+fn has_changed_reports_sender_closure() {
+    let (tx, rx) = watch(0_u32);
+    drop(tx);
+
+    assert!(matches!(rx.has_changed(), Err(RuntimeError::ChannelClosed)));
 }
 
 #[test]

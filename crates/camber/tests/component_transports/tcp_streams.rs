@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::cohort_support::{bounded, join_server};
@@ -132,4 +134,45 @@ async fn tcp_connect_outbound() {
 
     camber::runtime::request_shutdown();
     join_server(handle).await;
+}
+
+struct HandlerDropWitness(Arc<AtomicBool>);
+
+impl Drop for HandlerDropWitness {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[camber::test]
+async fn tcp_accept_loop_owns_handler_tasks() {
+    let listener = camber::net::listen("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().tcp().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let handler_dropped = Arc::new(AtomicBool::new(false));
+    let handler_entered = Arc::clone(&entered);
+    let handler_drop = Arc::clone(&handler_dropped);
+    let handle = camber::spawn_async(async move {
+        camber::net::serve_tcp_listener(listener, move |_| {
+            handler_entered.notify_one();
+            let witness = HandlerDropWitness(Arc::clone(&handler_drop));
+            async move {
+                std::future::pending::<()>().await;
+                drop(witness);
+                Ok(())
+            }
+        })
+        .await
+    });
+    let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+    bounded(entered.notified()).await;
+
+    camber::runtime::request_shutdown();
+    join_server(handle).await;
+
+    assert!(
+        handler_dropped.load(Ordering::Acquire),
+        "the accept loop must cancel and join its connection handlers"
+    );
+    drop(client);
 }

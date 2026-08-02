@@ -10,13 +10,15 @@ use crate::common::{
 use camber::RuntimeError;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, LifecycleFault, lifecycle};
 use camber::http::{
-    self, DisconnectCause, DisconnectSignal, Next, Request, Response, Router, WsConn,
+    self, DisconnectCause, DisconnectSignal, Next, Request, Response, Router, ServerHandleFuture,
+    WsConn,
 };
 use camber::runtime;
 use futures_util::{SinkExt, StreamExt};
 use std::future::IntoFuture;
 use std::io::Write;
 use std::net::TcpStream;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -51,6 +53,24 @@ async fn assert_proxy_echo(stream: &mut tokio::net::TcpStream) {
         .expect("proxy echo arrives before EOF");
     assert_eq!(opcode, 0x1, "expected proxied WebSocket text frame");
     assert_eq!(payload.as_ref(), b"bridge-live");
+}
+
+async fn assert_owned_proxy_close_contract(
+    websocket: &mut tokio::net::TcpStream,
+    owner: Pin<&mut ServerHandleFuture>,
+) {
+    let (opcode, _) = read_async_ws_frame_or_eof(websocket, "the permit-holding proxy close")
+        .await
+        .expect("graceful proxy shutdown sends a close frame");
+    assert_eq!(opcode, 0x8, "expected graceful proxied close frame");
+    assert!(
+        tokio::time::timeout(UNRESOLVED_WINDOW, owner)
+            .await
+            .is_err(),
+        "owner completed while the proxy bridge still owned its transport"
+    );
+    write_async_ws_frame(websocket, 0x8, &[], "the permit-holding proxy close reply").await;
+    assert_transport_eof(websocket, "the permit-holding proxy transport").await;
 }
 
 struct LifecycleWsBackend {
@@ -665,26 +685,8 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
                 controller
                     .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
                     .expect("release pending proxy permit wait into shutdown");
-                let (opcode, _) =
-                    read_async_ws_frame_or_eof(&mut websocket, "the permit-holding proxy close")
-                        .await
-                        .expect("graceful proxy shutdown sends a close frame");
-                assert_eq!(opcode, 0x8, "expected graceful proxied close frame");
                 let mut owner = Box::pin(handle.into_future());
-                assert!(
-                    tokio::time::timeout(UNRESOLVED_WINDOW, owner.as_mut())
-                        .await
-                        .is_err(),
-                    "owner completed while the proxy bridge still owned its transport"
-                );
-                write_async_ws_frame(
-                    &mut websocket,
-                    0x8,
-                    &[],
-                    "the permit-holding proxy close reply",
-                )
-                .await;
-                assert_transport_eof(&mut websocket, "the permit-holding proxy transport").await;
+                assert_owned_proxy_close_contract(&mut websocket, owner.as_mut()).await;
                 assert_transport_eof(&mut second, "the permit-waiting proxy transport").await;
                 assert!(
                     lifecycle_event("owned proxy bridge completion", owner.as_mut())

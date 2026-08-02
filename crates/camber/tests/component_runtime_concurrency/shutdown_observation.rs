@@ -3,7 +3,10 @@ use crate::schedule_probes::{
     AsyncProbe, CALLBACK_INTERVAL, SyncProbe, async_deadline, deadline_left, sync_deadline,
 };
 use camber::runtime_test_support::{RuntimeCheckpoint, runtime_schedule};
+use std::future::Future;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// Bounds each leg of the registration-window rendezvous.
@@ -350,5 +353,71 @@ fn wait_for_shutdown(context: &str, deadline: std::time::Instant) {
     assert!(
         matches!(result, Ok(())),
         "{context} did not complete shutdown: {result:?}"
+    );
+}
+
+struct BlockingCancellation {
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+    completed: std::sync::mpsc::SyncSender<()>,
+}
+
+impl Future for BlockingCancellation {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let watcher = self.get_mut();
+        watcher.entered.send(()).unwrap();
+        watcher.release.recv().unwrap();
+        watcher.completed.send(()).unwrap();
+        context.waker().wake_by_ref();
+        Poll::Ready(())
+    }
+}
+
+#[test]
+fn displaced_watcher_cannot_request_stale_shutdown() {
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+    let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(0);
+
+    camber::runtime::builder()
+        .worker_threads(2)
+        .run(move || {
+            camber::runtime::on_cancel(BlockingCancellation {
+                entered: entered_tx,
+                release: release_rx,
+                completed: completed_tx,
+            });
+            entered_rx.recv().unwrap();
+
+            camber::runtime::on_cancel(std::future::pending());
+            release_tx.send(()).unwrap();
+            completed_rx.recv().unwrap();
+            camber::runtime::block_on(tokio::time::sleep(Duration::from_millis(50)));
+
+            assert!(
+                !camber::runtime::is_shutting_down(),
+                "a displaced cancellation watcher requested shutdown"
+            );
+        })
+        .unwrap();
+}
+
+#[test]
+fn cancellation_watcher_panic_displaces_runtime_result() {
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+    let outcome = camber::runtime::run(move || {
+        camber::runtime::on_cancel(async move {
+            entered_tx.send(()).unwrap();
+            panic!("external cancellation watcher panic");
+        });
+        entered_rx.recv().unwrap();
+        camber::runtime::block_on(tokio::time::sleep(Duration::from_millis(50)));
+    });
+
+    assert!(
+        matches!(&outcome, Err(camber::RuntimeError::TaskPanicked(message)) if &**message == "external cancellation watcher panic"),
+        "watcher panic did not displace the runtime result: {outcome:?}"
     );
 }

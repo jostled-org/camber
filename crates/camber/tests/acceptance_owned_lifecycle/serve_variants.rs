@@ -100,6 +100,7 @@ async fn https_get(
     path: &str,
 ) -> Result<(u16, String), Box<str>> {
     let req = hyper::Request::get(format!("http://localhost{path}"))
+        .header("host", "localhost")
         .header("connection", "close")
         .body(http_body_util::Empty::<bytes::Bytes>::new())
         .map_err(|error| format!("HTTP request build failed: {error}").into_boxed_str())?;
@@ -436,17 +437,42 @@ async fn wait_for_all(proofs: &VariantProofs, checkpoint: LifecycleCheckpoint) {
 async fn await_retained_requests(
     proofs: &VariantProofs,
     entered: [tokio::sync::oneshot::Receiver<()>; 4],
+    clients: &mut [VariantClient; 4],
 ) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        for receiver in entered {
-            receiver.await.unwrap();
-        }
-    })
-    .await
-    .expect("not every background variant dispatched its retained request");
+    let [plain, tls, host, host_tls] = entered;
+    let [plain_client, tls_client, host_client, host_tls_client] = clients;
+    let waits = tokio::join!(
+        await_retained_request(proofs[0].name, plain, plain_client),
+        await_retained_request(proofs[1].name, tls, tls_client),
+        await_retained_request(proofs[2].name, host, host_client),
+        await_retained_request(proofs[3].name, host_tls, host_tls_client),
+    );
+    for result in [waits.0, waits.1, waits.2, waits.3] {
+        result.unwrap();
+    }
     for proof in proofs {
         assert!(proof.ownership.upgrade().is_some());
     }
+}
+
+async fn await_retained_request(
+    variant: &str,
+    entered: tokio::sync::oneshot::Receiver<()>,
+    client: &mut VariantClient,
+) -> Result<(), Box<str>> {
+    let dispatch = async {
+        tokio::select! {
+            entered = entered => entered.map_err(|_| {
+                format!("{variant} server exited before dispatch").into_boxed_str()
+            }),
+            response = client => Err(format!(
+                "{variant} client exited before dispatch: {response:?}"
+            ).into_boxed_str()),
+        }
+    };
+    tokio::time::timeout(EVENT_TIMEOUT, dispatch)
+        .await
+        .map_err(|_| format!("{variant} did not dispatch its retained request").into_boxed_str())?
 }
 
 fn pin_joins(handles: [ServerHandle; 4]) -> [VariantJoin; 4] {
@@ -542,9 +568,9 @@ async fn all_background_variants_share_internal_lifecycle_behavior() {
         handles,
         entered,
         releases,
-        clients,
+        mut clients,
     } = BackgroundVariants::start().await;
-    await_retained_requests(&proofs, entered).await;
+    await_retained_requests(&proofs, entered, &mut clients).await;
     let mut joins = pin_joins(handles);
     camber::runtime::request_shutdown();
     stop_admission(&proofs).await;

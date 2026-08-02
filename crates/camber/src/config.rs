@@ -34,23 +34,33 @@ impl TlsConfig {
         let has_cert = self.cert.is_some();
         let has_key = self.key.is_some();
         let has_email = self.email.is_some();
+        let has_dns = self.dns_provider.is_some()
+            || self.dns_api_token_env.is_some()
+            || self.dns_api_token_file.is_some();
 
-        match (is_auto, has_cert || has_key, has_email, has_cert, has_key) {
-            (true, true, _, _, _) => Err(RuntimeError::Config(
+        match (
+            is_auto,
+            has_cert || has_key,
+            has_email,
+            has_cert,
+            has_key,
+            has_dns,
+        ) {
+            (true, true, _, _, _, _) => Err(RuntimeError::Config(
                 "tls: auto and cert/key are mutually exclusive".into(),
             )),
-            (true, false, false, _, _) => Err(RuntimeError::Config(
+            (true, false, false, _, _, _) => Err(RuntimeError::Config(
                 "tls: auto = true requires email".into(),
             )),
-            (true, false, true, _, _) => self.validate_dns(),
-            (false, true, _, true, true) => Ok(()),
-            (false, true, _, _, _) => Err(RuntimeError::Config(
+            (true, false, true, _, _, _) => self.validate_dns(),
+            (false, _, _, _, _, true) => Err(RuntimeError::Config(
+                "tls: DNS settings require auto = true".into(),
+            )),
+            (false, true, _, true, true, false) => Ok(()),
+            (false, true, _, _, _, false) => Err(RuntimeError::Config(
                 "tls: both cert and key must be provided".into(),
             )),
-            (false, false, _, _, _) if self.dns_provider.is_some() => Err(RuntimeError::Config(
-                "tls: dns_provider requires auto = true".into(),
-            )),
-            (false, false, _, _, _) => Err(RuntimeError::Config(
+            (false, false, _, _, _, false) => Err(RuntimeError::Config(
                 "tls: must specify either auto = true or cert/key paths".into(),
             )),
         }
@@ -61,6 +71,9 @@ impl TlsConfig {
         let has_file = self.dns_api_token_file.is_some();
 
         match (self.dns_provider.is_some(), has_env, has_file) {
+            (false, true, _) | (false, _, true) => Err(RuntimeError::Config(
+                "tls: dns_api_token_env/dns_api_token_file requires dns_provider".into(),
+            )),
             (true, true, true) => Err(RuntimeError::Config(
                 "tls: dns_api_token_env and dns_api_token_file are mutually exclusive".into(),
             )),

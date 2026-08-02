@@ -2,6 +2,7 @@ use crate::runtime_support as common;
 
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
+use std::io::{Read, Write};
 use std::time::Duration;
 
 #[camber::test]
@@ -29,6 +30,69 @@ async fn router_returns_404_for_unknown_path() {
     assert_eq!(resp.status(), 404);
 
     runtime::request_shutdown();
+}
+
+#[test]
+fn unmatched_route_is_answered_without_waiting_for_its_declared_body() {
+    common::test_runtime()
+        .run(|| {
+            let addr = common::spawn_server(Router::new());
+            let mut stream = std::net::TcpStream::connect(addr).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            stream
+                .write_all(
+                    b"POST /missing HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            assert!(
+                response.starts_with(b"HTTP/1.1 404"),
+                "unexpected response: {}",
+                String::from_utf8_lossy(&response)
+            );
+
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn buffered_request_body_has_a_finite_read_deadline() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut router = Router::new();
+    router.post("/upload", |_req: &Request| async {
+        Response::text(200, "uploaded")
+    });
+    let handle = http::serve_background(listener, router);
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(
+            b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(60), stream.read_to_end(&mut response))
+        .await
+        .expect("request body read had no finite deadline")
+        .unwrap();
+    assert!(
+        response.starts_with(b"HTTP/1.1 408"),
+        "unexpected response: {}",
+        String::from_utf8_lossy(&response)
+    );
+
+    handle.shutdown_and_join().await.unwrap();
 }
 
 #[camber::test]
