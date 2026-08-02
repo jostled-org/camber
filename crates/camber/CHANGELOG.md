@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/jostled-org/camber/compare/camber-v0.2.2...camber-v0.3.0) - 2026-08-02
+
+### Added
+
+- implement raw-request-identity
+- [**breaking**] implement runtime-ownership-and-disconnect-cancellation
+
+### Fixed
+
+- [**breaking**] harden runtime ownership and I/O boundaries
+- *(http)* await both proxy websocket close replies
+- *(release)* decouple workspace package versions
+
+### Other
+
+- implement raw-request-identity-proof-contract
+- *(deps)* update rust dependency graph
+- fix release-plz and pedant test-tree failures
+
 ## [0.2.2](https://github.com/jostled-org/camber/compare/camber-v0.2.1...camber-v0.2.2) - 2026-07-24
 
 ### Other

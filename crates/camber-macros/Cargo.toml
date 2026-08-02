@@ -1,6 +1,6 @@
 [package]
 name = "camber-macros"
-version = "0.2.2"
+version = "0.2.3"
 edition.workspace = true
 autotests = false
 description = "Procedural macros for Camber"

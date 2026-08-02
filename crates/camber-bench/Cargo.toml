@@ -32,7 +32,7 @@ path = "src/bin/bench_axum.rs"
 
 [dependencies]
 axum = "0.8"
-camber = { version = "0.2.2", path = "../camber" }
+camber = { version = "0.3.0", path = "../camber" }
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
