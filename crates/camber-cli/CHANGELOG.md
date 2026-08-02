@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/jostled-org/camber/compare/camber-cli-v0.2.2...camber-cli-v0.3.0) - 2026-08-02
+
+### Fixed
+
+- [**breaking**] harden runtime ownership and I/O boundaries
+- *(release)* decouple workspace package versions
+
 ## [0.2.2](https://github.com/jostled-org/camber/compare/camber-cli-v0.2.1...camber-cli-v0.2.2) - 2026-07-24
 
 ### Other

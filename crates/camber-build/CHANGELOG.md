@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/jostled-org/camber/compare/camber-build-v0.2.2...camber-build-v0.2.3) - 2026-08-02
+
+### Fixed
+
+- *(release)* decouple workspace package versions
+
 ## [0.2.1](https://github.com/jostled-org/camber/compare/camber-build-v0.2.0...camber-build-v0.2.1) - 2026-07-23
 
 ### Fixed
