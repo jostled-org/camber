@@ -214,6 +214,8 @@ fn serve_scripted(
     stream
         .set_read_timeout(Some(PROXY_WIRE_TIMEOUT))
         .expect("the upstream read bound could not be set");
+    common::read_head(&mut stream, PROXY_WIRE_TIMEOUT)
+        .expect("the scripted upstream did not receive a complete request head");
     match script {
         UpstreamScript::TruncatedBody => {
             write_truncated_head(
