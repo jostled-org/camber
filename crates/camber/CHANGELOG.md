@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/jostled-org/camber/compare/camber-v0.4.1...camber-v0.4.2) - 2026-08-08
+
+### Other
+
+- *(proxy)* read request before scripted response
+
 ## [0.4.1](https://github.com/jostled-org/camber/compare/camber-v0.4.0...camber-v0.4.1) - 2026-08-08
 
 ### Other
