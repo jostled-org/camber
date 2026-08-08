@@ -118,6 +118,7 @@ struct ScriptedUpstream {
     /// from `Drop` reaches the thread's own `accept`. Handing the thread the
     /// only handle is what left nothing outside able to release it.
     _reservation: TcpListener,
+    truncate: Option<mpsc::SyncSender<()>>,
     finished: mpsc::Receiver<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -126,10 +127,19 @@ impl ScriptedUpstream {
     fn backend(&self) -> String {
         format!("http://{}", self.addr)
     }
+
+    fn truncate_body(&mut self) {
+        self.truncate
+            .take()
+            .expect("the truncated-body script has no release control")
+            .send(())
+            .expect("the scripted upstream stopped before body truncation");
+    }
 }
 
 impl Drop for ScriptedUpstream {
     fn drop(&mut self) {
+        drop(self.truncate.take());
         // Bounded on the report rather than on the join: the report is sent on
         // every exit the served connection can take, so a thread that finished
         // has already sent it. The teardown claim is asserted only when nothing
@@ -168,13 +178,20 @@ fn scripted_upstream(script: UpstreamScript) -> ScriptedUpstream {
     let accepting = reservation
         .try_clone()
         .expect("the upstream reservation could not be shared with its thread");
+    let (truncate, truncate_on) = match script {
+        UpstreamScript::TruncatedBody => {
+            let (release, wait) = mpsc::sync_channel(0);
+            (Some(release), Some(wait))
+        }
+        UpstreamScript::Stall => (None, None),
+    };
     let (report, finished) = mpsc::sync_channel(1);
     let thread = std::thread::spawn(move || {
         // Reported rather than skipped: an accept that fails is the fixture
         // breaking, and passing it off as a finished connection would blame the
         // proxy for what the upstream never did.
         match accepting.accept() {
-            Ok((stream, _)) => serve_scripted(stream, script),
+            Ok((stream, _)) => serve_scripted(stream, script, truncate_on),
             Err(error) => panic!("the scripted upstream could not accept: {error}"),
         }
         let _ = report.send(());
@@ -182,18 +199,28 @@ fn scripted_upstream(script: UpstreamScript) -> ScriptedUpstream {
     ScriptedUpstream {
         addr,
         _reservation: reservation,
+        truncate,
         finished,
         thread: Some(thread),
     }
 }
 
 /// Run one script against the connection the upstream accepted.
-fn serve_scripted(mut stream: TcpStream, script: UpstreamScript) {
+fn serve_scripted(
+    mut stream: TcpStream,
+    script: UpstreamScript,
+    truncate_on: Option<mpsc::Receiver<()>>,
+) {
     stream
         .set_read_timeout(Some(PROXY_WIRE_TIMEOUT))
         .expect("the upstream read bound could not be set");
     match script {
-        UpstreamScript::TruncatedBody => write_truncated_head(&mut stream),
+        UpstreamScript::TruncatedBody => {
+            write_truncated_head(
+                &mut stream,
+                truncate_on.expect("the truncated-body script has no release signal"),
+            );
+        }
         UpstreamScript::Stall => hold_until_closed(&mut stream),
     }
 }
@@ -203,7 +230,7 @@ fn serve_scripted(mut stream: TcpStream, script: UpstreamScript) {
 /// The write is the whole premise of the row this serves, so neither leg of it
 /// is discarded: a head that never arrives would leave the proxy waiting out its
 /// own deadline and the failure would name the proxy for what the fixture did.
-fn write_truncated_head(stream: &mut TcpStream) {
+fn write_truncated_head(stream: &mut TcpStream, truncate_on: mpsc::Receiver<()>) {
     stream
         .write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 64\r\n\r\nshort",
@@ -212,6 +239,9 @@ fn write_truncated_head(stream: &mut TcpStream) {
     stream
         .flush()
         .expect("the scripted upstream could not flush its truncated head");
+    match truncate_on.recv() {
+        Ok(()) | Err(_) => {}
+    }
 }
 
 /// Answer nothing, and hold the connection until the proxy gives up on it.
@@ -506,7 +536,7 @@ const TRUNCATED_STATUS: u16 = 200;
 fn proxy_preheader_failures_map_but_committed_stream_failure_does_not() {
     common::test_runtime()
         .run(|| {
-            let upstream = scripted_upstream(UpstreamScript::TruncatedBody);
+            let mut upstream = scripted_upstream(UpstreamScript::TruncatedBody);
             let (journal, trail, addr) = proxy_fixture(&upstream.backend());
 
             // The pre-header half of this case's own name, and what the zero
@@ -531,12 +561,19 @@ fn proxy_preheader_failures_map_but_committed_stream_failure_does_not() {
             // The upstream committed a response head, so what fails afterwards
             // belongs to the stream that is already on the wire. Nothing can
             // replace a status the peer has read.
-            let answered = get_until_closed(addr, "/streaming/data");
+            let mut peer = send(addr, "/streaming/data");
+            let head = common::read_head(&mut peer, PROXY_WIRE_TIMEOUT)
+                .expect("the upstream's committed status never reached the peer");
+            let head = String::from_utf8_lossy(&head).into_owned();
 
             assert!(
-                answered.starts_with(&format!("HTTP/1.1 {TRUNCATED_STATUS}")),
-                "the upstream's committed status reaches the peer: {answered}"
+                head.starts_with(&format!("HTTP/1.1 {TRUNCATED_STATUS}")),
+                "the upstream's committed status reaches the peer: {head}"
             );
+            upstream.truncate_body();
+            let tail = common::drain_to_close(&mut peer, PROXY_WIRE_TIMEOUT)
+                .expect("the truncated proxied response never ended");
+            let answered = format!("{head}{tail}");
             assert_eq!(
                 answered.matches("HTTP/1.1 ").count(),
                 1,
