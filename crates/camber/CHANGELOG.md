@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/jostled-org/camber/compare/camber-v0.4.0...camber-v0.4.1) - 2026-08-08
+
+### Other
+
+- *(proxy)* synchronize committed stream truncation
+
 ## [0.4.0](https://github.com/jostled-org/camber/compare/camber-v0.3.0...camber-v0.4.0) - 2026-08-08
 
 ### Added
