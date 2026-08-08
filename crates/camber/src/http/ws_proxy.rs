@@ -1,12 +1,13 @@
+use super::Request;
 use super::body::HyperResponseBody;
 use super::disconnect::DisconnectSignal;
+use super::rejection::Rejected;
 use super::response::HeaderPair;
 use super::router::WsHandler;
 use super::server_lifecycle::{
     ConnectionLifecycle, ConnectionPermit, ServerControl, UpgradeRegistrar, UpgradeRegistration,
 };
 use super::websocket::WsConn;
-use super::{Request, Response};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -193,30 +194,53 @@ const fn base64_value(byte: u8) -> Option<u8> {
 /// Check the WebSocket Origin header against the request Host.
 ///
 /// Returns `None` if the origin is acceptable (missing or same-host).
-/// Returns `Some(403 response)` if the origin is null, malformed, or cross-host.
-pub(super) fn check_ws_origin(req: &Request) -> Option<Response> {
+/// Returns the refusal the handshake earned otherwise.
+///
+/// Each arm states its own reason. A handshake that repeats `Origin`, one that
+/// states no single `Host` to compare against, and one whose authorities
+/// genuinely differ are three faults, and one sentence for all three tells an
+/// operator something false about two of them.
+pub(super) fn check_ws_origin(req: &Request) -> Option<Rejected> {
     let origin = match unique_request_header(req, "origin") {
-        Ok(Some(origin)) => origin,
-        Ok(None) => return None,
-        Err(()) => return rejected_origin(),
+        HeaderPresence::Absent => return None,
+        HeaderPresence::Unique(origin) => origin,
+        HeaderPresence::Repeated => {
+            return rejected_origin("handshake carries more than one Origin header");
+        }
     };
     let host = match unique_request_header(req, "host") {
-        Ok(Some(host)) => host,
-        Ok(None) | Err(()) => return rejected_origin(),
+        HeaderPresence::Unique(host) => host,
+        HeaderPresence::Absent | HeaderPresence::Repeated => {
+            return rejected_origin("handshake states no single Host to match the Origin against");
+        }
     };
 
     match origin_matches_host(origin, host) {
         true => None,
-        false => rejected_origin(),
+        false => rejected_origin("handshake Origin does not match the requested Host"),
     }
 }
 
-fn unique_request_header<'a>(req: &'a Request, name: &'static str) -> Result<Option<&'a str>, ()> {
+/// How many values a request carries under one header name.
+///
+/// Three named answers rather than a `Result` with an empty error: a repeated
+/// header and an absent one are different facts about the handshake, and each
+/// of them is refused with its own account.
+enum HeaderPresence<'a> {
+    /// No value under this name.
+    Absent,
+    /// Exactly one value.
+    Unique(&'a str),
+    /// More than one value, so no single one names the request.
+    Repeated,
+}
+
+fn unique_request_header<'a>(req: &'a Request, name: &'static str) -> HeaderPresence<'a> {
     let mut values = named_request_headers(req, name);
     match (values.next(), values.next()) {
-        (None, None) => Ok(None),
-        (Some(value), None) => Ok(Some(value)),
-        _ => Err(()),
+        (Some(value), None) => HeaderPresence::Unique(value),
+        (None, _) => HeaderPresence::Absent,
+        (Some(_), Some(_)) => HeaderPresence::Repeated,
     }
 }
 
@@ -234,8 +258,8 @@ fn named_request_headers<'a>(
         .filter_map(move |(candidate, value)| candidate.eq_ignore_ascii_case(name).then_some(value))
 }
 
-fn rejected_origin() -> Option<Response> {
-    Some(Response::text_raw(403, "WebSocket origin rejected"))
+fn rejected_origin(detail: &'static str) -> Option<Rejected> {
+    Some(Rejected::ws_origin_rejected(detail))
 }
 
 fn origin_matches_host(origin: &str, host: &str) -> bool {
@@ -329,19 +353,47 @@ struct WsHandoff<'a> {
     handoff: DisconnectSignal,
 }
 
+/// One refused upgrade, and what negotiation had established when it failed.
+///
+/// The subprotocol travels with the refusal because the request it was read
+/// from moves into the bridge: this is the last point that can say whether
+/// negotiation had selected one, and rejection context reports presence exactly
+/// where an owner established it.
+pub(super) struct WsRefusal {
+    pub(super) rejected: Rejected,
+    pub(super) subprotocol: Option<Box<str>>,
+}
+
+impl WsRefusal {
+    /// A refusal found before subprotocol negotiation ran.
+    fn unnegotiated(rejected: Rejected) -> Self {
+        Self {
+            rejected,
+            subprotocol: None,
+        }
+    }
+
+    /// A refusal found after negotiation settled on what it settled on.
+    fn negotiated(rejected: Rejected, subprotocol: Option<&str>) -> Self {
+        Self {
+            rejected,
+            subprotocol: subprotocol.map(Box::from),
+        }
+    }
+}
+
 /// What a handshake attempt leaves the caller holding.
 ///
 /// Both arms are what the peer gets, not success against error: a `101` whose
-/// bridge is still to be built, or the response that replaces it. Written as
+/// bridge is still to be built, or the refusal that replaces it. Written as
 /// its own enum rather than a `Result` because that is what it means, and
-/// because `clippy::result_large_err` does not apply to it — so neither arm
-/// pays a heap allocation to carry a response the caller immediately returns.
+/// because `clippy::result_large_err` does not apply to it.
 enum WsHandoffOutcome<'a> {
     /// The handshake stands; here is everything the `101` handoff needs.
     Ready(WsHandoff<'a>),
     /// The peer gets this instead: a rejected handshake, or a `101` that could
     /// not be built.
-    Refused(hyper::Response<HyperResponseBody>),
+    Refused(WsRefusal),
 }
 
 /// Validate the handshake and build everything the `101` handoff needs.
@@ -355,12 +407,21 @@ fn prepare_ws_handoff<'a>(
 ) -> WsHandoffOutcome<'a> {
     let (on_upgrade, accept_key) = match ws_upgrade_pair(ws_upgrade) {
         Ok(pair) => pair,
-        Err(error) => return WsHandoffOutcome::Refused(ws_handshake_rejection(error)),
+        Err(error) => {
+            return WsHandoffOutcome::Refused(WsRefusal::unnegotiated(ws_handshake_rejection(
+                error,
+            )));
+        }
     };
     let subprotocol = extract_ws_subprotocol(req);
     let response = match ws_switching_protocols(accept_key.as_ref(), subprotocol) {
-        Some(response) => response,
-        None => return WsHandoffOutcome::Refused(upgrade_build_failure()),
+        Ok(response) => response,
+        Err(error) => {
+            return WsHandoffOutcome::Refused(WsRefusal::negotiated(
+                Rejected::ws_upgrade_unbuildable(error),
+                subprotocol,
+            ));
+        }
     };
     WsHandoffOutcome::Ready(WsHandoff {
         on_upgrade,
@@ -378,13 +439,15 @@ pub(super) async fn handle_ws_upgrade(
     req: Request,
     buffer_size: usize,
     lifecycle: &ConnectionLifecycle,
-) -> hyper::Response<HyperResponseBody> {
+) -> Result<hyper::Response<HyperResponseBody>, WsRefusal> {
     let prepared = match prepare_ws_handoff(ws_upgrade, &req, lifecycle) {
         WsHandoffOutcome::Ready(prepared) => prepared,
-        WsHandoffOutcome::Refused(refusal) => return refusal,
+        WsHandoffOutcome::Refused(refusal) => return Err(refusal),
     };
-    // The selected subprotocol is already in the `101`; dropping it here ends
-    // the borrow of the request the bridge is about to take.
+    // Taken as an owned value before the request moves into the bridge: a
+    // registration refusal past this point still has to say what negotiation
+    // had selected.
+    let selected: Option<Box<str>> = prepared.subprotocol.map(Box::from);
     let WsHandoff {
         on_upgrade,
         response,
@@ -407,20 +470,10 @@ pub(super) async fn handle_ws_upgrade(
         )
     })
     .await
-}
-
-/// The answer to a `101` Camber could not build.
-///
-/// An ordinary buffered response whose body owns its own completion, the same
-/// shape the registrar-failure arms produce: no bridge is spawned and no
-/// handoff is resolved, because no upgrade happened. Returning the unbuilt
-/// response instead would hand the peer a bodyless `200` to a WebSocket
-/// handshake and resolve it as a successful upgrade.
-fn upgrade_build_failure() -> hyper::Response<HyperResponseBody> {
-    super::handle::to_hyper_full(Response::text_raw(
-        500,
-        "WebSocket upgrade response build failed",
-    ))
+    .map_err(|rejected| WsRefusal {
+        rejected,
+        subprotocol: selected,
+    })
 }
 
 /// What an owned server contributes to a bridge it is about to register.
@@ -462,7 +515,7 @@ async fn own_upgrade_bridge<F, Fut>(
     response: hyper::Response<HyperResponseBody>,
     handoff: &DisconnectSignal,
     build_bridge: F,
-) -> hyper::Response<HyperResponseBody>
+) -> Result<hyper::Response<HyperResponseBody>, Rejected>
 where
     F: FnOnce(Option<BridgeAttachment>) -> Fut,
     Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -471,7 +524,7 @@ where
         Some(registrar) => registrar,
         None => {
             detach_bridge(build_bridge(None));
-            return commit_upgrade(response, handoff);
+            return Ok(commit_upgrade(response, handoff));
         }
     };
     let attachment = BridgeAttachment {
@@ -777,20 +830,24 @@ pub(super) async fn handle_proxy_ws(
     backend: Arc<str>,
     prefix: Arc<str>,
     lifecycle: &ConnectionLifecycle,
-) -> hyper::Response<HyperResponseBody> {
+) -> Result<hyper::Response<HyperResponseBody>, WsRefusal> {
     let prepared = match prepare_ws_handoff(ws_upgrade, &req, lifecycle) {
         WsHandoffOutcome::Ready(prepared) => prepared,
-        WsHandoffOutcome::Refused(refusal) => return refusal,
+        WsHandoffOutcome::Refused(refusal) => return Err(refusal),
     };
+    // Borrowed rather than owned: this bridge never takes the request, so the
+    // selected protocol stays readable for as long as a refusal could name it.
+    // Only a refusal allocates it, and an upgrade takes at most one of them.
+    let subprotocol = prepared.subprotocol;
 
     let backend_ws_url = match build_backend_ws_url(req.raw_path_and_query(), &prefix, &backend) {
         Ok(url) => url,
-        Err(resp) => return *resp,
+        Err(rejected) => return Err(WsRefusal::negotiated(rejected, subprotocol)),
     };
 
     // The backend is offered the protocol the client was already promised, so
     // it cannot select a different one.
-    let forwarded_headers = collect_forwardable_ws_headers(&req, prepared.subprotocol);
+    let forwarded_headers = collect_forwardable_ws_headers(&req, subprotocol);
     let WsHandoff {
         on_upgrade,
         response,
@@ -808,6 +865,7 @@ pub(super) async fn handle_proxy_ws(
         )
     })
     .await
+    .map_err(|rejected| WsRefusal::negotiated(rejected, subprotocol))
 }
 
 /// Hand the bridge to the owned server's registrar, committing the `101` only
@@ -821,11 +879,11 @@ async fn complete_upgrade_registration(
     gate: tokio::sync::oneshot::Sender<()>,
     response: hyper::Response<HyperResponseBody>,
     handoff: &DisconnectSignal,
-) -> hyper::Response<HyperResponseBody> {
+) -> Result<hyper::Response<HyperResponseBody>, Rejected> {
     match registrar.submit(handle).await {
         UpgradeRegistration::Admitted => release_admitted_bridge(gate, response, handoff),
-        UpgradeRegistration::Rejected => super::server_lifecycle::rejected_response(),
-        UpgradeRegistration::Unavailable => super::server_lifecycle::unavailable_response(),
+        UpgradeRegistration::Rejected => Err(Rejected::upgrade_registration_refused()),
+        UpgradeRegistration::Unavailable => Err(Rejected::upgrade_registration_unavailable()),
     }
 }
 
@@ -841,10 +899,10 @@ fn release_admitted_bridge(
     gate: tokio::sync::oneshot::Sender<()>,
     response: hyper::Response<HyperResponseBody>,
     handoff: &DisconnectSignal,
-) -> hyper::Response<HyperResponseBody> {
+) -> Result<hyper::Response<HyperResponseBody>, Rejected> {
     match gate.send(()) {
-        Ok(()) => commit_upgrade(response, handoff),
-        Err(()) => super::server_lifecycle::unavailable_response(),
+        Ok(()) => Ok(commit_upgrade(response, handoff)),
+        Err(()) => Err(Rejected::upgrade_registration_unavailable()),
     }
 }
 
@@ -926,18 +984,13 @@ fn is_forwardable_ws_header(name: &str) -> bool {
 }
 
 /// Convert an HTTP backend URL + request path into a WebSocket URL.
-fn build_backend_ws_url(
-    path: &str,
-    prefix: &str,
-    backend: &str,
-) -> Result<Box<str>, Box<hyper::Response<HyperResponseBody>>> {
+fn build_backend_ws_url(path: &str, prefix: &str, backend: &str) -> Result<Box<str>, Rejected> {
     let remainder = match super::async_proxy::strip_prefix(path, prefix) {
-        Some(r) => r,
+        Some(remainder) => remainder,
         None => {
-            return Err(Box::new(super::handle::to_hyper_full(Response::text_raw(
-                400,
-                "invalid proxy path",
-            ))));
+            // The one fault that check refuses. A path that simply does not
+            // carry the prefix is returned whole, so it never arrives here.
+            return Err(unbuildable_ws_target(super::async_proxy::TRAVERSAL_SEGMENT));
         }
     };
     match backend {
@@ -947,11 +1000,19 @@ fn build_backend_ws_url(
         s if s.starts_with("https://") => {
             Ok(format!("wss://{}{remainder}", &s["https://".len()..]).into_boxed_str())
         }
-        _ => Err(Box::new(super::handle::to_hyper_full(Response::text_raw(
-            502,
-            "unsupported backend scheme for WebSocket proxy",
-        )))),
+        _ => Err(unbuildable_ws_target(
+            "the configured backend names no scheme this proxy can upgrade over",
+        )),
     }
+}
+
+/// Refuse a proxied upgrade whose target this proxy cannot build.
+///
+/// Classified as the same proxy fault the buffered and streaming classes raise
+/// on the same peer input, so a traversal probe reads one way across all three
+/// and never as a backend outage.
+fn unbuildable_ws_target(detail: &'static str) -> Rejected {
+    Rejected::from_proxy_failure(super::async_proxy::ProxyFailure::UnbuildableTarget(detail))
 }
 
 /// Bridge frames bidirectionally between client and backend WebSocket connections.
@@ -1264,7 +1325,10 @@ where
         match result {
             Ok(message) if message.is_close() => return,
             Ok(_) => {}
-            Err(_) => return,
+            Err(error) => {
+                tracing::debug!(%error, "WebSocket close drain failed");
+                return;
+            }
         }
     }
 }
@@ -1288,7 +1352,17 @@ fn build_ws_backend_request(url: &str, headers: &[HeaderPair]) -> Option<hyper::
             return None;
         }
     };
-    let host = uri.authority()?.as_str();
+    // A backend configured as an `http://` URL with no authority builds a
+    // `ws:///…` this request can never be sent to. The peer is already past the
+    // `101` by then, so it is answered with a `1011` close and nothing else:
+    // named here, or an operator reads that close with no account of it at all.
+    let host = match uri.authority() {
+        Some(authority) => authority.as_str(),
+        None => {
+            tracing::warn!(url = %url, "WebSocket backend URL names no authority");
+            return None;
+        }
+    };
 
     let mut builder = hyper::Request::builder()
         .uri(url)
@@ -1314,29 +1388,28 @@ fn build_ws_backend_request(url: &str, headers: &[HeaderPair]) -> Option<hyper::
     }
 }
 
-fn ws_handshake_rejection(error: WsHandshakeError) -> hyper::Response<HyperResponseBody> {
-    let response = match error {
-        WsHandshakeError::BadRequest => {
-            Response::text_raw(400, "invalid WebSocket upgrade headers")
-        }
-        WsHandshakeError::UnsupportedVersion => {
-            Response::text_raw(426, "unsupported WebSocket version")
-                .with_header("Sec-WebSocket-Version", "13")
-        }
-    };
-    super::handle::to_hyper_full(response)
+fn ws_handshake_rejection(error: WsHandshakeError) -> Rejected {
+    match error {
+        WsHandshakeError::BadRequest => Rejected::ws_bad_handshake(),
+        WsHandshakeError::UnsupportedVersion => Rejected::ws_unsupported_version(),
+    }
 }
 
 /// Build the `101` a validated handshake earns.
 ///
-/// `None` is a builder failure — unreachable while the accept key is derived
+/// `Err` is a builder failure — unreachable while the accept key is derived
 /// base64 and the subprotocol is token-validated, but a response that is not a
 /// `101` must never be handed back as one: the caller would register a bridge
 /// and resolve the handoff for an upgrade Hyper will never perform.
+///
+/// The builder's own error travels with the failure rather than being logged
+/// here. It is the only account of what could not be represented, and it
+/// belongs in the refusal record that already names the request, the route and
+/// the subprotocol.
 fn ws_switching_protocols(
     accept_key: &str,
     subprotocol: Option<&str>,
-) -> Option<hyper::Response<HyperResponseBody>> {
+) -> Result<hyper::Response<HyperResponseBody>, hyper::http::Error> {
     let mut builder = hyper::Response::builder()
         .status(hyper::StatusCode::SWITCHING_PROTOCOLS)
         .header("Upgrade", "websocket")
@@ -1347,13 +1420,7 @@ fn ws_switching_protocols(
         builder = builder.header("Sec-WebSocket-Protocol", proto);
     }
 
-    match builder.body(HyperResponseBody::Full(http_body_util::Full::new(
+    builder.body(HyperResponseBody::Full(http_body_util::Full::new(
         bytes::Bytes::new(),
-    ))) {
-        Ok(response) => Some(response),
-        Err(err) => {
-            tracing::error!("failed to build WebSocket 101 response: {err}");
-            None
-        }
-    }
+    )))
 }

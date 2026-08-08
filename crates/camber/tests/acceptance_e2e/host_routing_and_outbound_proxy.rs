@@ -7,26 +7,18 @@ mod ws_frame_io;
 mod ws_text_helpers;
 
 use camber::http::{self, Request, Response, Router, WsConn};
-use camber::{RuntimeError, runtime, spawn};
+use camber::runtime;
 use std::io::Write;
 use std::net::TcpStream;
 use std::time::Duration;
 use ws_frame_io::read_until_double_crlf;
 use ws_text_helpers::{read_ws_text_frame, write_ws_close_frame, write_ws_text_frame};
 
-fn spawn_host_server(host_router: http::HostRouter) -> std::net::SocketAddr {
-    let listener = camber::net::listen("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap().tcp().unwrap();
-    spawn(move || -> Result<(), RuntimeError> { http::serve_hosts(listener, host_router) });
-    addr
-}
+use common::spawn_host_server;
 
 /// Send a GET request with a specific Host header via raw TCP.
 fn get_with_host(addr: std::net::SocketAddr, path: &str, host: &str) -> crate::http::HttpResponse {
-    let mut stream = crate::http::connect(addr).unwrap();
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    stream.write_all(req.as_bytes()).unwrap();
-    crate::http::read_http_response_bounded(&mut stream).unwrap()
+    crate::http::request_with_host(addr, "GET", path, host).unwrap()
 }
 
 /// 4.T1: Host routing + async proxy + connection pooling

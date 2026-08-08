@@ -137,15 +137,10 @@ fn read_http_headers(stream: &mut impl Read) -> String {
 
 #[cfg(feature = "ws")]
 fn upgrade_websocket(mut stream: impl Read + Write, path: &str, host: &str) -> impl Read + Write {
-    let request = format!(
-        "GET {path} HTTP/1.1\r\n\
-         Host: {host}\r\n\
-         Upgrade: websocket\r\n\
-         Connection: Upgrade\r\n\
-         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-         Sec-WebSocket-Version: 13\r\n\
-         \r\n"
-    );
+    // The workspace's own accepted head, addressed to this case's authority: a
+    // copy here could drift from what Camber accepts, and then every limit
+    // proved through it would be proved against a request no client sends.
+    let request = common::ws_upgrade_request_to(host, path);
     stream
         .write_all(request.as_bytes())
         .expect("write WebSocket upgrade");

@@ -11,16 +11,26 @@ const MAX_FRAME_CAPTURE: usize = MAX_FRAME_BYTES + 14;
 
 /// A handshake key Camber accepts. The accept value derived from it is the
 /// WebSocket suite's own subject; every other journey only needs the `101`.
-const WS_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+pub const WS_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 
 /// The upgrade request every handshake journey sends.
 ///
 /// One definition of the handshake for the whole workspace: a copy per harness
 /// is a copy that can drift from what Camber actually accepts.
 pub fn ws_upgrade_request(path: &str) -> Box<str> {
+    ws_upgrade_request_to("localhost", path)
+}
+
+/// The same upgrade request, addressed to one named authority.
+///
+/// The authority is a parameter rather than a spliced extra header: a
+/// handshake carrying two `Host` values is a different request than one
+/// addressed to a host router, and a case about host routing would be proving
+/// something about neither.
+pub fn ws_upgrade_request_to(host: &str, path: &str) -> Box<str> {
     format!(
         "GET {path} HTTP/1.1\r\n\
-         Host: localhost\r\n\
+         Host: {host}\r\n\
          Upgrade: websocket\r\n\
          Connection: Upgrade\r\n\
          Sec-WebSocket-Key: {WS_KEY}\r\n\
@@ -39,14 +49,13 @@ pub fn ws_upgrade_request(path: &str) -> Box<str> {
 /// blank line that ends the head.
 pub fn ws_upgrade_request_with(path: &str, extra: &[(&str, &str)]) -> Box<str> {
     let head = ws_upgrade_request(path);
-    let headers = head
+    let mut request = head
         .strip_suffix("\r\n")
-        .expect("the shared upgrade request no longer ends with its blank line");
-    let extra_headers: String = extra
-        .iter()
-        .map(|(name, value)| format!("{name}: {value}\r\n"))
-        .collect();
-    format!("{headers}{extra_headers}\r\n").into_boxed_str()
+        .expect("the shared upgrade request no longer ends with its blank line")
+        .to_owned();
+    super::http::append_headers(&mut request, extra.iter().copied());
+    request.push_str("\r\n");
+    request.into_boxed_str()
 }
 
 /// Open a connection and send the upgrade request without reading anything.
@@ -54,9 +63,24 @@ pub fn ws_upgrade_request_with(path: &str, extra: &[(&str, &str)]) -> Box<str> {
 /// The response is left on the socket so a caller can order its own
 /// observations against the handshake rather than against a helper's read.
 pub fn start_upgrade(addr: SocketAddr, path: &str) -> TcpStream {
+    start_upgrade_with(addr, &ws_upgrade_request(path))
+}
+
+/// [`start_upgrade`] for a caller that built its own head.
+///
+/// The head is the parameter because the head is what those callers vary: a
+/// handshake missing a required header, one declaring a version Camber does not
+/// speak, one addressed to a named authority. Three of them wrote the connect,
+/// the write, and the flush out for themselves, so a peer that could not connect
+/// and a head that could not be sent were told apart three times over.
+///
+/// The answer is left on the socket, for the reason [`start_upgrade`] gives.
+pub fn start_upgrade_with(addr: SocketAddr, head: &str) -> TcpStream {
     let mut peer = super::http::connect(addr).expect("failed to connect the WebSocket peer");
-    peer.write_all(ws_upgrade_request(path).as_bytes())
+    peer.write_all(head.as_bytes())
         .expect("failed to send the WebSocket handshake");
+    peer.flush()
+        .expect("failed to flush the WebSocket handshake");
     peer
 }
 

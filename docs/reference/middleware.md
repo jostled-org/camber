@@ -8,6 +8,7 @@ Camber middleware wraps route handlers in registration order.
 - Middleware receives `(&Request, Next)`.
 - Continue the chain with `next.call(req).await`.
 - Short-circuit by returning a response directly.
+- Answer with a `Response` or with `Result<Response, RuntimeError>`. A failure reaches the router's rejection policy instead of becoming a response nothing can classify.
 
 For normal HTTP handlers, middleware wraps the full owned request/response path.
 For gRPC, `proxy_stream(...)`, WebSocket upgrades, SSE, and internal routes, middleware may run as
@@ -33,14 +34,14 @@ router.use_middleware(|req, next| {
 The same ownership rule as handlers applies here: if you need request data after `.await`, move owned values into the async block first.
 
 ```rust
-use camber::http::{IntoResponse, Response};
+use camber::http::Response;
 
 router.use_middleware(|req, next| {
     let authorized = req.header("authorization").is_some_and(valid);
     async move {
         match authorized {
-            true => next.call(req).await,
-            false => Response::text(401, "unauthorized")?.into_response(),
+            true => Ok(next.call(req).await),
+            false => Response::text(401, "unauthorized"),
         }
     }
 });
@@ -102,7 +103,7 @@ use camber::http::validate;
 router.use_middleware(validate::json::<CreateUser>());
 ```
 
-Validates JSON before the handler runs.
+Validates JSON before the handler runs. A body that does not parse becomes a malformed-body rejection, answered by the router's rejection mapper or by the built-in `400`.
 
 ## Streaming And Gate-Only Paths
 

@@ -118,14 +118,14 @@ router.use_middleware(rate_limit::per_second(100)?);
 Auth is just middleware:
 
 ```rust
-use camber::http::{Response, IntoResponse};
+use camber::http::Response;
 
 router.use_middleware(|req, next| {
     let authorized = req.header("authorization").is_some_and(valid);
     async move {
         match authorized {
-            true => next.call(req).await,
-            false => Response::text(401, "unauthorized")?.into_response(),
+            true => Ok(next.call(req).await),
+            false => Response::text(401, "unauthorized"),
         }
     }
 });

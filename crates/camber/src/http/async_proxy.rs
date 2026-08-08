@@ -1,10 +1,20 @@
 use super::encoding::decode_hex_pair;
 use super::map_reqwest_error;
-use super::method::Method;
+use super::method::{Method, RequestMethod};
+use super::rejection::{Diagnostic, proxy_failure_status};
 use super::response::HeaderPair;
 use crate::RuntimeError;
+use arrayvec::ArrayString;
 use std::borrow::Cow;
+use std::fmt;
 use std::sync::{Arc, LazyLock};
+
+/// The one account of the only path [`strip_prefix`] refuses.
+///
+/// Shared with the proxied-WebSocket target builder, which raises the identical
+/// fault from the identical check: one sentence for one fault, so an operator
+/// reading two proxy classes reads the same reason for the same probe.
+pub(super) const TRAVERSAL_SEGMENT: &str = "the request path contains a traversal segment";
 
 static PROXY_CLIENT: LazyLock<Result<reqwest::Client, Arc<str>>> = LazyLock::new(|| {
     reqwest::Client::builder()
@@ -60,12 +70,48 @@ fn is_rfc_token(value: &[u8]) -> bool {
         })
 }
 
+/// One header value, in the form the set it came from already holds it.
+///
+/// Every pass over a header set here needs both forms: the `Connection` token
+/// scan reads bytes, and the filter that follows reads text. The sets do not
+/// agree on which they hold — a collected request holds text, a hyper map holds
+/// bytes — so a single form in the item type charges one of them a conversion
+/// it does not owe. Named, each set hands over what it has, and only the byte
+/// set converts, once.
+#[derive(Clone, Copy)]
+enum HeaderValueRef<'a> {
+    Text(&'a str),
+    Bytes(&'a [u8]),
+}
+
+impl<'a> HeaderValueRef<'a> {
+    /// The value as bytes. Free from either set.
+    fn as_bytes(self) -> &'a [u8] {
+        match self {
+            Self::Text(text) => text.as_bytes(),
+            Self::Bytes(bytes) => bytes,
+        }
+    }
+
+    /// The value as text, empty where the bytes are not UTF-8.
+    ///
+    /// An unreadable value reads as empty rather than being dropped, the same
+    /// rule `Request::headers` follows: HTTP header values are ASCII, so this
+    /// answer is for a value no peer should have sent.
+    fn as_str(self) -> &'a str {
+        match self {
+            Self::Text(text) => text,
+            Self::Bytes(bytes) => std::str::from_utf8(bytes).unwrap_or_default(),
+        }
+    }
+}
+
 fn connection_header_tokens<'a>(
-    headers: impl Iterator<Item = (&'a str, &'a [u8])>,
+    headers: impl Iterator<Item = (&'a str, HeaderValueRef<'a>)>,
 ) -> Box<[&'a [u8]]> {
     headers
         .filter(|(name, _)| name.eq_ignore_ascii_case("connection"))
-        .flat_map(|(_, value)| value.split(|byte| *byte == b','))
+        .flat_map(|(_, value)| value.as_bytes().split(|byte| *byte == b','))
         .map(|token| token.trim_ascii())
         .filter(|token| is_rfc_token(token))
         .collect()
@@ -157,7 +203,7 @@ fn percent_decode_once(input: &str) -> Cow<'_, str> {
 /// Owned data extracted from Request for async forwarding.
 /// Owns its data to avoid holding a &Request borrow across .await points.
 pub(super) struct ProxyRequest {
-    pub(super) method: Method,
+    pub(super) method: RequestMethod,
     pub(super) path: Box<str>,
     pub(super) headers: Box<[HeaderPair]>,
     pub(super) body: bytes::Bytes,
@@ -168,7 +214,7 @@ pub(super) struct ProxyRequest {
 impl ProxyRequest {
     pub(super) fn from_request(req: &super::Request) -> Self {
         Self {
-            method: req.method_enum(),
+            method: req.request_method().clone(),
             path: req.raw_path_and_query().into(),
             headers: req
                 .headers()
@@ -184,7 +230,22 @@ impl ProxyRequest {
     }
 }
 
-fn to_reqwest_method(method: Method) -> reqwest::Method {
+/// The reqwest method a forwarded request travels under.
+///
+/// A method outside Camber's route enum is still the one the peer sent, and a
+/// proxy that substituted another would forward a different request. Every
+/// unnameable value came from a `hyper::Method`, which is already a validated
+/// token, so this conversion does not fail in practice — and where it somehow
+/// did, the refusal is reported rather than the method silently rewritten.
+fn to_reqwest_method(method: &RequestMethod) -> Result<reqwest::Method, RuntimeError> {
+    match method {
+        RequestMethod::Known(known) => Ok(routable_reqwest_method(*known)),
+        RequestMethod::Unnameable(text) => reqwest::Method::from_bytes(text.as_bytes())
+            .map_err(|error| RuntimeError::Http(format!("unforwardable method: {error}").into())),
+    }
+}
+
+fn routable_reqwest_method(method: Method) -> reqwest::Method {
     match method {
         Method::Get => reqwest::Method::GET,
         Method::Post => reqwest::Method::POST,
@@ -218,52 +279,159 @@ fn filter_request_headers<'a>(
     (builder, original_host)
 }
 
+/// The widest text any `IpAddr` renders as.
+///
+/// The IPv4-mapped IPv6 form is the longest either version produces: five
+/// zero groups and the mapped marker, then a dotted-quad tail. Stated to the
+/// compiler below rather than to the reader, so the inline storage the peer
+/// address is rendered into cannot be narrowed without the claim failing.
+const MAX_IP_TEXT_LEN: usize = 45;
+
+const _: () = assert!(MAX_IP_TEXT_LEN == "0000:0000:0000:0000:0000:ffff:255.255.255.255".len());
+
 /// Attach X-Forwarded-* headers and remote address to a reqwest builder.
 fn attach_forwarding_metadata(
-    mut builder: reqwest::RequestBuilder,
+    builder: reqwest::RequestBuilder,
     original_host: Option<&str>,
     remote_addr: Option<std::net::IpAddr>,
     scheme: &str,
 ) -> reqwest::RequestBuilder {
-    if let Some(host) = original_host {
-        builder = builder.header("x-forwarded-host", host);
+    let hosted = match original_host {
+        Some(host) => builder.header("x-forwarded-host", host),
+        None => builder,
+    };
+    let schemed = hosted.header("x-forwarded-proto", scheme);
+    match remote_addr {
+        Some(addr) => attach_peer_address(schemed, addr),
+        None => schemed,
     }
-    builder = builder.header("x-forwarded-proto", scheme);
+}
 
-    if let Some(addr) = remote_addr {
-        let mut buf = [0u8; 45]; // max IPv6 text representation
-        let addr_str = {
-            use std::io::Write;
-            let mut cursor = std::io::Cursor::new(&mut buf[..]);
-            let _ = write!(cursor, "{addr}");
-            let len = cursor.position() as usize;
-            std::str::from_utf8(&buf[..len]).unwrap_or("")
-        };
-        builder = builder
-            .header("x-forwarded-for", addr_str)
-            .header("x-real-ip", addr_str);
+/// Name the peer the request arrived from, or name it not at all.
+///
+/// The storage is exactly [`MAX_IP_TEXT_LEN`] wide and the constant above
+/// proves that is every address's width, so the refusal arm is unreachable. It
+/// answers by sending neither header rather than by sending both empty: an
+/// upstream reading `x-forwarded-for: ` is told this request came from a peer
+/// with no address, which is a worse answer than being told nothing.
+fn attach_peer_address(
+    builder: reqwest::RequestBuilder,
+    addr: std::net::IpAddr,
+) -> reqwest::RequestBuilder {
+    use std::fmt::Write;
+    let mut rendered = ArrayString::<MAX_IP_TEXT_LEN>::new();
+    match write!(rendered, "{addr}") {
+        Ok(()) => builder
+            .header("x-forwarded-for", rendered.as_str())
+            .header("x-real-ip", rendered.as_str()),
+        Err(_) => builder,
     }
+}
 
-    builder
+/// Filter one request's headers onto a builder and add Camber's own metadata.
+///
+/// Both upstream builders run these three steps in this order — scan
+/// `Connection` for the names it delegates, strip what must not travel between
+/// hops, then state what Camber knows about the peer — and differ only in where
+/// their headers come from. Written twice, one copy can drop a step and forward
+/// a header the other strips.
+///
+/// The source is taken as a way to start a pass rather than as a pass already
+/// running: the set is read twice, once to collect the `Connection` tokens and
+/// once to filter against them, and neither the collected slice's iterator nor
+/// hyper's map iterator is `Clone`.
+///
+/// Values arrive as [`HeaderValueRef`] rather than as bytes or as text, so
+/// neither caller pays for the form the other one stores.
+fn forward_headers<'a, I>(
+    builder: reqwest::RequestBuilder,
+    headers: impl Fn() -> I,
+    remote_addr: Option<std::net::IpAddr>,
+    scheme: &str,
+) -> reqwest::RequestBuilder
+where
+    I: Iterator<Item = (&'a str, HeaderValueRef<'a>)>,
+{
+    let connection_tokens = connection_header_tokens(headers());
+    let readable = headers().map(|(name, value)| (name, value.as_str()));
+    let (builder, original_host) = filter_request_headers(builder, readable, &connection_tokens);
+    attach_forwarding_metadata(builder, original_host, remote_addr, scheme)
+}
+
+/// Why a proxied request produced no usable upstream answer.
+///
+/// Three faults with one category and, outside a deadline, one status — kept
+/// apart because they are not the same fault. A target this proxy could not
+/// build was never reachable to begin with. A request this proxy could not send
+/// is Camber's own fault: the shared client would not build, or the method the
+/// peer sent could not be carried onto the outbound request. Only the third
+/// reached an upstream. Recorded as one, a path-traversal probe and a broken
+/// client are indistinguishable from a backend outage.
+pub(super) enum ProxyFailure {
+    /// This proxy could not build a target to send to.
+    ///
+    /// A target is built from the peer's path and from the configured backend,
+    /// so either can be the fault: a path Camber refuses to forward, or a
+    /// backend naming no scheme the proxy class can reach. Both are refused
+    /// before anything was sent, which is what they share.
+    UnbuildableTarget(&'static str),
+    /// Camber could not send the request at all.
+    ///
+    /// Carries a diagnostic rather than a fixed sentence: both faults in this
+    /// class are reported by a library, so neither states its reason in advance.
+    Unsendable(Diagnostic),
+    /// No usable upstream answer arrived.
+    ///
+    /// Either no response head arrived, or a head arrived whose body could not
+    /// be read. Both leave the caller nothing to forward, and an expired
+    /// deadline reads the same on either, so both answer as one fault.
+    Upstream(RuntimeError),
+}
+
+impl From<RuntimeError> for ProxyFailure {
+    fn from(error: RuntimeError) -> Self {
+        Self::Upstream(error)
+    }
+}
+
+impl ProxyFailure {
+    /// A fault this proxy raised on itself, in the shape a refusal carries it.
+    fn unsendable(error: RuntimeError) -> Self {
+        Self::Unsendable(Arc::new(error))
+    }
+}
+
+impl fmt::Display for ProxyFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnbuildableTarget(detail) => f.write_str(detail),
+            Self::Unsendable(diagnostic) => fmt::Display::fmt(diagnostic, f),
+            Self::Upstream(error) => fmt::Display::fmt(error, f),
+        }
+    }
 }
 
 /// Create a reqwest builder with URL resolved from path and prefix.
 ///
 /// Shared setup for both buffered and streaming upstream builders:
 /// strip prefix, format URL, acquire client, create builder.
+///
+/// The target is built per request from the peer's own path, so the refusal it
+/// raises is about peer input and is classified as such — not as an upstream
+/// that failed to answer a request this proxy never sent.
 fn upstream_builder(
-    method: Method,
+    method: reqwest::Method,
     path_and_query: &str,
     backend: &str,
     prefix: &str,
-) -> Result<reqwest::RequestBuilder, RuntimeError> {
+) -> Result<reqwest::RequestBuilder, ProxyFailure> {
     let remainder = match strip_prefix(path_and_query, prefix) {
-        Some(r) => r,
-        None => return Err(RuntimeError::InvalidArgument("invalid proxy path".into())),
+        Some(remainder) => remainder,
+        None => return Err(ProxyFailure::UnbuildableTarget(TRAVERSAL_SEGMENT)),
     };
     let url = format!("{backend}{remainder}");
-    let client = proxy_client()?;
-    Ok(client.request(to_reqwest_method(method), &url))
+    let client = proxy_client().map_err(ProxyFailure::unsendable)?;
+    Ok(client.request(method, &url))
 }
 
 /// Build a reqwest builder for upstream forwarding with a buffered body.
@@ -271,22 +439,20 @@ fn build_upstream_request(
     req: &ProxyRequest,
     backend: &str,
     prefix: &str,
-) -> Result<reqwest::RequestBuilder, RuntimeError> {
-    let builder = upstream_builder(req.method, &req.path, backend, prefix)?;
-
-    let connection_tokens = connection_header_tokens(
-        req.headers
-            .iter()
-            .map(|(name, value)| (name.as_ref(), value.as_bytes())),
+) -> Result<reqwest::RequestBuilder, ProxyFailure> {
+    let method = to_reqwest_method(&req.method).map_err(ProxyFailure::unsendable)?;
+    let builder = upstream_builder(method, &req.path, backend, prefix)?;
+    let forwarded = forward_headers(
+        builder,
+        || {
+            req.headers
+                .iter()
+                .map(|(name, value)| (name.as_ref(), HeaderValueRef::Text(value.as_ref())))
+        },
+        req.remote_addr,
+        req.scheme,
     );
-    let headers = req
-        .headers
-        .iter()
-        .map(|(name, value)| (name.as_ref(), value.as_ref()));
-    let (builder, original_host) = filter_request_headers(builder, headers, &connection_tokens);
-    let builder = attach_forwarding_metadata(builder, original_host, req.remote_addr, req.scheme);
-
-    Ok(builder.body(req.body.clone()))
+    Ok(forwarded.body(req.body.clone()))
 }
 
 /// Metadata extracted from a hyper request for streaming proxy forwarding.
@@ -304,24 +470,24 @@ fn build_upstream_request_streaming(
     incoming: hyper::body::Incoming,
     backend: &str,
     prefix: &str,
-) -> Result<reqwest::RequestBuilder, RuntimeError> {
-    let builder = upstream_builder(parts.method, &parts.path_and_query, backend, prefix)?;
-
-    let connection_tokens = connection_header_tokens(
-        parts
-            .headers
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+) -> Result<reqwest::RequestBuilder, ProxyFailure> {
+    let builder = upstream_builder(
+        routable_reqwest_method(parts.method),
+        &parts.path_and_query,
+        backend,
+        prefix,
+    )?;
+    let forwarded = forward_headers(
+        builder,
+        || {
+            parts
+                .headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), HeaderValueRef::Bytes(value.as_bytes())))
+        },
+        parts.remote_addr,
+        parts.scheme,
     );
-    let headers = parts.headers.iter().map(|(name, value)| {
-        (
-            name.as_str(),
-            std::str::from_utf8(value.as_bytes()).unwrap_or(""),
-        )
-    });
-    let (builder, original_host) = filter_request_headers(builder, headers, &connection_tokens);
-    let builder =
-        attach_forwarding_metadata(builder, original_host, parts.remote_addr, parts.scheme);
 
     use futures_util::StreamExt;
     let body_stream = http_body_util::BodyStream::new(incoming).filter_map(|result| async move {
@@ -331,7 +497,7 @@ fn build_upstream_request_streaming(
         }
     });
 
-    Ok(builder.body(reqwest::Body::wrap_stream(body_stream)))
+    Ok(forwarded.body(reqwest::Body::wrap_stream(body_stream)))
 }
 
 /// Collect non-hop-by-hop headers from an upstream response.
@@ -339,23 +505,43 @@ fn collect_response_headers(resp: &reqwest::Response) -> Box<[HeaderPair]> {
     let connection_tokens = connection_header_tokens(
         resp.headers()
             .iter()
-            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+            .map(|(name, value)| (name.as_str(), HeaderValueRef::Bytes(value.as_bytes()))),
     );
-    let mut headers: Vec<HeaderPair> = Vec::with_capacity(resp.headers().len());
-    for (name, value) in resp.headers() {
-        match is_hop_by_hop(name.as_str()) || is_connection_named(name.as_str(), &connection_tokens)
-        {
-            true => {}
-            false => {
-                let v = value.to_str().unwrap_or("");
-                headers.push((
-                    Cow::Owned(name.as_str().to_owned()),
-                    Cow::Owned(v.to_owned()),
-                ));
-            }
-        }
-    }
-    headers.into_boxed_slice()
+    resp.headers()
+        .iter()
+        .filter(|(name, _)| {
+            !is_hop_by_hop(name.as_str()) && !is_connection_named(name.as_str(), &connection_tokens)
+        })
+        .map(|(name, value)| {
+            (
+                Cow::Owned(name.as_str().to_owned()),
+                Cow::Owned(value.to_str().unwrap_or_default().to_owned()),
+            )
+        })
+        .collect()
+}
+
+/// One upstream answer's head, and the response its body is still inside.
+///
+/// Taken by the one send every forwarding entry point makes: the three of them
+/// differ in how the request was built and what they do with the body, never in
+/// how an answer's status and headers are read off it.
+struct UpstreamAnswer {
+    response: reqwest::Response,
+    status: u16,
+    headers: Box<[HeaderPair]>,
+}
+
+/// Send one built request and take the head of the answer it earns.
+async fn send_upstream(builder: reqwest::RequestBuilder) -> Result<UpstreamAnswer, ProxyFailure> {
+    let response = builder.send().await.map_err(map_reqwest_error)?;
+    let status = response.status().as_u16();
+    let headers = collect_response_headers(&response);
+    Ok(UpstreamAnswer {
+        response,
+        status,
+        headers,
+    })
 }
 
 /// Forward a request to upstream and return a buffered camber Response.
@@ -363,22 +549,27 @@ fn collect_response_headers(resp: &reqwest::Response) -> Box<[HeaderPair]> {
 /// Proxy routes go through the middleware chain, so middleware can inspect
 /// and modify the upstream response (status, headers). The body is fully
 /// buffered into the Response.
+///
+/// The failure keeps its class, because both callers still need it: the
+/// middleware terminal maps it through the rejection boundary, where a
+/// traversal probe must not be recorded as a backend outage, and
+/// [`proxy_forward`] settles a status from the same class alone.
 pub(super) async fn forward_request_buffered(
     req: ProxyRequest,
     backend: &str,
     prefix: &str,
-) -> Result<super::Response, RuntimeError> {
+) -> Result<super::Response, ProxyFailure> {
     let builder = build_upstream_request(&req, backend, prefix)?;
-    let resp = builder.send().await.map_err(map_reqwest_error)?;
-    let status = resp.status().as_u16();
-    let headers = collect_response_headers(&resp);
-
-    let body = resp.bytes().await.map_err(map_reqwest_error)?;
-    let mut response = super::Response::bytes_raw(status, body);
-    for (name, value) in headers.iter() {
-        response = response.with_header(name, value);
-    }
-    Ok(response)
+    let UpstreamAnswer {
+        response,
+        status,
+        headers,
+    } = send_upstream(builder).await?;
+    let body = response.bytes().await.map_err(map_reqwest_error)?;
+    Ok(headers.iter().fold(
+        super::Response::bytes_raw(status, body),
+        |answered, (name, value)| answered.with_header(name, value),
+    ))
 }
 
 /// Forward a request to a backend service and return a buffered response.
@@ -387,7 +578,17 @@ pub(super) async fn forward_request_buffered(
 /// strips `prefix` from the path, forwards to `backend`, and returns
 /// the upstream response with hop-by-hop headers removed.
 ///
-/// Returns 502 on backend failure.
+/// The failure is recorded here rather than classified. This entry point
+/// answers its caller with a response and holds no rejection scope, so there is
+/// nothing to map the failure through: the routed proxy terminal is the path
+/// that reaches the boundary. Recording the cause is what keeps it from being
+/// dropped with the response an operator never sees a reason for.
+///
+/// The status is read from the one function that owns the pair, not spelled
+/// here: an upstream deadline is a gateway timeout and everything else is a bad
+/// gateway, and the CLI's `proxy` plus `root` overlay routes real GET and HEAD
+/// traffic through this path, so a third spelling of that rule is user-visible
+/// the moment it drifts.
 pub fn proxy_forward(
     req: &super::Request,
     backend: &str,
@@ -399,7 +600,11 @@ pub fn proxy_forward(
     Box::pin(async move {
         match forward_request_buffered(proxy_req, &backend, &prefix).await {
             Ok(resp) => resp,
-            Err(_) => super::Response::text_raw(502, "bad gateway"),
+            Err(failure) => {
+                tracing::warn!(error = %failure, "proxy forward failed");
+                let (status, safe) = proxy_failure_status(&failure);
+                super::Response::text_raw(status, safe)
+            }
         }
     })
 }
@@ -452,26 +657,30 @@ async fn forward_stream_result(
     }
 }
 
-/// Forward a request to upstream and stream the response body via a channel.
+/// Send one built request and stream its answer back through a channel.
 ///
-/// Status and headers are buffered; the body is forwarded chunk-by-chunk
-/// with backpressure through the returned receiver.
+/// Both streaming entry points end here: the head is buffered, the body is
+/// forwarded chunk by chunk with backpressure through the returned receiver.
+/// Stating it once is what keeps a request built from a collected body and one
+/// built from a live hyper stream answering the same way.
+async fn stream_upstream(
+    builder: reqwest::RequestBuilder,
+) -> Result<StreamingProxyResponse, ProxyFailure> {
+    let answer = send_upstream(builder).await?;
+    Ok(StreamingProxyResponse {
+        status: answer.status,
+        headers: answer.headers,
+        rx: spawn_response_streamer(answer.response),
+    })
+}
+
+/// Forward a request to upstream and stream the response body via a channel.
 pub(super) async fn forward_request_streaming(
     req: ProxyRequest,
     backend: &str,
     prefix: &str,
-) -> Result<StreamingProxyResponse, RuntimeError> {
-    let builder = build_upstream_request(&req, backend, prefix)?;
-    let resp = builder.send().await.map_err(map_reqwest_error)?;
-    let status = resp.status().as_u16();
-    let headers = collect_response_headers(&resp);
-    let rx = spawn_response_streamer(resp);
-
-    Ok(StreamingProxyResponse {
-        status,
-        headers,
-        rx,
-    })
+) -> Result<StreamingProxyResponse, ProxyFailure> {
+    stream_upstream(build_upstream_request(&req, backend, prefix)?).await
 }
 
 /// Forward an incoming hyper body stream to upstream without buffering.
@@ -484,16 +693,9 @@ pub(super) async fn forward_incoming_streaming(
     incoming: hyper::body::Incoming,
     backend: &str,
     prefix: &str,
-) -> Result<StreamingProxyResponse, RuntimeError> {
-    let builder = build_upstream_request_streaming(&parts, incoming, backend, prefix)?;
-    let resp = builder.send().await.map_err(map_reqwest_error)?;
-    let status = resp.status().as_u16();
-    let headers = collect_response_headers(&resp);
-    let rx = spawn_response_streamer(resp);
-
-    Ok(StreamingProxyResponse {
-        status,
-        headers,
-        rx,
-    })
+) -> Result<StreamingProxyResponse, ProxyFailure> {
+    stream_upstream(build_upstream_request_streaming(
+        &parts, incoming, backend, prefix,
+    )?)
+    .await
 }

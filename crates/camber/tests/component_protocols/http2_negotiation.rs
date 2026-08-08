@@ -1,4 +1,4 @@
-use std::future::{Future, IntoFuture};
+use std::future::IntoFuture;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -7,44 +7,18 @@ use camber::http::{Request, Response, Router};
 use camber::{RuntimeError, runtime};
 use futures_util::FutureExt;
 
+use crate::h2_client::{drain_h2_body, h2_request};
+use crate::http::{HttpResponse, bounded};
 use crate::runtime_support;
 
 const PROTOCOL_TIMEOUT: Duration = Duration::from_secs(5);
 
-async fn bounded<T>(future: impl Future<Output = T>, operation: &str) -> T {
-    tokio::time::timeout(PROTOCOL_TIMEOUT, future)
-        .await
-        .unwrap_or_else(|_| panic!("HTTP/2 {operation} timed out"))
-}
-
-async fn h2c_get(addr: std::net::SocketAddr, path: &str) -> (u16, Box<[u8]>) {
-    bounded(
-        async {
-            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-            let (mut client, connection) = h2::client::handshake(tcp).await.unwrap();
-            let connection = tokio::spawn(connection);
-            let request = ::http::Request::get(format!("http://{addr}{path}"))
-                .body(())
-                .unwrap();
-            let (response, _) = client.send_request(request, true).unwrap();
-            let response = response.await.unwrap();
-            let status = response.status().as_u16();
-            let body_bytes = drain_h2_body(response.into_body(), "response body frame").await;
-            drop(client);
-            // The response is complete. Abort the client driver rather than waiting for
-            // the server's independent keepalive policy to close the connection.
-            connection.abort();
-            match connection.await {
-                Ok(Ok(())) => {}
-                Err(error) if error.is_cancelled() => {}
-                Ok(Err(error)) => panic!("HTTP/2 client driver failed: {error}"),
-                Err(error) => panic!("HTTP/2 client driver join failed: {error}"),
-            }
-            (status, body_bytes)
-        },
-        "request",
-    )
-    .await
+/// Send one cleartext HTTP/2 `GET` and read the whole answer.
+///
+/// The authority is the address itself, which is what an `h2c` peer talking to a
+/// bare socket has to say for itself.
+async fn h2c_get(addr: std::net::SocketAddr, path: &str) -> HttpResponse {
+    h2_request(addr, "GET", path, &addr.to_string(), &[], PROTOCOL_TIMEOUT).await
 }
 
 fn retained_stream_router() -> (
@@ -82,12 +56,20 @@ async fn open_http2_client(
     h2::client::SendRequest<Bytes>,
     tokio::task::JoinHandle<Result<(), h2::Error>>,
 ) {
-    let tcp = bounded(tokio::net::TcpStream::connect(addr), "connect")
-        .await
-        .unwrap();
-    let (client, connection) = bounded(h2::client::handshake(tcp), "handshake")
-        .await
-        .unwrap();
+    let tcp = bounded(
+        tokio::net::TcpStream::connect(addr),
+        PROTOCOL_TIMEOUT,
+        "the HTTP/2 client connect",
+    )
+    .await
+    .unwrap();
+    let (client, connection) = bounded(
+        h2::client::handshake(tcp),
+        PROTOCOL_TIMEOUT,
+        "the HTTP/2 handshake",
+    )
+    .await
+    .unwrap();
     (client, tokio::spawn(connection))
 }
 
@@ -100,21 +82,10 @@ async fn await_goaway(client: &mut h2::client::SendRequest<Bytes>) -> h2::Error 
                 std::task::Poll::Pending
             }
         }),
-        "GOAWAY",
+        PROTOCOL_TIMEOUT,
+        "the HTTP/2 GOAWAY",
     )
     .await
-}
-
-/// Read one HTTP/2 response body to end of stream, releasing flow-control
-/// capacity per frame so the sender is never stalled by an unread window.
-async fn drain_h2_body(mut body: h2::RecvStream, operation: &str) -> Box<[u8]> {
-    let mut body_bytes = Vec::new();
-    while let Some(chunk) = bounded(body.data(), operation).await {
-        let chunk = chunk.unwrap();
-        body_bytes.extend_from_slice(&chunk);
-        body.flow_control().release_capacity(chunk.len()).unwrap();
-    }
-    body_bytes.into_boxed_slice()
 }
 
 #[test]
@@ -125,9 +96,9 @@ fn http2_cleartext_request() {
             let mut router = Router::new();
             router.get("/hello", |_: &Request| async { Response::text(200, "hi") });
             let addr = runtime_support::spawn_server(router);
-            let (status, body) = runtime_support::block_on(h2c_get(addr, "/hello"));
-            assert_eq!(status, 200);
-            assert_eq!(body.as_ref(), b"hi");
+            let answered = runtime_support::block_on(h2c_get(addr, "/hello"));
+            assert_eq!(answered.status, 200);
+            assert_eq!(answered.body.as_ref(), b"hi");
             runtime::request_shutdown();
         })
         .unwrap();
@@ -141,16 +112,17 @@ async fn http1_and_http2_same_port() {
 
     let response = bounded(
         camber::http::get(&format!("http://{addr}/hello")),
-        "HTTP/1.1 request",
+        PROTOCOL_TIMEOUT,
+        "the HTTP/1.1 request",
     )
     .await
     .unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(response.body(), "hi");
 
-    let (status, body) = h2c_get(addr, "/hello").await;
-    assert_eq!(status, 200);
-    assert_eq!(body.as_ref(), b"hi");
+    let answered = h2c_get(addr, "/hello").await;
+    assert_eq!(answered.status, 200);
+    assert_eq!(answered.body.as_ref(), b"hi");
     runtime::request_shutdown();
 }
 
@@ -166,9 +138,13 @@ async fn graceful_http2_sends_goaway_drains_stream_and_then_joins() {
         .version(::http::Version::HTTP_2)
         .body(())
         .unwrap();
-    client = bounded(client.ready(), "client readiness").await.unwrap();
+    client = bounded(client.ready(), PROTOCOL_TIMEOUT, "HTTP/2 client readiness")
+        .await
+        .unwrap();
     let (retained_response, _) = client.send_request(request, true).unwrap();
-    bounded(entered_rx, "handler entry").await.unwrap();
+    bounded(entered_rx, PROTOCOL_TIMEOUT, "the HTTP/2 handler entry")
+        .await
+        .unwrap();
 
     runtime::request_shutdown();
     let new_stream_rejection = await_goaway(&mut client).await;
@@ -183,16 +159,26 @@ async fn graceful_http2_sends_goaway_drains_stream_and_then_joins() {
     }
 
     release.add_permits(1);
-    let response = bounded(retained_response, "retained response")
-        .await
-        .expect("retained HTTP/2 stream was not drained");
+    let response = bounded(
+        retained_response,
+        PROTOCOL_TIMEOUT,
+        "the retained HTTP/2 response",
+    )
+    .await
+    .expect("retained HTTP/2 stream was not drained");
     assert_eq!(response.status(), 200);
-    let body_bytes = drain_h2_body(response.into_body(), "retained body frame").await;
+    let body_bytes = drain_h2_body(
+        response.into_body(),
+        "retained body frame",
+        PROTOCOL_TIMEOUT,
+    )
+    .await;
     assert_eq!(body_bytes.as_ref(), b"drained");
 
-    let result: Result<(), RuntimeError> = bounded(completion, "server join").await;
+    let result: Result<(), RuntimeError> =
+        bounded(completion, PROTOCOL_TIMEOUT, "the HTTP/2 server join").await;
     assert!(result.is_ok(), "graceful ServerHandle result: {result:?}");
-    bounded(connection, "connection join")
+    bounded(connection, PROTOCOL_TIMEOUT, "the HTTP/2 connection join")
         .await
         .unwrap()
         .unwrap();

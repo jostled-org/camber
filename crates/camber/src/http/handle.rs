@@ -1,13 +1,18 @@
 use super::body::HyperResponseBody;
 use super::disconnect::DisconnectSignal;
-use super::dispatch::{AsyncDispatch, FrozenRouter, RouteClass, Routed};
+use super::dispatch::{
+    AsyncDispatch, Classified, FrozenRouter, HeadUpgrade, PreBodyScope, RouteClass, Routed,
+};
 #[cfg(feature = "profiling")]
 use super::internal_routes::match_profiling_route;
 use super::internal_routes::{
     build_internal_handler, invoke_internal_route, match_internal_route_from_path,
 };
-use super::record::record_request;
-use super::request::{RequestHead, RequestOrigin, method_is_head};
+use super::record::{count_rejection, record_scoped};
+use super::rejection::{
+    HANDLER, Rejected, RejectionProtocol, RejectionScope, RequestId, RequestIdentity,
+};
+use super::request::{RequestHead, RequestOrigin};
 use super::router::{DispatchResult, GateCheck, ServerDispatch, gate_result};
 use super::server_lifecycle::ConnectionLifecycle;
 use super::streaming::{
@@ -64,47 +69,30 @@ impl ConnCtx {
 /// A request refused before it ever reached dispatch, and the identity to
 /// record it under.
 ///
-/// The response alone was not enough. Every pre-dispatch refusal left with no
+/// The refusal alone was not enough. Every pre-dispatch refusal left with no
 /// method and no path to name, so nothing recorded it: a peer oversizing every
-/// body, or sending an unnameable method on every request, could drive a server
-/// to shed all of its traffic while `http_requests_total` and
-/// `http_request_duration_seconds` stayed flat.
+/// body could drive a server to shed all of its traffic while
+/// `http_requests_total` and `http_request_duration_seconds` stayed flat.
 struct Refused {
-    refusal: Response,
-    /// `None` for a method Camber cannot name — the one refusal whose method
-    /// has no name to record it under.
-    method: Option<super::method::Method>,
+    rejected: Rejected,
+    method: hyper::Method,
     uri: hyper::Uri,
-}
-
-impl Refused {
-    /// Refuse a head Camber cannot name, against the request that sent it.
-    fn unnameable(uri: hyper::Uri) -> Box<Self> {
-        Box::new(Self {
-            refusal: method_not_allowed_response(),
-            method: None,
-            uri,
-        })
-    }
 }
 
 /// What a request-building step answers with.
 ///
-/// The refusal is boxed, and boxed at EVERY step rather than at one of them: a
-/// `Response` beside a `Uri` is ~192 bytes, over `clippy::result_large_err`'s
-/// threshold, and that weight would otherwise ride the success path's stack on
-/// every request to describe a refusal that usually never fires. Boxing one
-/// step and not the next is what forces a frame to unbox and rebox, so all five
-/// builders and the entry point that consumes them agree on the shape.
+/// The refusal is boxed: a rejection beside a `Uri` and a `Method` is well over
+/// `clippy::result_large_err`'s threshold, and that weight would otherwise ride
+/// the success path's stack on every request to describe a refusal that usually
+/// never fires.
 type Building = Result<DispatchInput, Box<Refused>>;
 
 /// Collect the hyper body with a size limit and build a Camber Request.
 ///
 /// `method` arrives already parsed, from the classification that read this
-/// request's head. A method Camber cannot name is answered as `Unnameable`
-/// before a body is read, so this path has one refusal rather than two, and the
-/// URI moves into whichever of the two outcomes needs it instead of being
-/// copied for a refusal that usually never fires.
+/// request's head. Only a matched route reaches here, so the method is one
+/// Camber routes on, and the URI moves into whichever of the two outcomes needs
+/// it instead of being copied for a refusal that usually never fires.
 async fn collect_body_limited(
     hyper_req: hyper::Request<hyper::body::Incoming>,
     max_body: usize,
@@ -115,10 +103,10 @@ async fn collect_body_limited(
     let (parts, body) = hyper_req.into_parts();
     let body_bytes = match collect_body(body, max_body, lifecycle_script).await {
         Ok(bytes) => bytes,
-        Err(refusal) => {
+        Err(rejected) => {
             return Err(Box::new(Refused {
-                refusal,
-                method: Some(method),
+                rejected,
+                method: parts.method,
                 uri: parts.uri,
             }));
         }
@@ -128,11 +116,15 @@ async fn collect_body_limited(
 }
 
 /// Read and size-limit a request body. Separate function to avoid nested match.
+///
+/// Both refusals are built here, where the limit and the deadline are still
+/// known, rather than as a status a later stage would have to guess the cause
+/// of.
 async fn collect_body(
     body: hyper::body::Incoming,
     max_body: usize,
     lifecycle_script: Option<&super::mock::LifecycleScript>,
-) -> Result<bytes::Bytes, Response> {
+) -> Result<bytes::Bytes, Rejected> {
     use http_body_util::BodyExt;
     super::mock::LifecycleScript::pause_at(
         lifecycle_script,
@@ -142,8 +134,25 @@ async fn collect_body(
     let limited = http_body_util::Limited::new(body, max_body);
     match tokio::time::timeout(REQUEST_BODY_TIMEOUT, limited.collect()).await {
         Ok(Ok(collected)) => Ok(collected.to_bytes()),
-        Ok(Err(_)) => Err(Response::text_raw(413, "request body too large")),
-        Err(_) => Err(Response::text_raw(408, "request body timeout")),
+        Ok(Err(error)) => Err(exceeded_or_unreadable(error, max_body)),
+        Err(_) => Err(Rejected::body_timeout(REQUEST_BODY_TIMEOUT)),
+    }
+}
+
+/// Tell an oversized body apart from one that stopped arriving.
+///
+/// `Limited` reports both as one boxed error, and only the length limit is its
+/// own. Reading every failure as the limit answered a mid-body transport error
+/// or a peer reset with `413 request body too large` — a size complaint about a
+/// request that was never too large — and dropped the cause that would have
+/// said otherwise.
+fn exceeded_or_unreadable(
+    error: Box<dyn std::error::Error + Send + Sync>,
+    max_body: usize,
+) -> Rejected {
+    match error.downcast_ref::<http_body_util::LengthLimitError>() {
+        Some(_) => Rejected::body_too_large(max_body),
+        None => Rejected::body_unreadable(error),
     }
 }
 
@@ -164,11 +173,10 @@ type DispatchInput = Request;
 fn build_head_only_request(
     mut hyper_req: hyper::Request<hyper::body::Incoming>,
     origin: RequestOrigin<'_>,
-) -> Building {
+) -> DispatchInput {
     let ws = ws_proxy::extract_ws_upgrade(&mut hyper_req);
-    let head = RequestHead::from_hyper_request(&hyper_req, origin)
-        .ok_or_else(|| Refused::unnameable(hyper_req.uri().clone()))?;
-    Ok((head.to_request(None), ws))
+    let head = RequestHead::from_hyper_request(&hyper_req, origin);
+    (head.to_request(None), ws)
 }
 
 /// Build a Request from head metadata with an empty body.
@@ -178,10 +186,8 @@ fn build_head_only_request(
 fn build_head_only_request(
     hyper_req: hyper::Request<hyper::body::Incoming>,
     origin: RequestOrigin<'_>,
-) -> Building {
-    let head = RequestHead::from_hyper_request(&hyper_req, origin)
-        .ok_or_else(|| Refused::unnameable(hyper_req.uri().clone()))?;
-    Ok(head.to_request(None))
+) -> DispatchInput {
+    RequestHead::from_hyper_request(&hyper_req, origin).to_request(None)
 }
 
 /// Consume a hyper request into a Camber Request (body-limited, WS-extracted).
@@ -211,23 +217,29 @@ async fn collect_request(
     collect_body_limited(hyper_req, max_body, origin, lifecycle_script, method).await
 }
 
-/// Read the wire the way the head classification decided it should be read.
+/// How the wire is read for one classified request.
 ///
-/// Head-only and unmatched routes never expose a body to a handler, so
-/// collecting one would buffer bytes no handler can reach. Both arms answer
-/// with the refusal the request earned, so the entry point has one `?`-shaped
-/// decision rather than one per build configuration.
+/// Head-only routes and routing terminals never expose a body to a handler, so
+/// collecting one would buffer bytes no handler can reach. Only a matched
+/// buffered route names a method here, because only that arm reads a body.
+enum WireRead {
+    /// Build from the head alone and drop the incoming body.
+    HeadOnly,
+    /// Collect the body under the limit, for the method that matched.
+    Body(super::method::Method),
+}
+
+/// Read the wire the way the head classification decided it should be read.
 async fn build_dispatch_input(
     hyper_req: hyper::Request<hyper::body::Incoming>,
     ctx: &ConnCtx,
     origin: RequestOrigin<'_>,
     lifecycle: &ConnectionLifecycle,
-    skip_body: bool,
-    method: super::method::Method,
+    read: WireRead,
 ) -> Building {
-    match skip_body {
-        true => build_head_only_request(hyper_req, origin),
-        false => {
+    match read {
+        WireRead::HeadOnly => Ok(build_head_only_request(hyper_req, origin)),
+        WireRead::Body(method) => {
             let lifecycle_script = lifecycle.script();
             collect_request(
                 hyper_req,
@@ -242,45 +254,45 @@ async fn build_dispatch_input(
 }
 
 /// What the request head decides before a body is read.
-enum PreBodyRoute {
+enum PreBodyRoute<'a> {
     /// An internal route (`/health`, `/metrics`, `/debug/pprof/cpu`), which
-    /// bypasses body collection entirely, and the method it was asked with.
-    Internal(super::internal_routes::InternalRoute, super::method::Method),
-    /// How the dispatch trie classifies the route, and the method it was
-    /// classified under. The method travels with the class because every path
-    /// below needs it to record what it answered, and parsing it a second time
-    /// would only re-derive what the head already proved.
-    Class(RouteClass, super::method::Method),
-    /// A method Camber cannot name.
-    ///
-    /// It reaches no route, no handler, and no middleware, so the only answer
-    /// it can get is `405`. Carried out of classification so the body is never
-    /// read for one: routing it as buffered spent a full body read, and up to
-    /// `max_request_body` of heap, on a request already known to be refused.
-    Unnameable,
+    /// bypasses body collection entirely.
+    Internal(super::internal_routes::InternalRoute),
+    /// How the dispatch trie classifies the route. A class that reads a body
+    /// carries the method it matched under, because that is the one arm that
+    /// needs it and re-parsing it would only re-derive what the head proved.
+    Class(Classified<'a>),
 }
 
 /// Classify a request from its head alone.
 ///
 /// The borrow of `hyper_req` ends here, before any mutable access or body
-/// collection. A head Camber cannot name — an unparseable method — leaves as
-/// `Unnameable` rather than being routed on a guess.
-fn classify_pre_body(
+/// collection.
+///
+/// The upgrade question is answered here, where the hyper headers are still in
+/// hand, and carried in: a streaming-proxy route that carries one is dispatched
+/// as a handshake, so classification has to know before it decides what to
+/// build.
+fn classify_pre_body<'a>(
     hyper_req: &hyper::Request<hyper::body::Incoming>,
-    dispatch: &ServerDispatch,
+    dispatch: &'a ServerDispatch,
     ctx: &ConnCtx,
     origin: RequestOrigin<'_>,
-) -> PreBodyRoute {
-    let head = match RequestHead::from_hyper_request(hyper_req, origin) {
-        Some(head) => head,
-        None => return PreBodyRoute::Unnameable,
-    };
+) -> PreBodyRoute<'a> {
+    let head = RequestHead::from_hyper_request(hyper_req, origin);
     let internal = match_internal_route_from_path(head.path(), ctx);
     #[cfg(feature = "profiling")]
     let internal = internal.or_else(|| match_profiling_route(head.path(), head.raw_query(), ctx));
+    #[cfg(feature = "ws")]
+    let asks_websocket = ws_proxy::is_ws_upgrade_head(hyper_req.headers());
+    // No WebSocket support is compiled in, so no head can ask for one.
+    #[cfg(not(feature = "ws"))]
+    let asks_websocket = false;
     match internal {
-        Some(route) => PreBodyRoute::Internal(route, head.method()),
-        None => PreBodyRoute::Class(dispatch.classify_route(&head), head.method()),
+        Some(route) => PreBodyRoute::Internal(route),
+        None => {
+            PreBodyRoute::Class(dispatch.classify_route(&head, HeadUpgrade::of(asks_websocket)))
+        }
     }
 }
 
@@ -292,71 +304,71 @@ fn classify_pre_body(
 fn pending_middleware_gate(
     result: &DispatchResult,
     router: Option<&FrozenRouter>,
+    scope: &RejectionScope,
 ) -> Option<GateCheck> {
     match (result.needs_middleware_gate(), router) {
-        (true, Some(router)) => router.middleware_gate(result.request_ref()),
-        _ => None,
+        (false, _) => None,
+        (true, Some(router)) => router.middleware_gate(result.request_ref(), scope),
+        // Named rather than folded into the pass above. Only a resolved router
+        // has handlers to select a gated class from, so nothing reaches here
+        // today — but the pass arm forwards, and a stream, an SSE, or a proxied
+        // upgrade forwarded on a gate that never ran is an unauthenticated
+        // request. Refused instead, which is the answer that stays safe if the
+        // shape ever changes.
+        (true, None) => Some(unrunnable_gate(scope)),
     }
+}
+
+/// Answer a gate that was owed but had no chain to run it.
+fn unrunnable_gate(scope: &RejectionScope) -> GateCheck {
+    let scope = scope.clone();
+    Box::pin(async move { scope.map(Rejected::gate_unrunnable()) })
 }
 
 /// Put a buffered response on the wire and record the status the peer is given.
 ///
 /// The record is read off the CONVERTED response, never off the one handed in.
-/// `Response::into_hyper` answers with its own `500` for a response it cannot
-/// build — an unrepresentable header name is enough, and `with_header` does not
-/// validate — so a metric taken before the conversion could name a status no
-/// peer ever saw.
+/// A response Camber cannot build leaves through the rejection boundary with
+/// its own status — an unrepresentable header name is enough, and `with_header`
+/// does not validate — so a metric taken before the conversion could name a
+/// status no peer ever saw.
 ///
-/// A HEAD keeps its headers and loses its body, stripped here rather than at
-/// each caller: every buffered answer this file gives leaves through this
-/// function, so none of them can strip a body another one keeps.
-fn answer(
+/// The scope owns the conversion, the HEAD body strip, and the method and path
+/// this request is recorded under: every buffered answer this file gives leaves
+/// through here, so none of them can strip a body another one keeps or record a
+/// name another one uses.
+///
+/// A response policy produced is also counted as the refusal it answered.
+/// Conversion reports that category alongside the response, because conversion
+/// is the last stage that can raise one of its own.
+pub(super) fn answer(
     ctx: &ConnCtx,
-    method: &'static str,
-    path: &str,
-    is_head: bool,
     resp: Response,
     start: std::time::Instant,
+    scope: &RejectionScope,
 ) -> hyper::Response<HyperResponseBody> {
-    let converted = to_hyper_full(strip_body_if_head(is_head, resp));
-    record_request(ctx, method, path, converted.status().as_u16(), start);
-    converted
+    let finalized = scope.finalize(resp);
+    let status = finalized.response.status().as_u16();
+    if let Some(kind) = finalized.refused {
+        count_rejection(ctx, kind, status);
+    }
+    record_scoped(ctx, scope, status, start);
+    let (parts, body) = finalized.response.into_parts();
+    hyper::Response::from_parts(parts, HyperResponseBody::Full(body))
 }
 
-/// Record a refusal against the request that produced it.
-fn refuse(
+/// Answer one refusal under the policy its own stage resolved.
+///
+/// Every mapped refusal this file answers with leaves through here, so none of
+/// them can map under one policy and record under another.
+pub(super) fn answer_rejected(
     ctx: &ConnCtx,
-    result: &DispatchResult,
-    refusal: Response,
+    scope: &RejectionScope,
+    rejected: Rejected,
     start: std::time::Instant,
 ) -> hyper::Response<HyperResponseBody> {
-    let req = result.request_ref();
-    answer(ctx, req.method(), req.path(), req.is_head(), refusal, start)
-}
-
-/// The label a request whose method Camber cannot name is recorded under.
-///
-/// `record_request` names methods with `&'static str`, and an unnameable method
-/// has no such name. Recording it under this keeps the refusal countable; not
-/// recording it is what let a peer shed every request without moving a counter.
-const UNNAMEABLE_METHOD: &str = "UNKNOWN";
-
-/// Record a refusal decided from the head alone, before dispatch was reached.
-///
-/// Recorded like every other refusal this file answers with. The buffered
-/// proxy's own unhealthy arm returns its `503` through `finish_async`, so it is
-/// counted and logged; leaving the head refusals unrecorded made the classes
-/// that shed traffic the ones no metric or request log could see.
-pub(super) fn refuse_head(
-    ctx: &ConnCtx,
-    method: Option<super::method::Method>,
-    path: &str,
-    refusal: Response,
-    start: std::time::Instant,
-) -> hyper::Response<HyperResponseBody> {
-    let is_head = method.is_some_and(method_is_head);
-    let name = method.map_or(UNNAMEABLE_METHOD, super::method::Method::as_str);
-    answer(ctx, name, path, is_head, refusal, start)
+    let response = scope.map(rejected);
+    answer(ctx, response, start, scope)
 }
 
 /// Shared facts needed after a request head has selected a dispatch route.
@@ -368,75 +380,101 @@ struct RequestDispatch<'a> {
     start: std::time::Instant,
 }
 
+/// How the wire must be read for a class that reaches dispatch.
+///
+/// Listed rather than wildcarded, so a new `RouteClass` is a compile error here
+/// instead of a silent fall-through into body collection. `StreamingProxy` is
+/// listed for exhaustiveness alone: classification decides the upgrade, so that
+/// class forwards its own body and returns before reaching here.
+fn wire_read(route_class: &RouteClass) -> WireRead {
+    match route_class {
+        RouteClass::Buffered(method) => WireRead::Body(*method),
+        RouteClass::HeadOnly
+        | RouteClass::Terminal
+        | RouteClass::Refused(_)
+        | RouteClass::StreamingProxy(_) => WireRead::HeadOnly,
+    }
+}
+
 /// Dispatch a classified route without losing its body-collection contract.
-async fn dispatch_classified_route(
+async fn dispatch_classified_route<'a>(
     hyper_req: hyper::Request<hyper::body::Incoming>,
-    route_class: RouteClass,
-    method: super::method::Method,
-    request_dispatch: &RequestDispatch<'_>,
+    classified: Classified<'a>,
+    request_dispatch: &RequestDispatch<'a>,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let &RequestDispatch {
-        dispatch,
         ctx,
         origin,
         lifecycle,
         start,
+        ..
     } = request_dispatch;
-    #[cfg(feature = "ws")]
-    let is_ws_upgrade = ws_proxy::is_ws_upgrade_head(hyper_req.headers());
-    #[cfg(not(feature = "ws"))]
-    let is_ws_upgrade = false;
 
-    let skip_body_collection = matches!(route_class, RouteClass::HeadOnly | RouteClass::Unmatched)
-        || (matches!(&route_class, RouteClass::StreamingProxy(_)) && is_ws_upgrade);
-    match route_class {
-        RouteClass::StreamingProxy(target) if !is_ws_upgrade => {
-            return dispatch_streaming_proxy(
-                hyper_req, dispatch, ctx, target, origin, method, start,
-            )
-            .await;
+    let Classified {
+        class,
+        scope,
+        router,
+    } = classified;
+    // The wire contract is asked for only by the classes that go on to read the
+    // wire. The two arms below answer without reading one, so deriving it for
+    // them was work every proxied stream and every head refusal paid to drop.
+    let class = match class {
+        RouteClass::StreamingProxy(target) => {
+            return dispatch_streaming_proxy(hyper_req, ctx, target, origin, router, &scope, start)
+                .await;
         }
-        RouteClass::Refused(refusal) => {
-            let path = hyper_req.uri().path();
-            return Ok(refuse_head(ctx, Some(method), path, refusal, start));
+        RouteClass::Refused(rejected) => {
+            let scope = scope.scope(RequestIdentity::from_head(
+                &origin,
+                hyper_req.method(),
+                hyper_req.uri(),
+            ));
+            return Ok(answer_rejected(ctx, &scope, rejected, start));
         }
-        // Listed rather than wildcarded, so a new `RouteClass` is a compile
-        // error here instead of a silent fall-through into body collection.
-        // `StreamingProxy(_)` appears because the guarded arm above it does not
-        // cover the WS-upgrade case.
-        RouteClass::HeadOnly
-        | RouteClass::Unmatched
-        | RouteClass::Buffered
-        | RouteClass::StreamingProxy(_) => {}
-    }
+        read_from_wire
+        @ (RouteClass::HeadOnly | RouteClass::Terminal | RouteClass::Buffered(_)) => read_from_wire,
+    };
 
-    let input = match build_dispatch_input(
-        hyper_req,
-        ctx,
-        origin,
-        lifecycle,
-        skip_body_collection,
-        method,
-    )
-    .await
-    {
+    let read = wire_read(&class);
+    let input = match build_dispatch_input(hyper_req, ctx, origin, lifecycle, read).await {
         Ok(input) => input,
         Err(refused) => {
-            let Refused {
-                refusal,
-                method: refused_method,
-                uri,
-            } = *refused;
-            return Ok(refuse_head(ctx, refused_method, uri.path(), refusal, start));
+            return Ok(refuse_body(ctx, origin, &scope, *refused, start));
         }
     };
-    dispatch_built_request(input, request_dispatch).await
+    dispatch_built_request(input, router, request_dispatch).await
+}
+
+/// Answer a refusal raised while the request body was being read.
+///
+/// No owned request exists yet, so the policy and the route identity come from
+/// the classification that decided how the wire would be read. That is the same
+/// mapper the route's own handler would have failed through.
+fn refuse_body(
+    ctx: &ConnCtx,
+    origin: RequestOrigin<'_>,
+    pre_body: &PreBodyScope,
+    refused: Refused,
+    start: std::time::Instant,
+) -> hyper::Response<HyperResponseBody> {
+    let Refused {
+        rejected,
+        method,
+        uri,
+    } = refused;
+    let scope = pre_body.scope(RequestIdentity::from_head(&origin, &method, &uri));
+    answer_rejected(ctx, &scope, rejected, start)
 }
 
 /// Run middleware gates and finish a request whose wire representation is built.
-async fn dispatch_built_request(
+///
+/// The child router arrives from classification rather than being resolved
+/// again: the authority parse and the host-table search that selected it are
+/// the same two this dispatch would otherwise repeat.
+async fn dispatch_built_request<'a>(
     input: DispatchInput,
-    request_dispatch: &RequestDispatch<'_>,
+    resolved: Option<&'a FrozenRouter>,
+    request_dispatch: &RequestDispatch<'a>,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let &RequestDispatch {
         dispatch,
@@ -449,13 +487,26 @@ async fn dispatch_built_request(
     let (req, ws_upgrade) = input;
     #[cfg(not(feature = "ws"))]
     let req = input;
-    let Routed { result, router } = dispatch.dispatch(req);
-    let gate_blocked = match pending_middleware_gate(&result, router) {
+    let Routed {
+        result,
+        router,
+        scope,
+    } = dispatch.dispatch_resolved(req, resolved);
+    // A proxied route that carries an upgrade dispatches as WebSocket, not as
+    // the proxy class its handler was registered under. Corrected before the
+    // gate runs, so a gate refusal reports the class this request is actually
+    // being answered as.
+    #[cfg(feature = "ws")]
+    let scope = match result.is_websocket() {
+        true => scope.reclassified(RejectionProtocol::WebSocket),
+        false => scope,
+    };
+    let gate_blocked = match pending_middleware_gate(&result, router, &scope) {
         None => None,
-        Some(GateCheck { reached, fut }) => gate_result(reached, fut.await),
+        Some(gate) => gate_result(gate.await),
     };
     if let Some(blocked) = gate_blocked {
-        return Ok(refuse(ctx, &result, blocked, start));
+        return Ok(answer(ctx, blocked, start, &scope));
     }
 
     #[cfg(feature = "ws")]
@@ -464,32 +515,42 @@ async fn dispatch_built_request(
         .then(|| ws_proxy::check_ws_origin(result.request_ref()))
         .flatten()
     {
-        return Ok(refuse(ctx, &result, rejected, start));
+        return Ok(answer_rejected(ctx, &scope, rejected, start));
     }
 
     match result {
-        DispatchResult::Async(fut, req) => finish_async(ctx, &req, fut.await, start),
-        DispatchResult::Stream(fut, req) => handle_stream_response(fut.await, req, ctx, start),
+        DispatchResult::Async(fut, held_request) => {
+            let answered = finish_async(ctx, fut.await, start, &scope);
+            // Released here, not at the start of this arm: the request owns
+            // this response's lifetime signal, and the buffered future is
+            // `'static`, so nothing else keeps that signal alive while the
+            // handler runs.
+            drop(held_request);
+            answered
+        }
+        DispatchResult::Stream(fut, req) => {
+            handle_stream_response(fut.await, req, ctx, &scope, start)
+        }
         DispatchResult::Sse(handler, req) => {
-            record_request(ctx, req.method(), req.path(), 200, start);
+            record_scoped(ctx, &scope, 200, start);
             handle_sse(handler, req, ctx.sse_buffer_size, lifecycle).await
         }
         #[cfg(feature = "ws")]
         DispatchResult::WebSocket(handler, req) => {
-            record_upgrade(ctx, req, start, |req| {
+            record_upgrade(ctx, req, start, &scope, |req| {
                 ws_proxy::handle_ws_upgrade(ws_upgrade, handler, req, ctx.ws_buffer_size, lifecycle)
             })
             .await
         }
         #[cfg(feature = "ws")]
         DispatchResult::ProxyWebSocket(req, backend, prefix) => {
-            record_upgrade(ctx, req, start, |req| {
+            record_upgrade(ctx, req, start, &scope, |req| {
                 ws_proxy::handle_proxy_ws(ws_upgrade, req, backend, prefix, lifecycle)
             })
             .await
         }
         DispatchResult::ProxyStream(req, backend, prefix) => {
-            handle_proxy_stream_response(req, &backend, &prefix, ctx, start).await
+            handle_proxy_stream_response(req, &backend, &prefix, ctx, &scope, start).await
         }
     }
 }
@@ -511,10 +572,15 @@ pub(super) async fn handle_request(
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let start = std::time::Instant::now();
     // Built once and copied down every dispatch path, so no path can pair this
-    // peer with another request's lifetime signal.
+    // peer with another request's lifetime signal. The identity is minted here,
+    // after Hyper accepted the head and before method, host, route, body,
+    // middleware, or protocol classification has run, so every answer this
+    // request can get names the same value.
     let origin = RequestOrigin {
         remote_addr,
         is_tls: ctx.is_tls,
+        request_id: RequestId::generate(),
+        version: hyper_req.version(),
         disconnect: &disconnect,
     };
 
@@ -526,27 +592,14 @@ pub(super) async fn handle_request(
         GrpcDispatch::NotGrpc(req) => req,
     };
 
-    let (route_class, method) = match classify_pre_body(&hyper_req, dispatch, ctx, origin) {
+    let classified = match classify_pre_body(&hyper_req, dispatch, ctx, origin) {
         // Internal routes (/health, /metrics, /debug/pprof/cpu) bypass body
         // collection.
-        PreBodyRoute::Internal(route, method) => {
-            return dispatch_internal_head_only(
-                &hyper_req, route, dispatch, ctx, origin, method, start,
-            )
-            .await;
+        PreBodyRoute::Internal(route) => {
+            return dispatch_internal_head_only(&hyper_req, route, dispatch, ctx, origin, start)
+                .await;
         }
-        // Answered before the wire is read: nothing downstream could route it,
-        // and collecting a body first would buffer megabytes for a `405`.
-        PreBodyRoute::Unnameable => {
-            return Ok(refuse_head(
-                ctx,
-                None,
-                hyper_req.uri().path(),
-                method_not_allowed_response(),
-                start,
-            ));
-        }
-        PreBodyRoute::Class(class, method) => (class, method),
+        PreBodyRoute::Class(classified) => classified,
     };
     let request_dispatch = RequestDispatch {
         dispatch,
@@ -555,7 +608,7 @@ pub(super) async fn handle_request(
         lifecycle,
         start,
     };
-    dispatch_classified_route(hyper_req, route_class, method, &request_dispatch).await
+    dispatch_classified_route(hyper_req, classified, &request_dispatch).await
 }
 
 /// Finish a buffered dispatch against the request that produced it.
@@ -564,42 +617,61 @@ pub(super) async fn handle_request(
 /// can strip a body the other keeps or record a status it did not answer with.
 fn finish_async(
     ctx: &ConnCtx,
-    req: &Request,
     resp: Response,
     start: std::time::Instant,
+    scope: &RejectionScope,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    Ok(answer(
-        ctx,
-        req.method(),
-        req.path(),
-        req.is_head(),
-        resp,
-        start,
-    ))
+    Ok(answer(ctx, resp, start, scope))
 }
 
 /// Run an upgrade and record what it ANSWERED, not the `101` it hoped for.
 ///
-/// A rejected handshake, a refused registrar, or an unbuildable response all
-/// leave with their own status. The request's name is taken before it is handed
-/// to the upgrade, because the request itself moves into the bridge — the URI is
-/// `Bytes`-backed, so holding one is a refcount bump. Both upgrade kinds record
-/// through here, so that invariant is stated once rather than per kind.
+/// A rejected handshake, a refused registrar, or an unbuildable `101` leaves as
+/// a refusal, mapped here by the same policy the route's own handler would have
+/// failed through — named by what negotiation had selected before it failed.
+/// Both upgrade kinds record through here, so that invariant is stated once
+/// rather than per kind.
+///
+/// The name comes off the scope, not off the request that moves into the
+/// bridge. Rebuilding it here from the request's own method and URI was a
+/// second answer to a question every exit already carries one for, and the
+/// buffered and streaming exits cannot disagree about what names a request
+/// while they read the same one.
 #[cfg(feature = "ws")]
 async fn record_upgrade<F, Fut>(
     ctx: &ConnCtx,
     req: Request,
     start: std::time::Instant,
+    scope: &RejectionScope,
     upgrade: F,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible>
 where
     F: FnOnce(Request) -> Fut,
-    Fut: std::future::Future<Output = hyper::Response<HyperResponseBody>>,
+    Fut: std::future::Future<
+            Output = Result<hyper::Response<HyperResponseBody>, ws_proxy::WsRefusal>,
+        >,
 {
-    let (method, uri) = (req.method(), req.uri_owned());
-    let resp = upgrade(req).await;
-    record_request(ctx, method, uri.path(), resp.status().as_u16(), start);
-    Ok(resp)
+    match upgrade(req).await {
+        Ok(resp) => {
+            record_scoped(ctx, scope, resp.status().as_u16(), start);
+            Ok(resp)
+        }
+        Err(refusal) => Ok(answer_rejected(
+            ctx,
+            &refused_upgrade_scope(scope, refusal.subprotocol.as_deref()),
+            refusal.rejected,
+            start,
+        )),
+    }
+}
+
+/// Name a refused upgrade's policy by what negotiation had already selected.
+#[cfg(feature = "ws")]
+fn refused_upgrade_scope(scope: &RejectionScope, subprotocol: Option<&str>) -> RejectionScope {
+    match subprotocol {
+        Some(subprotocol) => scope.clone().negotiated_subprotocol(subprotocol),
+        None => scope.clone(),
+    }
 }
 
 /// Dispatch an internal route without body collection.
@@ -614,18 +686,10 @@ async fn dispatch_internal_head_only(
     dispatch: &ServerDispatch,
     ctx: &ConnCtx,
     origin: RequestOrigin<'_>,
-    method: super::method::Method,
     start: std::time::Instant,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     match dispatch.skip_middleware_for_internal() {
-        true => Ok(answer(
-            ctx,
-            method.as_str(),
-            hyper_req.uri().path(),
-            method_is_head(method),
-            invoke_internal_route(&route),
-            start,
-        )),
+        true => Ok(answer_internal_directly(hyper_req, &route, dispatch, ctx, origin, start).await),
         false => {
             dispatch_internal_through_middleware(hyper_req, route, dispatch, ctx, origin, start)
                 .await
@@ -633,8 +697,44 @@ async fn dispatch_internal_head_only(
     }
 }
 
+/// Answer an internal route that bypasses the middleware chain.
+///
+/// The bypass skips middleware, not policy: a route Camber could not build a
+/// response for is mapped by the same mapper every other refusal reaches.
+///
+/// Async because the route it invokes is: the profiling route waits on a
+/// blocking thread, and a bypass that resolved it synchronously would hold this
+/// worker for the whole sampling window.
+async fn answer_internal_directly(
+    hyper_req: &hyper::Request<hyper::body::Incoming>,
+    route: &super::internal_routes::InternalRoute,
+    dispatch: &ServerDispatch,
+    ctx: &ConnCtx,
+    origin: RequestOrigin<'_>,
+    start: std::time::Instant,
+) -> hyper::Response<HyperResponseBody> {
+    let head = RequestHead::from_hyper_request(hyper_req, origin);
+    let identity = RequestIdentity::from_head(&origin, hyper_req.method(), hyper_req.uri());
+    let scope = internal_scope(dispatch.head_scope(&head, identity), route);
+    let response = scope.resolve(invoke_internal_route(route).await, HANDLER);
+    answer(ctx, response, start, &scope)
+}
+
+/// Name one internal route's policy by the fixed identity it dispatches under.
+fn internal_scope(
+    scope: RejectionScope,
+    route: &super::internal_routes::InternalRoute,
+) -> RejectionScope {
+    scope.established(route.route(), RejectionProtocol::OrdinaryHttp)
+}
+
 /// Build a lightweight Request from head metadata and run the internal route
 /// through the middleware chain.
+///
+/// The child router is resolved once and handed to both the scope and the
+/// dispatch. `/health` and `/metrics` are the highest-frequency paths a served
+/// process sees, and asking each of them separately cost two authority parses
+/// and two host-table searches per request.
 async fn dispatch_internal_through_middleware(
     hyper_req: &hyper::Request<hyper::body::Incoming>,
     route: super::internal_routes::InternalRoute,
@@ -643,34 +743,19 @@ async fn dispatch_internal_through_middleware(
     origin: RequestOrigin<'_>,
     start: std::time::Instant,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    let head = match RequestHead::from_hyper_request(hyper_req, origin) {
-        Some(h) => h,
-        None => {
-            return Ok(refuse_head(
-                ctx,
-                None,
-                hyper_req.uri().path(),
-                method_not_allowed_response(),
-                start,
-            ));
-        }
-    };
-    let req = head.to_request(None);
+    let req = RequestHead::from_hyper_request(hyper_req, origin).to_request(None);
+    let resolved = dispatch.resolve(&req);
+    let scope = internal_scope(dispatch.resolved_scope(&resolved, &req), &route);
     let handler = build_internal_handler(route);
-    let AsyncDispatch { fut, req } = dispatch.dispatch_with_handler(&handler, req);
-    finish_async(ctx, &req, fut.await, start)
-}
-
-pub(super) fn to_hyper_full(resp: Response) -> hyper::Response<HyperResponseBody> {
-    let (parts, body) = resp.into_hyper().into_parts();
-    hyper::Response::from_parts(parts, HyperResponseBody::Full(body))
-}
-
-fn strip_body_if_head(is_head: bool, resp: Response) -> Response {
-    match is_head {
-        true => resp.strip_body(),
-        false => resp,
-    }
+    let AsyncDispatch {
+        fut,
+        req: held_request,
+    } = ServerDispatch::dispatch_with_handler(resolved, &handler, req, scope.clone());
+    let answered = finish_async(ctx, fut.await, start, &scope);
+    // Released here, not before the await: the request owns this response's
+    // lifetime signal, and the buffered future does not borrow from it.
+    drop(held_request);
+    answered
 }
 
 /// What the gRPC pre-check decided about a request.
@@ -695,110 +780,110 @@ async fn try_dispatch_grpc(
     origin: RequestOrigin<'_>,
     start: std::time::Instant,
 ) -> GrpcDispatch {
-    let is_grpc = dispatch.grpc_router().is_some() && is_grpc_request(&hyper_req);
-    match is_grpc {
-        false => GrpcDispatch::NotGrpc(hyper_req),
-        true => GrpcDispatch::Handled(
-            dispatch_grpc_inner(hyper_req, dispatch, ctx, origin, start).await,
+    // The router is resolved here and carried into the dispatch, so being gRPC
+    // and having somewhere to send it is one decision. Re-asking downstream
+    // would invent a "no router" state the caller has already ruled out, and
+    // that state would need an answer no rejection stage produced.
+    match dispatch.grpc_router() {
+        Some(grpc_router) if is_grpc_request(&hyper_req) => GrpcDispatch::Handled(
+            dispatch_grpc_inner(hyper_req, grpc_router, dispatch, ctx, origin, start).await,
         ),
+        _ => GrpcDispatch::NotGrpc(hyper_req),
     }
 }
 
 /// Run the middleware gate and dispatch to tonic. Called only when the request
-/// is confirmed gRPC and a grpc_router exists.
+/// is confirmed gRPC and its caller has resolved the router that answers it.
 #[cfg(feature = "grpc")]
 async fn dispatch_grpc_inner(
     hyper_req: hyper::Request<hyper::body::Incoming>,
+    grpc_router: &super::grpc_support::GrpcRouter,
     dispatch: &ServerDispatch,
     ctx: &ConnCtx,
     origin: RequestOrigin<'_>,
     start: std::time::Instant,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    // Named once for every refusal below. It is `None` exactly when the head
-    // cannot be built, which is the one refusal `run_head_gate` reports as
-    // `MethodNotAllowed`.
-    let method = super::method::Method::from_hyper(hyper_req.method());
-    let grpc_router = match dispatch.grpc_router() {
-        Some(r) => r,
-        None => {
-            return Ok(refuse_head(
-                ctx,
-                method,
-                hyper_req.uri().path(),
-                Response::text_raw(500, "grpc router missing"),
-                start,
-            ));
-        }
-    };
     // Build a lightweight Request from headers for the middleware gate check.
     // The streaming gRPC body is preserved for tonic.
-    match run_head_gate(&hyper_req, dispatch, origin, None).await {
-        Err(MethodNotAllowed) => Ok(refuse_head(
-            ctx,
-            method,
-            hyper_req.uri().path(),
-            method_not_allowed_response(),
-            start,
-        )),
-        Ok(Some(refusal)) => Ok(refuse_head(
-            ctx,
-            method,
-            hyper_req.uri().path(),
-            refusal,
-            start,
-        )),
-        Ok(None) => {
+    //
+    // The pre-check selecting this class is the establishment transition: it
+    // resolved the gRPC router this request dispatches to, so the class carries
+    // both the identity that registration is named by and the class itself.
+    // Tonic owns method routing past the handoff, so the identity is the class's
+    // fixed one rather than a trie pattern.
+    //
+    // The identity borrows the head it names. The request outlives it here, and
+    // the identity takes its own `Bytes`-backed URI handle, so a pair of locals
+    // cloned only to be lent out was a copy nothing read afterwards.
+    //
+    // The child router is resolved once, here, and handed to both the scope and
+    // the gate. Asking separately cost two authority parses and two host-table
+    // searches on every gRPC request.
+    let head = RequestHead::from_hyper_request(&hyper_req, origin);
+    let resolved = dispatch.resolve_from_head(&head);
+    let scope = dispatch
+        .resolved_head_scope(
+            &resolved,
+            RequestIdentity::from_head(&origin, hyper_req.method(), hyper_req.uri()),
+        )
+        .established(super::grpc_support::grpc_route(), RejectionProtocol::Grpc);
+    // An authority Camber cannot parse is refused before the gate, not read as
+    // a pass: this path forwards to tonic on a pass, so the chain would never
+    // have run for a request that reached the upstream.
+    let router = match resolved {
+        Ok(router) => router,
+        Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, start)),
+    };
+    match run_head_gate(&head, router, None, &scope).await {
+        // Answered under the scope this class established, not a rebuilt
+        // built-in one: a middleware response the wire cannot carry recovers
+        // through the router's own mapper, the same one every other refusal on
+        // this path reaches.
+        Some(refusal) => Ok(answer(ctx, refusal, start, &scope)),
+        None => {
             // Tonic owns the response body from here, so this handoff is
-            // Camber's last observation of the request.
+            // Camber's last observation of the request's lifetime.
             origin.disconnect.complete();
-            grpc_router.dispatch(hyper_req).await
+            let response = grpc_router.dispatch(hyper_req).await?;
+            // The head is still Camber's to see, and every other dispatch class
+            // records the answer it gave. Recorded under the same scope this
+            // class established, so a gRPC request is countable and
+            // request-id-keyed like the rest — a class that recorded nothing
+            // was a class an operator could not see at all. What stays outside
+            // is what tonic owns past the head: the trailer status and anything
+            // the body fails with.
+            record_scoped(ctx, &scope, response.status().as_u16(), start);
+            Ok(response)
         }
     }
 }
 
-/// A request whose method Camber cannot name.
-///
-/// Distinct from "the chain passed": a head no `RequestHead` could be built
-/// from was never offered to middleware at all, so a caller that read it as a
-/// pass would forward the request upstream with no gate ever run.
-pub(super) struct MethodNotAllowed;
-
 /// Run middleware as a gate check for a streaming request (gRPC, streaming proxy).
 ///
-/// Borrows URI and HeaderMap from the hyper request via `RequestHead`.
-/// Only clones into an owned `Request` when middleware actually exists.
-/// Returns `Ok(Some(response))` if the request is refused, `Ok(None)` if
-/// middleware passed, and `Err(MethodNotAllowed)` if the gate could not be
-/// built at all.
+/// Borrows URI and HeaderMap from the hyper request via `RequestHead`. Only
+/// clones into an owned `Request` when middleware actually exists. `Some` is
+/// the answer the chain gave instead of passing the request through; `None` is
+/// a pass, either because the chain passed it or because there was no chain.
 ///
-/// A Host header no router can be resolved from is one of the refusals, not a
-/// pass. This gate guards the gRPC and streaming-proxy paths, both of which
-/// forward upstream on `Ok(None)`, so an unresolvable host reported as a pass
-/// would reach the upstream with the chain never run.
+/// The child router arrives already resolved. Both callers — the gRPC path and
+/// the streaming proxy — resolved it to select the policy their refusals are
+/// mapped under, and resolving it again here cost an authority parse and a
+/// host-table search on every one of their requests.
+///
+/// An authority no router can be resolved from is still a refusal, not a pass:
+/// both callers forward upstream on `None`, so an unresolvable authority read
+/// as a pass would reach the upstream with the chain never run. That refusal is
+/// now answered at the single resolution each caller makes, before this gate is
+/// reached at all.
 pub(super) async fn run_head_gate(
-    hyper_req: &hyper::Request<hyper::body::Incoming>,
-    dispatch: &ServerDispatch,
-    origin: RequestOrigin<'_>,
+    head: &RequestHead<'_>,
+    router: Option<&FrozenRouter>,
     params: Option<super::request::Params>,
-) -> Result<Option<Response>, MethodNotAllowed> {
-    let head = match RequestHead::from_hyper_request(hyper_req, origin) {
-        Some(head) => head,
-        None => return Err(MethodNotAllowed),
+    scope: &RejectionScope,
+) -> Option<Response> {
+    let gate = match router.and_then(|router| router.middleware_gate_head(head, params, scope)) {
+        Some(gate) => gate,
+        None => return None,
     };
-    let GateCheck { reached, fut } = match dispatch.middleware_gate_head(&head, params) {
-        Ok(Some(gate)) => gate,
-        Ok(None) => return Ok(None),
-        Err(refusal) => return Ok(Some(refusal)),
-    };
-    Ok(gate_result(reached, fut.await))
-}
-
-/// The answer to a method Camber cannot name.
-///
-/// Every path that meets one gives this same response, whether it is found at
-/// body collection, at head construction, or at a gate that could not be built.
-/// One constructor, so the refusal that is recorded and the refusal that goes
-/// on the wire cannot drift apart.
-pub(super) fn method_not_allowed_response() -> Response {
-    Response::text_raw(405, "method not allowed")
+    gate_result(gate.await)
 }

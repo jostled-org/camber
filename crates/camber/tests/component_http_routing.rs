@@ -2,6 +2,8 @@
 pub mod deterministic;
 #[path = "support/http.rs"]
 pub mod http;
+#[path = "support/rejection.rs"]
+pub mod rejection_support;
 #[path = "support/runtime.rs"]
 pub mod runtime_support;
 
@@ -15,6 +17,8 @@ mod client_methods;
 mod client_timeouts;
 #[path = "component_http_routing/connection_persistence.rs"]
 mod connection_persistence;
+#[path = "component_http_routing/framework_rejections.rs"]
+mod framework_rejections;
 #[path = "component_http_routing/host_dispatch.rs"]
 mod host_dispatch;
 #[path = "component_http_routing/http_test_api.rs"]

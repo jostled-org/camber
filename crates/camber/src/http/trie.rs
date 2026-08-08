@@ -1,6 +1,7 @@
 use super::Request;
 use super::Response;
 use super::method::Method;
+use super::request::Params;
 use super::sse::SseWriter;
 use super::stream::StreamResponse;
 #[cfg(feature = "ws")]
@@ -15,8 +16,19 @@ use std::sync::atomic::AtomicBool;
 
 // ── Handler type aliases ───────────────────────────────────────────
 
+/// The outcome a buffered handler produces.
+///
+/// Fallible, so a handler's error keeps its category and source chain until the
+/// router's one rejection boundary decides what the peer is told.
+///
+/// Public because [`MiddlewareFuture`](super::MiddlewareFuture) resolves to it:
+/// a name a published signature spells has to be a name a reader can follow.
+/// It is transparently `Result<Response, RuntimeError>`, so this documents the
+/// shape rather than adding one.
+pub type HandlerOutcome = Result<Response, RuntimeError>;
+
 pub(super) type Handler =
-    Box<dyn Fn(&Request) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync>;
+    Box<dyn Fn(&Request) -> Pin<Box<dyn Future<Output = HandlerOutcome> + Send>> + Send + Sync>;
 pub(super) type SseHandler =
     Arc<dyn Fn(&Request, &mut SseWriter) -> Result<(), RuntimeError> + Send + Sync>;
 pub(super) type StreamHandler =
@@ -45,22 +57,160 @@ pub(super) enum RouteHandler {
 
 // ── Trie internals ─────────────────────────────────────────────────
 
-type Params = Box<[(Arc<str>, Box<str>)]>;
-type CaptureVec = Vec<Box<str>>;
+/// The segments one path match captured, borrowed from the path itself.
+///
+/// Nothing here is owned. A method refusal collects captures and reads none of
+/// them, and the selection that keeps them binds each to a name as it builds
+/// [`Params`], so boxing them during the traversal spent one allocation per
+/// parameter to produce values no answer reads.
+type CaptureVec<'a> = Vec<&'a str>;
+
 struct RegisteredHandler {
     method: Method,
     handler: RouteHandler,
     capture_names: Box<[Arc<str>]>,
+    route: Arc<str>,
 }
 
 type MethodHandlers = Vec<RegisteredHandler>;
-type LookupResult<'a> = Option<(&'a RouteHandler, Params)>;
+
+/// Every routing method, in the order an `Allow` header lists them.
+///
+/// Not `Method::ordinal` order: that one is a dispatch index, and reusing it
+/// here would make the header's order an accident of how the array is laid out.
+///
+/// Shared with route registration, which needs the same set for a different
+/// reason: a proxy prefix claims every method Camber routes on. A second
+/// literal there would go on claiming seven methods after an eighth variant was
+/// added, and nothing at runtime could see the omission — the added method
+/// would simply stop being proxied. This one is length-checked against
+/// [`Method::COUNT`] and proved a permutation below.
+pub(super) const CANONICAL_METHODS: [Method; Method::COUNT] = [
+    Method::Get,
+    Method::Head,
+    Method::Post,
+    Method::Put,
+    Method::Patch,
+    Method::Delete,
+    Method::Options,
+];
+
+/// The methods one handler set serves, one bit per `Method::ordinal()`.
+///
+/// Two branches can claim one concrete path, and the refusal they share has to
+/// name what both serve. Merging rendered `Allow` values would mean parsing
+/// them back; merging bits is one `or`.
+type MethodMask = u8;
+
+/// `MethodMask` holds every method.
+const _: () = assert!(
+    Method::COUNT <= MethodMask::BITS as usize,
+    "MethodMask has fewer bits than there are methods"
+);
+
+/// `CANONICAL_METHODS` names every routing method exactly once.
+///
+/// The array's length is already the variant count, so an entry written twice
+/// silently drops the method it displaced from every `Allow` header this
+/// module renders. Nothing at runtime can see that omission — the header is
+/// simply short — so the permutation is proved here instead.
+const _: () = {
+    let mut listed = [false; Method::COUNT];
+    let mut position = 0;
+    while position < Method::COUNT {
+        let ordinal = CANONICAL_METHODS[position].ordinal();
+        assert!(!listed[ordinal], "CANONICAL_METHODS lists a method twice");
+        listed[ordinal] = true;
+        position += 1;
+    }
+};
+
+/// What one path-and-method lookup established.
+pub(super) enum RouteLookup<'n, 'p> {
+    /// A handler claims this path with this method.
+    Matched(Selected<'n, 'p>),
+    /// A route claims this path, but not with this method.
+    MethodMismatch {
+        route: Arc<str>,
+        /// Everything the branches claiming this path serve, between them.
+        ///
+        /// Shared rather than borrowed from one node: a path only one branch
+        /// claims is answered with the value that node rendered at freeze, so
+        /// the refusal carrying it costs a refcount bump. A path two branches
+        /// claim has no single frozen value to name, so that set is rendered
+        /// into the same shape — a refusal must not have to know which of the
+        /// two it was handed.
+        allow: Arc<str>,
+    },
+    /// No route claims this path.
+    Unmatched,
+}
+
+/// What a method-selection pass found, and nothing a refusal would need.
+///
+/// Named apart from [`RouteLookup`] so the callers that only dispatch — they
+/// have no refusal to explain — can ask for selection alone and skip the
+/// collecting pass and the `Allow` merge that explaining one costs.
+pub(super) struct Selected<'n, 'p> {
+    /// The normalized pattern the selected handler was registered under.
+    ///
+    /// Borrowed from the frozen handler, like everything else here. Both
+    /// callers clone it into an identity that outlives this value, so owning it
+    /// spent a refcount bump per selection to hand back a handle each of them
+    /// then took its own copy of anyway.
+    pub(super) route: &'n Arc<str>,
+    pub(super) handler: &'n RouteHandler,
+    /// The names the matched pattern spells its captures with.
+    capture_names: &'n [Arc<str>],
+    /// The segments this path matched, in the pattern's own order.
+    captures: CaptureVec<'p>,
+}
+
+impl Selected<'_, '_> {
+    /// Bind each captured segment to the name its pattern spells it with.
+    ///
+    /// Held back for the one caller that keeps the parameters, because most do
+    /// not: pre-body classification reads the handler and the route and
+    /// discards the rest, and binding there boxed a string per parameter for
+    /// every buffered, head-only, and refused request to throw all of them
+    /// away.
+    pub(super) fn bind_params(self) -> Params {
+        debug_assert_eq!(
+            self.capture_names.len(),
+            self.captures.len(),
+            "a pattern names one capture per segment its match collected"
+        );
+        self.capture_names
+            .iter()
+            .cloned()
+            .zip(self.captures)
+            .map(|(name, value)| (name, Box::from(value)))
+            .collect()
+    }
+}
 
 /// A segment in a route pattern: literal, named parameter, or wildcard catch-all.
 enum Segment {
     Static(Box<str>),
     Param(Box<str>),
     Wildcard(Box<str>),
+}
+
+impl Segment {
+    /// Render this segment the way the pattern that produced it spelled it.
+    fn render(&self, into: &mut String) {
+        match self {
+            Self::Static(name) => into.push_str(name),
+            Self::Param(name) => {
+                into.push(':');
+                into.push_str(name);
+            }
+            Self::Wildcard(name) => {
+                into.push('*');
+                into.push_str(name);
+            }
+        }
+    }
 }
 
 fn parse_segments(path: &str) -> Box<[Segment]> {
@@ -72,6 +222,26 @@ fn parse_segments(path: &str) -> Box<[Segment]> {
             _ => Segment::Static(s.into()),
         })
         .collect()
+}
+
+/// The registered pattern, spelled the way the trie actually matches it.
+///
+/// Rebuilt from the parsed segments rather than kept as written, so `//a//b/`
+/// and `/a/b` — which match identically — also name themselves identically.
+/// This is the value a rejection context reports, so two spellings of one route
+/// must not read as two routes.
+fn normalize_route(segments: &[Segment]) -> Arc<str> {
+    match segments.is_empty() {
+        true => Arc::from("/"),
+        false => {
+            let mut pattern = String::new();
+            for segment in segments {
+                pattern.push('/');
+                segment.render(&mut pattern);
+            }
+            Arc::from(pattern.as_str())
+        }
+    }
 }
 
 /// Mutable trie node used during route registration.
@@ -103,44 +273,33 @@ impl TrieNode {
                 Segment::Static(_) => None,
             })
             .collect();
-        self.insert_segments(method, &segments, handler, capture_names);
+        let registered = RegisteredHandler {
+            method,
+            handler,
+            capture_names,
+            route: normalize_route(&segments),
+        };
+        self.insert_segments(&segments, registered);
     }
 
-    fn insert_segments(
-        &mut self,
-        method: Method,
-        segments: &[Segment],
-        handler: RouteHandler,
-        capture_names: Box<[Arc<str>]>,
-    ) {
+    fn insert_segments(&mut self, segments: &[Segment], registered: RegisteredHandler) {
         match segments.first() {
-            None => {
-                self.handlers.push(RegisteredHandler {
-                    method,
-                    handler,
-                    capture_names,
-                });
-            }
+            None => self.handlers.push(registered),
             Some(Segment::Static(name)) => {
                 let child = self
                     .static_children
                     .entry(name.clone())
                     .or_insert_with(TrieNode::new);
-                child.insert_segments(method, &segments[1..], handler, capture_names);
+                child.insert_segments(&segments[1..], registered);
             }
             Some(Segment::Param(_)) => {
                 let child = self
                     .param_child
                     .get_or_insert_with(|| Box::new(TrieNode::new()));
-                child.insert_segments(method, &segments[1..], handler, capture_names);
+                child.insert_segments(&segments[1..], registered);
             }
             Some(Segment::Wildcard(_)) => {
-                let handlers = self.wildcard.get_or_insert_with(Vec::new);
-                handlers.push(RegisteredHandler {
-                    method,
-                    handler,
-                    capture_names,
-                });
+                self.wildcard.get_or_insert_with(Vec::new).push(registered);
             }
         }
     }
@@ -153,43 +312,136 @@ impl TrieNode {
             .map(|(k, v)| (k, v.freeze()))
             .collect();
 
-        let param_child = self.param_child.map(|node| Box::new(node.freeze()));
-
-        let wildcard = self.wildcard.map(|handlers| {
-            let mut method_array: FrozenMethodHandlers = Default::default();
-            for registered in handlers {
-                method_array[registered.method.ordinal()] = Some(FrozenHandler {
-                    handler: registered.handler,
-                    capture_names: registered.capture_names,
-                });
-            }
-            method_array
-        });
-
-        let mut handlers: FrozenMethodHandlers = Default::default();
-        for registered in self.handlers {
-            handlers[registered.method.ordinal()] = Some(FrozenHandler {
-                handler: registered.handler,
-                capture_names: registered.capture_names,
-            });
-        }
-
         FrozenNode {
             static_children,
-            param_child,
-            wildcard,
-            handlers,
+            param_child: self.param_child.map(|node| Box::new(node.freeze())),
+            wildcard: self.wildcard.map(freeze_handlers),
+            handlers: freeze_handlers(self.handlers),
         }
     }
 }
 
-/// Method handlers indexed by `Method::ordinal()`. One slot per HTTP method.
+/// Index one node's registered handlers by `Method::ordinal()`.
+///
+/// Everything a method refusal at this node reports is rendered here too. The
+/// allowed set and the pattern a `405` names are fixed the moment the trie
+/// freezes, so deriving them per refusal was seven probes, a collection, and a
+/// join to rebuild a string that never changes.
+fn freeze_handlers(registered: MethodHandlers) -> FrozenMethodHandlers {
+    let mut by_method: MethodSlots = Default::default();
+    for entry in registered {
+        by_method[entry.method.ordinal()] = Some(FrozenHandler {
+            handler: entry.handler,
+            capture_names: entry.capture_names,
+            route: entry.route,
+        });
+    }
+    FrozenMethodHandlers {
+        claimed: freeze_claim(&by_method),
+        by_method,
+    }
+}
+
+/// What this node answers a method it does not serve with, if it claims a path.
+///
+/// `None` is a node no handler was registered on — an interior node on the way
+/// to one that was. Such a node claims nothing, so it names no route and
+/// allows no method.
+fn freeze_claim(by_method: &MethodSlots) -> Option<Claimed> {
+    let route = CANONICAL_METHODS
+        .iter()
+        .find_map(|method| by_method[method.ordinal()].as_ref())
+        .map(|handler| Arc::clone(&handler.route))?;
+    let served = served_mask(by_method);
+    Some(Claimed {
+        route,
+        allow: render_allow(served),
+        served,
+    })
+}
+
+/// The set of methods a node answers.
+///
+/// `HEAD` is in it whenever `GET` is registered, because that is exactly when
+/// dispatch answers one.
+fn served_mask(by_method: &MethodSlots) -> MethodMask {
+    CANONICAL_METHODS
+        .into_iter()
+        .filter(|method| slot_serves(by_method, *method))
+        .fold(0, |mask, method| mask | method_bit(method))
+}
+
+/// The bit one method occupies in a [`MethodMask`].
+fn method_bit(method: Method) -> MethodMask {
+    1 << method.ordinal()
+}
+
+/// Render an allowed set as an `Allow` value, in canonical order.
+///
+/// Folded straight into the value, the shape [`normalize_route`] uses.
+/// Collecting the names first and joining them allocated a slice nothing else
+/// read, and `merge_allow` reaches here per request whenever two branches
+/// claiming one path serve different method sets.
+fn render_allow(served: MethodMask) -> Arc<str> {
+    let rendered = CANONICAL_METHODS
+        .into_iter()
+        .filter(|method| served & method_bit(*method) != 0)
+        .fold(String::new(), |mut rendered, method| {
+            let separator = match rendered.is_empty() {
+                true => "",
+                false => ", ",
+            };
+            rendered.push_str(separator);
+            rendered.push_str(method.as_str());
+            rendered
+        });
+    Arc::from(rendered.as_str())
+}
+
+/// One registered handler, with everything selecting it needs.
 struct FrozenHandler {
     handler: RouteHandler,
     capture_names: Box<[Arc<str>]>,
+    /// The normalized pattern this handler was registered under.
+    ///
+    /// `Arc<str>` because one immutable registered pattern is cloned across
+    /// every concurrent request that matches it, and because two handlers on
+    /// one path may spell their captures differently — the pattern belongs to
+    /// the handler, not to the node.
+    route: Arc<str>,
 }
 
-type FrozenMethodHandlers = [Option<FrozenHandler>; Method::COUNT];
+/// One slot per HTTP method, indexed by `Method::ordinal()`.
+type MethodSlots = [Option<FrozenHandler>; Method::COUNT];
+
+/// What a node that claims its path answers an unserved method with.
+///
+/// Both values are decided when the trie freezes: the pattern a refusal names,
+/// and the `Allow` value it must carry. Held together because a `405` reports
+/// both or neither.
+struct Claimed {
+    /// The pattern a refusal reports.
+    ///
+    /// Two handlers on one path may spell their captures differently, so a
+    /// refusal has to choose. It reports the first in canonical order — the
+    /// same order the `Allow` header lists — rather than the received path,
+    /// which is not a registered pattern at all.
+    route: Arc<str>,
+    /// The frozen allowed set, already rendered as an `Allow` value.
+    ///
+    /// Shared, so the path only this node claims is refused with the value
+    /// rendered here rather than one built per refusal.
+    allow: Arc<str>,
+    /// The same set as bits, for the refusal that has to merge two nodes'.
+    served: MethodMask,
+}
+
+/// One node's handlers, and what it answers a method it does not serve with.
+struct FrozenMethodHandlers {
+    by_method: MethodSlots,
+    /// Present exactly when some handler claims this node's path.
+    claimed: Option<Claimed>,
+}
 
 /// Immutable trie node for request dispatch.
 pub(crate) struct FrozenNode {
@@ -199,93 +451,179 @@ pub(crate) struct FrozenNode {
     handlers: FrozenMethodHandlers,
 }
 
-impl FrozenNode {
-    /// Match a path and return the route handler + extracted params.
-    /// Priority: static children > param child > wildcard catch-all.
-    pub(crate) fn lookup(&self, method: Method, path: &str, segments: &[&str]) -> LookupResult<'_> {
-        let (registered, mut captures) = self.resolve(method, path, segments)?;
-        captures.reverse();
-        let params = registered
-            .capture_names
-            .iter()
-            .cloned()
-            .zip(captures)
-            .collect();
-        Some((&registered.handler, params))
-    }
+/// What a traversal does with each candidate node's handler set.
+///
+/// One traversal serves both passes because they differ only here: selection
+/// asks for a node that serves the received method and stops at the first
+/// `true`, while a refusal — reached only once selection found nothing —
+/// records what each candidate claims and answers `false`, so the walk carries
+/// on and every branch that could serve the path is seen. Two traversals would
+/// be the same precedence rules written twice, and a route's fallback order is
+/// exactly what would drift between the copies.
+type Accepts<'v, 'n> = &'v mut dyn FnMut(&'n FrozenMethodHandlers) -> bool;
 
-    fn resolve(
-        &self,
-        method: Method,
-        path: &str,
-        segments: &[&str],
-    ) -> Option<(&FrozenHandler, Vec<Box<str>>)> {
-        match segments.first() {
-            None => {
-                let handler = self.handler_for(method)?;
-                Some((handler, CaptureVec::new()))
-            }
-            Some(segment) => self
-                .resolve_static(method, path, segment, &segments[1..])
-                .or_else(|| self.resolve_param(method, path, segment, &segments[1..]))
-                .or_else(|| self.resolve_wildcard(method, path, segments)),
+/// What one path resolution found: the node's handlers and its raw captures.
+type PathMatch<'n, 'p> = (&'n FrozenMethodHandlers, CaptureVec<'p>);
+
+impl FrozenNode {
+    /// Match a path, then select a handler for the received method.
+    ///
+    /// Priority is static children, then the param child, then the wildcard
+    /// catch-all — for the method pass and the any-method pass alike, so a
+    /// refusal names the same route a match would have named.
+    ///
+    /// `method` is `None` for a method outside Camber's route enum. Such a
+    /// request selects no handler, but a route that claims its path still names
+    /// itself and its allowed set.
+    pub(super) fn lookup<'n, 'p>(
+        &'n self,
+        method: Option<Method>,
+        path: &'p str,
+        segments: &[&'p str],
+    ) -> RouteLookup<'n, 'p> {
+        match method.and_then(|method| self.select(method, path, segments)) {
+            Some(selected) => RouteLookup::Matched(selected),
+            None => self.refuse_method(path, segments),
         }
     }
 
-    /// Return the handler for a method, falling back from HEAD to GET.
-    fn handler_for(&self, method: Method) -> Option<&FrozenHandler> {
-        lookup_method_handler(&self.handlers, method)
+    /// Select the handler that serves this method, with its captures bound.
+    ///
+    /// Public to the module because dispatch asks only this: a request being
+    /// routed has no refusal to explain, and paying for the any-method pass and
+    /// the `Allow` rendering to throw both away is what the split avoids.
+    pub(super) fn select<'n, 'p>(
+        &'n self,
+        method: Method,
+        path: &'p str,
+        segments: &[&'p str],
+    ) -> Option<Selected<'n, 'p>> {
+        let mut accepts =
+            |handlers: &'n FrozenMethodHandlers| slot_serves(&handlers.by_method, method);
+        let (handlers, mut captures) = self.resolve(&mut accepts, path, segments)?;
+        let selected = select_slot(&handlers.by_method, method)?;
+        captures.reverse();
+        Some(Selected {
+            route: &selected.route,
+            handler: &selected.handler,
+            capture_names: &selected.capture_names,
+            captures,
+        })
     }
 
-    fn resolve_static(
-        &self,
-        method: Method,
-        path: &str,
+    /// Name the route that claims this path, and everything it may be asked for.
+    ///
+    /// Collects instead of stopping at the first claim. A static child and a
+    /// param child can both claim one concrete path, and each serves its own
+    /// methods there — a request for the other branch's method succeeds. So a
+    /// refusal that named only the branch it reached first would answer with an
+    /// allowed set the peer can disprove with its next request. The route is
+    /// the first in precedence order, the one a match would have named.
+    fn refuse_method<'n, 'p>(&'n self, path: &'p str, segments: &[&'p str]) -> RouteLookup<'n, 'p> {
+        let mut claims: Vec<&'n Claimed> = Vec::new();
+        let mut collect = |handlers: &'n FrozenMethodHandlers| {
+            claims.extend(handlers.claimed.as_ref());
+            false
+        };
+        let matched = self.resolve(&mut collect, path, segments);
+        debug_assert!(matched.is_none(), "a collecting pass accepts no node");
+
+        match claims.split_first() {
+            Some((first, rest)) => RouteLookup::MethodMismatch {
+                route: Arc::clone(&first.route),
+                allow: merge_allow(first, rest),
+            },
+            None => RouteLookup::Unmatched,
+        }
+    }
+
+    fn resolve<'n, 'p>(
+        &'n self,
+        accepts: Accepts<'_, 'n>,
+        path: &'p str,
+        segments: &[&'p str],
+    ) -> Option<PathMatch<'n, 'p>> {
+        let Some(&segment) = segments.first() else {
+            return accepts(&self.handlers).then(|| (&self.handlers, CaptureVec::new()));
+        };
+        let rest = &segments[1..];
+        if let Some(matched) = self.resolve_static(accepts, path, segment, rest) {
+            return Some(matched);
+        }
+        if let Some(matched) = self.resolve_param(accepts, path, segment, rest) {
+            return Some(matched);
+        }
+        self.resolve_wildcard(accepts, path, segments)
+    }
+
+    fn resolve_static<'n, 'p>(
+        &'n self,
+        accepts: Accepts<'_, 'n>,
+        path: &'p str,
         segment: &str,
-        rest: &[&str],
-    ) -> Option<(&FrozenHandler, Vec<Box<str>>)> {
+        rest: &[&'p str],
+    ) -> Option<PathMatch<'n, 'p>> {
         let idx = self
             .static_children
             .binary_search_by_key(&segment, |(k, _)| k)
             .ok()?;
-        self.static_children[idx].1.resolve(method, path, rest)
+        self.static_children[idx].1.resolve(accepts, path, rest)
     }
 
-    fn resolve_param(
-        &self,
-        method: Method,
-        path: &str,
-        segment: &str,
-        rest: &[&str],
-    ) -> Option<(&FrozenHandler, Vec<Box<str>>)> {
+    fn resolve_param<'n, 'p>(
+        &'n self,
+        accepts: Accepts<'_, 'n>,
+        path: &'p str,
+        segment: &'p str,
+        rest: &[&'p str],
+    ) -> Option<PathMatch<'n, 'p>> {
         let child = self.param_child.as_ref()?;
-        let mut result = child.resolve(method, path, rest)?;
-        result.1.push(segment.into());
+        let mut result = child.resolve(accepts, path, rest)?;
+        result.1.push(segment);
         Some(result)
     }
 
-    fn resolve_wildcard(
-        &self,
-        method: Method,
-        path: &str,
-        segments: &[&str],
-    ) -> Option<(&FrozenHandler, Vec<Box<str>>)> {
+    fn resolve_wildcard<'n, 'p>(
+        &'n self,
+        accepts: Accepts<'_, 'n>,
+        path: &'p str,
+        segments: &[&'p str],
+    ) -> Option<PathMatch<'n, 'p>> {
         let handlers = self.wildcard.as_ref()?;
-        let handler = lookup_method_handler(handlers, method)?;
-        let captured: Box<str> = wildcard_span(path, segments).into();
-        Some((handler, vec![captured]))
+        accepts(handlers).then(|| (handlers, vec![wildcard_span(path, segments)]))
     }
 }
 
-/// Look up a handler by method, falling back from HEAD to GET.
-fn lookup_method_handler(
-    handlers: &FrozenMethodHandlers,
-    method: Method,
-) -> Option<&FrozenHandler> {
-    handlers[method.ordinal()]
+/// The `Allow` value for every branch that claims one path.
+///
+/// One claim — or several that happen to serve the same set — is answered with
+/// the value its node rendered at freeze, so the refusal carrying it costs a
+/// refcount bump. A set no single node rendered has no frozen value to name, so
+/// it is built here, on the refusal path only.
+fn merge_allow(first: &Claimed, rest: &[&Claimed]) -> Arc<str> {
+    let served = rest
+        .iter()
+        .fold(first.served, |mask, claim| mask | claim.served);
+    match served == first.served {
+        true => Arc::clone(&first.allow),
+        false => render_allow(served),
+    }
+}
+
+/// Whether a slot set answers this method at all.
+///
+/// Reads the slots rather than the node, so freeze can ask it while the node
+/// that will hold them does not exist yet.
+fn slot_serves(by_method: &MethodSlots, method: Method) -> bool {
+    select_slot(by_method, method).is_some()
+}
+
+/// Read one method's slot, falling back from HEAD to GET.
+fn select_slot(by_method: &MethodSlots, method: Method) -> Option<&FrozenHandler> {
+    by_method[method.ordinal()]
         .as_ref()
         .or_else(|| match method {
-            Method::Head => handlers[Method::Get.ordinal()].as_ref(),
+            Method::Head => by_method[Method::Get.ordinal()].as_ref(),
             _ => None,
         })
 }
@@ -304,9 +642,12 @@ fn wildcard_span<'a>(path: &'a str, segments: &[&'a str]) -> &'a str {
     }
 }
 
-/// Split a URL path into non-empty segments, capped at 32.
-/// Returns `None` if the path exceeds 32 segments (414 URI Too Long).
-pub(super) fn split_path_segments(path: &str) -> Option<ArrayVec<&str, 32>> {
+/// How many path segments the router will match before refusing the target.
+pub(super) const PATH_SEGMENT_LIMIT: usize = 32;
+
+/// Split a URL path into non-empty segments, capped at [`PATH_SEGMENT_LIMIT`].
+/// Returns `None` if the path exceeds that many segments.
+pub(super) fn split_path_segments(path: &str) -> Option<ArrayVec<&str, PATH_SEGMENT_LIMIT>> {
     let mut segments = ArrayVec::new();
     for seg in path.split('/').filter(|s| !s.is_empty()) {
         match segments.try_push(seg) {

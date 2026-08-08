@@ -1,9 +1,8 @@
-use super::middleware::{MiddlewareFn, Next};
+use super::middleware::{MiddlewareFn, MiddlewareFuture, Next};
 use super::request::Request;
 use super::response::Response;
 use crate::RuntimeError;
-use std::future::Future;
-use std::pin::Pin;
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -124,19 +123,22 @@ impl TokenBucket {
     }
 }
 
-fn rate_limit_check(
-    bucket: &TokenBucket,
-    req: &Request,
-    next: Next,
-) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+fn rate_limit_check(bucket: &TokenBucket, req: &Request, next: Next) -> MiddlewareFuture {
     match bucket.try_acquire() {
-        true => next.call(req),
+        true => {
+            let passed = next.call(req);
+            Box::pin(async move { Ok(passed.await) })
+        }
         false => {
             let mut buf = itoa::Buffer::new();
-            let retry_after: Box<str> = buf.format(bucket.retry_after_secs()).into();
-            Box::pin(
-                async move { Response::empty_raw(429).with_header("Retry-After", &retry_after) },
-            )
+            let retry_after = buf.format(bucket.retry_after_secs()).to_owned();
+            // A deliberate application answer, not a framework refusal: it is
+            // this middleware's policy, so it stays a response. The header name
+            // is a literal, so only the computed delay is copied.
+            Box::pin(async move {
+                Ok(Response::empty_raw(429)
+                    .with_static_header("Retry-After", Cow::Owned(retry_after)))
+            })
         }
     }
 }

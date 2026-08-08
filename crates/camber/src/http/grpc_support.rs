@@ -1,7 +1,15 @@
 use super::body::{GrpcBody, HyperResponseBody};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+
+/// The fixed identity a gRPC-dispatched request is named by.
+///
+/// The class is selected by content type against the `GrpcRouter` a router
+/// registered, not by a path match in the trie, so it has no frozen pattern to
+/// carry — the way an internal route has none. Every normalized trie pattern
+/// begins with `/`, so this identity cannot read as one of them.
+static GRPC_ROUTE: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from("grpc"));
 
 type GrpcRequest = hyper::Request<hyper::body::Incoming>;
 type GrpcResponse = hyper::Response<tonic::body::Body>;
@@ -107,6 +115,14 @@ impl Default for GrpcRouter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The pattern the gRPC dispatch class establishes for every request it takes.
+///
+/// One shared identity, minted once: a refusal on this class costs a refcount
+/// bump to name rather than an allocation on the request path.
+pub(super) fn grpc_route() -> Arc<str> {
+    Arc::clone(&GRPC_ROUTE)
 }
 
 /// Check if a request has gRPC content-type.

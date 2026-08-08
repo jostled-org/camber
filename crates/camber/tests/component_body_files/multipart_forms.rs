@@ -73,13 +73,16 @@ fn multipart_ok(req: &Request) -> camber::http::MultipartReader {
     }
 }
 
-fn assert_bad_request(result: Result<camber::http::MultipartReader, camber::RuntimeError>) {
+/// Assert one parse failed as the multipart parser's own, not as a generic one.
+///
+/// The variant is the assertion: a handler propagating this with `?` is what
+/// keeps multipart provenance distinguishable from a JSON body's, and text
+/// matching would accept the erased error that distinction exists to prevent.
+fn assert_multipart_refusal(result: Result<camber::http::MultipartReader, camber::RuntimeError>) {
     match result {
         Ok(_) => panic!("expected multipart parse failure"),
-        Err(err) => assert!(
-            err.to_string().contains("bad request"),
-            "expected bad request error, got: {err}"
-        ),
+        Err(RuntimeError::Multipart(_)) => {}
+        Err(err) => panic!("expected a multipart refusal, got: {err:?}"),
     }
 }
 
@@ -109,7 +112,8 @@ struct GeneratedWirePart {
 
 enum GeneratedExpectation {
     Parts(Box<[ExpectedGeneratedPart]>),
-    BadRequest,
+    /// The generated body is not parseable multipart at all.
+    Malformed,
 }
 
 struct GeneratedMultipartCase {
@@ -297,7 +301,7 @@ fn generated_bad_request_case(
     GeneratedMultipartCase {
         content_type: content_type.into_boxed_str(),
         body,
-        expectation: GeneratedExpectation::BadRequest,
+        expectation: GeneratedExpectation::Malformed,
     }
 }
 
@@ -309,11 +313,11 @@ fn assert_generated_multipart_case(generated: GeneratedMultipartCase, context: &
     );
     let request = multipart_request(&generated.content_type, generated.body);
     match (generated.expectation, request.multipart()) {
-        (GeneratedExpectation::BadRequest, Err(RuntimeError::BadRequest(_))) => {}
-        (GeneratedExpectation::BadRequest, Err(error)) => {
-            panic!("{context}: expected concrete BadRequest, got {error:?}")
+        (GeneratedExpectation::Malformed, Err(RuntimeError::Multipart(_))) => {}
+        (GeneratedExpectation::Malformed, Err(error)) => {
+            panic!("{context}: expected a concrete multipart refusal, got {error:?}")
         }
-        (GeneratedExpectation::BadRequest, Ok(reader)) => panic!(
+        (GeneratedExpectation::Malformed, Ok(reader)) => panic!(
             "{context}: malformed multipart parsed as {} parts",
             reader.parts().len()
         ),
@@ -472,13 +476,13 @@ fn multipart_rejects_invalid_start_or_closing_delimiter_framing() {
         "--{boundary}Content-Disposition: form-data; name=\"field\"\r\n\r\nvalue\r\n--{boundary}--\r\n"
     )
     .into_bytes();
-    assert_bad_request(multipart_request(&content_type, invalid_start).multipart());
+    assert_multipart_refusal(multipart_request(&content_type, invalid_start).multipart());
 
     let invalid_closing = format!(
         "--{boundary}\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\nvalue--{boundary}--\r\n"
     )
     .into_bytes();
-    assert_bad_request(multipart_request(&content_type, invalid_closing).multipart());
+    assert_multipart_refusal(multipart_request(&content_type, invalid_closing).multipart());
 }
 
 #[test]
@@ -576,12 +580,7 @@ fn multipart_returns_error_for_non_multipart_body() {
         .finish()
         .expect("valid request");
 
-    let result = req.multipart();
-    assert!(result.is_err());
-    match result {
-        Ok(_) => panic!("expected multipart parse failure"),
-        Err(err) => assert!(err.to_string().contains("bad request")),
-    }
+    assert_multipart_refusal(req.multipart());
 }
 
 #[test]
@@ -593,7 +592,7 @@ fn multipart_rejects_part_without_name_parameter() {
     .into_bytes();
     let content_type = format!("multipart/form-data; boundary={boundary}");
 
-    assert_bad_request(multipart_request(&content_type, body).multipart());
+    assert_multipart_refusal(multipart_request(&content_type, body).multipart());
 }
 
 #[test]
@@ -605,7 +604,7 @@ fn multipart_rejects_duplicate_name_parameter() {
     .into_bytes();
     let content_type = format!("multipart/form-data; boundary={boundary}");
 
-    assert_bad_request(multipart_request(&content_type, body).multipart());
+    assert_multipart_refusal(multipart_request(&content_type, body).multipart());
 }
 
 #[test]
@@ -622,7 +621,7 @@ fn multipart_rejects_duplicate_boundary_parameter() {
     );
     let content_type = format!("multipart/form-data; boundary={boundary}; boundary=other");
 
-    assert_bad_request(multipart_request(&content_type, body).multipart());
+    assert_multipart_refusal(multipart_request(&content_type, body).multipart());
 }
 
 #[test]

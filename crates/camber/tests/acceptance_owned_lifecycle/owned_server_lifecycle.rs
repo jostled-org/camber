@@ -229,11 +229,62 @@ fn assert_eof_with_socket_deadline(stream: tokio::net::TcpStream) {
     assert_eq!(read, 0, "expected EOF, received transport data");
 }
 
+// The same claim for a case whose bound must stay off the paused Tokio clock.
+//
+// The ordinary form is `common::assert_refusal_body_then_eof`, shared with the
+// proxy and WebSocket roots. It bounds on the Tokio clock, which the paused-time
+// case has stopped, so that case observes on a thread of its own instead. What
+// the body must be is `common::assert_refusal_body`'s claim in both forms, so
+// the two readers cannot come to disagree about what a refused peer is owed.
 #[cfg(feature = "ws")]
-async fn assert_eof_with_independent_deadline(stream: tokio::net::TcpStream) {
-    tokio::task::spawn_blocking(move || assert_eof_with_socket_deadline(stream))
-        .await
-        .expect("socket EOF observer panicked");
+async fn assert_refusal_body_then_eof_with_independent_deadline(
+    stream: tokio::net::TcpStream,
+    expected: &'static str,
+) {
+    tokio::task::spawn_blocking(move || {
+        let stream = stream.into_std().unwrap();
+        let rest = read_rest_with_socket_deadline(stream)
+            .expect("failed while reading the refused upgrade body");
+        assert_refusal_body(&rest, expected, "the refused upgrade");
+    })
+    .await
+    .expect("socket refusal-body observer panicked");
+}
+
+// Everything one peer is owed for an upgrade the supervisor would not own.
+//
+// Six cases in this binary claim it: the mapped `503`, no commitment anywhere in
+// the head, the transport-owned close, and the client-safe body through the
+// peer's end of stream. Six copies were six places those four claims could come
+// apart, and four of them had already lost one or two — one read no body at all,
+// so it could not say what the refused peer was told.
+//
+// `subject` names the case, so an expired bound or a failed comparison reports
+// which refusal it was reading.
+#[cfg(feature = "ws")]
+async fn assert_refused_upgrade_wire(client: &mut tokio::net::TcpStream, subject: &str) {
+    let response =
+        read_http_head_bounded(client, &format!("{subject}: the refusal head timed out")).await;
+    assert!(
+        response.starts_with("HTTP/1.1 503"),
+        "{subject}: answers with the mapped status: {response}"
+    );
+    // Searched rather than tested at the head's start: the line above has just
+    // required a `503` there, so a `starts_with` for `101` could not have failed
+    // whatever the server did. The claim is that no commitment reached this peer
+    // at all, which is a claim about the whole transport it was sent.
+    assert!(
+        !response.contains("HTTP/1.1 101"),
+        "{subject}: a refused registration never commits its upgrade: {response}"
+    );
+    assert!(
+        response.to_ascii_lowercase().contains("connection: close"),
+        "{subject}: the transport-owned close survives mapping: {response}"
+    );
+    // Read to EOF rather than peeking for it: the mapped refusal carries a body,
+    // so the peer's end-of-transport is the end of that body — and reading it is
+    // what proves the body is the safe message and nothing else.
+    common::assert_refusal_body_then_eof(client, UNAVAILABLE_BODY, subject).await;
 }
 
 async fn assert_connection_closed_with_independent_deadline(stream: tokio::net::TcpStream) {
@@ -258,14 +309,33 @@ fn assert_connection_closed_with_socket_deadline(stream: tokio::net::TcpStream) 
 // could reach. Shutting it down from here ends that read, so the observer is
 // joinable on both paths and teardown owns neither the thread nor the socket.
 fn peek_with_socket_deadline(stream: std::net::TcpStream) -> std::io::Result<usize> {
+    observe_with_socket_deadline(stream, peek_blocking)
+}
+
+// The same independent observation, for a peer whose answer has a body: the
+// remaining bytes through the close, rather than the first one.
+fn read_rest_with_socket_deadline(stream: std::net::TcpStream) -> std::io::Result<Vec<u8>> {
+    observe_with_socket_deadline(stream, read_rest_blocking)
+}
+
+// The observer both blocking observations run under, written once. The two
+// differ only in what they ask of the socket; the thread, the bound, the
+// shutdown that ends a parked read, and the join are the same either way.
+fn observe_with_socket_deadline<T>(
+    stream: std::net::TcpStream,
+    observe: fn(&std::net::TcpStream) -> std::io::Result<T>,
+) -> std::io::Result<T>
+where
+    T: Send + 'static,
+{
     let stream = Arc::new(stream);
-    let peeked = Arc::clone(&stream);
+    let observed_stream = Arc::clone(&stream);
     let (observed, observation) = std::sync::mpsc::sync_channel(1);
     let mut observer = Some(
         std::thread::Builder::new()
             .name("peer-closure-observer".to_owned())
             .spawn(move || {
-                let _ = observed.send(peek_blocking(&peeked));
+                let _ = observed.send(observe(&observed_stream));
             })
             .unwrap(),
     );
@@ -289,6 +359,16 @@ fn peek_blocking(stream: &std::net::TcpStream) -> std::io::Result<usize> {
     stream.set_nonblocking(false)?;
     let mut byte = [0u8; 1];
     stream.peek(&mut byte)
+}
+
+// Everything the peer still owes, through its close.
+fn read_rest_blocking(stream: &std::net::TcpStream) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    stream.set_nonblocking(false)?;
+    let mut rest = Vec::new();
+    (&mut &*stream).read_to_end(&mut rest)?;
+    Ok(rest)
 }
 
 fn assert_blocking_connection_closed(stream: std::net::TcpStream) {
@@ -504,11 +584,11 @@ async fn lifecycle_controller_is_listener_scoped_and_fail_closed() {
     )
     .await;
 
+    // Joining the failed server proves that its owned listener was dropped.
+    // Do not reconnect to `second_addr` after that point: the operating system
+    // may already have reassigned the released ephemeral port to another test.
     assert_io_kind(second_handle.await, std::io::ErrorKind::Other);
     assert_ok_request(third_addr).await;
-    // The `AfterAccept` pause above is the listener-scoped proof: the first
-    // listener is held there while the third serves and the second is gone.
-    assert!(tokio::net::TcpStream::connect(second_addr).await.is_err());
 
     first_controller
         .release(LifecycleCheckpoint::AfterAccept)
@@ -2176,7 +2256,7 @@ async fn deadline_branch_wins_over_submitted_registration_and_joins_it() {
     let response = read_http_head(&mut client).await;
     assert!(response.starts_with("HTTP/1.1 503"));
     assert!(response.to_ascii_lowercase().contains("connection: close"));
-    assert_eof_with_independent_deadline(client).await;
+    assert_refusal_body_then_eof_with_independent_deadline(client, UNAVAILABLE_BODY).await;
     assert_timeout(completion.await);
 }
 
@@ -2306,6 +2386,21 @@ async fn submit_upgrade_through_accept(
     controller: &LifecycleController,
     addr: SocketAddr,
 ) -> tokio::net::TcpStream {
+    submit_offered_upgrade_through_accept(controller, addr, &common::ws_upgrade_request("/ws"))
+        .await
+}
+
+// The same carry, for a case whose claim is about what the handshake offered.
+//
+// The request is a parameter rather than a second copy of this sequence: an
+// offer only changes what negotiation settles on, never how the ticket reaches
+// the supervisor, and a copy is where those two could drift apart.
+#[cfg(feature = "ws")]
+async fn submit_offered_upgrade_through_accept(
+    controller: &LifecycleController,
+    addr: SocketAddr,
+    request: &str,
+) -> tokio::net::TcpStream {
     controller
         .pause_once(LifecycleCheckpoint::SupervisorSelectedAccept)
         .unwrap();
@@ -2313,10 +2408,7 @@ async fn submit_upgrade_through_accept(
         .pause_once(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
         .unwrap();
     let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-    client
-        .write_all(common::ws_upgrade_request("/ws").as_bytes())
-        .await
-        .unwrap();
+    client.write_all(request.as_bytes()).await.unwrap();
     wait_until_paused_bounded(
         controller,
         LifecycleCheckpoint::SupervisorSelectedAccept,
@@ -2337,7 +2429,16 @@ async fn prepare_submitted_upgrade(
     controller: &LifecycleController,
     addr: SocketAddr,
 ) -> tokio::net::TcpStream {
-    let client = submit_upgrade_through_accept(controller, addr).await;
+    prepare_offered_submitted_upgrade(controller, addr, &common::ws_upgrade_request("/ws")).await
+}
+
+#[cfg(feature = "ws")]
+async fn prepare_offered_submitted_upgrade(
+    controller: &LifecycleController,
+    addr: SocketAddr,
+    request: &str,
+) -> tokio::net::TcpStream {
+    let client = submit_offered_upgrade_through_accept(controller, addr, request).await;
     wait_until_paused_bounded(
         controller,
         LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
@@ -2436,10 +2537,7 @@ async fn control_wins_over_submitted_registration_and_joins_wrapper() {
         "forced control was not applied before releasing the submitted upgrade",
     )
     .await;
-    let response = read_http_head(&mut client).await;
-    assert!(response.starts_with("HTTP/1.1 503"));
-    assert!(response.to_ascii_lowercase().contains("connection: close"));
-    assert_eof(&mut client).await;
+    assert_refused_upgrade_wire(&mut client, "the control-refused upgrade").await;
     assert_cancelled(handle.await);
 }
 
@@ -2471,10 +2569,7 @@ async fn runtime_wins_over_submitted_registration_and_joins_wrapper() {
         "runtime shutdown was not applied before releasing the submitted upgrade",
     )
     .await;
-    let response = read_http_head(&mut client).await;
-    assert!(response.starts_with("HTTP/1.1 503"));
-    assert!(response.to_ascii_lowercase().contains("connection: close"));
-    assert_eof(&mut client).await;
+    assert_refused_upgrade_wire(&mut client, "the runtime-refused upgrade").await;
     assert!(handle.await.is_ok());
 }
 
@@ -2525,9 +2620,7 @@ async fn accept_branch_wins_over_submitted_registration() {
         "forced control was not applied before releasing the deferred upgrade",
     )
     .await;
-    let response = read_http_head(&mut upgrade).await;
-    assert!(response.starts_with("HTTP/1.1 503"));
-    assert_eof(&mut upgrade).await;
+    assert_refused_upgrade_wire(&mut upgrade, "the accept-deferred refused upgrade").await;
     assert_cancelled(handle.await);
 }
 
@@ -2667,12 +2760,7 @@ async fn reject_deferred_upgrade(mut fixture: PermitRegistrationFixture) {
         "forced control was not applied before releasing the deferred upgrade",
     )
     .await;
-    let response =
-        read_http_head_bounded(&mut fixture.upgrade, "upgrade rejection response timed out").await;
-    assert!(
-        response.starts_with("HTTP/1.1 503"),
-        "unexpected upgrade rejection response: {response}"
-    );
+    assert_refused_upgrade_wire(&mut fixture.upgrade, "the permit-deferred refused upgrade").await;
     let result = tokio::time::timeout(Duration::from_secs(5), fixture.handle.into_future())
         .await
         .expect("permit fixture owner finalization timed out");
@@ -4176,7 +4264,12 @@ async fn supervisor_unwind_joins_acknowledged_and_buffered_upgrades() {
             .contains("connection: close"),
         "supervisor-unavailable response did not close the connection: {pending_response}"
     );
-    assert_eof(&mut pending).await;
+    common::assert_refusal_body_then_eof(
+        &mut pending,
+        REDACTED_BODY,
+        "the unwound pending upgrade",
+    )
+    .await;
     assert_task_panicked(handle.await, SUPERVISOR_PANIC);
 }
 
@@ -4430,14 +4523,7 @@ async fn owner_graceful_wins_over_submitted_registration() {
         "owner graceful shutdown was not applied before releasing the submitted upgrade",
     )
     .await;
-    let response = read_http_head_bounded(
-        &mut client,
-        "owner registration rejection response timed out",
-    )
-    .await;
-    assert!(response.starts_with("HTTP/1.1 503"));
-    assert!(response.to_ascii_lowercase().contains("connection: close"));
-    assert_eof(&mut client).await;
+    assert_refused_upgrade_wire(&mut client, "the owner-graceful refused upgrade").await;
     let result = tokio::time::timeout(Duration::from_secs(5), &mut future)
         .await
         .expect("owner registration completion timed out");

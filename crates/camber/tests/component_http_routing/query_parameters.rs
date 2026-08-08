@@ -71,10 +71,6 @@ fn literal_target_response(addr: SocketAddr, target: &str) -> crate::http::HttpR
     })
 }
 
-fn response_text(response: &crate::http::HttpResponse) -> Box<str> {
-    String::from_utf8_lossy(&response.body).into()
-}
-
 /// Shut one fixture server down within the bound and prove it cleaned up.
 fn shutdown_and_assert_clean(server: crate::http::ReadyServer, name: &str) {
     let probe = server.cleanup_probe();
@@ -181,7 +177,7 @@ async fn raw_query_round_trips_literal_http_target() {
     let absent = literal_target_response(addr, "/items");
     assert_eq!(absent.status, 200);
     assert_eq!(
-        response_text(&absent).as_ref(),
+        absent.text().as_ref(),
         ABSENT,
         "a target with no ? has no raw query"
     );
@@ -191,7 +187,7 @@ async fn raw_query_round_trips_literal_http_target() {
         let response = literal_target_response(addr, &target);
         assert_eq!(response.status, 200, "status for {target}");
         assert_eq!(
-            response_text(&response).as_ref(),
+            response.text().as_ref(),
             *case,
             "raw query for the literal target {target}"
         );
@@ -217,7 +213,7 @@ async fn head_only_handler_observes_query_identity() {
 
     assert_eq!(response.status, 200);
     assert_eq!(
-        response_text(&response).as_ref(),
+        response.text().as_ref(),
         format!("event: query\ndata: {OBSERVED_IDENTITY}\n\n"),
         "the head-only SSE request carries the same raw and decoded query contract"
     );
@@ -258,7 +254,7 @@ async fn streaming_proxy_gate_observes_and_forwards_query_identity() {
 
     assert_eq!(response.status, 200, "the gate admitted the request");
     assert_eq!(
-        response_text(&response).as_ref(),
+        response.text().as_ref(),
         OBSERVED_QUERY,
         "the streaming proxy forwards the query spelling unchanged"
     );

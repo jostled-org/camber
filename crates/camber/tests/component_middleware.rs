@@ -1,10 +1,14 @@
 #[path = "support/http.rs"]
 pub mod http;
+#[path = "support/rejection.rs"]
+pub mod rejection_support;
 #[path = "support/runtime.rs"]
 pub mod runtime_support;
 
 #[path = "component_middleware/cross_origin.rs"]
 mod cross_origin;
+#[path = "component_middleware/framework_rejections.rs"]
+mod framework_rejections;
 #[path = "component_middleware/middleware_execution.rs"]
 mod middleware_execution;
 #[path = "component_middleware/rate_limiting.rs"]

@@ -3,9 +3,9 @@
 use crate::common;
 use crate::common::{
     assert_graceful_close_then_eof, assert_http_ok, assert_optional_close_then_eof,
-    assert_transport_eof, attach_dispatch_probe, lifecycle_event, read_async_http_head,
-    read_async_ws_frame_or_eof, read_until_double_crlf, read_ws_text_frame, status_from_raw,
-    write_async_ws_frame, write_ws_close_frame, write_ws_text_frame,
+    assert_refusal_body_then_eof, assert_transport_eof, attach_dispatch_probe, lifecycle_event,
+    read_async_http_head, read_async_ws_frame_or_eof, read_until_double_crlf, read_ws_text_frame,
+    status_from_raw, write_async_ws_frame, write_ws_close_frame, write_ws_text_frame,
 };
 use camber::RuntimeError;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, LifecycleFault, lifecycle};
@@ -805,7 +805,12 @@ async fn pending_proxy_upgrade_shutdown_is_rejected(forced: bool) {
         0,
         "rejected proxy upgrade reached its backend"
     );
-    assert_transport_eof(&mut pending, "the rejected proxy-upgrade transport").await;
+    assert_refusal_body_then_eof(
+        &mut pending,
+        "service unavailable",
+        "the rejected proxy-upgrade transport",
+    )
+    .await;
     let result = lifecycle_event("pending proxy-upgrade drain", owner.as_mut()).await;
     match forced {
         true => assert_cancelled(result),
@@ -989,7 +994,12 @@ async fn finish_proxy_unwind_scenario(mut scenario: ProxyUnwindScenario) {
         1,
         "pending proxy upgrade reached its backend during unwind"
     );
-    assert_transport_eof(&mut scenario.pending, "the unwound pending proxy transport").await;
+    assert_refusal_body_then_eof(
+        &mut scenario.pending,
+        "internal server error",
+        "the unwound pending proxy transport",
+    )
+    .await;
     match lifecycle_event("proxy supervisor unwind drain", owner.as_mut()).await {
         Err(RuntimeError::TaskPanicked(message)) => assert!(!message.is_empty()),
         other => panic!("expected TaskPanicked after proxy upgrade drain, got {other:?}"),

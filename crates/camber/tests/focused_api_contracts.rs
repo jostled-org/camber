@@ -1,3 +1,5 @@
+#[path = "support/rejection_kinds.rs"]
+pub mod rejection_kinds;
 #[path = "support/temp.rs"]
 pub mod temp_support;
 #[path = "support/tls.rs"]
@@ -11,6 +13,8 @@ mod channel_errors;
 mod configuration_loading;
 #[path = "focused_api_contracts/configuration_validation.rs"]
 mod configuration_validation;
+#[path = "focused_api_contracts/framework_rejections.rs"]
+mod framework_rejections;
 #[path = "focused_api_contracts/owned_server_api.rs"]
 mod owned_server_api;
 #[path = "focused_api_contracts/public_trait_contracts.rs"]

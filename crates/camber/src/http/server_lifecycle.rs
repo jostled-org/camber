@@ -11,8 +11,6 @@ use futures_util::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use super::BufferConfig;
-#[cfg(feature = "ws")]
-use super::Response;
 use super::mock::{LifecycleCheckpoint, LifecycleFault, LifecycleScript, SupervisorJoinProbe};
 use super::router::ServerDispatch;
 use crate::runtime_state::{
@@ -1864,20 +1862,4 @@ async fn string_panic_probe() -> Result<(), RuntimeError> {
 
 async fn opaque_panic_probe() -> Result<(), RuntimeError> {
     std::panic::resume_unwind(Box::new(13usize));
-}
-
-#[cfg(feature = "ws")]
-pub(super) fn unavailable_response() -> hyper::Response<super::body::HyperResponseBody> {
-    close_response(500)
-}
-
-#[cfg(feature = "ws")]
-pub(super) fn rejected_response() -> hyper::Response<super::body::HyperResponseBody> {
-    close_response(503)
-}
-
-#[cfg(feature = "ws")]
-fn close_response(status: u16) -> hyper::Response<super::body::HyperResponseBody> {
-    let response = Response::empty_raw(status).with_header("Connection", "close");
-    super::handle::to_hyper_full(response)
 }

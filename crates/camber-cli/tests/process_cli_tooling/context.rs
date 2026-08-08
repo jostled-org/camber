@@ -3,6 +3,17 @@ use std::time::Duration;
 
 use crate::support::{FixtureError, run_command, run_command_with_timeout};
 
+/// How long the capture fixture's own command has to run to completion.
+///
+/// Its own number rather than `CHILD_EXIT_TIMEOUT`. That constant bounds a
+/// reap — a child already told to exit, which a healthy host completes in
+/// milliseconds — and this bounds a whole `/bin/sh` run that builds and prints
+/// 128 KiB. One number carrying both claims is one number that cannot be tuned
+/// for either: shortening the reap bound would start failing this command on a
+/// loaded runner, and lengthening it for this command would let a stuck child
+/// hang the suite for longer than the reap ever needs.
+const CAPTURE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn camber_bin() -> &'static str {
     env!("CARGO_BIN_EXE_camber")
 }
@@ -76,10 +87,10 @@ fn command_fixture_reports_success_and_bounds_captured_output() -> Result<(), Fi
     let mut command = Command::new("/bin/sh");
     command.args([
         "-c",
-        "count=0; while [ $count -lt 70000 ]; do printf x; count=$((count + 1)); done; printf err >&2",
+        "chunk=x; doublings=0; while [ $doublings -lt 16 ]; do chunk=\"$chunk$chunk\"; doublings=$((doublings + 1)); done; printf %s%s \"$chunk\" \"$chunk\"; printf err >&2",
     ]);
 
-    let output = run_command_with_timeout(command, Duration::from_secs(2))?;
+    let output = run_command_with_timeout(command, CAPTURE_COMMAND_TIMEOUT)?;
 
     assert!(output.status.success());
     assert_eq!(output.stdout.len(), 64 * 1024);

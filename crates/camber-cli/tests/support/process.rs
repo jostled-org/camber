@@ -8,7 +8,15 @@ use std::time::{Duration, Instant};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(100);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a child already told to exit has to be reaped.
+///
+/// Bounds a hang, not a performance expectation: a healthy child is reaped in
+/// milliseconds, so this only has to outlast scheduling delay when the full
+/// `[ci]` matrix runs every test binary in parallel. It bounds reaps and
+/// nothing else — a caller waiting on a command that is still doing its work
+/// names its own bound, because that wait is a different claim and the two
+/// cannot be tuned through one number.
+pub const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 const OUTPUT_CAPTURE_LIMIT: usize = 64 * 1024;
 const READINESS_RESPONSE_LIMIT: u64 = 64 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -53,7 +61,7 @@ pub struct ReapProbe {
 impl ReapProbe {
     pub fn wait(self) -> Result<ReapedChild, Box<str>> {
         self.receiver
-            .recv_timeout(SHUTDOWN_TIMEOUT)
+            .recv_timeout(CHILD_EXIT_TIMEOUT)
             .map_err(|error| {
                 format!("wait for serve child reap completion: {error}").into_boxed_str()
             })
@@ -337,7 +345,7 @@ fn terminate_and_reap(child: &mut Child) -> io::Result<(ExitStatus, TerminationK
 
 fn kill_and_reap(child: &mut Child) -> io::Result<(ExitStatus, TerminationKind)> {
     let kill_result = child.kill();
-    let status = wait_for_exit(child, Instant::now() + SHUTDOWN_TIMEOUT)?;
+    let status = wait_for_exit(child, Instant::now() + CHILD_EXIT_TIMEOUT)?;
     match kill_result {
         Ok(()) => Ok((status, TerminationKind::Killed)),
         Err(_) => Ok((status, TerminationKind::NaturalExitAfterObservation)),
@@ -346,7 +354,7 @@ fn kill_and_reap(child: &mut Child) -> io::Result<(ExitStatus, TerminationKind)>
 
 fn force_kill_and_reap(child: &mut Child) -> io::Result<(ExitStatus, TerminationKind)> {
     let kill_result = child.kill();
-    let wait_result = wait_for_exit(child, Instant::now() + SHUTDOWN_TIMEOUT);
+    let wait_result = wait_for_exit(child, Instant::now() + CHILD_EXIT_TIMEOUT);
     match (wait_result, kill_result) {
         (Ok(status), _) => Ok((status, TerminationKind::Killed)),
         (Err(wait_error), Ok(())) => Err(wait_error),
@@ -368,7 +376,7 @@ where
         Some(status) => return Ok((status, TerminationKind::AlreadyExited)),
         None => release(child)?,
     }
-    let status = wait_for_exit(child, Instant::now() + SHUTDOWN_TIMEOUT)?;
+    let status = wait_for_exit(child, Instant::now() + CHILD_EXIT_TIMEOUT)?;
     let _ = child.kill();
     Ok((status, TerminationKind::NaturalExitAfterObservation))
 }

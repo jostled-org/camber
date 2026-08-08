@@ -1,13 +1,11 @@
-use super::middleware::Next;
+use super::middleware::{Next, ResponseFuture};
 use super::request::Request;
 use super::response::{HeaderPair, Response};
 use bytes::Bytes;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::borrow::Cow;
-use std::future::Future;
 use std::io::Write;
-use std::pin::Pin;
 
 /// Minimum response body size (in bytes) to apply compression.
 const MIN_COMPRESS_SIZE: usize = 1024;
@@ -31,9 +29,7 @@ fn accepts_gzip(req: &Request) -> bool {
 ///
 /// Compression is enabled only when the request advertises `gzip` support and
 /// the response is an unencoded text-like payload larger than 1 KB.
-pub fn auto()
--> impl Fn(&Request, Next) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync + 'static
-{
+pub fn auto() -> impl Fn(&Request, Next) -> ResponseFuture + Send + Sync + 'static {
     move |req, next| {
         let accepts_gzip = accepts_gzip(req);
 

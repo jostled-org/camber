@@ -12,6 +12,7 @@ The variants cluster into a few stable buckets:
 - runtime and coordination: `Io`, `Timeout`, `Cancelled`, `TaskPanicked`, channel errors
 - runtime context and task lifecycle: `NoRuntime`, `ScopeClosed`, `ScopeDrainTimeout`
 - request and API misuse: `BadRequest`, `InvalidArgument`
+- unparseable request payloads: `MalformedBody`, `Multipart`
 - transport and integration failures: `Http`, `Tls`, `MessageQueue`
 - application-supplied: `Database`
 - startup and infrastructure configuration: `Config`, `Secret`, `Dns`, `Acme`, `Schedule`
@@ -40,19 +41,25 @@ fn load_user(id: u64) -> Result<User, RuntimeError> {
 }
 ```
 
-Like every variant other than `BadRequest` and `ScopeClosed`, it maps to `500` through `IntoResponse`.
+Like every variant the boundary has no client-safe answer for, it reaches the router's rejection boundary as a redacted `500`.
 
 ## Handler Behavior
 
-In HTTP handlers, `IntoResponse` maps:
+A handler error is not converted where it is raised. `IntoResponse` carries it to the router's rejection boundary, which answers:
 
-- `RuntimeError::BadRequest` to `400`
-- `RuntimeError::ScopeClosed` to `503`
-- all other `RuntimeError` values to `500`
+- `RuntimeError::BadRequest` with `400` and the message you supplied, which you are declaring client-safe
+- `RuntimeError::MalformedBody` with `400` and exactly `malformed request body`
+- `RuntimeError::Multipart` with `400` and exactly `invalid multipart body`
+- `RuntimeError::ScopeClosed` with `503` and `service unavailable`
+- every other `RuntimeError` with `500` and exactly `internal server error`
+
+The `500` body is fixed, and so is each parse refusal's. Your error's text and its whole source chain go to the operator log, never to the peer. A parser names which part of the grammar failed; that account is operator detail, so the peer reads fixed text instead.
+
+The same boundary answers a middleware frame that fails. `use_middleware` accepts a frame resolving to `Response` or to `Result<Response, RuntimeError>`, and the failing frame is classified where it failed rather than becoming a response nothing can classify.
 
 `ScopeClosed` is not a server fault. A spawn refused inside the shutdown window is an orderly drain, and `503` is the status a load balancer reads as "drain this instance". `500` is the one it reads as "this instance is broken". `NoRuntime` keeps its `500` because that one is a genuine misconfiguration of the server.
 
-If you need a different status code, return a concrete `Response` instead of relying on automatic mapping.
+If you need a different status code, return a concrete `Response` — a deliberate `Response` is never reclassified, whatever its status — or configure `Router::rejection_mapper` to answer every refusal your own way.
 
 ## Typical Usage
 
@@ -73,6 +80,7 @@ As a rule:
 
 - use `InvalidArgument` for programmer-facing API misuse
 - use `BadRequest` for caller-supplied HTTP input problems
+- leave `MalformedBody` and `Multipart` to `req.json()` and `req.multipart()`, which raise them for you
 - use `Config` for startup configuration errors
 - use `Secret` for secret source lookup failures
 

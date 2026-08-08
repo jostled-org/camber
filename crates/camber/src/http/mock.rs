@@ -403,6 +403,17 @@ pub fn supervisor_join_probe(probe: SupervisorJoinProbe) -> super::server::Serve
     super::server_lifecycle::supervisor_join_probe(probe)
 }
 
+/// Mint one request identifier through the exact production generator.
+///
+/// Semver-unsupported, and it takes no argument and offers no alternate
+/// algorithm: a measurement of what generation costs has to measure the
+/// generator a served request uses, and building a whole `Request` to reach it
+/// would count the request's allocations instead.
+#[doc(hidden)]
+pub fn generated_request_id() -> super::RequestId {
+    super::RequestId::generate()
+}
+
 /// Global registry of mock HTTP responses.
 ///
 /// When a mock is registered, `http::get`/`http::post` check this registry

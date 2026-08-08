@@ -16,6 +16,8 @@ mod background_serving;
 mod direct_serving;
 #[path = "acceptance_owned_lifecycle/disconnect/mod.rs"]
 mod disconnect;
+#[path = "acceptance_owned_lifecycle/framework_rejections.rs"]
+mod framework_rejections;
 #[path = "acceptance_owned_lifecycle/scope_drain.rs"]
 mod scope_drain;
 #[path = "acceptance_owned_lifecycle/serve_variants.rs"]

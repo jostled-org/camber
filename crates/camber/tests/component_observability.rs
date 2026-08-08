@@ -3,6 +3,8 @@ pub mod common;
 #[cfg(feature = "profiling")]
 #[path = "component_observability/cpu_profiling.rs"]
 mod cpu_profiling;
+#[path = "component_observability/framework_rejections.rs"]
+mod framework_rejections;
 #[path = "component_observability/metrics_endpoint.rs"]
 mod metrics_endpoint;
 #[path = "component_observability/request_tracing.rs"]

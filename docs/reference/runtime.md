@@ -114,6 +114,12 @@ Common options:
 
 `connection_limit(0)` is invalid and returns `RuntimeError::InvalidArgument` when the runtime starts.
 
+`otel_endpoint(url)` installs the OTLP exporter as the global tracing subscriber.
+Another subscriber may already hold that slot: `camber::logging::init_logging`, or a
+stack your application installed. Then no span reaches the exporter, so `run` returns
+`RuntimeError::Config` rather than start. See
+[Logging](logging.md#with-otel_endpoint).
+
 ## Background Servers
 
 If you already have a Tokio runtime and want to run Camber servers inside it, use the async and background server entrypoints:

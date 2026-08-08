@@ -1,7 +1,10 @@
 use super::Response;
+use super::rejection::{Rejected, Rejection, RejectionContext, RejectionMapper, shared_mapper};
 use super::request::RequestHead;
 use super::router::{FrozenRouter, Router};
 use super::{BufferConfig, Request};
+use crate::RuntimeError;
+use std::sync::Arc;
 
 impl std::fmt::Debug for HostRouter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -9,6 +12,7 @@ impl std::fmt::Debug for HostRouter {
             .field("host_count", &self.hosts.len())
             .field("has_default", &self.default.is_some())
             .field("buffers", &self.buffers)
+            .field("has_rejection_mapper", &self.mapper.is_some())
             .finish()
     }
 }
@@ -19,6 +23,7 @@ pub struct HostRouter {
     hosts: Vec<(Box<str>, Router)>,
     default: Option<Router>,
     buffers: BufferConfig,
+    mapper: Option<Arc<RejectionMapper>>,
 }
 
 impl HostRouter {
@@ -59,6 +64,22 @@ impl HostRouter {
         self.buffers
     }
 
+    /// Set the policy for refusals no child router claims.
+    ///
+    /// A resolved child router's own mapper wins. This one answers a malformed
+    /// or unmatched Host, and every child that configured none.
+    #[must_use]
+    pub fn rejection_mapper<F>(mut self, mapper: F) -> Self
+    where
+        F: Fn(&Rejection, &RejectionContext) -> Result<Response, RuntimeError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.mapper = Some(shared_mapper(mapper));
+        self
+    }
+
     /// Register a router for a specific host name.
     ///
     /// Host matching is case-insensitive.
@@ -85,6 +106,7 @@ impl HostRouter {
         FrozenHostRouter {
             hosts: hosts.into_boxed_slice(),
             default,
+            mapper: self.mapper,
         }
     }
 }
@@ -93,6 +115,7 @@ impl HostRouter {
 pub(super) struct FrozenHostRouter {
     hosts: Box<[(Box<str>, FrozenRouter)]>,
     default: Option<FrozenRouter>,
+    mapper: Option<Arc<RejectionMapper>>,
 }
 
 /// Reject values that are not an HTTP authority.
@@ -154,37 +177,59 @@ fn lowercase_hostname(host: &str) -> std::borrow::Cow<'_, str> {
 }
 
 impl FrozenHostRouter {
-    /// Resolve a router from a host header value.
-    fn resolve_host(&self, host_header: &str) -> Result<Option<&FrozenRouter>, Response> {
-        match is_valid_host(host_header) {
-            false => Err(Response::text_raw(400, "bad request")),
-            true => {
-                let hostname = strip_host_port(host_header);
-                let lookup = lowercase_hostname(hostname);
+    /// The policy a request uses when its resolved child configured none.
+    pub(super) fn mapper(&self) -> Option<Arc<RejectionMapper>> {
+        self.mapper.clone()
+    }
 
-                Ok(self
-                    .hosts
-                    .binary_search_by_key(&lookup.as_ref(), |(h, _)| h.as_ref())
-                    .ok()
-                    .map(|i| &self.hosts[i].1)
-                    .or(self.default.as_ref()))
-            }
+    /// Resolve a router from the authority a request named.
+    fn resolve_host(&self, authority: &str) -> Result<Option<&FrozenRouter>, Rejected> {
+        match is_valid_host(authority) {
+            false => Err(Rejected::invalid_host(authority)),
+            true => Ok(self.claiming_router(authority)),
         }
     }
 
-    /// Find the matching FrozenRouter for a request's Host header.
+    /// The router that claims an authority already known to be one.
+    fn claiming_router(&self, authority: &str) -> Option<&FrozenRouter> {
+        let hostname = strip_host_port(authority);
+        let lookup = lowercase_hostname(hostname);
+
+        self.hosts
+            .binary_search_by_key(&lookup.as_ref(), |(h, _)| h.as_ref())
+            .ok()
+            .map(|i| &self.hosts[i].1)
+            .or(self.default.as_ref())
+    }
+
+    /// The router an authority selects, for a stage that answers without it.
     ///
-    /// Returns `Err(Response)` with 400 if the Host header contains
-    /// path separators or control characters.
-    pub(super) fn resolve(&self, req: &Request) -> Result<Option<&FrozenRouter>, Response> {
-        self.resolve_host(req.header("host").unwrap_or(""))
+    /// Scope selection asks only which mapper answers, and an authority that is
+    /// not one selects no child — the same answer as an authority no child
+    /// claims. Telling those two apart is what [`Self::resolve`] mints a
+    /// refusal for, and a caller that needs neither dropped it unread: a
+    /// `format!` detail and a shared allocation built and discarded on every
+    /// malformed request, for a value nothing records.
+    pub(super) fn router_for(&self, authority: &str) -> Option<&FrozenRouter> {
+        match is_valid_host(authority) {
+            false => None,
+            true => self.claiming_router(authority),
+        }
+    }
+
+    /// Find the matching FrozenRouter for a request's authority.
+    ///
+    /// Returns `Err` with a `Routing` refusal when the authority is not one:
+    /// a value with path separators, control characters, or no host part at all.
+    pub(super) fn resolve(&self, req: &Request) -> Result<Option<&FrozenRouter>, Rejected> {
+        self.resolve_host(req.authority())
     }
 
     /// Find the matching FrozenRouter from borrowed request-head metadata.
     pub(super) fn resolve_from_head(
         &self,
         head: &RequestHead<'_>,
-    ) -> Result<Option<&FrozenRouter>, Response> {
-        self.resolve_host(head.header("host").unwrap_or(""))
+    ) -> Result<Option<&FrozenRouter>, Rejected> {
+        self.resolve_host(head.authority())
     }
 }

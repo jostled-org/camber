@@ -14,6 +14,16 @@ logging::init_logging(LogFormat::Text, LogLevel::Info);
 
 If a global subscriber is already installed, this call becomes a no-op.
 
+### With `otel_endpoint`
+
+Do not call `init_logging` before a runtime that sets `otel_endpoint`. The subscriber
+this call installs claims the global slot, and the OTLP exporter needs that slot to
+forward spans. `RuntimeBuilder::run` refuses the startup with `RuntimeError::Config`
+rather than run an exporter no span reaches.
+
+To export spans, drop the `init_logging` call, or install your own subscriber stack
+with an OTLP layer composed into it.
+
 ## Output Shape
 
 Camber keeps the choice small:

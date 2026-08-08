@@ -1,13 +1,34 @@
+#[path = "support/h2_client.rs"]
+pub mod h2_client;
 #[path = "support/http.rs"]
 pub mod http;
+#[path = "support/metrics_scrape.rs"]
+pub mod metrics_scrape;
+#[path = "support/rejection_kinds.rs"]
+pub mod rejection_kinds;
+#[path = "support/rejection_metrics.rs"]
+pub mod rejection_metrics;
+#[path = "support/rejection.rs"]
+pub mod rejection_support;
 #[path = "support/runtime.rs"]
 pub mod runtime_support;
+#[path = "support/tls.rs"]
+pub mod tls;
+#[path = "support/trace_capture.rs"]
+pub mod trace_capture;
 #[cfg(feature = "ws")]
 #[path = "support/ws.rs"]
 pub mod ws;
 
 pub mod common {
+    pub use crate::h2_client::*;
+    pub use crate::metrics_scrape::*;
+    pub use crate::rejection_kinds::*;
+    pub use crate::rejection_metrics::*;
+    pub use crate::rejection_support::*;
     pub use crate::runtime_support::*;
+    pub use crate::tls::*;
+    pub use crate::trace_capture::*;
     #[cfg(feature = "ws")]
     pub use crate::ws::*;
 }
@@ -16,6 +37,8 @@ pub mod common {
 pub mod async_server_and_scheduling;
 #[path = "acceptance_e2e/concurrent_routes_and_keepalive.rs"]
 pub mod concurrent_routes_and_keepalive;
+#[path = "acceptance_e2e/framework_rejections.rs"]
+pub mod framework_rejections;
 #[path = "acceptance_e2e/host_routing_and_outbound_proxy.rs"]
 pub mod host_routing_and_outbound_proxy;
 #[path = "acceptance_e2e/mixed_content_and_websocket_proxy.rs"]

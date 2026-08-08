@@ -1,14 +1,12 @@
+use super::Request;
 use super::body::{HyperResponseBody, StreamBody};
-use super::handle::{
-    ConnCtx, MethodNotAllowed, method_not_allowed_response, refuse_head, run_head_gate,
-    to_hyper_full,
-};
-use super::record::record_request;
-use super::request::{RequestOrigin, method_is_head};
+use super::handle::{ConnCtx, answer, answer_rejected, run_head_gate};
+use super::record::record_scoped;
+use super::rejection::{Rejected, RejectionScope, RequestIdentity};
+use super::request::{RequestHead, RequestOrigin};
 use super::response::HeaderPair;
 use super::server_lifecycle::ConnectionLifecycle;
 use super::sse::SseWriter;
-use super::{Request, Response};
 
 /// Produce the SSE response and start the blocking producer that feeds it.
 ///
@@ -77,14 +75,15 @@ fn spawn_sse_producer(
     StreamBody::Channel(rx)
 }
 
-/// Finish a streaming response, or answer with `fallback` if it cannot be built.
+/// Finish the SSE response, or answer with `fallback` if it cannot be built.
 ///
-/// A builder failure means the status or a header the caller described is not
-/// representable, so the response it asked for does not exist. The fallback
-/// carries the status the caller names for that case rather than the builder's
-/// bodyless `200`: a proxied `404` that could not be built is not an `OK`.
-/// Setting the status on a built response keeps the fallback itself
-/// infallible — it cannot fail the way the response it stands in for did.
+/// The status and both headers here are fixed text this function owns, so the
+/// builder has nothing a peer supplied to reject. The fallback exists for the
+/// shape of the API rather than for a failure anything can provoke, and it
+/// keeps the status already recorded for this response: an SSE answer is a
+/// `200` or it is nothing. Setting the status on a built response keeps the
+/// fallback itself infallible — it cannot fail the way the response it stands
+/// in for did.
 fn streaming_response_or_empty(
     builder: hyper::http::response::Builder,
     body: StreamBody,
@@ -103,83 +102,111 @@ fn streaming_response_or_empty(
 
 /// Build a streaming hyper response from a status, header set, and body channel.
 ///
-/// HEAD requests get a drained body; all other methods stream from `rx`.
-/// A response that cannot be built is a `502`: the status and headers here are
-/// an upstream's or a handler's, and neither is answerable once unrepresentable.
+/// HEAD requests get a drained body; all other methods stream from `rx`. The
+/// scope answers whether this is a HEAD, because it is already what decides the
+/// same question for a refusal in [`RejectionScope::convert`]. A stage that
+/// re-derived the method would be a second place the rule could be decided, and
+/// the copy that drifted would strip a body this one kept.
+///
+/// The failure travels rather than being swallowed. Nothing is on the wire yet,
+/// so a status or header set that cannot be represented is a refusal like any
+/// other pre-commitment failure — the buffered twin answers the identical fault
+/// through the configured mapper. Answered here as a bare status, it counted
+/// nothing, carried no `X-Request-Id`, and reached the operator only as a log
+/// line naming no request.
 fn build_streaming_response(
     status: u16,
     headers: &[HeaderPair],
     body: StreamBody,
-    is_head: bool,
-) -> hyper::Response<HyperResponseBody> {
+    scope: &RejectionScope,
+) -> Result<hyper::Response<HyperResponseBody>, hyper::http::Error> {
     let mut builder = hyper::Response::builder().status(status);
     for (name, value) in headers {
         builder = builder.header(name.as_ref(), value.as_ref());
     }
-    let body = match is_head {
+    let body = match scope.is_head() {
         true => StreamBody::Drained,
         false => body,
     };
-    streaming_response_or_empty(builder, body, hyper::StatusCode::BAD_GATEWAY)
+    builder.body(HyperResponseBody::Streaming(body))
 }
 
 /// Turn a streaming forward's outcome into the response it produces.
 ///
-/// Both streaming-proxy entry points end here: a failed forward is a `502`
-/// whose buffered body owns its own completion, and a successful one carries
-/// the upstream's status and headers over the same channel-backed body every
-/// streaming response uses. Stating it once keeps the recorded status and the
-/// response shape from drifting between the two entry points.
+/// Both streaming-proxy entry points end here: a forward that failed before an
+/// upstream response head is a refusal the route's own policy answers, and a
+/// successful one carries the upstream's status and headers over the same
+/// channel-backed body every streaming response uses. Stating it once keeps the
+/// recorded status and the response shape from drifting between the two entry
+/// points.
 fn finish_upstream_stream(
-    forwarded: Result<super::async_proxy::StreamingProxyResponse, crate::RuntimeError>,
+    forwarded: Result<super::async_proxy::StreamingProxyResponse, super::async_proxy::ProxyFailure>,
     ctx: &ConnCtx,
-    method: &'static str,
-    path: &str,
-    is_head: bool,
+    scope: &RejectionScope,
     start: std::time::Instant,
 ) -> hyper::Response<HyperResponseBody> {
     let upstream = match forwarded {
         Ok(upstream) => upstream,
-        Err(e) => {
-            tracing::warn!(error = %e, "streaming proxy upstream failed");
-            record_request(ctx, method, path, 502, start);
-            return to_hyper_full(Response::text_raw(502, "proxy upstream failed"));
+        Err(failure) => {
+            return answer_rejected(ctx, scope, Rejected::from_proxy_failure(failure), start);
         }
     };
     // Recorded from the built response, not from the upstream's status: a
     // response that could not be built answers with its own status, and the
     // metric names what the peer was given.
-    let response = build_streaming_response(
+    let response = match build_streaming_response(
         upstream.status,
         &upstream.headers,
         StreamBody::Proxy(upstream.rx),
-        is_head,
-    );
-    record_request(ctx, method, path, response.status().as_u16(), start);
+        scope,
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            return answer_rejected(ctx, scope, Rejected::unrepresentable(error), start);
+        }
+    };
+    record_scoped(ctx, scope, response.status().as_u16(), start);
     response
 }
 
+/// Answer a streaming handler's response, or refuse what cannot be represented.
+///
+/// The scope arrives from dispatch: a handler's status or header set that hyper
+/// rejects is mapped by the same policy the handler's own failure would have
+/// reached, and the answer is recorded under that same scope. One exit rule per
+/// file — the refusal and the answer name the request the same way, so this
+/// exit and its streaming-proxy sibling cannot disagree about what a request is
+/// called.
+///
+/// The request is taken by value and released here rather than at the caller.
+/// It carries the disconnect signal the producer behind `stream_resp` reports
+/// through, so it outlives the response this builds.
 pub(super) fn handle_stream_response(
     stream_resp: super::stream::StreamResponse,
-    req: Request,
+    held_request: Request,
     ctx: &ConnCtx,
+    scope: &RejectionScope,
     start: std::time::Instant,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    let is_head = req.is_head();
     let parts = stream_resp.into_parts();
-    let response = build_streaming_response(
+    let response = match build_streaming_response(
         parts.status,
         &parts.headers,
         StreamBody::Channel(parts.rx),
-        is_head,
-    );
-    record_request(
-        ctx,
-        req.method(),
-        req.path(),
-        response.status().as_u16(),
-        start,
-    );
+        scope,
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            return Ok(answer_rejected(
+                ctx,
+                scope,
+                Rejected::unrepresentable(error),
+                start,
+            ));
+        }
+    };
+    record_scoped(ctx, scope, response.status().as_u16(), start);
+    drop(held_request);
 
     Ok(response)
 }
@@ -190,20 +217,13 @@ pub(super) async fn handle_proxy_stream_response(
     backend: &str,
     prefix: &str,
     ctx: &ConnCtx,
+    scope: &RejectionScope,
     start: std::time::Instant,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let proxy_req = super::async_proxy::ProxyRequest::from_request(&req);
-    let is_head = req.is_head();
 
     let forwarded = super::async_proxy::forward_request_streaming(proxy_req, backend, prefix).await;
-    Ok(finish_upstream_stream(
-        forwarded,
-        ctx,
-        req.method(),
-        req.path(),
-        is_head,
-        start,
-    ))
+    Ok(finish_upstream_stream(forwarded, ctx, scope, start))
 }
 
 /// Dispatch a streaming proxy request without buffering the incoming body.
@@ -211,62 +231,59 @@ pub(super) async fn handle_proxy_stream_response(
 /// Runs the middleware gate on a lightweight request (empty body), then
 /// forwards the original hyper body stream to upstream.
 ///
-/// `method` arrives already parsed, from the classification that produced this
-/// route. A method Camber cannot name never reaches a proxy route — it is
-/// answered as `Unnameable` before classification runs — so parsing it a second
-/// time here would only re-derive what the head already proved, and would add a
-/// refusal arm no request can reach.
+/// The method arrives already parsed, on the target the classification that
+/// produced this route built. Only a matched route reaches here, so the method
+/// is one Camber routes on, and parsing it again would only re-derive what the
+/// head already proved.
 ///
 /// `start` comes from `handle_request`, not from here. One clock per request
 /// means every route class reports the same span into
 /// `http_request_duration_seconds`; a second `Instant::now()` at this entry
 /// would leave this class's buckets incomparable with all the others.
+///
+/// The child router arrives from classification rather than being resolved
+/// again. Only a resolved child can produce this class, and the authority parse
+/// and host-table search that selected it are exactly the two the gate below
+/// otherwise repeated, on every proxied stream a `HostRouter` serves.
 pub(super) async fn dispatch_streaming_proxy(
     hyper_req: hyper::Request<hyper::body::Incoming>,
-    dispatch: &super::router::ServerDispatch,
     ctx: &ConnCtx,
     target: super::dispatch::StreamingProxyTarget,
     origin: RequestOrigin<'_>,
-    method: super::method::Method,
+    router: Option<&super::dispatch::FrozenRouter>,
+    pre_body: &super::dispatch::PreBodyScope,
     start: std::time::Instant,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let super::dispatch::StreamingProxyTarget {
         backend,
         prefix,
         params,
+        method,
     } = target;
-    let method_str = method.as_str();
-    let is_head = method_is_head(method);
+    // The route and dispatch class classification established, carried into
+    // every refusal this path can raise: the gate's, the host's, and the
+    // upstream's alike.
+    let scope = pre_body.scope(RequestIdentity::from_head(
+        &origin,
+        hyper_req.method(),
+        hyper_req.uri(),
+    ));
 
-    // Middleware gate check using a lightweight Request (empty body). A method
-    // no gate could be built for is refused here rather than forwarded: an
-    // upstream reached with the chain never run is an unauthenticated request.
-    // The refusal is recorded like every other one this path answers with, so
-    // no arm of this function can shed a request without moving a counter.
-    let gate_blocked = match run_head_gate(&hyper_req, dispatch, origin, Some(params)).await {
-        Ok(blocked) => blocked,
-        Err(MethodNotAllowed) => {
-            return Ok(refuse_head(
-                ctx,
-                Some(method),
-                hyper_req.uri().path(),
-                method_not_allowed_response(),
-                start,
-            ));
-        }
-    };
-
-    // Answered through the same refusal path as the arm above it. A middleware
-    // response carrying a header name hyper cannot build leaves as a `500`, and
-    // recording it before that conversion named a status the peer never saw.
-    if let Some(blocked) = gate_blocked {
-        return Ok(refuse_head(
-            ctx,
-            Some(method),
-            hyper_req.uri().path(),
-            blocked,
-            start,
-        ));
+    // Middleware gate check using a lightweight Request (empty body). The gate
+    // runs against the child classification already resolved, so an authority
+    // Camber cannot parse never reaches here: that one is answered from the
+    // head, before this class is chosen.
+    //
+    // A middleware response carrying a header name hyper cannot build leaves as
+    // a `500`, and recording it before that conversion named a status the peer
+    // never saw, so it goes out through the same answering path every other
+    // refusal on this path takes.
+    let head = RequestHead::from_hyper_request(&hyper_req, origin);
+    if let Some(blocked) = run_head_gate(&head, router, Some(params), &scope).await {
+        // Answered under the scope built above, not a rebuilt built-in one: a
+        // gate response the wire cannot carry recovers through this route's own
+        // mapper, the same one the host and upstream refusals reach.
+        return Ok(answer(ctx, blocked, start, &scope));
     }
     let scheme = match origin.is_tls {
         true => "https",
@@ -286,16 +303,7 @@ pub(super) async fn dispatch_streaming_proxy(
         scheme,
     };
 
-    // `hyper_parts.uri` survives the partial move of `headers`, so the request
-    // path is still readable for the record without a copy of it.
     let forwarded =
         super::async_proxy::forward_incoming_streaming(proxy_parts, body, &backend, &prefix).await;
-    Ok(finish_upstream_stream(
-        forwarded,
-        ctx,
-        method_str,
-        hyper_parts.uri.path(),
-        is_head,
-        start,
-    ))
+    Ok(finish_upstream_stream(forwarded, ctx, &scope, start))
 }

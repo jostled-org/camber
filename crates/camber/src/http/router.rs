@@ -1,9 +1,10 @@
 use super::method::Method;
 use super::middleware::MiddlewareFn;
+use super::rejection::{Rejection, RejectionContext, RejectionMapper, shared_mapper};
 use super::response::IntoResponse;
 use super::sse::SseWriter;
 use super::stream::StreamResponse;
-use super::trie::{RouteHandler, TrieNode};
+use super::trie::{CANONICAL_METHODS, HandlerOutcome, RouteHandler, TrieNode};
 #[cfg(feature = "ws")]
 use super::websocket::WsConn;
 use super::{Request, Response};
@@ -33,6 +34,7 @@ impl std::fmt::Debug for Router {
                 "skip_middleware_for_internal",
                 &self.skip_middleware_for_internal,
             )
+            .field("has_rejection_mapper", &self.mapper.is_some())
             .finish()
     }
 }
@@ -47,6 +49,7 @@ pub struct Router {
     middleware: Vec<MiddlewareFn>,
     buffers: BufferConfig,
     skip_middleware_for_internal: bool,
+    mapper: Option<Arc<RejectionMapper>>,
     #[cfg(feature = "grpc")]
     grpc_router: Option<super::dispatch::GrpcRouter>,
 }
@@ -58,6 +61,7 @@ impl Default for Router {
             middleware: Vec::new(),
             buffers: BufferConfig::default(),
             skip_middleware_for_internal: false,
+            mapper: None,
             #[cfg(feature = "grpc")]
             grpc_router: None,
         }
@@ -113,11 +117,43 @@ impl Router {
         self
     }
 
+    /// Set the policy that turns a Camber-controlled refusal into a response.
+    ///
+    /// The mapper is given the client-safe [`Rejection`] and the
+    /// [`RejectionContext`] that names the request. It cannot reach the private
+    /// cause, and it runs at most once per refusal. Returning `Err`, panicking,
+    /// or answering with an informational status produces the fixed redacted
+    /// `500` instead, without calling the mapper again.
+    ///
+    /// ```rust
+    /// use camber::http::{Rejection, RejectionContext, Response, Router};
+    ///
+    /// let router = Router::new().rejection_mapper(|rejection: &Rejection, _: &RejectionContext| {
+    ///     Response::text(rejection.status(), rejection.message())
+    /// });
+    /// ```
+    #[must_use]
+    pub fn rejection_mapper<F>(mut self, mapper: F) -> Self
+    where
+        F: Fn(&Rejection, &RejectionContext) -> Result<Response, RuntimeError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.mapper = Some(shared_mapper(mapper));
+        self
+    }
+
     /// Register async middleware that wraps all route handlers.
     ///
     /// Middleware registered first executes outermost (wraps all later
     /// middleware). Each middleware receives the request and a `Next`
     /// handle — call `next.call(req).await` to continue the chain.
+    ///
+    /// A frame may answer with a `Response` or with
+    /// `Result<Response, RuntimeError>`, so a failure it raises reaches the
+    /// router's rejection policy instead of becoming a response nothing can
+    /// classify.
     ///
     /// ```ignore
     /// router.use_middleware(|req, next| async move {
@@ -125,13 +161,16 @@ impl Router {
     ///     resp.with_header("X-Custom", "value")
     /// });
     /// ```
-    pub fn use_middleware<F, Fut>(&mut self, mw: F)
+    pub fn use_middleware<F, Fut, R>(&mut self, mw: F)
     where
         F: Fn(&Request, super::middleware::Next) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: IntoResponse + 'static,
     {
-        self.middleware
-            .push(Box::new(move |req, next| Box::pin(mw(req, next))));
+        self.middleware.push(Box::new(move |req, next| {
+            let entered = mw(req, next);
+            Box::pin(async move { entered.await.into_response() })
+        }));
     }
 
     /// Register a GET handler for `path`.
@@ -320,23 +359,10 @@ impl Router {
     ) {
         let backend: Arc<str> = backend.into();
         let prefix_owned: Arc<str> = prefix.into();
-        let wildcard_pattern = format!("{prefix}/*proxy_path");
-        let exact_pattern = match prefix.is_empty() {
-            true => "/".to_owned(),
-            false => prefix.to_owned(),
-        };
+        let patterns = PrefixPatterns::under(prefix, "proxy_path");
 
-        let methods = [
-            Method::Get,
-            Method::Post,
-            Method::Put,
-            Method::Delete,
-            Method::Patch,
-            Method::Head,
-            Method::Options,
-        ];
-        for method in methods {
-            for pattern in [wildcard_pattern.as_str(), exact_pattern.as_str()] {
+        for method in CANONICAL_METHODS {
+            for pattern in [patterns.wildcard.as_ref(), patterns.exact.as_ref()] {
                 let handler = proxy_route_handler(
                     streaming,
                     Arc::clone(&backend),
@@ -353,30 +379,26 @@ impl Router {
         let base_dir: Arc<std::path::Path> = Arc::from(std::path::PathBuf::from(dir));
         let exact_base_dir = Arc::clone(&base_dir);
         let wildcard_base_dir = Arc::clone(&base_dir);
-        let wildcard_pattern = format!("{prefix}/*filepath");
-        let exact_pattern = match prefix.is_empty() {
-            true => "/".to_owned(),
-            false => prefix.to_owned(),
-        };
+        let patterns = PrefixPatterns::under(prefix, "filepath");
         self.root.insert_route(
             Method::Get,
-            &exact_pattern,
+            &patterns.exact,
             RouteHandler::Async(Box::new(move |_req: &Request| {
                 let base_dir = Arc::clone(&exact_base_dir);
                 Box::pin(async move {
-                    super::static_files::serve_file_async(&base_dir, "index.html").await
-                }) as Pin<Box<dyn Future<Output = Response> + Send>>
+                    Ok(super::static_files::serve_file_async(&base_dir, "index.html").await)
+                }) as Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
             })),
         );
         self.root.insert_route(
             Method::Get,
-            &wildcard_pattern,
+            &patterns.wildcard,
             RouteHandler::Async(Box::new(move |req: &Request| {
                 let base_dir = Arc::clone(&wildcard_base_dir);
                 let file_path: Box<str> = req.param("filepath").unwrap_or("").into();
                 Box::pin(async move {
-                    super::static_files::serve_file_async(&base_dir, &file_path).await
-                }) as Pin<Box<dyn Future<Output = Response> + Send>>
+                    Ok(super::static_files::serve_file_async(&base_dir, &file_path).await)
+                }) as Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
             })),
         );
     }
@@ -393,7 +415,7 @@ impl Router {
             RouteHandler::Async(Box::new(move |req: &Request| {
                 let fut = handler(req);
                 Box::pin(async move { fut.await.into_response() })
-                    as Pin<Box<dyn Future<Output = Response> + Send>>
+                    as Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
             })),
         );
     }
@@ -417,8 +439,35 @@ impl Router {
             root: self.root.freeze(),
             middleware: self.middleware.into_boxed_slice(),
             skip_middleware_for_internal: self.skip_middleware_for_internal,
+            mapper: self.mapper,
             #[cfg(feature = "grpc")]
             grpc_router: self.grpc_router,
+        }
+    }
+}
+
+/// The two patterns one URL prefix registers.
+///
+/// Every prefix-mounted feature claims both: the prefix itself and everything
+/// beneath it. Proxy registration and static-file serving derived the same pair
+/// from the same prefix, differing only in the name they capture the tail
+/// under, and two copies of the empty-prefix rule are two places `""` can stop
+/// meaning the root.
+struct PrefixPatterns {
+    /// Everything beneath the prefix, captured under the given name.
+    wildcard: Box<str>,
+    /// The prefix itself. An empty prefix is the root.
+    exact: Box<str>,
+}
+
+impl PrefixPatterns {
+    fn under(prefix: &str, capture: &str) -> Self {
+        Self {
+            wildcard: format!("{prefix}/*{capture}").into_boxed_str(),
+            exact: match prefix.is_empty() {
+                true => "/".into(),
+                false => prefix.into(),
+            },
         }
     }
 }

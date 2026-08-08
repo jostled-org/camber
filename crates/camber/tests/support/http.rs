@@ -20,6 +20,13 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// can stall the poll before the next attempt is made.
 const PROBE_ATTEMPT: Duration = Duration::from_millis(100);
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// The bound one request-and-answer exchange runs under.
+///
+/// The same number [`connect`] arms on the socket, named once for the suites
+/// that hand a bound of their own to [`request`]. Two spellings of it are two
+/// things that can drift, and the copy that drifts is the one that stops
+/// bounding what it was written for.
+pub const WIRE_TIMEOUT: Duration = IO_TIMEOUT;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = MAX_HEADER_BYTES + MAX_BODY_BYTES + MAX_HEADER_BYTES;
@@ -151,7 +158,9 @@ impl ServerCleanupProbe {
 pub struct ReadyServer {
     local_addr: SocketAddr,
     handle: Option<ServerHandle>,
-    readiness: HttpResponse,
+    /// The probe's answer, for a server this guard waited on. An adopted server
+    /// was never probed, so it carries none.
+    readiness: Option<HttpResponse>,
     cleanup: Arc<ServerCleanupState>,
 }
 
@@ -163,7 +172,6 @@ impl ReadyServer {
     ) -> Result<Self, FixtureError> {
         let local_addr = listener.local_addr();
         let handle = http::serve_background(listener.into_tokio()?, router);
-        let cleanup = Arc::new(ServerCleanupState::default());
         let readiness = match wait_for_http_response(local_addr, timeout) {
             Ok(response) => response,
             Err(error) => {
@@ -173,20 +181,52 @@ impl ReadyServer {
                 });
             }
         };
+        // Built field by field rather than from `adopt`: this type owns a
+        // `Drop`, so the functional-update syntax that would reuse that
+        // constructor cannot move its fields out.
         Ok(Self {
             local_addr,
             handle: Some(handle),
-            readiness,
-            cleanup,
+            readiness: Some(readiness),
+            cleanup: Arc::new(ServerCleanupState::default()),
         })
+    }
+
+    /// Take ownership of a server that is already serving, without probing it.
+    ///
+    /// The guard's whole contract is the teardown: the handle lives in an
+    /// `Option`, `Drop` cancels and joins it under a bound, and an assertion
+    /// that fails anywhere in the case still releases the task and the listener
+    /// under it. Three fixtures wrote that contract out, two of them locally,
+    /// because they could not use this one — a fixture that must start serving
+    /// at an exact moment, or serve over TLS, has nothing to probe when the
+    /// guard is built.
+    ///
+    /// Readiness is what it gives up, and only that. A caller that adopts owns
+    /// the question of when the server is answering; a caller that wants it
+    /// answered for it uses [`ReadyServer::start`].
+    pub fn adopt(local_addr: SocketAddr, handle: ServerHandle) -> Self {
+        Self {
+            local_addr,
+            handle: Some(handle),
+            readiness: None,
+            cleanup: Arc::new(ServerCleanupState::default()),
+        }
     }
 
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
+    /// The answer the readiness probe read.
+    ///
+    /// Only a probed server has one. An adopted server was never probed, so
+    /// asking it this is a caller reading a fixture it did not build — reported
+    /// as the mistake it is rather than as an absent response.
     pub fn readiness_response(&self) -> &HttpResponse {
-        &self.readiness
+        self.readiness
+            .as_ref()
+            .expect("an adopted server was never probed, so it read no readiness response")
     }
 
     pub fn cleanup_probe(&self) -> ServerCleanupProbe {
@@ -245,12 +285,40 @@ impl ReadyServer {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *cleanup_error = Some(error.to_string().into_boxed_str());
     }
+
+    /// Record one cleanup fault, and fail the case on the faults that are one.
+    ///
+    /// Recording alone was the weaker half of this guard's contract: two
+    /// fixtures wrote their own because a server that failed its join, or never
+    /// joined at all, wrote a sentence into a probe most cases never read and
+    /// then passed. A server told to stop and unable to stop is a fault, and it
+    /// fails here.
+    ///
+    /// Two of the reports are not that fault. [`FixtureError::NoJoinRuntime`]
+    /// and [`FixtureError::UnjoinableRuntime`] say this thread has no runtime
+    /// that can host a blocking wait — a current-thread fixture, or a `Drop`
+    /// outside any runtime — so cancellation is the whole of what the guard can
+    /// owe there, and it has already been sent. They stay recorded, which is
+    /// what a case that wants to assert on them reads.
+    ///
+    /// Nothing is raised during an unwind: a panic there aborts the process and
+    /// destroys the whole binary's assertion output, and the case's own failure
+    /// is the one worth reading.
+    fn report_cleanup_failure(&self, error: &FixtureError) {
+        self.record_cleanup_error(error);
+        match (error, std::thread::panicking()) {
+            (FixtureError::NoJoinRuntime | FixtureError::UnjoinableRuntime { .. }, _) => {}
+            (_, true) => {}
+            (_, false) => panic!("the fixture server did not join: {error}"),
+        }
+    }
 }
 
 impl Drop for ReadyServer {
     fn drop(&mut self) {
-        if let Err(error) = self.cancel_and_join(SERVER_CLEANUP_TIMEOUT) {
-            self.record_cleanup_error(&error);
+        match self.cancel_and_join(SERVER_CLEANUP_TIMEOUT) {
+            Ok(()) => {}
+            Err(error) => self.report_cleanup_failure(&error),
         }
     }
 }
@@ -332,6 +400,27 @@ pub fn serve_background_ready(
     ReadyServer::start(listener, router, timeout).map(ReadyServer::into_handle)
 }
 
+/// Hand an owned Tokio listener to whichever server serves it, and guard the
+/// handle that comes back.
+///
+/// [`spawn_server_ready`] binds, serves plain HTTP, and probes, in one step.
+/// A fixture that cannot take all three — one serving over TLS, or one that
+/// must start serving at an exact moment after its peer is already waiting —
+/// took none of them and wrote its own guard. `serve` is any function from a
+/// listener to a [`ServerHandle`], so `serve_background`, `serve_background_tls`
+/// and a closure over either all reach the same teardown.
+///
+/// The listener is already bound, because binding is what the caller varies:
+/// a case that reserves its port before its runtime exists cannot have the
+/// reservation made for it here.
+pub fn serve_owned(
+    listener: tokio::net::TcpListener,
+    serve: impl FnOnce(tokio::net::TcpListener) -> ServerHandle,
+) -> io::Result<ReadyServer> {
+    let local_addr = listener.local_addr()?;
+    Ok(ReadyServer::adopt(local_addr, serve(listener)))
+}
+
 /// Add a `/second` route that reports its first dispatch, and hand back the
 /// receiver that observes it.
 ///
@@ -381,6 +470,236 @@ impl HttpResponse {
             .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_ref())
     }
+
+    /// Every value this answer carries under one header name, in wire order.
+    ///
+    /// [`HttpResponse::header`] answers with the first value, which cannot say
+    /// that a corrected header carries exactly one: enforcement that appended
+    /// rather than replaced reads identically through it. Three roots wrote this
+    /// lookup out to make that distinction, so the distinction lives here.
+    ///
+    /// Borrowed and sealed: every caller compares the values or reports them,
+    /// and nothing appends to a lookup's result.
+    pub fn header_values(&self, name: &str) -> Box<[&str]> {
+        self.headers
+            .iter()
+            .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_ref())
+            .collect()
+    }
+
+    /// This answer's body, read as text however it was encoded.
+    ///
+    /// Lossy rather than checked: a body a case asserts on is a body a case can
+    /// read, and a refusal that answered with bytes no encoding explains is a
+    /// failure to report rather than a decode to propagate. It sits beside
+    /// [`HttpResponse::header`] because it is the same kind of read — one field
+    /// off one answer — and a free function elsewhere was one more name for it.
+    ///
+    /// Sealed: every caller compares the text or reports it, and nothing appends
+    /// to a body that has already been sent.
+    pub fn text(&self) -> Box<str> {
+        String::from_utf8_lossy(&self.body).into()
+    }
+
+    /// One answer a transport framed for itself, read as every other one is.
+    ///
+    /// HTTP/2 hands its caller a status, a header map, and a drained body rather
+    /// than the bytes of a message, so a root reading it used to carry a second
+    /// answer type with its own hand-copied `header` and `text`. It reads this
+    /// instead. The raw text is rebuilt from the parts rather than dropped: the
+    /// leak assertions search the whole answer, head and body alike, and one
+    /// that had no head to search would report a header leak as absent.
+    pub fn from_parts(
+        status: u16,
+        headers: Box<[(Box<str>, Box<str>)]>,
+        body: Box<[u8]>,
+    ) -> HttpResponse {
+        let mut raw = format!("HTTP/2 {status}\r\n");
+        append_headers(
+            &mut raw,
+            headers
+                .iter()
+                .map(|(name, value)| (name.as_ref(), value.as_ref())),
+        );
+        raw.push_str("\r\n");
+        let mut raw = raw.into_bytes();
+        raw.extend_from_slice(&body);
+        HttpResponse {
+            status,
+            headers,
+            body,
+            raw: raw.into_boxed_slice(),
+        }
+    }
+}
+
+/// The authority a request is addressed to when the case turns on no other one.
+const DEFAULT_HOST: &str = "localhost";
+
+/// The `Connection` value a request that wants no second exchange sends.
+pub const CLOSE_AFTER_RESPONSE: &str = "close";
+
+/// The `Connection` value a request that offers to send another one sends.
+pub const KEEP_CONNECTION: &str = "keep-alive";
+
+/// A request target with more path segments than the router will match.
+///
+/// The limit is the router's, so the fixture that provokes a URI-depth refusal
+/// states it once here rather than once per suite that asserts on it. Sealed:
+/// every caller sends the target as it stands and nothing appends to it.
+pub fn overdeep_path() -> Box<str> {
+    "/deep".repeat(33).into_boxed_str()
+}
+
+/// The target one table row asks for.
+///
+/// A row states its own target instead of carrying a flag another line has to
+/// interpret. Stated beside [`overdeep_path`] because the deep case is that
+/// function's, and two roots drove it from a bool of their own.
+pub enum PathSpec {
+    /// A target with more path segments than the router will match.
+    Deep,
+    /// The exact target this row asks for.
+    Exact(&'static str),
+}
+
+impl PathSpec {
+    /// The target this row sends, given the deep path its caller built once.
+    ///
+    /// The deep case borrows rather than rebuilding: [`overdeep_path`] allocates,
+    /// and a table driving one row per iteration would allocate the same target
+    /// again for every row that names it.
+    pub fn resolve<'a>(&self, deep: &'a str) -> &'a str {
+        match self {
+            PathSpec::Deep => deep,
+            PathSpec::Exact(path) => path,
+        }
+    }
+}
+
+/// Write `headers` onto a request or response head, one CRLF-terminated line
+/// each.
+///
+/// Three heads are built in this suite — the bodyless request, the framed one,
+/// and the WebSocket upgrade — and they differ in their start line and in
+/// nothing else. Three copies of this loop were three places the separator, the
+/// terminator, or the order could drift from what the other two send.
+///
+/// It takes any sequence of pairs rather than a slice of them. A caller holding
+/// owned strings — [`HttpResponse::from_parts`], rebuilding a head out of an
+/// HTTP/2 header map — collected a throwaway slice of borrows per response for
+/// no reason but this parameter. A borrowing iterator writes the same head and
+/// allocates nothing; the slice callers spell the same thing as
+/// `.iter().copied()`.
+pub fn append_headers<'a>(
+    head: &mut String,
+    headers: impl IntoIterator<Item = (&'a str, &'a str)>,
+) {
+    headers.into_iter().for_each(|(name, value)| {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    });
+}
+
+/// Send one request with an exact method, path, and `Host` value.
+///
+/// [`request`] writes `Host: localhost` for every call, so a case that turns on
+/// the authority the peer sent — host routing, or an authority the server must
+/// refuse — cannot be expressed through it. A second `Host` line is a different
+/// request, not the same one with an override.
+pub fn request_with_host(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    host: &str,
+) -> io::Result<HttpResponse> {
+    request_to_host(
+        addr,
+        method,
+        path,
+        host,
+        &[("Connection", CLOSE_AFTER_RESPONSE)],
+    )
+}
+
+/// Send one request under the suite's wire bound, failing the calling test
+/// rather than reporting.
+///
+/// Five roots wrote this wrapper, panic text included. A send that does not
+/// complete is never the claim under test in any of them: it is the fixture's
+/// own transport breaking, and the row that asked for it has nothing left to
+/// assert. The bound is [`WIRE_TIMEOUT`], because a caller that has given up its
+/// error has no way to act on a budget of its own either.
+pub fn send(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> HttpResponse {
+    request(addr, method, path, headers, body, WIRE_TIMEOUT)
+        .unwrap_or_else(|error| panic!("{method} {path} did not complete: {error}"))
+}
+
+/// [`send`], addressed to a named authority and carrying the headers the caller
+/// names.
+///
+/// The authority is a parameter rather than one more header, for the reason
+/// [`request_with_host`] gives: a request carrying two `Host` values is a
+/// different request, not the same one with an override.
+///
+/// The one failure sentence a host-addressed send has. [`send_to_host`] is this
+/// with the close preference filled in, so a peer that never answered is
+/// reported the same way whichever form asked it.
+pub fn send_to_host_with(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    host: &str,
+    headers: &[(&str, &str)],
+) -> HttpResponse {
+    request_to_host(addr, method, path, host, headers)
+        .unwrap_or_else(|error| panic!("{method} {path} (Host: {host}) did not complete: {error}"))
+}
+
+/// [`send_to_host_with`], asking the server to close after it answers.
+///
+/// The preference every case that reads one answer and stops wants. A case whose
+/// claim IS the connection's disposition states its own headers through
+/// [`send_to_host_with`], because a request that asked for close would be
+/// reading back its own preference.
+pub fn send_to_host(addr: SocketAddr, method: &str, path: &str, host: &str) -> HttpResponse {
+    send_to_host_with(
+        addr,
+        method,
+        path,
+        host,
+        &[("Connection", CLOSE_AFTER_RESPONSE)],
+    )
+}
+
+/// [`request_with_host`], with the connection preference left to the caller.
+///
+/// A case that reads the response's own `Connection` value cannot ask for close
+/// itself: the server would echo the request's preference, and the assertion
+/// would hold whether or not the framework had decided anything.
+pub fn request_to_host(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    host: &str,
+    headers: &[(&str, &str)],
+) -> io::Result<HttpResponse> {
+    let mut stream = connect(addr)?;
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\n");
+    append_headers(&mut head, headers.iter().copied());
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes())?;
+    stream.flush()?;
+    read_http_response_bounded(&mut stream)
 }
 
 pub fn request(
@@ -643,20 +962,204 @@ pub fn write_request(
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> io::Result<()> {
-    let mut request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
-        body.len()
-    );
-    headers.iter().for_each(|(name, value)| {
-        request.push_str(name);
-        request.push_str(": ");
-        request.push_str(value);
-        request.push_str("\r\n");
-    });
-    request.push_str("\r\n");
-    stream.write_all(request.as_bytes())?;
+    write_request_with_connection(stream, CLOSE_AFTER_RESPONSE, method, path, headers, body)
+}
+
+/// [`write_request`], with the connection preference the caller names.
+///
+/// A case that turns on the framework's own disposition cannot ask for close
+/// itself: the server would be answering the peer's preference, and the
+/// assertion would hold whether or not anything had decided anything.
+pub fn write_request_with_connection(
+    stream: &mut TcpStream,
+    connection: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> io::Result<()> {
+    let head = body_request_head(DEFAULT_HOST, connection, method, path, headers, body.len());
+    stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
     stream.flush()
+}
+
+/// The head of one request that frames a body of `body_len` bytes.
+///
+/// Stated once because the writer that sends onto a caller-owned connection and
+/// the sender that opens its own differ in nothing else, and two copies of a
+/// request head are two things that can disagree about what was sent.
+fn body_request_head(
+    host: &str,
+    connection: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body_len: usize,
+) -> String {
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: {connection}\r\nContent-Length: {body_len}\r\n"
+    );
+    append_headers(&mut head, headers.iter().copied());
+    head.push_str("\r\n");
+    head
+}
+
+/// A chunk size that is not a size, sent where the framing promised one.
+///
+/// Hyper accepts the request head, so Camber's own body collection runs and
+/// then fails — on neither the length limit nor the deadline, and with far
+/// fewer bytes sent than any limit collects. This is the shape a mid-body
+/// transport failure or a peer reset arrives in, written as bytes a test can
+/// send on demand.
+const BROKEN_CHUNK: &str = "zz\r\n";
+
+/// Send a request whose chunked body framing breaks after the head.
+///
+/// The connection preference is the caller's, for the reason
+/// [`write_request_with_connection`] gives: a case that turns on the
+/// framework's own disposition cannot ask for close itself.
+pub fn write_unreadable_body(
+    stream: &mut TcpStream,
+    connection: &str,
+    method: &str,
+    path: &str,
+    content_type: &str,
+) -> io::Result<()> {
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {DEFAULT_HOST}\r\nConnection: {connection}\r\n\
+         Content-Type: {content_type}\r\nTransfer-Encoding: chunked\r\n\r\n{BROKEN_CHUNK}"
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.flush()
+}
+
+/// Open a connection, send a body that stops being readable, and read the answer
+/// off it.
+///
+/// The socket comes back with the answer because the connection is half the
+/// claim: a refusal that left the request body unread has decided a disposition,
+/// and what that connection does with one more request is the only way to
+/// observe it. Two roots wrote the connect, the write, and the bounded read out
+/// as one sequence; the sequence is stated here and each root keeps its own
+/// failure sentences.
+pub fn send_unreadable_body(
+    addr: SocketAddr,
+    connection: &str,
+    method: &str,
+    path: &str,
+    content_type: &str,
+) -> io::Result<(HttpResponse, TcpStream)> {
+    let mut stream = connect(addr)?;
+    write_unreadable_body(&mut stream, connection, method, path, content_type)?;
+    let refused = read_http_response_bounded(&mut stream)?;
+    Ok((refused, stream))
+}
+
+/// The body length a stalled request declares and never finishes sending.
+///
+/// The declared length is the fixture, not its size: the peer sends one byte and
+/// stops, so what the server waits on is the rest of a promise. Sixty-four is
+/// what both roots that stall a body chose, and two constants under one name
+/// were two numbers that could drift while both went on being called the stalled
+/// length.
+pub const STALLED_CONTENT_LENGTH: usize = 64;
+
+/// The head of one request that promises [`STALLED_CONTENT_LENGTH`] body bytes
+/// and sends one.
+///
+/// `connection` is an `Option` because one root states a preference and the
+/// other deliberately states none: a case reading back the framework's own
+/// disposition cannot send a preference for it to echo, and a case proving
+/// reuse after the refusal has to offer keep-alive. Absence is a third request,
+/// not a default either root can stand in for.
+pub fn stalled_request_head(connection: Option<&str>, method: &str, path: &str) -> String {
+    // Formatting into the head rather than through a second `format!`, because
+    // a formatted write to a `String` cannot fail and the intermediate would be
+    // one allocation per stalled request for nothing.
+    use std::fmt::Write as _;
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {DEFAULT_HOST}\r\n");
+    append_headers(&mut head, connection.map(|value| ("Connection", value)));
+    let _ = write!(head, "Content-Length: {STALLED_CONTENT_LENGTH}\r\n\r\nx");
+    head
+}
+
+/// Send [`stalled_request_head`] onto a connection the caller owns.
+///
+/// The blocking half of the same fixture. A root driving the stall from an async
+/// peer writes the head itself, because its socket is Tokio's and this one is
+/// the standard library's; both send the same bytes because both build them
+/// here.
+pub fn write_stalled_body(
+    stream: &mut TcpStream,
+    connection: Option<&str>,
+    method: &str,
+    path: &str,
+) -> io::Result<()> {
+    stream.write_all(stalled_request_head(connection, method, path).as_bytes())?;
+    stream.flush()
+}
+
+/// Send one request with a body to a named authority, on its own connection.
+///
+/// [`request`] addresses every call to `localhost`, and [`request_to_host`]
+/// frames no body — so a case that turns on the authority the peer sent *and*
+/// carries a body, which is what host-routed body collection is, can be
+/// expressed through neither.
+pub fn request_to_host_with_body(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    host: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> io::Result<HttpResponse> {
+    let mut stream = connect(addr)?;
+    let head = body_request_head(
+        host,
+        CLOSE_AFTER_RESPONSE,
+        method,
+        path,
+        headers,
+        body.len(),
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()?;
+    read_http_response_bounded(&mut stream)
+}
+
+/// What an already-answered connection does with one more request on it.
+///
+/// `Some` is a connection that framed and answered the second request; `None`
+/// is one the server ended, whether the peer learns it on the write or at end
+/// of stream. A forced-close disposition is observable only this way: the
+/// header a response carries states an intent, and what the transport then did
+/// with the connection is the behavior itself.
+pub fn probe_connection_reuse(
+    stream: &mut TcpStream,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> io::Result<Option<HttpResponse>> {
+    let written =
+        write_request_with_connection(stream, CLOSE_AFTER_RESPONSE, method, path, headers, body);
+    match written {
+        Ok(()) => {}
+        Err(error) if is_closed_connection_error(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    match read_http_response_bounded(stream) {
+        Ok(response) => Ok(Some(response)),
+        Err(error)
+            if is_closed_connection_error(&error)
+                || error.kind() == io::ErrorKind::UnexpectedEof =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Read the response head: every byte through the blank line that ends it.
@@ -695,6 +1198,84 @@ pub fn read_delimited(
         )?;
         Ok(bytes[..end].into())
     })
+}
+
+/// Read a stream to closure and hand back what it wrote, as text.
+///
+/// [`read_until_closed`] for the cases whose subject is the whole transport
+/// rather than one parsed message: a committed stream that ends short, a request
+/// line Hyper never accepted, a proxied answer that outlives the framed reader's
+/// own deadline. Three roots wrote the same read-then-decode pair, so what
+/// counts as the end of such an answer is stated once.
+pub fn drain_to_close(stream: &mut TcpStream, timeout: Duration) -> io::Result<String> {
+    read_until_closed(stream, timeout).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Await `future` under `bound`, failing the calling test when it expires.
+///
+/// Three roots wrote this wrapper. It is a hang guard, not a timing assertion: a
+/// rendezvous that never arrives fails its own test at the bound instead of
+/// parking the whole binary on it, and `operation` names what was being waited
+/// for so the failure says which leg stalled.
+pub async fn bounded<F: std::future::Future>(
+    future: F,
+    bound: Duration,
+    operation: &str,
+) -> F::Output {
+    tokio::time::timeout(bound, future)
+        .await
+        .unwrap_or_else(|_| panic!("{operation} timed out after {bound:?}"))
+}
+
+/// [`bounded`], for a caller whose runtime clock is paused.
+///
+/// A paused runtime advances to the nearest armed timer whenever it has nothing
+/// left to run. A single `timeout` armed before the subject has a deadline of
+/// its own is therefore the only timer in the process, the clock jumps straight
+/// to it, and it elapses having proved nothing — so a plain [`bounded`] fails a
+/// perfectly healthy wait. Every idle park before the subject arms its own timer
+/// can consume one arming that way.
+///
+/// The bound is armed `armings` times instead. Each arming after the one the
+/// clock jumped to is measured against a deadline that does exist, is the nearer
+/// timer, and fires first, so an elapse that exhausts them all says the subject
+/// never settled. An arming spent on virtual time costs no real time.
+///
+/// The future is pinned once and carried across armings rather than rebuilt: a
+/// cancelled read keeps the bytes it already took, and a fresh future per arming
+/// would drop them. `subject` names what never settled.
+pub async fn bounded_under_pause<F: std::future::Future>(
+    future: F,
+    bound: Duration,
+    armings: usize,
+    subject: &str,
+) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    for _ in 0..armings {
+        match tokio::time::timeout(bound, &mut future).await {
+            Ok(output) => return output,
+            // The clock jumped to this arming rather than to the subject's own
+            // deadline. The next one is measured against a deadline that now
+            // exists.
+            Err(_) => {}
+        }
+    }
+    panic!("{subject} did not settle across {armings} armings of {bound:?}")
+}
+
+/// Assert one server owner joined on an end its owner asked for.
+///
+/// A server told to stop returns `Ok(())` or `Cancelled` — it ended because it
+/// was told to, which is a completed join and not a failure. Every other outcome
+/// is a fault, and discarding the result with `let _` reports none of them: a
+/// server that panicked, refused, or never joined at all reads exactly like one
+/// that shut down cleanly.
+pub fn assert_server_joined(result: Result<Result<(), RuntimeError>, tokio::time::error::Elapsed>) {
+    match result {
+        Ok(Ok(())) | Ok(Err(RuntimeError::Cancelled)) => {}
+        Ok(Err(error)) => panic!("the server owner failed rather than stopping: {error}"),
+        Err(expiry) => panic!("the server owner never joined: {expiry}"),
+    }
 }
 
 /// Read a stream to closure, returning everything that arrived before it.

@@ -41,6 +41,7 @@ Supported registration methods include:
 - `req.body()`
 - `req.json::<T>()`
 - `req.multipart()`
+- `req.request_id()` — the identity Camber minted for this request, not the `X-Request-Id` header the peer sent
 - `req.on_disconnect()` — see [Observing Disconnect](#observing-disconnect)
 
 ### Query Views
@@ -166,7 +167,145 @@ All constructors return `Result<Response, RuntimeError>`.
 - `Response`
 - `Result<Response, RuntimeError>`
 
-That lets handlers return either directly.
+That lets handlers return either directly. The conversion is fallible: it carries a handler error to the router's rejection boundary instead of turning it into a response on the spot. See [Error Handling](error.md#handler-behavior) for the answers that boundary gives.
+
+## Rejections
+
+Camber answers its own HTTP refusals through one boundary. A routing miss, a body
+limit, a parser failure, a handler error, a handshake refusal, and a proxy failure all
+become one typed value before they become a response. `Router::rejection_mapper` and
+`HostRouter::rejection_mapper` replace the answer that value produces.
+
+```rust
+use camber::http::{Rejection, RejectionContext, Response, Router};
+
+let router = Router::new().rejection_mapper(|rejection: &Rejection, context: &RejectionContext| {
+    Response::json(
+        rejection.status(),
+        &serde_json::json!({
+            "error": rejection.message(),
+            "request_id": context.request_id().as_str(),
+        }),
+    )
+});
+```
+
+The mapper is synchronous. It runs at failure and shutdown boundaries, where awaiting
+application work would start a second cancellable lifecycle.
+
+### Categories
+
+`RejectionKind` names the producer that found the failure. Two categories a mapper
+answers with the same status stay distinct.
+
+| Kind | Default status | Default body | Raised by |
+|---|---|---|---|
+| `Routing` | `404`, `400` for an unusable `Host`, or `414` for a target nested too deep | `not found`, `invalid host header`, `URI path too deep` | No host or route claims the target, or the path nests past the segment limit the router matches |
+| `MethodSelection` | `405` | `method not allowed` | A route claims the path, not the method |
+| `BodyLimit` | `413` | `request body too large` | The body exceeds the effective limit |
+| `BodyUnreadable` | `400` | `request body could not be read` | The body stopped arriving for a reason that is not the limit |
+| `BodyTimeout` | `408` | `request body timed out` | The body missed its collection deadline |
+| `MalformedBody` | `400` | `malformed request body` | `Request::json` could not parse the body |
+| `Multipart` | `400` | `invalid multipart body` | `Request::multipart` could not parse the body |
+| `InvalidHeader` | `500` | `internal server error` | A response cannot be put on the wire |
+| `Application` | `400` | the message the handler declared safe | A handler returned `RuntimeError::BadRequest` |
+| `Middleware` | `400` or `500` | the declared message, or fixed text | A middleware frame failed |
+| `WebSocketHandshake` | `400`, `403`, or `426` | fixed handshake text | A handshake failed before `101` |
+| `Proxy` | `502`, `503`, or `504` | `bad gateway`, `service unavailable`, `gateway timeout` | A proxied request failed before an upstream head |
+| `InternalService` | `500` or `503` | `internal server error`, `service unavailable` | Camber could not complete the request |
+
+`BodyAdmission` completes the taxonomy. It is reserved for route-aware admission
+control and has no producer today. A mid-body transport failure or a peer reset is
+not an admission refusal: it is `BodyUnreadable`.
+
+### What a mapper is given
+
+`Rejection` carries the category, the default status, the client-safe message, and the
+safe default headers. It carries no diagnostic, no source error, no panic payload, no
+upstream address, and no filesystem path. There is no accessor from it to the private
+cause.
+
+`RejectionContext` carries the request. Method, raw path, and request identifier are
+present for every mapped request. Every other value is present exactly when its owner
+established it:
+
+| Failure stage | Route | Protocol | Content type | Subprotocol |
+|---|---|---|---|---|
+| Malformed or unmatched `Host` | absent | absent | absent | absent |
+| URI depth or unmatched path | absent | absent | absent | absent |
+| Wrong or unsupported method | present | absent | absent | absent |
+| Body limit, timeout, or collection failure | present | present | absent | absent |
+| Middleware, handler, or internal route | present | present | present after an accepted head | absent |
+| WebSocket gate refusal | present | `WebSocket` | absent | absent |
+| WebSocket refusal after negotiation | present | `WebSocket` | absent | present |
+
+### Which mapper answers
+
+The resolved child router's mapper wins. The `HostRouter`'s mapper answers a request no
+child claimed. The built-in mapper answers when neither is configured, and adds
+`X-Request-Id` to what it builds. Precedence is the same for buffered, head-only,
+streaming, WebSocket, proxied, gRPC, and host-routed requests.
+
+### What the framework keeps
+
+A mapper owns the final non-informational status, the application headers, the content
+type, and the body. Camber corrects the output the protocol owns, after the mapper
+returns:
+
+- A final `405` carries the `Allow` set of every route that claims the path, in `GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS` order. A static route and a parameterized one can both claim a concrete path; the header names what they serve between them.
+- A final `426` on an unsupported WebSocket version carries `Sec-WebSocket-Version: 13`.
+- A refusal that must close the connection overwrites `Connection` with `close`. `BodyLimit`, `BodyUnreadable`, and `BodyTimeout` each leave the request body unread, so all three close: nothing establishes where a next request on that connection would begin. Under HTTP/2 there is nothing to close for — each request owns its own stream, so an unread body cannot desynchronize the connection — and the header is illegal on that version, so it is removed.
+- A `HEAD` sends no body bytes. The status and the representation headers do not change.
+
+Mapper `Err`, a mapper panic, a `1xx` mapped status, or a mapped response Hyper cannot
+build produces one fixed answer: status `500`, `Content-Type: text/plain`, body
+`internal server error`, and `X-Request-Id`. The fallback never calls a mapper, so
+response construction cannot recurse.
+
+### Request identity
+
+Camber mints a `RequestId` for every request Hyper hands it, before classification. It
+is a 32-digit lowercase hexadecimal value, and it never comes from an inbound header —
+a peer sending `X-Request-Id` is sending application data. The same value reaches
+`Request::request_id`, `RejectionContext::request_id`, the built-in rejection headers,
+and both operator events.
+
+### What the mapper never sees
+
+Failures outside Camber's control never reach a mapper: a request Hyper or rustls
+refuses before Camber admits the head, a gRPC failure after the tonic handoff, a
+WebSocket failure after `101`, and a streaming-source failure after the response head
+is committed. No replacement response can be sent at those points.
+
+### What operators see
+
+Every mapped refusal records one `request rejected` event at error level, at the
+conversion that puts the answer on the wire. Its fields are the request identifier, the
+category, the sent status, the default status, the method, the raw path, the established
+route, protocol, content type and subprotocol, the peer address, and the complete
+private source chain. The message is fixed text, so the cause never becomes part of what
+an operator filters on.
+
+The status is the one the peer received. When a mapped response cannot be built, the
+peer gets the fixed `500` fallback and that is the status this event records; a separate
+`mapped rejection response could not be represented` event names the status policy had
+chosen, so the displaced answer is reported rather than lost.
+
+A refusal no peer receives is recorded too. An outer middleware or gate frame may answer
+with its own response in place of the mapped one, and a request may end before its answer
+is sent. Such a refusal has no sent status, so it records one `rejection response was not
+sent` event instead, carrying the same identity, category, and private cause under a
+`mapped_status` field naming what policy had chosen. It has no `status` field, and
+`http_rejections_total` does not move for it: that counter is labelled by the status the
+peer received, and the peer received the other answer.
+
+Each request also records one `request completed` event carrying the same identifier
+and the same sent status. For a replaced refusal that event, and `http_requests_total`,
+report the answer the peer actually got.
+
+With metrics enabled, `http_rejections_total` counts refusals under two labels: `kind`
+and `status`. Both vocabularies are closed. A request identifier, a path, a route, a
+peer address, and an error string are never labels.
 
 ## Cookies
 
@@ -397,8 +536,8 @@ router.use_middleware(|req, next| {
         .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
     async move {
         match has_auth {
-            true => next.call(req).await,
-            false => Response::text(401, "unauthorized")?.into_response(),
+            true => Ok(next.call(req).await),
+            false => Response::text(401, "unauthorized"),
         }
     }
 });

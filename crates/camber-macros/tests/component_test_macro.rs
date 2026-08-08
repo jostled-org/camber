@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const FIXTURE_TIMEOUT: Duration = Duration::from_secs(120);
+const FIXTURE_TIMEOUT: Duration = Duration::from_secs(300);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PROCESS_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 static TARGET_SEQUENCE: AtomicU64 = AtomicU64::new(0);

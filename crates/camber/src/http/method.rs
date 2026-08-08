@@ -1,3 +1,71 @@
+use std::borrow::Cow;
+use std::sync::Arc;
+
+/// The label a request whose method Camber cannot name is recorded under.
+///
+/// Request recording and metrics label methods with `&'static str`, and a
+/// method outside the route enum has no such name. Recording every one of them
+/// under this keeps the refusal countable without turning a peer's arbitrary
+/// method text into an unbounded label.
+const UNNAMEABLE_METHOD: &str = "UNKNOWN";
+
+/// The method one accepted request arrived with.
+///
+/// [`Method`] is the closed set Camber routes on. A peer may send anything
+/// else, and that request still needs an answer, a record, and a rejection
+/// context that repeats what it actually sent. Held apart from `Method` so the
+/// routing enum stays closed and only the unroutable case pays for a string.
+#[derive(Clone, Debug)]
+pub(super) enum RequestMethod {
+    /// One of the methods Camber routes on. Nothing is allocated.
+    Known(Method),
+    /// A method outside the route enum, kept exactly as received.
+    ///
+    /// Shared rather than boxed because the identity carrying it is cloned into
+    /// every terminal that may have to name this request.
+    Unnameable(Arc<str>),
+}
+
+impl RequestMethod {
+    /// Name the method a hyper request arrived with.
+    pub(super) fn from_hyper(method: &hyper::Method) -> Self {
+        Method::from_hyper(method)
+            .map_or_else(|| Self::Unnameable(Arc::from(method.as_str())), Self::Known)
+    }
+
+    /// The method Camber can route on, when it can route on this one.
+    pub(super) fn routable(&self) -> Option<Method> {
+        match self {
+            Self::Known(method) => Some(*method),
+            Self::Unnameable(_) => None,
+        }
+    }
+
+    /// The method exactly as the peer sent it.
+    pub(super) fn as_str(&self) -> &str {
+        match self {
+            Self::Known(method) => method.as_str(),
+            Self::Unnameable(text) => text,
+        }
+    }
+
+    /// The method exactly as the peer sent it, without copying a known one.
+    pub(super) fn to_cow(&self) -> Cow<'static, str> {
+        match self {
+            Self::Known(method) => Cow::Borrowed(method.as_str()),
+            Self::Unnameable(text) => Cow::Owned(text.to_string()),
+        }
+    }
+
+    /// The bounded label this method is recorded and counted under.
+    pub(super) fn label(&self) -> &'static str {
+        match self {
+            Self::Known(method) => method.as_str(),
+            Self::Unnameable(_) => UNNAMEABLE_METHOD,
+        }
+    }
+}
+
 /// HTTP method for route matching and request identification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Method {
@@ -85,7 +153,10 @@ impl Method {
     }
 
     /// Stable index (0..6) for array-based dispatch.
-    pub(super) fn ordinal(self) -> usize {
+    ///
+    /// `const` so the compiler, not a reader, holds the index space to the
+    /// variant set — see the assertion below this block.
+    pub(super) const fn ordinal(self) -> usize {
         match self {
             Self::Get => 0,
             Self::Post => 1,
@@ -97,3 +168,11 @@ impl Method {
         }
     }
 }
+
+/// The last ordinal fills the last slot of a `[_; COUNT]` array.
+///
+/// [`Method::COUNT`] and [`Method::ordinal`] are hand-written facts that index
+/// fixed-size arrays in the trie. Stated to the compiler so a count raised
+/// without an ordinal to fill it, or a final ordinal moved out from under the
+/// count, stops the build instead of leaving a dead slot behind.
+const _: () = assert!(Method::Options.ordinal() + 1 == Method::COUNT);

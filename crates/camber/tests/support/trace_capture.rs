@@ -257,6 +257,115 @@ impl Drop for TraceCapture {
     }
 }
 
+/// The captured events carrying one fixed sentence.
+fn events_saying<'a>(events: &'a [Box<str>], sentence: &str) -> Box<[&'a str]> {
+    events
+        .iter()
+        .map(Box::as_ref)
+        .filter(|event| event.contains(sentence))
+        .collect()
+}
+
+/// The one captured event carrying `sentence`, or a failure naming what was there.
+///
+/// One event, not the first of several: a record that a condition happened once
+/// is only a record if nothing else recorded the same condition.
+pub fn only_event<'a>(events: &'a [Box<str>], sentence: &str, label: &str) -> &'a str {
+    let matching = events_saying(events, sentence);
+    assert_eq!(
+        matching.len(),
+        1,
+        "{label}: exactly one {sentence:?} event was expected, but {} of the {} captured carry it: {matching:?}",
+        matching.len(),
+        events.len()
+    );
+    matching[0]
+}
+
+/// Assert one event carries every declared field.
+///
+/// A row with no declared fields is refused rather than passed: this is called
+/// table-driven from two roots, and a row that named nothing would assert
+/// nothing while reporting the same success as a row that named everything.
+pub fn assert_fields(event: &str, fields: &[&str], label: &str) {
+    assert!(
+        !fields.is_empty(),
+        "{label}: no fields were declared, so this event proves nothing: {event}"
+    );
+    for field in fields {
+        assert!(
+            event.contains(field),
+            "{label}: the event does not carry {field:?}: {event}"
+        );
+    }
+}
+
+/// Assert one event records `name` with exactly `value`.
+///
+/// Field-aware, unlike [`assert_fields`]: `status=500` is a substring of
+/// `default_status=500`, so a contains-check can report a status the event
+/// never recorded. Reads the boundary the capture writes — fields are
+/// `name=value`, separated by one space — so it answers for the field asked
+/// about and no other.
+///
+/// For fields whose value cannot contain a space. The message and the source
+/// chain both can, and neither is a value a row states exactly.
+pub fn assert_field_value(event: &str, name: &str, value: &str, label: &str) {
+    let recorded = field_value(event, name)
+        .unwrap_or_else(|| panic!("{label}: the event records no {name} field: {event}"));
+    assert_eq!(
+        recorded, value,
+        "{label}: the event records {name}={recorded}, not {name}={value}: {event}"
+    );
+}
+
+/// The value one event recorded under `name`, read at a field boundary.
+///
+/// Public for the callers that correlate two events on a value production
+/// chose — a request identifier no wire response carried, so no row can state
+/// it as a literal.
+pub fn field_value<'a>(event: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!("{name}=");
+    let (at, _) = event
+        .match_indices(needle.as_str())
+        .find(|(at, _)| *at == 0 || event.as_bytes()[at - 1] == b' ')?;
+    let rest = &event[at + needle.len()..];
+    Some(rest.split_once(' ').map_or(rest, |(value, _)| value))
+}
+
+/// Assert the fixed sentence is the whole message, with nothing spliced into it.
+///
+/// The sentence is read where the capture wrote it, and what follows it must be
+/// the end of the record or the next field. A separator alone is not enough:
+/// `"request rejected {cause}"` interpolates a cause that begins with a space,
+/// so a tail that only had to start with one would pass the very check this
+/// exists to fail. What follows is required to look like a field instead.
+pub fn assert_message_is_fixed(event: &str, sentence: &str, label: &str) {
+    let at = event
+        .find(sentence)
+        .unwrap_or_else(|| panic!("{label}: the event does not carry {sentence:?}: {event}"));
+    let tail = &event[at + sentence.len()..];
+    assert!(
+        tail.is_empty() || opens_a_field(tail),
+        "{label}: the fixed message carries interpolated text: {event}"
+    );
+}
+
+/// Whether `tail` continues into another field rather than into spliced text.
+///
+/// A field is `name=value` behind one space, so the tail has to open with that
+/// separator and its first token has to carry a `=` with a name in front of it.
+/// Interpolated text carries the second of those at best, whichever character it
+/// starts with.
+fn opens_a_field(tail: &str) -> bool {
+    tail.starts_with(' ')
+        && tail
+            .split_whitespace()
+            .next()
+            .and_then(|token| token.split_once('='))
+            .is_some_and(|(name, _)| !name.is_empty())
+}
+
 /// How many live captures asked for exactly `needle`.
 ///
 /// Scoped to one needle rather than reported as a total, so a contract test can

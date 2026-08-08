@@ -396,7 +396,7 @@ router.post("/users", |req| async move {
 });
 ```
 
-Validation runs as middleware before the handler. Invalid requests get `400` without reaching handler code.
+Validation runs as middleware before the handler. Invalid requests never reach handler code: the frame raises a malformed-body rejection, which the rejection mapper answers, or the built-in `400` does.
 
 ## WebSocket
 
@@ -630,14 +630,14 @@ router.get("/data", |req| async move {
     Response::json(200, &data)
 });
 
-// Or return Result<Response, RuntimeError> — auto-mapped via IntoResponse
+// Or return Result<Response, RuntimeError> — the error reaches rejection policy
 router.get("/fallible", |req| async move {
     let data = fetch().await?;
     Ok(Response::json(200, &data))
 });
 ```
 
-`IntoResponse` maps `RuntimeError::BadRequest` to 400, `RuntimeError::ScopeClosed` to 503, and all other errors to 500. `ScopeClosed` means the runtime refused a spawn inside the shutdown window, which is an orderly drain rather than a server fault — 503 is what a load balancer reads as "drain this instance". Handlers returning `Response` pass through unchanged.
+`IntoResponse` carries the result to the router's rejection boundary rather than converting it. That boundary answers `RuntimeError::BadRequest` with 400 and your message, `RuntimeError::MalformedBody` and `RuntimeError::Multipart` with 400 and fixed text, `RuntimeError::ScopeClosed` with 503, and every other error with a redacted 500 whose body is exactly `internal server error` — your error text and its source chain go to the operator log instead. `ScopeClosed` means the runtime refused a spawn inside the shutdown window, which is an orderly drain rather than a server fault — 503 is what a load balancer reads as "drain this instance". Handlers returning `Response` pass through unchanged. `Router::rejection_mapper` replaces every one of those answers.
 
 ## Concurrent Work in Handlers
 

@@ -1,3 +1,5 @@
+#[path = "support/h2_client.rs"]
+pub mod h2_client;
 #[path = "support/http.rs"]
 pub mod http;
 #[path = "support/runtime.rs"]

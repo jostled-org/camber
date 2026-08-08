@@ -32,6 +32,8 @@
 //! - [`self::Response`]: build text, JSON, bytes, headers, and cookies
 //! - [`self::IntoResponse`]: handler return conversion for `Response` and
 //!   `Result<Response, RuntimeError>`
+//! - [`self::Rejection`], [`self::RejectionContext`], and [`self::RequestId`]:
+//!   what a router's `rejection_mapper` is given when Camber refuses a request
 //! - [`self::DisconnectSignal`] and [`self::DisconnectCause`]: observe one
 //!   response's lifetime through
 //!   [`Request::on_disconnect`](self::Request::on_disconnect) — it resolves
@@ -89,7 +91,9 @@
 //! # Middleware and Handler Shape
 //!
 //! Handlers receive `&Request` and return an async block. Middleware receives
-//! `&Request` and a [`self::Next`] handle.
+//! `&Request` and a [`self::Next`] handle. [`self::MiddlewareFn`] is the shape
+//! a stored frame has, [`self::MiddlewareFuture`] what one frame hands back,
+//! and [`self::HandlerOutcome`] what that future resolves to.
 //!
 //! If you need request data after an `.await`, move owned values into the
 //! future first instead of borrowing from `req` across the await boundary.
@@ -133,6 +137,7 @@ pub mod otel;
 /// Rate limiting middleware.
 pub mod rate_limit;
 mod record;
+mod rejection;
 mod request;
 mod response;
 mod router;
@@ -161,8 +166,12 @@ pub use disconnect::{DisconnectCause, DisconnectSignal};
 pub use health::{ProxyHealthResource, spawn_health_checker};
 pub use host_router::HostRouter;
 pub use method::{Method, ParseMethodError};
-pub use middleware::Next;
+pub use middleware::{MiddlewareFn, MiddlewareFuture, Next, ResponseFuture};
 pub use multipart::{MultipartReader, Part};
+pub use rejection::{
+    NegotiatedResponseMetadata, Rejection, RejectionContext, RejectionKind, RejectionProtocol,
+    RequestId,
+};
 pub use request::{Request, RequestBuilder};
 pub use response::{HeaderPair, IntoResponse, Response};
 #[cfg(feature = "grpc")]
@@ -176,6 +185,7 @@ pub use server::{
 pub use sse::SseWriter;
 pub use static_files::serve_file;
 pub use stream::{StreamResponse, StreamSender};
+pub use trie::HandlerOutcome;
 #[cfg(feature = "ws")]
 pub use websocket::{WsConn, WsMessage};
 

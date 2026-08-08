@@ -4,11 +4,14 @@ use crate::common;
 #[path = "../support/deterministic.rs"]
 mod deterministic;
 
+use crate::handshake::{Header, LOCAL_HOST, accepted, accepted_plus, handshake_request};
+
 use crate::common::{
     ASYNC_EVENT_TIMEOUT, assert_graceful_close_then_eof, assert_http_ok,
-    assert_optional_close_then_eof, assert_transport_eof, attach_dispatch_probe, lifecycle_event,
-    read_async_http_head, read_ws_binary_frame, read_ws_text_frame, status_from_raw,
-    write_ws_binary_frame, write_ws_close_frame, write_ws_text_frame,
+    assert_optional_close_then_eof, assert_refusal_body_then_eof, assert_transport_eof,
+    attach_dispatch_probe, lifecycle_event, read_async_http_head, read_ws_binary_frame,
+    read_ws_text_frame, status_from_raw, write_ws_binary_frame, write_ws_close_frame,
+    write_ws_text_frame,
 };
 use camber::RuntimeError;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, LifecycleFault, lifecycle};
@@ -23,7 +26,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const FLAG_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const VALID_WEBSOCKET_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+/// The key every accepted handshake here offers.
+///
+/// The workspace's own, not a copy of it: [`VALID_WEBSOCKET_ACCEPT`] below is
+/// derived from this exact value, so a second spelling would leave the accept
+/// value proving nothing about the key Camber was actually sent.
+const VALID_WEBSOCKET_KEY: &str = common::WS_KEY;
 const VALID_WEBSOCKET_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
 struct InvalidHandshakeCase {
@@ -83,23 +91,6 @@ const INVALID_HANDSHAKE_CASES: [InvalidHandshakeCase; 5] = [
         expected_version_header: None,
     },
 ];
-
-/// Every value a response head carries under `name`, in order.
-///
-/// `HttpResponse::header` answers with the first one, which cannot express what
-/// these handshake cases claim: that a `101` carries exactly one `Upgrade`, or
-/// that a rejection carries no `Sec-WebSocket-Accept` at all. Sealed, because
-/// nothing appends to a lookup's result.
-fn header_values<'a>(head: &'a common::HttpResponse, name: &str) -> Box<[&'a str]> {
-    head.headers
-        .iter()
-        .filter_map(|(candidate, value)| {
-            candidate
-                .eq_ignore_ascii_case(name)
-                .then_some(value.as_ref())
-        })
-        .collect()
-}
 
 struct CallbackDropProbe(Arc<AtomicBool>);
 
@@ -191,43 +182,22 @@ async fn wait_for_unacknowledged_upgrade(controller: &LifecycleController) {
     .expect("submitted upgrade reaches acknowledgement checkpoint");
 }
 
-/// One header line, or nothing when the case omits that header.
+/// The accepted head with one case's omissions and replacements applied.
 ///
-/// Sealed: the result is spliced into a request head and never appended to.
-fn optional_raw_header(name: &str, value: Option<&str>) -> Box<str> {
-    match value {
-        Some(value) => format!("{name}: {value}\r\n").into_boxed_str(),
-        None => Box::from(""),
-    }
-}
-
-/// A handshake the shared builder cannot express.
-///
-/// `common::ws_upgrade_request_with` states the head Camber accepts, so it can
-/// only add headers. The cases here own the opposite claim — a head that omits
-/// `Connection` or `Sec-WebSocket-Version`, or carries a key Camber must
-/// refuse — which needs the whole request spelled out. Sealed, because nothing
-/// appends to a request once it is framed.
-fn raw_ws_upgrade_request(
-    host: &str,
-    connection: Option<&str>,
-    key: &str,
-    version: Option<&str>,
-    extra_headers: &str,
-) -> Box<str> {
-    let connection = optional_raw_header("Connection", connection);
-    let version = optional_raw_header("Sec-WebSocket-Version", version);
-    format!(
-        "GET /ws HTTP/1.1\r\n\
-         Host: {host}\r\n\
-         Upgrade: websocket\r\n\
-         {connection}\
-         Sec-WebSocket-Key: {key}\r\n\
-         {version}\
-         {extra_headers}\
-         \r\n"
-    )
-    .into_boxed_str()
+/// Stated as a change to the accepted list rather than as a list of its own:
+/// what each case claims is that one header is missing, or carries a value
+/// Camber must refuse, and that everything else is what a client sends. `None`
+/// drops the header the case names; a stated value replaces it.
+fn case_handshake(case: &InvalidHandshakeCase) -> Box<[Header<'static>]> {
+    accepted(LOCAL_HOST)
+        .into_iter()
+        .filter_map(|(name, value)| match name {
+            "Connection" => case.connection.map(|refused| (name, refused)),
+            "Sec-WebSocket-Version" => case.version.map(|refused| (name, refused)),
+            "Sec-WebSocket-Key" => Some((name, case.key)),
+            _ => Some((name, value)),
+        })
+        .collect()
 }
 
 /// Send `request` and read the response it answers with.
@@ -236,6 +206,10 @@ fn raw_ws_upgrade_request(
 /// parsed by the shared response reader: a handshake case owns what it sends
 /// and what the head must say, not a second statement of how a socket is
 /// opened or how a status line is split.
+///
+/// Read under the bounded form, which arms one deadline over the whole reply.
+/// The socket's own timeout bounds a single syscall, so a peer dribbling one
+/// byte per read would never be cut off by it.
 fn perform_raw_ws_handshake(
     addr: std::net::SocketAddr,
     request: &str,
@@ -244,20 +218,20 @@ fn perform_raw_ws_handshake(
     stream
         .write_all(request.as_bytes())
         .expect("write raw WebSocket handshake");
-    let response =
-        common::read_http_response(&mut stream, None).expect("read raw WebSocket handshake reply");
+    let response = common::read_http_response_bounded(&mut stream)
+        .expect("read raw WebSocket handshake reply");
     (stream, response)
 }
 
 fn assert_websocket_switch(head: &common::HttpResponse, context: &str) {
     assert_eq!(head.status, 101, "{context}: unexpected status: {head:?}");
-    let upgrade = header_values(head, "upgrade");
+    let upgrade = head.header_values("upgrade");
     assert_eq!(upgrade.len(), 1, "{context}: Upgrade header: {head:?}");
     assert!(
         upgrade[0].eq_ignore_ascii_case("websocket"),
         "{context}: invalid Upgrade header: {head:?}"
     );
-    let connection = header_values(head, "connection");
+    let connection = head.header_values("connection");
     assert_eq!(
         connection.len(),
         1,
@@ -268,7 +242,7 @@ fn assert_websocket_switch(head: &common::HttpResponse, context: &str) {
         "{context}: invalid Connection header: {head:?}"
     );
     assert_eq!(
-        *header_values(head, "sec-websocket-accept"),
+        *head.header_values("sec-websocket-accept"),
         [VALID_WEBSOCKET_ACCEPT],
         "{context}: Sec-WebSocket-Accept header"
     );
@@ -280,11 +254,11 @@ fn assert_handshake_rejected(head: &common::HttpResponse, expected_status: u16, 
         "{context}: unexpected rejection: {head:?}"
     );
     assert!(
-        header_values(head, "sec-websocket-accept").is_empty(),
+        head.header_values("sec-websocket-accept").is_empty(),
         "{context}: rejection exposed Sec-WebSocket-Accept: {head:?}"
     );
     assert!(
-        header_values(head, "sec-websocket-protocol").is_empty(),
+        head.header_values("sec-websocket-protocol").is_empty(),
         "{context}: rejection selected a subprotocol: {head:?}"
     );
 }
@@ -306,13 +280,12 @@ fn assert_connected_frame(stream: &mut TcpStream, context: &str) {
 
 fn assert_invalid_handshake_matrix(addr: std::net::SocketAddr, dispatch_count: &AtomicUsize) {
     INVALID_HANDSHAKE_CASES.iter().for_each(|case| {
-        let request =
-            raw_ws_upgrade_request("localhost", case.connection, case.key, case.version, "");
+        let request = handshake_request("/ws", &case_handshake(case));
         let (_, head) = perform_raw_ws_handshake(addr, &request);
         assert_handshake_rejected(&head, case.expected_status, case.label);
         match case.expected_version_header {
             Some(version) => assert_eq!(
-                *header_values(&head, "sec-websocket-version"),
+                *head.header_values("sec-websocket-version"),
                 [version],
                 "{}: rejection must advertise the supported version",
                 case.label
@@ -329,23 +302,17 @@ fn assert_invalid_handshake_matrix(addr: std::net::SocketAddr, dispatch_count: &
 }
 
 fn assert_strict_handshake_rejections(addr: std::net::SocketAddr, dispatch_count: &AtomicUsize) {
-    let invalid_protocol = raw_ws_upgrade_request(
-        "localhost",
-        Some("Upgrade"),
-        VALID_WEBSOCKET_KEY,
-        Some("13"),
-        "Sec-WebSocket-Protocol: chat, invalid protocol\r\n",
+    let invalid_protocol = handshake_request(
+        "/ws",
+        &accepted_plus(
+            LOCAL_HOST,
+            &[("Sec-WebSocket-Protocol", "chat, invalid protocol")],
+        ),
     );
     let (_, head) = perform_raw_ws_handshake(addr, &invalid_protocol);
     assert_handshake_rejected(&head, 400, "malformed subprotocol offer");
-    let http_10 = raw_ws_upgrade_request(
-        "localhost",
-        Some("Upgrade"),
-        VALID_WEBSOCKET_KEY,
-        Some("13"),
-        "",
-    )
-    .replacen("HTTP/1.1", "HTTP/1.0", 1);
+    let http_10 =
+        handshake_request("/ws", &accepted(LOCAL_HOST)).replacen("HTTP/1.1", "HTTP/1.0", 1);
     let (_, head) = perform_raw_ws_handshake(addr, &http_10);
     assert_handshake_rejected(&head, 400, "HTTP/1.0 upgrade");
     assert_eq!(
@@ -359,17 +326,11 @@ fn assert_valid_handshake_after_rejections(
     addr: std::net::SocketAddr,
     dispatch_count: &AtomicUsize,
 ) {
-    let valid = raw_ws_upgrade_request(
-        "localhost",
-        Some("Upgrade"),
-        VALID_WEBSOCKET_KEY,
-        Some("13"),
-        "",
-    );
+    let valid = handshake_request("/ws", &accepted(LOCAL_HOST));
     let (mut stream, head) = perform_raw_ws_handshake(addr, &valid);
     assert_websocket_switch(&head, "valid handshake after rejection matrix");
     assert!(
-        header_values(&head, "sec-websocket-protocol").is_empty(),
+        head.header_values("sec-websocket-protocol").is_empty(),
         "unsolicited subprotocol in valid probe: {head:?}"
     );
     assert_connected_frame(&mut stream, "valid handshake did not dispatch");
@@ -383,11 +344,22 @@ fn assert_valid_handshake_after_rejections(
 /// `unreachable!` instead of silently narrowing what the case set covers.
 const ORIGIN_CATEGORIES: u64 = 11;
 
+/// One generated case: what it offers as `Origin`, and whether Camber takes it.
+///
+/// The values alone, not the header lines they are sent as: every one of them
+/// is an `Origin`, and a category that offers two of them is a case about a
+/// handshake carrying the header twice. Written as a list rather than as a
+/// spliced block so the whole request stays one header list.
 #[derive(Debug)]
 struct GeneratedOrigin {
     label: &'static str,
-    headers: String,
+    origins: Box<[Box<str>]>,
     accepted: bool,
+}
+
+/// One offered origin, as the list a single-origin category declares.
+fn one_origin(value: String) -> Box<[Box<str>]> {
+    Box::new([value.into_boxed_str()])
 }
 
 fn generated_host_case(host: &str, case: &mut deterministic::DeterministicCase) -> String {
@@ -424,59 +396,60 @@ fn generated_origin(
     let origin = match index % ORIGIN_CATEGORIES {
         0 => GeneratedOrigin {
             label: "normalized scheme and authority case",
-            headers: format!("Origin: HtTp://{mixed_host}\r\n"),
+            origins: one_origin(format!("HtTp://{mixed_host}")),
             accepted: true,
         },
         1 => GeneratedOrigin {
             label: "normalized HTTP default port",
-            headers: format!("Origin: HTTP://{mixed_host}:80\r\n"),
+            origins: one_origin(format!("HTTP://{mixed_host}:80")),
             accepted: true,
         },
         2 => GeneratedOrigin {
             label: "normalized HTTPS default port",
-            headers: format!("Origin: hTtPs://{mixed_host}:443\r\n"),
+            origins: one_origin(format!("hTtPs://{mixed_host}:443")),
             accepted: true,
         },
         3 => GeneratedOrigin {
             label: "null origin",
-            headers: "Origin: null\r\n".to_owned(),
+            origins: one_origin("null".to_owned()),
             accepted: false,
         },
         4 => GeneratedOrigin {
             label: "wrong authority",
-            headers: format!("Origin: http://attacker-{index}.{zone}.test\r\n"),
+            origins: one_origin(format!("http://attacker-{index}.{zone}.test")),
             accepted: false,
         },
         5 => GeneratedOrigin {
             label: "wrong port",
-            headers: format!("Origin: http://{host}:{generated_port}\r\n"),
+            origins: one_origin(format!("http://{host}:{generated_port}")),
             accepted: false,
         },
         6 => GeneratedOrigin {
             label: "userinfo",
-            headers: format!("Origin: http://attacker@{host}\r\n"),
+            origins: one_origin(format!("http://attacker@{host}")),
             accepted: false,
         },
         7 => GeneratedOrigin {
             label: "path",
-            headers: format!("Origin: http://{host}{generated_path}\r\n"),
+            origins: one_origin(format!("http://{host}{generated_path}")),
             accepted: false,
         },
         8 => GeneratedOrigin {
             label: "query",
-            headers: format!("Origin: http://{host}?case={index}\r\n"),
+            origins: one_origin(format!("http://{host}?case={index}")),
             accepted: false,
         },
         9 => GeneratedOrigin {
             label: "fragment",
-            headers: format!("Origin: http://{host}#case-{index}\r\n"),
+            origins: one_origin(format!("http://{host}#case-{index}")),
             accepted: false,
         },
         10 => GeneratedOrigin {
             label: "multiple origins",
-            headers: format!(
-                "Origin: http://{host}\r\nOrigin: http://attacker-{index}.{zone}.test\r\n"
-            ),
+            origins: Box::new([
+                format!("http://{host}").into_boxed_str(),
+                format!("http://attacker-{index}.{zone}.test").into_boxed_str(),
+            ]),
             accepted: false,
         },
         _ => unreachable!("modulo bounds origin categories"),
@@ -511,17 +484,14 @@ fn websocket_selects_one_offered_subprotocol() {
         .run(|| {
             let dispatch_count = Arc::new(AtomicUsize::new(0));
             let addr = common::spawn_server(websocket_probe_router(Arc::clone(&dispatch_count)));
-            let request = raw_ws_upgrade_request(
-                "localhost",
-                Some("Upgrade"),
-                VALID_WEBSOCKET_KEY,
-                Some("13"),
-                "Sec-WebSocket-Protocol: chat, superchat\r\n",
+            let request = handshake_request(
+                "/ws",
+                &accepted_plus(LOCAL_HOST, &[("Sec-WebSocket-Protocol", "chat, superchat")]),
             );
             let (mut stream, head) = perform_raw_ws_handshake(addr, &request);
 
             assert_websocket_switch(&head, "subprotocol handshake");
-            let selected = header_values(&head, "sec-websocket-protocol");
+            let selected = head.header_values("sec-websocket-protocol");
             assert_eq!(
                 selected.len(),
                 1,
@@ -562,26 +532,25 @@ fn generated_websocket_origins_normalize_or_reject() {
                 let mut case = generator.case(index);
                 let (host, origin) = generated_origin(index, &mut case);
                 let context = format!(
-                    "seed={:#x} index={} category={} host={host} headers={:?}",
+                    "seed={:#x} index={} category={} host={host} origins={:?}",
                     case.seed(),
                     case.index(),
                     origin.label,
-                    origin.headers
+                    origin.origins
                 );
-                let request = raw_ws_upgrade_request(
-                    &host,
-                    Some("Upgrade"),
-                    VALID_WEBSOCKET_KEY,
-                    Some("13"),
-                    &origin.headers,
-                );
+                let offered: Box<[Header<'_>]> = origin
+                    .origins
+                    .iter()
+                    .map(|value| ("Origin", value.as_ref()))
+                    .collect();
+                let request = handshake_request("/ws", &accepted_plus(&host, &offered));
                 let (mut stream, head) = perform_raw_ws_handshake(addr, &request);
 
                 match origin.accepted {
                     true => {
                         assert_websocket_switch(&head, &context);
                         assert!(
-                            header_values(&head, "sec-websocket-protocol").is_empty(),
+                            head.header_values("sec-websocket-protocol").is_empty(),
                             "{context}: unsolicited subprotocol"
                         );
                         assert_connected_frame(&mut stream, &context);
@@ -855,12 +824,11 @@ fn websocket_accepts_same_host_origin() {
             let port = addr.port();
 
             // Origin matches Host after normalization (both include the same port)
-            let request = raw_ws_upgrade_request(
-                &format!("localhost:{port}"),
-                Some("Upgrade"),
-                VALID_WEBSOCKET_KEY,
-                Some("13"),
-                &format!("Origin: http://localhost:{port}\r\n"),
+            let authority = format!("localhost:{port}");
+            let origin = format!("http://{authority}");
+            let request = handshake_request(
+                "/ws",
+                &accepted_plus(&authority, &[("Origin", origin.as_str())]),
             );
             let (mut stream, head) = perform_raw_ws_handshake(addr, &request);
             assert_websocket_switch(&head, "same-host origin handshake");
@@ -1291,7 +1259,12 @@ async fn pending_direct_upgrade_shutdown_is_rejected(forced: bool) {
         response_lower.contains("connection: close"),
         "upgrade rejection omitted Connection: close: {response}"
     );
-    assert_transport_eof(&mut pending, "pending direct-upgrade transport EOF").await;
+    assert_refusal_body_then_eof(
+        &mut pending,
+        "service unavailable",
+        "pending direct-upgrade transport EOF",
+    )
+    .await;
     let result = lifecycle_event("pending direct-upgrade drain", owner.as_mut()).await;
     match forced {
         true => assert_cancelled(result),
@@ -1414,7 +1387,12 @@ async fn supervisor_unwind_joins_acknowledged_and_pending_direct_upgrades() {
             .contains("connection: close"),
         "pending unwind response omitted Connection: close: {pending_response}"
     );
-    assert_transport_eof(&mut pending, "unwound pending transport EOF").await;
+    assert_refusal_body_then_eof(
+        &mut pending,
+        "internal server error",
+        "unwound pending transport EOF",
+    )
+    .await;
     match lifecycle_event("supervisor unwind drain", owner.as_mut()).await {
         Err(RuntimeError::TaskPanicked(message)) => assert!(!message.is_empty()),
         other => panic!("expected TaskPanicked after upgrade drain, got {other:?}"),

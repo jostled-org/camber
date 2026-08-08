@@ -458,12 +458,12 @@ func getUser(w http.ResponseWriter, r *http.Request) {
 
 ```rust
 router.post("/users", |req| async move {
-    let user: User = req.json()?; // BadRequest on parse failure
+    let user: User = req.json()?; // MalformedBody on parse failure
     Ok(Response::json(200, &user))
 });
 ```
 
-`?` replaces every `if err != nil` block. Parse errors map to 400 automatically.
+`?` replaces every `if err != nil` block. Parse errors map to 400 automatically, with fixed text the peer can read and the parser's own account kept for the operator log.
 
 ## What You Gain
 

@@ -1,4 +1,5 @@
 use super::cookie::{CookieOptions, sanitize_cookie};
+use super::rejection::MappedRefusal;
 use crate::RuntimeError;
 use bytes::Bytes;
 use serde::Serialize;
@@ -13,17 +14,10 @@ use std::sync::OnceLock;
 /// while dynamic headers use `Cow::Owned`.
 pub type HeaderPair = (Cow<'static, str>, Cow<'static, str>);
 
-fn raw_body_text<'a>(bytes: &'a Bytes, text_cache: &'a OnceLock<Box<str>>) -> &'a str {
-    match std::str::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(_) => text_cache.get_or_init(|| String::from_utf8_lossy(bytes).into()),
-    }
-}
-
 /// Body storage that avoids double allocation.
 ///
 /// Text and JSON responses store the string eagerly; bytes are computed
-/// on demand in `into_hyper()`. Binary responses store raw bytes; text
+/// on demand in `into_wire()`. Binary responses store raw bytes; text
 /// is decoded lazily on first `body()` call.
 enum BodyStore {
     /// Source is text (text/json constructors). Bytes derived on demand.
@@ -38,39 +32,150 @@ enum BodyStore {
     Empty,
 }
 
-/// Trait for types that can be converted into an HTTP response.
+/// Trait for types that can be converted into an HTTP response outcome.
 ///
-/// Implemented for `Response` (passthrough) and `Result<Response, RuntimeError>`
-/// (maps `BadRequest` to 400, `ScopeClosed` to 503, other errors to 500).
+/// Implemented for `Response` (a deliberate application response) and
+/// `Result<Response, RuntimeError>` (that response, or the failure the router's
+/// rejection boundary classifies). The conversion is fallible so a handler's
+/// error keeps its category, source chain, and client-safe message until one
+/// boundary decides what the peer is told.
 pub trait IntoResponse {
-    /// Convert this value into a concrete [`Response`].
-    fn into_response(self) -> Response;
+    /// Convert this value into a response outcome.
+    fn into_response(self) -> Result<Response, RuntimeError>;
 }
 
 impl IntoResponse for Response {
-    fn into_response(self) -> Response {
-        self
+    fn into_response(self) -> Result<Response, RuntimeError> {
+        Ok(self)
     }
 }
 
 impl IntoResponse for Result<Response, RuntimeError> {
-    fn into_response(self) -> Response {
+    fn into_response(self) -> Result<Response, RuntimeError> {
+        self
+    }
+}
+
+/// Where a response came from, for the one decision that depends on it.
+///
+/// A conversion failure on an application response is a rejection the mapper
+/// sees once. A conversion failure on a response the rejection boundary already
+/// produced goes straight to the fixed fallback: mapping it again is how
+/// response construction would recurse through policy.
+pub(super) enum ResponseProvenance {
+    /// Built by an application handler, by middleware, or by a framework path
+    /// that has not reached rejection policy.
+    Application,
+    /// Produced by rejection policy — a mapper, the built-in mapper, or the
+    /// fixed fallback — for the refusal the producing stage classified.
+    ///
+    /// The whole refusal rides here because the wire exit is where the status
+    /// the peer was actually given becomes known, and that is the one status
+    /// the operator's record and the operator's counter must both name.
+    /// Conversion can still displace what policy settled on, so recording it
+    /// any earlier would name a status no peer ever saw. Boxed, so a response
+    /// nobody refused carries a pointer rather than a whole refusal.
+    Mapped(Box<MappedRefusal>),
+    /// Produced by the gate terminal, and untouched since.
+    ///
+    /// A specialized route runs its middleware as a gate rather than around a
+    /// response, so the chain's answer means "the request may proceed" only
+    /// while it is still the terminal's own value. A frame that refuses on the
+    /// unwind replaces it, and this is what tells the two apart.
+    Gate,
+}
+
+impl ResponseProvenance {
+    /// Whether this is still the gate terminal's own passthrough answer.
+    ///
+    /// Listed rather than wildcarded, so a new variant is a compile error here
+    /// instead of a silent pass through a gate that never approved it.
+    pub(super) fn is_gate_passthrough(&self) -> bool {
         match self {
-            Ok(resp) => resp,
-            Err(RuntimeError::BadRequest(msg)) => Response::build_text(400, &msg),
-            // A handler that asks the root scope for a child after admission
-            // closed is reporting an orderly drain, not a server fault. 503 is
-            // the status a load balancer reads as "drain this instance"; 500 is
-            // the one it reads as "this instance is broken". `NoRuntime` keeps
-            // its 500 — that one IS a misconfiguration of the server.
-            Err(RuntimeError::ScopeClosed) => Response::build_text(503, "service is shutting down"),
-            Err(e) => Response::build_text(500, &e.to_string()),
+            Self::Gate => true,
+            Self::Application | Self::Mapped(_) => false,
+        }
+    }
+
+    /// The refusal this response answered, when rejection policy produced it.
+    pub(super) fn into_refusal(self) -> Option<Box<MappedRefusal>> {
+        match self {
+            Self::Mapped(refusal) => Some(refusal),
+            Self::Application | Self::Gate => None,
+        }
+    }
+
+    /// The bounded name this origin is printed under.
+    ///
+    /// Listed rather than wildcarded, for the same reason
+    /// [`Self::is_gate_passthrough`] is: a new variant is a compile error here
+    /// instead of a response that prints as one it is not.
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Application => "application",
+            Self::Mapped(_) => "mapped",
+            Self::Gate => "gate",
         }
     }
 }
 
+/// The header a response states its representation through.
+const CONTENT_TYPE: &str = "Content-Type";
+
+/// A response Camber accepted that Hyper cannot put on the wire.
+///
+/// Carries the content type the accepted head established alongside the
+/// builder's own error, because the rejection boundary needs both and the
+/// response itself is gone by the time it answers. Built only on the failure
+/// path, so a response that converts pays nothing for a value only a failure
+/// reads.
+pub(super) struct UnrepresentableResponse {
+    error: hyper::http::Error,
+    content_type: Option<Box<str>>,
+}
+
+impl UnrepresentableResponse {
+    fn new(error: hyper::http::Error, headers: &[HeaderPair]) -> Self {
+        Self {
+            error,
+            content_type: representable_content_type(headers),
+        }
+    }
+
+    /// The content type the accepted head established.
+    pub(super) fn content_type(&self) -> Option<&str> {
+        self.content_type.as_deref()
+    }
+
+    /// The builder's own account of what it could not represent.
+    pub(super) fn into_error(self) -> hyper::http::Error {
+        self.error
+    }
+}
+
+/// The declared content type, when the head stated one Hyper would accept.
+///
+/// A `Content-Type` that is itself the value Hyper refused established nothing:
+/// naming it would report a representation that never validated.
+fn representable_content_type(headers: &[HeaderPair]) -> Option<Box<str>> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(CONTENT_TYPE))
+        .filter(|(_, value)| hyper::header::HeaderValue::from_str(value).is_ok())
+        .map(|(_, value)| Box::from(value.as_ref()))
+}
+
+/// The bytes one stored body becomes on the wire.
+fn wire_bytes(body: BodyStore) -> Bytes {
+    match body {
+        BodyStore::Text(text) => Bytes::from(String::from(text)),
+        BodyStore::Raw { bytes, .. } => bytes,
+        BodyStore::Empty => Bytes::new(),
+    }
+}
+
 /// Validate that an HTTP status code is in the valid range (100-599).
-fn validate_status(status: u16) -> Result<(), RuntimeError> {
+pub(super) fn validate_status(status: u16) -> Result<(), RuntimeError> {
     match (100..=599).contains(&status) {
         true => Ok(()),
         false => Err(RuntimeError::InvalidArgument(
@@ -88,6 +193,7 @@ impl fmt::Debug for Response {
         };
         f.debug_struct("Response")
             .field("status", &self.status)
+            .field("provenance", &self.provenance.label())
             .field("header_count", &self.headers.len())
             .field("body_type", &body_type)
             .field("body_length", &body_len)
@@ -103,6 +209,7 @@ pub struct Response {
     status: u16,
     body: BodyStore,
     headers: Vec<HeaderPair>,
+    provenance: ResponseProvenance,
 }
 
 impl Response {
@@ -114,6 +221,7 @@ impl Response {
                 text_cache: OnceLock::new(),
             },
             headers,
+            provenance: ResponseProvenance::Application,
         }
     }
 
@@ -124,6 +232,7 @@ impl Response {
             status,
             body: BodyStore::Text(body.into()),
             headers: vec![(Cow::Borrowed("Content-Type"), Cow::Borrowed("text/plain"))],
+            provenance: ResponseProvenance::Application,
         }
     }
 
@@ -132,6 +241,7 @@ impl Response {
             status,
             body: BodyStore::Empty,
             headers: Vec::new(),
+            provenance: ResponseProvenance::Application,
         }
     }
 
@@ -152,6 +262,7 @@ impl Response {
                     Cow::Borrowed("nosniff"),
                 ),
             ],
+            provenance: ResponseProvenance::Application,
         }
     }
 
@@ -194,6 +305,7 @@ impl Response {
                 Cow::Borrowed("Content-Type"),
                 Cow::Borrowed("application/json"),
             )],
+            provenance: ResponseProvenance::Application,
         })
     }
 
@@ -229,20 +341,66 @@ impl Response {
     }
 
     /// Add a custom header to the response.
-    pub fn with_header(mut self, name: &str, value: &str) -> Self {
-        self.headers
-            .push((Cow::Owned(name.to_owned()), Cow::Owned(value.to_owned())));
+    pub fn with_header(self, name: &str, value: &str) -> Self {
+        self.with_pair(Cow::Owned(name.to_owned()), Cow::Owned(value.to_owned()))
+    }
+
+    /// Add a header whose name Camber spells at compile time.
+    ///
+    /// The name is borrowed, never copied. Framework headers are literals, and
+    /// a `String` copy of a constant on every response is exactly the
+    /// allocation `HeaderPair`'s `Cow` shape exists to avoid. The value stays a
+    /// `Cow` because some of these are constants too and some are built per
+    /// response.
+    pub(super) fn with_static_header(self, name: &'static str, value: Cow<'static, str>) -> Self {
+        self.with_pair(Cow::Borrowed(name), value)
+    }
+
+    /// Append one header exactly as given.
+    ///
+    /// The one push site, so what a header costs is decided by the caller that
+    /// knows whether its halves are constants, and nowhere else.
+    pub(super) fn with_pair(mut self, name: Cow<'static, str>, value: Cow<'static, str>) -> Self {
+        self.headers.push((name, value));
         self
     }
 
     /// Set the Content-Type header, replacing any existing one.
-    pub fn with_content_type(mut self, content_type: &str) -> Self {
+    pub fn with_content_type(self, content_type: &str) -> Self {
+        self.with_replaced_header(CONTENT_TYPE, Cow::Owned(content_type.to_owned()))
+    }
+
+    /// Set one header to exactly this value, dropping every existing spelling.
+    ///
+    /// The framework's correction of protocol-owned output goes through here,
+    /// so a mapper's conflicting value cannot survive alongside the required
+    /// one as a second header line.
+    ///
+    /// The value is taken as a `Cow` rather than a `&str`: a correction whose
+    /// value the framework spells at compile time, and one whose value the
+    /// caller already owns, both reach the header list without a copy this
+    /// function made.
+    pub(super) fn with_replaced_header(self, name: &'static str, value: Cow<'static, str>) -> Self {
+        self.without_header(name)
+            .with_pair(Cow::Borrowed(name), value)
+    }
+
+    /// Drop every header with this name.
+    pub(super) fn without_header(mut self, name: &str) -> Self {
         self.headers
-            .retain(|(k, _)| !k.eq_ignore_ascii_case("Content-Type"));
-        self.headers.push((
-            Cow::Borrowed("Content-Type"),
-            Cow::Owned(content_type.to_owned()),
-        ));
+            .retain(|(key, _)| !key.eq_ignore_ascii_case(name));
+        self
+    }
+
+    /// Drop every header with any of these names.
+    ///
+    /// One pass over the list rather than one per name: the caller that removes
+    /// a whole family — every header a version forbids — is removing them from
+    /// the same response, and folding [`Self::without_header`] over the family
+    /// walked the list once for each member to answer one question.
+    pub(super) fn without_headers(mut self, names: &[&str]) -> Self {
+        self.headers
+            .retain(|(key, _)| !names.iter().any(|name| key.eq_ignore_ascii_case(name)));
         self
     }
 
@@ -254,22 +412,47 @@ impl Response {
     /// explicit [`CookieOptions`] to set security attributes.
     pub fn set_cookie(self, name: &str, value: &str) -> Self {
         let header_value = format!("{}={}", sanitize_cookie(name), sanitize_cookie(value));
-        self.with_header("Set-Cookie", &header_value)
+        self.with_static_header("Set-Cookie", Cow::Owned(header_value))
     }
 
     /// Append a `Set-Cookie` header with the given name, value, and options.
     pub fn set_cookie_with(self, name: &str, value: &str, options: &CookieOptions) -> Self {
         let header_value = options.format_header(name, value);
-        self.with_header("Set-Cookie", &header_value)
+        self.with_static_header("Set-Cookie", Cow::Owned(header_value))
     }
 
     /// Strip the body, keeping status and headers. Used for HEAD auto-responses.
     pub(crate) fn strip_body(self) -> Self {
         Self {
-            status: self.status,
             body: BodyStore::Empty,
-            headers: self.headers,
+            ..self
         }
+    }
+
+    /// Mark this response as the product of rejection policy for one refusal.
+    ///
+    /// Consuming rather than a setter, so a response is marked exactly where
+    /// policy hands it back and nowhere else.
+    #[must_use]
+    pub(super) fn mark_mapped(self, refusal: MappedRefusal) -> Self {
+        Self {
+            provenance: ResponseProvenance::Mapped(Box::new(refusal)),
+            ..self
+        }
+    }
+
+    /// Mark this response as the gate terminal's own passthrough answer.
+    #[must_use]
+    pub(super) fn mark_gate(self) -> Self {
+        Self {
+            provenance: ResponseProvenance::Gate,
+            ..self
+        }
+    }
+
+    /// Where this response came from.
+    pub(super) fn provenance(&self) -> &ResponseProvenance {
+        &self.provenance
     }
 
     /// Return the HTTP status code.
@@ -283,7 +466,7 @@ impl Response {
     pub fn body(&self) -> &str {
         match &self.body {
             BodyStore::Text(text) => text,
-            BodyStore::Raw { bytes, text_cache } => raw_body_text(bytes, text_cache),
+            BodyStore::Raw { bytes, text_cache } => super::encoding::lossy_text(bytes, text_cache),
             BodyStore::Empty => "",
         }
     }
@@ -303,29 +486,42 @@ impl Response {
     }
 
     /// Convert to a hyper Response with a full body, consuming self.
-    pub(crate) fn into_hyper(self) -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
-        let status = self.status;
-        let body_bytes = match self.body {
-            BodyStore::Text(text) => Bytes::from(String::from(text)),
-            BodyStore::Raw { bytes, .. } => bytes,
-            BodyStore::Empty => Bytes::new(),
-        };
+    ///
+    /// Fallible, and it reports the builder's own error rather than
+    /// substituting a response of its own: a header name `with_header` accepted
+    /// but Hyper cannot represent is a rejection the router's one boundary owns,
+    /// and a second fallback here is a second answer to the same condition.
+    ///
+    /// The failure carries the content type this head established. The headers
+    /// are consumed here, and the boundary that maps the failure is asked what
+    /// the response was going to be.
+    ///
+    /// The provenance leaves with the conversion rather than beside it. Hyper's
+    /// value has nowhere to carry a refusal, so a conversion that discarded the
+    /// provenance would drop a live [`MappedRefusal`] and have its `Drop` report
+    /// a response that was in fact sent. Returning the two together means the
+    /// caller cannot forget to take it first, and a caller that ignores the
+    /// refusal has to say so.
+    pub(super) fn into_wire(
+        self,
+    ) -> (
+        ResponseProvenance,
+        Result<hyper::Response<http_body_util::Full<Bytes>>, UnrepresentableResponse>,
+    ) {
+        let Self {
+            status,
+            body,
+            headers,
+            provenance,
+        } = self;
 
         let mut builder = hyper::Response::builder().status(status);
-        for (name, value) in &self.headers {
+        for (name, value) in &headers {
             builder = builder.header(name.as_ref(), value.as_ref());
         }
-        builder
-            .body(http_body_util::Full::new(body_bytes))
-            .unwrap_or_else(|err| {
-                tracing::error!(%err, status, "hyper response builder failed");
-                {
-                    let mut fallback = hyper::Response::new(http_body_util::Full::new(
-                        bytes::Bytes::from_static(b"internal error"),
-                    ));
-                    *fallback.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
-                    fallback
-                }
-            })
+        let converted = builder
+            .body(http_body_util::Full::new(wire_bytes(body)))
+            .map_err(|error| UnrepresentableResponse::new(error, &headers));
+        (provenance, converted)
     }
 }

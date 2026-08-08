@@ -57,6 +57,22 @@ pub enum RuntimeError {
     #[error("bad request: {0}")]
     BadRequest(Box<str>),
 
+    /// A request body could not be parsed as its declared representation.
+    ///
+    /// Carries the parser's own account of the failure, which is operator
+    /// detail: the HTTP rejection boundary answers the peer with fixed safe
+    /// text and never with this string.
+    #[error("malformed request body: {0}")]
+    MalformedBody(Box<str>),
+
+    /// A `multipart/form-data` body could not be parsed.
+    ///
+    /// Held apart from [`RuntimeError::MalformedBody`] so the two parsers stay
+    /// distinguishable through a handler's `?`, rather than being told apart
+    /// later by their text.
+    #[error("invalid multipart body: {0}")]
+    Multipart(Box<str>),
+
     /// A database interaction failed.
     ///
     /// Camber never constructs this variant — it ships no database layer. It is

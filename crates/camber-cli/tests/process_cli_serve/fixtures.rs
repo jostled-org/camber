@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::support::FixtureError;
 use crate::support::http::{Backend, BackendError, BackendShutdown, read_response, request_tcp};
-use crate::support::process::{ChildGuard, ReadinessTarget, TerminationKind};
+use crate::support::process::{CHILD_EXIT_TIMEOUT, ChildGuard, ReadinessTarget, TerminationKind};
 
 #[test]
 fn child_guard_reaps_natural_exit_between_observation_and_termination() -> Result<(), FixtureError>
@@ -42,7 +42,7 @@ fn child_guard_reports_natural_reap_status() -> Result<(), FixtureError> {
     let reap_probe = child
         .take_reap_probe()
         .ok_or_else(|| FixtureError::new("successful child reap probe was absent"))?;
-    let output = child.wait_with_output(Duration::from_secs(2))?;
+    let output = child.wait_with_output(CHILD_EXIT_TIMEOUT)?;
     let reaped = reap_probe.wait()?;
     assert!(output.status.success());
     assert_eq!(reaped.child_id(), child_id);

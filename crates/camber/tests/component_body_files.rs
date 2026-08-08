@@ -2,6 +2,8 @@
 pub mod deterministic;
 #[path = "support/http.rs"]
 pub mod http;
+#[path = "support/rejection.rs"]
+pub mod rejection_support;
 #[path = "support/runtime.rs"]
 pub mod runtime_support;
 
@@ -11,6 +13,8 @@ mod binary_bodies;
 mod body_limits;
 #[path = "component_body_files/cookie_handling.rs"]
 mod cookie_handling;
+#[path = "component_body_files/framework_rejections.rs"]
+mod framework_rejections;
 #[path = "component_body_files/json_bodies.rs"]
 mod json_bodies;
 #[path = "component_body_files/multipart_forms.rs"]

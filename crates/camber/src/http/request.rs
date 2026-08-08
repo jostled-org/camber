@@ -1,8 +1,9 @@
 use super::cookie::{self, CookiePairs};
 use super::disconnect::DisconnectSignal;
 use super::encoding::decode_hex_pair;
-use super::method::Method;
+use super::method::{Method, RequestMethod};
 use super::multipart::{self, MultipartReader};
+use super::rejection::RequestId;
 use crate::RuntimeError;
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
@@ -18,19 +19,25 @@ pub(crate) type Params = Box<[(Arc<str>, Box<str>)]>;
 type KvPairs = Box<[(Box<str>, Box<str>)]>;
 
 /// The connection-level facts a request carries in from its transport: who the
-/// peer is, whether the transport is TLS, and the signal that resolves this
-/// response's lifetime.
+/// peer is, whether the transport is TLS, the identity Camber minted for this
+/// request, and the signal that resolves this response's lifetime.
 ///
-/// [`RequestHead`] names exactly this triple, so the dispatch paths thread one
-/// borrowed bundle rather than three parallel parameters that can only agree by
+/// [`RequestHead`] names exactly this bundle, so the dispatch paths thread one
+/// borrowed value rather than four parallel parameters that can only agree by
 /// construction. `Copy` because every field already is: a shared borrow, a
-/// `bool`, and an `Option<IpAddr>` — about 32 bytes once padded, not a pointer
-/// and two flags. Passing it by value therefore costs exactly what passing the
-/// three fields separately cost, which is the whole argument for `Copy` here.
+/// `bool`, an `Option<IpAddr>`, and fixed inline identifier storage. Passing it
+/// by value therefore costs exactly what passing the fields separately cost,
+/// which is the whole argument for `Copy` here.
 #[derive(Clone, Copy)]
 pub(super) struct RequestOrigin<'a> {
     pub(super) remote_addr: Option<std::net::IpAddr>,
     pub(super) is_tls: bool,
+    pub(super) request_id: RequestId,
+    /// The HTTP version this request arrived over.
+    ///
+    /// Read only where the protocol owns the answer — which connection headers
+    /// a response may carry, and who enacts a close disposition.
+    pub(super) version: hyper::Version,
     pub(super) disconnect: &'a DisconnectSignal,
 }
 
@@ -39,7 +46,7 @@ pub(super) struct RequestOrigin<'a> {
 /// Used before body collection to determine route type (buffered vs streaming)
 /// without consuming or buffering the incoming body.
 pub(super) struct RequestHead<'a> {
-    method: Method,
+    method: RequestMethod,
     uri: &'a hyper::Uri,
     headers: &'a hyper::HeaderMap,
     origin: RequestOrigin<'a>,
@@ -47,29 +54,34 @@ pub(super) struct RequestHead<'a> {
 
 impl<'a> RequestHead<'a> {
     /// Borrow metadata from a hyper request without consuming it.
+    ///
+    /// Infallible: a method outside Camber's route enum is still a request that
+    /// needs classifying, a record, and an answer through the same policy every
+    /// other refusal reaches.
     pub(super) fn from_hyper_request(
         req: &'a hyper::Request<hyper::body::Incoming>,
         origin: RequestOrigin<'a>,
-    ) -> Option<Self> {
-        let method = Method::from_hyper(req.method())?;
-        Some(Self {
-            method,
+    ) -> Self {
+        Self {
+            method: RequestMethod::from_hyper(req.method()),
             uri: req.uri(),
             headers: req.headers(),
             origin,
-        })
+        }
     }
 
-    pub(super) fn method(&self) -> Method {
-        self.method
+    /// The method Camber can route on, when it can route on this one.
+    pub(super) fn routable_method(&self) -> Option<Method> {
+        self.method.routable()
     }
 
     pub(super) fn path(&self) -> &str {
         self.uri.path()
     }
 
-    pub(super) fn header(&self, name: &str) -> Option<&str> {
-        header_str(self.headers, name)
+    /// The authority this request names, however its version states one.
+    pub(super) fn authority(&self) -> &str {
+        authority_of(self.headers, self.uri)
     }
 
     /// The borrowed head's view of [`Request::raw_query`].
@@ -91,7 +103,7 @@ impl<'a> RequestHead<'a> {
     /// validated by `from_hyper_request`.
     pub(super) fn to_request(&self, params: Option<Params>) -> Request {
         Request {
-            method: self.method,
+            method: self.method.clone(),
             uri: self.uri.clone(),
             raw_headers: self.headers.clone(),
             body_raw: Bytes::new(),
@@ -102,14 +114,27 @@ impl<'a> RequestHead<'a> {
             cookie_params: OnceLock::new(),
             remote_addr: self.origin.remote_addr,
             is_tls: self.origin.is_tls,
+            request_id: self.origin.request_id,
+            version: self.origin.version,
             disconnect: self.origin.disconnect.clone(),
         }
     }
 }
 
+/// The authority a request names, however its HTTP version states one.
+///
+/// HTTP/1 states it in `Host`; HTTP/2 states it in `:authority`, which hyper
+/// puts in the URI and writes no header for. One reader for both, so host
+/// routing resolves the same service whichever version a peer speaks.
+fn authority_of<'a>(headers: &'a hyper::HeaderMap, uri: &'a hyper::Uri) -> &'a str {
+    header_str(headers, "host")
+        .or_else(|| uri.authority().map(hyper::http::uri::Authority::as_str))
+        .unwrap_or("")
+}
+
 /// Handler-facing HTTP request. Owns all data.
 pub struct Request {
-    method: Method,
+    method: RequestMethod,
     uri: hyper::Uri,
     raw_headers: hyper::HeaderMap,
     body_raw: Bytes,
@@ -120,6 +145,8 @@ pub struct Request {
     cookie_params: OnceLock<CookiePairs>,
     remote_addr: Option<std::net::IpAddr>,
     is_tls: bool,
+    request_id: RequestId,
+    version: hyper::Version,
     disconnect: DisconnectSignal,
 }
 
@@ -143,7 +170,7 @@ impl Request {
         method: Method,
     ) -> Self {
         Self {
-            method,
+            method: RequestMethod::Known(method),
             uri: parts.uri,
             raw_headers: parts.headers,
             body_raw: body_bytes,
@@ -154,8 +181,25 @@ impl Request {
             cookie_params: OnceLock::new(),
             remote_addr: origin.remote_addr,
             is_tls: origin.is_tls,
+            request_id: origin.request_id,
+            version: origin.version,
             disconnect: origin.disconnect.clone(),
         }
+    }
+
+    /// The identity Camber minted for this request.
+    ///
+    /// Generated after Hyper accepted the request head and before any method,
+    /// host, route, body, middleware, or protocol classification ran, so every
+    /// answer this request can get names the same value. An inbound
+    /// `X-Request-Id` header is application data a handler may read, never this
+    /// value.
+    ///
+    /// Returned by value, the way the rejection scope returns the same type:
+    /// the identifier is `Copy` fixed-size storage, so a borrow buys nothing
+    /// and only obliges every caller to dereference it.
+    pub fn request_id(&self) -> RequestId {
+        self.request_id
     }
 
     /// Observe this response's lifetime.
@@ -173,8 +217,12 @@ impl Request {
         self.disconnect.clone()
     }
 
-    /// Return the uppercase HTTP method string.
-    pub fn method(&self) -> &'static str {
+    /// Return the HTTP method exactly as the peer sent it.
+    ///
+    /// Camber routes on a closed set of methods, but a peer may send any token.
+    /// This reports what arrived, so a middleware or mapper reading it sees the
+    /// request rather than a substitute for it.
+    pub fn method(&self) -> &str {
         self.method.as_str()
     }
 
@@ -184,12 +232,38 @@ impl Request {
     /// The runtime strips the body automatically for HEAD responses,
     /// but this method lets handlers avoid building it in the first place.
     pub fn is_head(&self) -> bool {
-        method_is_head(self.method)
+        self.method.routable().is_some_and(method_is_head)
     }
 
-    /// Return the parsed HTTP method enum.
-    pub(super) fn method_enum(&self) -> Method {
-        self.method
+    /// Return the routable HTTP method enum, when this method is one.
+    pub(super) fn method_enum(&self) -> Option<Method> {
+        self.method.routable()
+    }
+
+    /// The method exactly as it arrived, in the form the identity carries.
+    pub(super) fn request_method(&self) -> &RequestMethod {
+        &self.method
+    }
+
+    /// The bounded label this request's tracing span is named by.
+    ///
+    /// Gated on the one reader that has it: the OpenTelemetry span is built
+    /// before a rejection scope exists, so it names the method off the request.
+    /// Every other record reads the label off the scope instead, so nothing
+    /// outside that feature reaches for this.
+    #[cfg(feature = "otel")]
+    pub(super) fn method_label(&self) -> &'static str {
+        self.method.label()
+    }
+
+    /// The HTTP version this request arrived over.
+    pub(super) fn http_version(&self) -> hyper::Version {
+        self.version
+    }
+
+    /// The authority this request names, however its version states one.
+    pub(super) fn authority(&self) -> &str {
+        authority_of(&self.raw_headers, &self.uri)
     }
 
     /// Return the request path without the query string.
@@ -244,12 +318,7 @@ impl Request {
     ///
     /// Invalid UTF-8 is decoded lossily on first access and cached.
     pub fn body(&self) -> &str {
-        match std::str::from_utf8(&self.body_raw) {
-            Ok(text) => text,
-            Err(_) => self
-                .body_text
-                .get_or_init(|| String::from_utf8_lossy(&self.body_raw).into()),
-        }
+        super::encoding::lossy_text(&self.body_raw, &self.body_text)
     }
 
     /// Return the raw body bytes.
@@ -263,18 +332,24 @@ impl Request {
     }
 
     /// Deserialize the request body as JSON.
+    ///
+    /// Fails with [`RuntimeError::MalformedBody`], which carries the parser's
+    /// account for operators. Propagating it with `?` from a handler reaches
+    /// the router's rejection boundary as a malformed-body refusal; the peer is
+    /// answered with fixed safe text.
     pub fn json<T: DeserializeOwned>(&self) -> Result<T, RuntimeError> {
         serde_json::from_slice(&self.body_raw)
-            .map_err(|e| RuntimeError::BadRequest(e.to_string().into()))
+            .map_err(|e| RuntimeError::MalformedBody(e.to_string().into()))
     }
 
     /// Parse the request body as multipart/form-data.
     ///
     /// Returns a `MultipartReader` that provides access to all parts.
-    /// Fails with `BadRequest` if the Content-Type is not multipart/form-data.
+    /// Fails with [`RuntimeError::Multipart`] when the Content-Type is absent
+    /// or the body is not a parseable multipart payload.
     pub fn multipart(&self) -> Result<MultipartReader, RuntimeError> {
         let content_type = self.header("content-type").ok_or_else(|| {
-            RuntimeError::BadRequest("missing Content-Type header for multipart".into())
+            RuntimeError::Multipart("missing Content-Type header for multipart".into())
         })?;
         multipart::parse(content_type, &self.body_raw)
     }
@@ -453,6 +528,10 @@ impl RequestBuilder {
     }
 
     /// Serialize `value` as JSON and set `Content-Type: application/json`.
+    ///
+    /// The content type replaces any already set, rather than joining it: a
+    /// body has one representation, and `finish` appends every header it is
+    /// given, so a second line here would build a request stating two.
     pub fn json(mut self, value: &impl serde::Serialize) -> Result<Self, RuntimeError> {
         let serialized = serde_json::to_string(value).map_err(|e| {
             RuntimeError::InvalidArgument(
@@ -460,6 +539,8 @@ impl RequestBuilder {
             )
         })?;
         self.body = Bytes::from(serialized);
+        self.headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("content-type"));
         self.headers
             .push(("Content-Type".into(), "application/json".into()));
         Ok(self)
@@ -491,7 +572,7 @@ impl RequestBuilder {
             header_map.append(n, v);
         }
         Ok(Request {
-            method: self.method,
+            method: RequestMethod::Known(self.method),
             uri,
             raw_headers: header_map,
             body_raw: self.body,
@@ -502,6 +583,13 @@ impl RequestBuilder {
             cookie_params: OnceLock::new(),
             remote_addr: None,
             is_tls: false,
+            // A built request has no transport; the version it reports is the
+            // one every other field it carries would have arrived over.
+            version: hyper::Version::HTTP_11,
+            // Minted through the production generator, so a built request
+            // exercises the public accessor rather than a second identity
+            // model that could drift from the served one.
+            request_id: RequestId::generate(),
             disconnect: DisconnectSignal::detached(),
         })
     }

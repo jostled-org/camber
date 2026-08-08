@@ -132,16 +132,26 @@ where
         .map_err(panic_to_error)
 }
 
+/// The message an unwind carried, when it carried one std panics can name.
+///
+/// `panic!` produces a `&'static str` for a literal and a `String` for a
+/// formatted message; anything else is a payload only its own thrower can read,
+/// and there is nothing safe to say about it.
+///
+/// Borrowed rather than owned, so a caller that only wants to record the text
+/// pays nothing for it. `panic_to_error` is the one caller that needs an owned
+/// copy, and it makes that copy itself.
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> Option<&str> {
+    match payload.downcast_ref::<&'static str>() {
+        Some(text) => Some(text),
+        None => payload.downcast_ref::<String>().map(String::as_str),
+    }
+}
+
+/// The message this unwind is reported to a joining caller under.
 pub(crate) fn panic_to_error(payload: Box<dyn std::any::Any + Send>) -> RuntimeError {
-    let msg = match (
-        payload.downcast_ref::<&str>(),
-        payload.downcast_ref::<String>(),
-    ) {
-        (Some(s), _) => (*s).into(),
-        (_, Some(s)) => s.as_str().into(),
-        _ => "unknown panic".into(),
-    };
-    RuntimeError::TaskPanicked(msg)
+    let message = panic_message(payload.as_ref()).unwrap_or("unknown panic");
+    RuntimeError::TaskPanicked(message.into())
 }
 
 impl<T> JoinHandle<T> {

@@ -49,10 +49,10 @@ async fn validation_rejects_invalid_json() {
         .unwrap();
 
     assert_eq!(resp.status(), 400);
-    assert!(
-        resp.body().contains("expected"),
-        "error body: {}",
-        resp.body()
+    assert_eq!(
+        resp.body(),
+        "malformed request body",
+        "a validation failure answers with the fixed safe message"
     );
 
     runtime::request_shutdown();

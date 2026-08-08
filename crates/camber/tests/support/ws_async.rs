@@ -220,6 +220,49 @@ pub async fn assert_transport_eof(stream: &mut TcpStream, context: &str) {
     .await;
 }
 
+/// The most a refusal body is ever read before the reader gives up on it.
+///
+/// The expected body is one fixed sentence a category declared safe, so this is
+/// a hang guard rather than a size claim: a peer that keeps writing is capped
+/// here and fails the comparison below with what it did send, instead of filling
+/// the test host's memory inside a bound that only limits time. Every sibling
+/// reader in the suite carries such a cap; this one had only the clock.
+const MAX_REFUSAL_BODY: u64 = 64 * 1024;
+
+/// Require the client-safe body a refused upgrade carries, then a closed transport.
+///
+/// A refused upgrade is answered through rejection policy, so its head is
+/// followed by the message that category declared safe. Reading to the peer's
+/// end proves both at once: the body is exactly that message, and nothing
+/// follows it but the close.
+pub async fn assert_refusal_body_then_eof(stream: &mut TcpStream, expected: &str, context: &str) {
+    lifecycle_event(context, async {
+        let mut body = Vec::new();
+        match stream.take(MAX_REFUSAL_BODY).read_to_end(&mut body).await {
+            Ok(_) => {}
+            Err(error) if super::http::is_closed_connection_error(&error) => {}
+            Err(error) => panic!("{context}: failed reading the refusal body: {error}"),
+        }
+        assert_refusal_body(&body, expected, context);
+    })
+    .await;
+}
+
+/// Require that a refusal body is exactly the message its category declared safe.
+///
+/// One statement of the claim for every way of reading the body up to it. The
+/// paused-clock cases cannot bound on the Tokio clock and read through a socket
+/// deadline on a thread of their own, so they arrive here with bytes rather than
+/// a stream — and a second spelling of the comparison is a second thing that can
+/// come to disagree about what a refused peer is owed.
+pub fn assert_refusal_body(body: &[u8], expected: &str, context: &str) {
+    assert_eq!(
+        String::from_utf8_lossy(body),
+        expected,
+        "{context}: the peer is told only what the refusal declared safe"
+    );
+}
+
 /// Require the close handshake a graceful teardown owes its peer, then a
 /// transport that is given up.
 ///
