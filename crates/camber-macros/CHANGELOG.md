@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/jostled-org/camber/compare/camber-macros-v0.2.3...camber-macros-v0.3.0) - 2026-08-08
+
+### Added
+
+- [**breaking**] implement structured-framework-rejections
+
 ## [0.2.3](https://github.com/jostled-org/camber/compare/camber-macros-v0.2.2...camber-macros-v0.2.3) - 2026-08-02
 
 ### Fixed
