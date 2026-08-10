@@ -1,4 +1,5 @@
 use super::Request;
+use super::async_proxy::UploadDisposition;
 use super::body::{HyperResponseBody, StreamBody};
 use super::handle::{ConnCtx, answer, answer_rejected, run_head_gate};
 use super::record::record_scoped;
@@ -140,23 +141,24 @@ fn build_streaming_response(
 /// recorded status and the response shape from drifting between the two entry
 /// points.
 fn finish_upstream_stream(
-    forwarded: Result<super::async_proxy::StreamingProxyResponse, super::async_proxy::ProxyFailure>,
+    forwarded: Result<
+        super::async_proxy::StreamingProxyResponse,
+        super::async_proxy::UploadFailure,
+    >,
     ctx: &ConnCtx,
     scope: &RejectionScope,
     start: std::time::Instant,
 ) -> hyper::Response<HyperResponseBody> {
     let upstream = match forwarded {
         Ok(upstream) => upstream,
-        Err(failure) => {
-            return answer_rejected(ctx, scope, Rejected::from_proxy_failure(failure), start);
-        }
+        Err(failure) => return answer_rejected(ctx, scope, refused_forward(failure), start),
     };
     // Recorded from the built response, not from the upstream's status: a
     // response that could not be built answers with its own status, and the
     // metric names what the peer was given.
     let response = match build_streaming_response(
         upstream.status,
-        &upstream.headers,
+        &disposed(upstream.headers, upstream.upload, scope),
         StreamBody::Proxy(upstream.rx),
         scope,
     ) {
@@ -167,6 +169,45 @@ fn finish_upstream_stream(
     };
     record_scoped(ctx, scope, response.status().as_u16(), start);
     response
+}
+
+/// The refusal one uncommitted streaming forward is answered with.
+///
+/// The upload's own refusal travels through unchanged: it was classified where
+/// it was raised, under the limit or the transport that raised it, and
+/// reclassifying it here as a proxy fault would tell the peer its upstream
+/// failed when it was this request that was refused.
+fn refused_forward(failure: super::async_proxy::UploadFailure) -> Rejected {
+    match failure {
+        super::async_proxy::UploadFailure::Proxy(failure) => Rejected::from_proxy_failure(failure),
+        super::async_proxy::UploadFailure::Body(rejected) => rejected,
+    }
+}
+
+/// State what this transport may do after an answer taken over unread payload.
+///
+/// An upstream head that arrived first stops the upload behind it, which leaves
+/// framed payload no stage will read. On HTTP/1 the next request would be
+/// framed out of those bytes, so the connection ends with this answer; the
+/// scope owns that version question, and every refusal on this path already
+/// answers it through the same rule.
+///
+/// Every disposition is listed rather than wildcarded, so a third one is a
+/// compile error here: a state this function has not been taught about would
+/// otherwise leave the transport open by default, which is the answer that
+/// frames the next request out of payload nothing read.
+fn disposed(
+    headers: Box<[HeaderPair]>,
+    upload: UploadDisposition,
+    scope: &RejectionScope,
+) -> Box<[HeaderPair]> {
+    match (upload, scope.closes_transport()) {
+        (UploadDisposition::Stopped, true) => headers
+            .into_iter()
+            .chain([super::rejection::close_header()])
+            .collect(),
+        (UploadDisposition::Stopped, false) | (UploadDisposition::Drained, _) => headers,
+    }
 }
 
 /// Answer a streaming handler's response, or refuse what cannot be represented.
@@ -226,6 +267,37 @@ pub(super) async fn handle_proxy_stream_response(
     Ok(finish_upstream_stream(forwarded, ctx, scope, start))
 }
 
+/// The outbound request one streaming forward is built from, and its payload.
+///
+/// Taken apart here so the forward is handed exactly two things: what to send,
+/// and the incoming stream to send as its body.
+fn outbound_parts(
+    hyper_req: hyper::Request<hyper::body::Incoming>,
+    method: super::method::Method,
+    origin: &RequestOrigin<'_>,
+) -> (
+    super::async_proxy::IncomingProxyParts,
+    hyper::body::Incoming,
+) {
+    let scheme = match origin.is_tls {
+        true => "https",
+        false => "http",
+    };
+    let (hyper_parts, body) = hyper_req.into_parts();
+    let parts = super::async_proxy::IncomingProxyParts {
+        method,
+        path_and_query: hyper_parts
+            .uri
+            .path_and_query()
+            .map_or("/", |pq| pq.as_str())
+            .into(),
+        headers: hyper_parts.headers,
+        remote_addr: origin.remote_addr,
+        scheme,
+    };
+    (parts, body)
+}
+
 /// Dispatch a streaming proxy request without buffering the incoming body.
 ///
 /// Runs the middleware gate on a lightweight request (empty body), then
@@ -247,27 +319,42 @@ pub(super) async fn handle_proxy_stream_response(
 /// otherwise repeated, on every proxied stream a `HostRouter` serves.
 pub(super) async fn dispatch_streaming_proxy(
     hyper_req: hyper::Request<hyper::body::Incoming>,
-    ctx: &ConnCtx,
     target: super::dispatch::StreamingProxyTarget,
-    origin: RequestOrigin<'_>,
     router: Option<&super::dispatch::FrozenRouter>,
     pre_body: &super::dispatch::PreBodyScope,
-    start: std::time::Instant,
+    request_dispatch: &super::handle::RequestDispatch<'_>,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    let &super::handle::RequestDispatch {
+        ctx,
+        origin,
+        lifecycle,
+        start,
+        ..
+    } = request_dispatch;
     let super::dispatch::StreamingProxyTarget {
         backend,
         prefix,
         params,
         method,
+        plan,
     } = target;
     // The route and dispatch class classification established, carried into
-    // every refusal this path can raise: the gate's, the host's, and the
-    // upstream's alike.
+    // every refusal this path can raise: the admission's, the gate's, the
+    // host's, and the upstream's alike.
     let scope = pre_body.scope(RequestIdentity::from_head(
         &origin,
         hyper_req.method(),
         hyper_req.uri(),
     ));
+    let head = RequestHead::from_hyper_request(&hyper_req, origin);
+    let script = lifecycle.script();
+    // Admission runs here rather than at the forward, so a policy that declines
+    // the work never has a middleware chain or an upstream leg run for it, and a
+    // gate that refuses afterwards releases the permit it granted.
+    let admitted = match super::body_admission::admit(&plan, &head, script.as_ref()).await {
+        Ok(admitted) => admitted,
+        Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, start)),
+    };
 
     // Middleware gate check using a lightweight Request (empty body). The gate
     // runs against the child classification already resolved, so an authority
@@ -278,32 +365,23 @@ pub(super) async fn dispatch_streaming_proxy(
     // a `500`, and recording it before that conversion named a status the peer
     // never saw, so it goes out through the same answering path every other
     // refusal on this path takes.
-    let head = RequestHead::from_hyper_request(&hyper_req, origin);
     if let Some(blocked) = run_head_gate(&head, router, Some(params), &scope).await {
         // Answered under the scope built above, not a rebuilt built-in one: a
         // gate response the wire cannot carry recovers through this route's own
-        // mapper, the same one the host and upstream refusals reach.
-        return Ok(answer(ctx, blocked, start, &scope));
+        // mapper, the same one the host and upstream refusals reach. Closing,
+        // because the payload this request declared was never read: the next
+        // request on an HTTP/1 connection would otherwise be framed out of it.
+        return Ok(answer(ctx, scope.closing(blocked), start, &scope));
     }
-    let scheme = match origin.is_tls {
-        true => "https",
-        false => "http",
-    };
-
-    let (hyper_parts, body) = hyper_req.into_parts();
-    let proxy_parts = super::async_proxy::IncomingProxyParts {
-        method,
-        path_and_query: hyper_parts
-            .uri
-            .path_and_query()
-            .map_or("/", |pq| pq.as_str())
-            .into(),
-        headers: hyper_parts.headers,
-        remote_addr: origin.remote_addr,
-        scheme,
-    };
-
-    let forwarded =
-        super::async_proxy::forward_incoming_streaming(proxy_parts, body, &backend, &prefix).await;
+    let (proxy_parts, body) = outbound_parts(hyper_req, method, &origin);
+    let forwarded = super::async_proxy::forward_incoming_streaming(
+        proxy_parts,
+        body,
+        admitted,
+        &backend,
+        &prefix,
+        script.as_ref(),
+    )
+    .await;
     Ok(finish_upstream_stream(forwarded, ctx, &scope, start))
 }

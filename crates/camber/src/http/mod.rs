@@ -109,6 +109,7 @@
 
 mod async_proxy;
 mod body;
+pub(crate) mod body_admission;
 mod buffer_config;
 mod client;
 /// Response compression helpers.
@@ -157,6 +158,7 @@ mod websocket;
 mod ws_proxy;
 
 pub use async_proxy::proxy_forward;
+pub use body_admission::{BodyAdmission, BodyAdmissionContext, RequestBodyMode};
 pub use client::{
     ClientBuilder, client, delete, delete_with_body, get, head, options, patch, patch_form,
     patch_json, post, post_form, post_json, put, put_form, put_json,

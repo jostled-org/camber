@@ -1,13 +1,17 @@
+use super::body_admission::{AdmittedBody, BodyBudget, BodyPermit};
 use super::encoding::decode_hex_pair;
 use super::map_reqwest_error;
 use super::method::{Method, RequestMethod};
-use super::rejection::{Diagnostic, proxy_failure_status};
+use super::mock::{LifecycleCheckpoint, LifecycleScript};
+use super::rejection::{Diagnostic, Rejected, proxy_failure_status};
 use super::response::HeaderPair;
 use crate::RuntimeError;
 use arrayvec::ArrayString;
 use std::borrow::Cow;
 use std::fmt;
+use std::future::Future;
 use std::sync::{Arc, LazyLock};
+use tokio::sync::oneshot;
 
 /// The one account of the only path [`strip_prefix`] refuses.
 ///
@@ -23,6 +27,15 @@ static PROXY_CLIENT: LazyLock<Result<reqwest::Client, Arc<str>>> = LazyLock::new
         .build()
         .map_err(|e| -> Arc<str> { e.to_string().into() })
 });
+
+/// How long an upload gets to confirm it stopped before its answer goes out.
+///
+/// The acknowledgement arrives only on another poll of the outbound request
+/// body, and an upstream that answered without draining makes none — so this
+/// bounds scheduling time, not transfer time, and seconds of it are already
+/// generous. Unbounded, a head in hand waits for as long as that upstream
+/// connection lives.
+const UPLOAD_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub(crate) fn proxy_client() -> Result<&'static reqwest::Client, RuntimeError> {
     PROXY_CLIENT
@@ -106,12 +119,24 @@ impl<'a> HeaderValueRef<'a> {
     }
 }
 
-fn connection_header_tokens<'a>(
-    headers: impl Iterator<Item = (&'a str, HeaderValueRef<'a>)>,
-) -> Box<[&'a [u8]]> {
+/// One header on its way between two hops, named and in its own form.
+///
+/// Materialized rather than iterated twice from its source, because every set
+/// here is read twice — once for the `Connection` tokens it delegates, once to
+/// filter against them — and neither a collected slice's iterator nor hyper's
+/// map iterator is `Clone`.
+#[derive(Clone, Copy)]
+struct ForwardedHeader<'a> {
+    name: &'a str,
+    value: HeaderValueRef<'a>,
+}
+
+/// The `Connection` tokens one header set delegates to other header names.
+fn connection_header_tokens<'a>(headers: &[ForwardedHeader<'a>]) -> Box<[&'a [u8]]> {
     headers
-        .filter(|(name, _)| name.eq_ignore_ascii_case("connection"))
-        .flat_map(|(_, value)| value.as_bytes().split(|byte| *byte == b','))
+        .iter()
+        .filter(|header| header.name.eq_ignore_ascii_case("connection"))
+        .flat_map(|header| header.value.as_bytes().split(|byte| *byte == b','))
         .map(|token| token.trim_ascii())
         .filter(|token| is_rfc_token(token))
         .collect()
@@ -211,6 +236,17 @@ pub(super) struct ProxyRequest {
     pub(super) scheme: &'static str,
 }
 
+/// Every header one collected request forwards.
+fn collected_headers(req: &ProxyRequest) -> Box<[ForwardedHeader<'_>]> {
+    req.headers
+        .iter()
+        .map(|(name, value)| ForwardedHeader {
+            name: name.as_ref(),
+            value: HeaderValueRef::Text(value.as_ref()),
+        })
+        .collect()
+}
+
 impl ProxyRequest {
     pub(super) fn from_request(req: &super::Request) -> Self {
         Self {
@@ -260,11 +296,12 @@ fn routable_reqwest_method(method: Method) -> reqwest::Method {
 /// Filter request headers onto a reqwest builder, returning the original Host value if present.
 fn filter_request_headers<'a>(
     mut builder: reqwest::RequestBuilder,
-    headers: impl Iterator<Item = (&'a str, &'a str)>,
+    headers: &[ForwardedHeader<'a>],
     connection_tokens: &[&[u8]],
 ) -> (reqwest::RequestBuilder, Option<&'a str>) {
     let mut original_host = None;
-    for (name, value) in headers {
+    for header in headers {
+        let (name, value) = (header.name, header.value.as_str());
         match (
             is_hop_by_hop(name),
             name.eq_ignore_ascii_case("host"),
@@ -336,25 +373,16 @@ fn attach_peer_address(
 /// their headers come from. Written twice, one copy can drop a step and forward
 /// a header the other strips.
 ///
-/// The source is taken as a way to start a pass rather than as a pass already
-/// running: the set is read twice, once to collect the `Connection` tokens and
-/// once to filter against them, and neither the collected slice's iterator nor
-/// hyper's map iterator is `Clone`.
-///
 /// Values arrive as [`HeaderValueRef`] rather than as bytes or as text, so
 /// neither caller pays for the form the other one stores.
-fn forward_headers<'a, I>(
+fn forward_headers(
     builder: reqwest::RequestBuilder,
-    headers: impl Fn() -> I,
+    headers: &[ForwardedHeader<'_>],
     remote_addr: Option<std::net::IpAddr>,
     scheme: &str,
-) -> reqwest::RequestBuilder
-where
-    I: Iterator<Item = (&'a str, HeaderValueRef<'a>)>,
-{
-    let connection_tokens = connection_header_tokens(headers());
-    let readable = headers().map(|(name, value)| (name, value.as_str()));
-    let (builder, original_host) = filter_request_headers(builder, readable, &connection_tokens);
+) -> reqwest::RequestBuilder {
+    let connection_tokens = connection_header_tokens(headers);
+    let (builder, original_host) = filter_request_headers(builder, headers, &connection_tokens);
     attach_forwarding_metadata(builder, original_host, remote_addr, scheme)
 }
 
@@ -444,11 +472,7 @@ fn build_upstream_request(
     let builder = upstream_builder(method, &req.path, backend, prefix)?;
     let forwarded = forward_headers(
         builder,
-        || {
-            req.headers
-                .iter()
-                .map(|(name, value)| (name.as_ref(), HeaderValueRef::Text(value.as_ref())))
-        },
+        &collected_headers(req),
         req.remote_addr,
         req.scheme,
     );
@@ -464,10 +488,22 @@ pub(super) struct IncomingProxyParts {
     pub(super) scheme: &'static str,
 }
 
+/// Every header one incoming request forwards.
+fn incoming_headers(parts: &IncomingProxyParts) -> Box<[ForwardedHeader<'_>]> {
+    parts
+        .headers
+        .iter()
+        .map(|(name, value)| ForwardedHeader {
+            name: name.as_str(),
+            value: HeaderValueRef::Bytes(value.as_bytes()),
+        })
+        .collect()
+}
+
 /// Build a reqwest builder for upstream forwarding with a streaming incoming body.
 fn build_upstream_request_streaming(
     parts: &IncomingProxyParts,
-    incoming: hyper::body::Incoming,
+    upload: reqwest::Body,
     backend: &str,
     prefix: &str,
 ) -> Result<reqwest::RequestBuilder, ProxyFailure> {
@@ -479,43 +515,38 @@ fn build_upstream_request_streaming(
     )?;
     let forwarded = forward_headers(
         builder,
-        || {
-            parts
-                .headers
-                .iter()
-                .map(|(name, value)| (name.as_str(), HeaderValueRef::Bytes(value.as_bytes())))
-        },
+        &incoming_headers(parts),
         parts.remote_addr,
         parts.scheme,
     );
 
-    use futures_util::StreamExt;
-    let body_stream = http_body_util::BodyStream::new(incoming).filter_map(|result| async move {
-        match result {
-            Ok(frame) => frame.into_data().ok().map(Ok),
-            Err(e) => Some(Err(e)),
-        }
-    });
+    Ok(forwarded.body(upload))
+}
 
-    Ok(forwarded.body(reqwest::Body::wrap_stream(body_stream)))
+/// Every header one upstream answer arrived with.
+fn answered_headers(resp: &reqwest::Response) -> Box<[ForwardedHeader<'_>]> {
+    resp.headers()
+        .iter()
+        .map(|(name, value)| ForwardedHeader {
+            name: name.as_str(),
+            value: HeaderValueRef::Bytes(value.as_bytes()),
+        })
+        .collect()
 }
 
 /// Collect non-hop-by-hop headers from an upstream response.
 fn collect_response_headers(resp: &reqwest::Response) -> Box<[HeaderPair]> {
-    let connection_tokens = connection_header_tokens(
-        resp.headers()
-            .iter()
-            .map(|(name, value)| (name.as_str(), HeaderValueRef::Bytes(value.as_bytes()))),
-    );
-    resp.headers()
+    let headers = answered_headers(resp);
+    let connection_tokens = connection_header_tokens(&headers);
+    headers
         .iter()
-        .filter(|(name, _)| {
-            !is_hop_by_hop(name.as_str()) && !is_connection_named(name.as_str(), &connection_tokens)
+        .filter(|header| {
+            !is_hop_by_hop(header.name) && !is_connection_named(header.name, &connection_tokens)
         })
-        .map(|(name, value)| {
+        .map(|header| {
             (
-                Cow::Owned(name.as_str().to_owned()),
-                Cow::Owned(value.to_str().unwrap_or_default().to_owned()),
+                Cow::Owned(header.name.to_owned()),
+                Cow::Owned(header.value.as_str().to_owned()),
             )
         })
         .collect()
@@ -615,6 +646,21 @@ pub(super) struct StreamingProxyResponse {
     pub(super) status: u16,
     pub(super) headers: Box<[HeaderPair]>,
     pub(super) rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, super::body::BodyError>>,
+    /// What this request's own payload did while the answer was being taken.
+    pub(super) upload: UploadDisposition,
+}
+
+/// What one request's upload left behind when its answer was settled.
+///
+/// Read by the stage that puts the answer on the wire, because the two states
+/// leave the downstream transport in different conditions: a drained upload
+/// owes nothing, and a stopped one leaves framed payload no stage will read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum UploadDisposition {
+    /// The peer's payload ended inside its bound, or there was none to read.
+    Drained,
+    /// Polling stopped with payload the peer still owed left unread.
+    Stopped,
 }
 
 /// Spawn a task that streams response body chunks into an mpsc channel.
@@ -663,39 +709,457 @@ async fn forward_stream_result(
 /// forwarded chunk by chunk with backpressure through the returned receiver.
 /// Stating it once is what keeps a request built from a collected body and one
 /// built from a live hyper stream answering the same way.
+///
+/// The head's arrival is a scheduling checkpoint of its own, taken before the
+/// answer's body streamer exists: a case that has to make an upstream answer
+/// and an upload's own verdict ready in the same turn needs the head held at
+/// the moment it became ready, not after this call has already returned it.
 async fn stream_upstream(
     builder: reqwest::RequestBuilder,
+    observer: Option<&Arc<LifecycleScript>>,
 ) -> Result<StreamingProxyResponse, ProxyFailure> {
     let answer = send_upstream(builder).await?;
+    LifecycleScript::pause_at(
+        observer.map(Arc::as_ref),
+        LifecycleCheckpoint::StreamingUpstreamHeadReady,
+    )
+    .await;
     Ok(StreamingProxyResponse {
         status: answer.status,
         headers: answer.headers,
         rx: spawn_response_streamer(answer.response),
+        upload: UploadDisposition::Drained,
     })
 }
 
 /// Forward a request to upstream and stream the response body via a channel.
+///
+/// The payload was collected and bounded before this call, so its upload owes
+/// nothing to settle: only the answer is still outstanding.
 pub(super) async fn forward_request_streaming(
     req: ProxyRequest,
     backend: &str,
     prefix: &str,
-) -> Result<StreamingProxyResponse, ProxyFailure> {
-    stream_upstream(build_upstream_request(&req, backend, prefix)?).await
+) -> Result<StreamingProxyResponse, UploadFailure> {
+    Ok(stream_upstream(build_upstream_request(&req, backend, prefix)?, None).await?)
 }
 
-/// Forward an incoming hyper body stream to upstream without buffering.
+/// Forward an incoming hyper body stream to upstream under its admission.
 ///
-/// The request body is streamed directly from the client to upstream,
-/// bypassing the router's max_request_body limit. The response body
-/// is streamed back via an mpsc channel.
+/// The payload is never collected: it is measured frame by frame against the
+/// bound this request's own route admitted and forwarded as it arrives. What
+/// settles the request is the race between that bound and the upstream's
+/// answer, which [`settle_upload`] owns.
 pub(super) async fn forward_incoming_streaming(
     parts: IncomingProxyParts,
     incoming: hyper::body::Incoming,
+    admitted: AdmittedBody,
     backend: &str,
     prefix: &str,
-) -> Result<StreamingProxyResponse, ProxyFailure> {
-    stream_upstream(build_upstream_request_streaming(
-        &parts, incoming, backend, prefix,
-    )?)
-    .await
+    observer: Option<&Arc<LifecycleScript>>,
+) -> Result<StreamingProxyResponse, UploadFailure> {
+    let (upload, coordinator) = bounded_upload(incoming, admitted, observer);
+    let builder = build_upstream_request_streaming(&parts, upload, backend, prefix)?;
+    settle_upload(coordinator, stream_upstream(builder, observer)).await
+}
+
+/// Why one streaming forward committed no upstream answer.
+///
+/// Two producers, kept apart because a peer is told different things by each: a
+/// proxy fault is the upstream leg's, and a bounded upload's refusal is this
+/// request's own — its limit, or the transport it arrived over. Collapsed into
+/// one, an oversized upload would be reported to the operator as a backend
+/// outage and to the peer as a bad gateway.
+pub(super) enum UploadFailure {
+    /// The proxy produced no usable upstream answer.
+    Proxy(ProxyFailure),
+    /// The bounded upload refused this request before anything was committed.
+    Body(Rejected),
+}
+
+impl From<ProxyFailure> for UploadFailure {
+    fn from(failure: ProxyFailure) -> Self {
+        Self::Proxy(failure)
+    }
+}
+
+/// The item a bounded upload hands its upstream request.
+type UploadItem = Result<bytes::Bytes, std::io::Error>;
+
+/// The fault an upload reports when it will send no more of a request's payload.
+///
+/// It carries no reason. The reason travels to the coordinator on its own
+/// channel, which is the only stage that answers with it; what the outbound
+/// request needs to know is that this body ends without the bytes it declared,
+/// so that the upstream sees an aborted request rather than a complete short
+/// one.
+fn upload_aborted() -> std::io::Error {
+    std::io::Error::other("the request body was refused before it finished arriving")
+}
+
+/// How one bounded upload ended.
+enum UploadEnd {
+    /// The peer's payload ended inside its bound.
+    Drained,
+    /// The coordinator asked this upload to stop.
+    Stopped,
+    /// This upload refused the request, and this is the refusal.
+    Refused(Rejected),
+}
+
+/// What one poll of a bounded upload produced.
+enum UploadStep {
+    /// A frame with no payload. Nothing to measure and nothing to forward.
+    Skipped,
+    /// One data frame the bound admitted.
+    Forward(bytes::Bytes),
+    /// The upload ends here.
+    End(UploadEnd),
+}
+
+/// One streaming route's incoming payload, measured before it is forwarded.
+///
+/// The sole owner of the admitted permit from the moment the specialized gate
+/// passes the request: every way this value goes away — a drained body, a
+/// refusal, a stop, a dropped upstream request, a cancelled request future —
+/// releases that permit exactly once.
+struct BoundedUpload {
+    incoming: hyper::body::Incoming,
+    budget: BodyBudget,
+    permit: Option<BodyPermit>,
+    /// The channel a refusal travels on, and the one the coordinator closes to
+    /// ask this upload to stop. One handle for both, because they are the same
+    /// question from opposite ends: whether anything this upload could still
+    /// say would change the answer.
+    refusal: Option<oneshot::Sender<Rejected>>,
+    /// The acknowledgement this upload owes once it has stopped polling.
+    finished: Option<oneshot::Sender<UploadDisposition>>,
+    observer: Option<Arc<LifecycleScript>>,
+}
+
+/// The half of one bounded upload the request's own coordinator holds.
+struct UploadCoordinator {
+    refusal: oneshot::Receiver<Rejected>,
+    finished: oneshot::Receiver<UploadDisposition>,
+    observer: Option<Arc<LifecycleScript>>,
+}
+
+/// The senders one upload uses to report its terminal state.
+struct UploadSignals {
+    refusal: oneshot::Sender<Rejected>,
+    finished: oneshot::Sender<UploadDisposition>,
+}
+
+/// Split one admitted incoming body into the upload and its coordinator.
+fn bounded_upload(
+    incoming: hyper::body::Incoming,
+    admitted: AdmittedBody,
+    observer: Option<&Arc<LifecycleScript>>,
+) -> (reqwest::Body, UploadCoordinator) {
+    let (signals, coordinator) = upload_coordination(observer);
+    match hyper::body::Body::is_end_stream(&incoming) {
+        true => (drained_upload(admitted.permit, signals), coordinator),
+        false => live_upload(incoming, admitted, signals, coordinator, observer),
+    }
+}
+
+/// Build the reporting channel pair shared by live and already-ended uploads.
+fn upload_coordination(
+    observer: Option<&Arc<LifecycleScript>>,
+) -> (UploadSignals, UploadCoordinator) {
+    let (refusal_tx, refusal_rx) = oneshot::channel();
+    let (finished_tx, finished_rx) = oneshot::channel();
+    (
+        UploadSignals {
+            refusal: refusal_tx,
+            finished: finished_tx,
+        },
+        UploadCoordinator {
+            refusal: refusal_rx,
+            finished: finished_rx,
+            observer: observer.map(Arc::clone),
+        },
+    )
+}
+
+/// Complete an upload whose incoming body had already reached end-of-stream.
+fn drained_upload(permit: Option<BodyPermit>, signals: UploadSignals) -> reqwest::Body {
+    drop(permit);
+    drop(signals.refusal);
+    acknowledge_end(signals.finished, UploadDisposition::Drained);
+    reqwest::Body::from(bytes::Bytes::new())
+}
+
+/// Wrap an incoming body that still has frames to poll.
+fn live_upload(
+    incoming: hyper::body::Incoming,
+    admitted: AdmittedBody,
+    signals: UploadSignals,
+    coordinator: UploadCoordinator,
+    observer: Option<&Arc<LifecycleScript>>,
+) -> (reqwest::Body, UploadCoordinator) {
+    let upload = BoundedUpload {
+        budget: BodyBudget::new(&admitted),
+        incoming,
+        permit: admitted.permit,
+        refusal: Some(signals.refusal),
+        finished: Some(signals.finished),
+        observer: observer.map(Arc::clone),
+    };
+    (
+        reqwest::Body::wrap_stream(futures_util::stream::unfold(
+            upload,
+            BoundedUpload::next_data,
+        )),
+        coordinator,
+    )
+}
+
+impl BoundedUpload {
+    /// The next payload frame this upload forwards, or the end of it.
+    ///
+    /// An upload that has already reported its end yields nothing more: the one
+    /// acknowledgement it owes has been sent, and a second pass over a body
+    /// whose owner has stopped listening would be work with no reader.
+    async fn next_data(self) -> Option<(UploadItem, Self)> {
+        match self.finished.is_some() {
+            false => None,
+            true => self.forward_next().await,
+        }
+    }
+
+    /// Poll until this upload has a frame to forward or an end to report.
+    async fn forward_next(mut self) -> Option<(UploadItem, Self)> {
+        loop {
+            match self.step().await {
+                UploadStep::Skipped => continue,
+                UploadStep::Forward(data) => return Some((Ok(data), self)),
+                UploadStep::End(end) => return self.ended(end),
+            }
+        }
+    }
+
+    /// Take one frame from the peer, unless the coordinator asks to stop first.
+    ///
+    /// Biased on the stop: an answer the coordinator has already taken settles
+    /// this request, so a frame ready in the same turn is one no stage will
+    /// ever look at.
+    async fn step(&mut self) -> UploadStep {
+        let Self {
+            incoming, refusal, ..
+        } = self;
+        let polled = tokio::select! {
+            biased;
+            () = stop_requested(refusal.as_mut()) => return UploadStep::End(UploadEnd::Stopped),
+            frame = <hyper::body::Incoming as http_body_util::BodyExt>::frame(incoming) => frame,
+        };
+        self.measure(polled).await
+    }
+
+    /// Measure one polled frame against the bound this request was admitted under.
+    async fn measure(
+        &mut self,
+        polled: Option<Result<hyper::body::Frame<bytes::Bytes>, hyper::Error>>,
+    ) -> UploadStep {
+        let frame = match polled {
+            None => return UploadStep::End(UploadEnd::Drained),
+            Some(Err(error)) => return UploadStep::End(unreadable(error)),
+            Some(Ok(frame)) => frame,
+        };
+        // Trailers carry no payload, so they are neither counted nor measured.
+        let Ok(data) = frame.into_data() else {
+            return UploadStep::Skipped;
+        };
+        LifecycleScript::count_body_frame(self.observer.as_deref());
+        self.admit(data).await
+    }
+
+    /// Forward one data frame, or refuse the frame that would cross the bound.
+    async fn admit(&mut self, data: bytes::Bytes) -> UploadStep {
+        match self.budget.admit_frame(data.len()) {
+            Ok(_) => UploadStep::Forward(data),
+            Err(rejected) => self.crossed(rejected).await,
+        }
+    }
+
+    /// Hold one crossing at its checkpoint, then end this upload with it.
+    ///
+    /// Ordered here rather than where the refusal is sent: a case whose claim is
+    /// how one coordinator turn settles this request's own bound against an
+    /// upstream answer needs the crossing observed and not yet reported, so both
+    /// results can be staged before either is said.
+    async fn crossed(&self, rejected: Rejected) -> UploadStep {
+        LifecycleScript::pause_at(
+            self.observer.as_deref(),
+            LifecycleCheckpoint::RequestBodyLimitObserved,
+        )
+        .await;
+        UploadStep::End(UploadEnd::Refused(rejected))
+    }
+
+    /// Report how this upload ended, and tell its consumer what to do next.
+    ///
+    /// A refusal leaves as a stream error rather than as an end of body: an
+    /// upstream given a clean end would take a truncated request for a complete
+    /// one, which is the request Camber refused to forward.
+    fn ended(mut self, end: UploadEnd) -> Option<(UploadItem, Self)> {
+        let aborted = matches!(end, UploadEnd::Refused(_));
+        self.report(end);
+        match aborted {
+            true => Some((Err(upload_aborted()), self)),
+            false => None,
+        }
+    }
+
+    /// End this upload once: release the permit, then answer the coordinator.
+    ///
+    /// Both handles are taken whatever the ending was. A refusal travels out on
+    /// the first; an upload that raised none closes it, which is the same
+    /// answer to the coordinator's only question about it.
+    fn report(&mut self, end: UploadEnd) {
+        drop(self.permit.take());
+        let disposition = match &end {
+            UploadEnd::Drained => UploadDisposition::Drained,
+            UploadEnd::Stopped | UploadEnd::Refused(_) => UploadDisposition::Stopped,
+        };
+        match self.refusal.take().zip(refusal_of(end)) {
+            Some((sender, rejected)) => raise_refusal(sender, rejected),
+            None => {}
+        }
+        match self.finished.take() {
+            Some(sender) => acknowledge_end(sender, disposition),
+            None => {}
+        }
+    }
+}
+
+/// Hand one upload's refusal to the coordinator, or say that nothing heard it.
+///
+/// A closed channel means the upstream's answer already won the tie: the peer
+/// is told the upstream's status and never learns its upload crossed the bound.
+/// The log is the operator's only record that the limit fired at all.
+fn raise_refusal(sender: oneshot::Sender<Rejected>, rejected: Rejected) {
+    match sender.send(rejected) {
+        Ok(()) => {}
+        Err(_) => tracing::warn!(
+            "request body limit refused an upload after its answer was already taken"
+        ),
+    }
+}
+
+/// Tell the coordinator this upload has stopped, if it is still listening.
+fn acknowledge_end(sender: oneshot::Sender<UploadDisposition>, disposition: UploadDisposition) {
+    match sender.send(disposition) {
+        // Both outcomes leave nothing owed: a coordinator that is gone settled
+        // this request without waiting, and it already assumes what an unheard
+        // disposition would have told it.
+        Ok(()) | Err(_) => {}
+    }
+}
+
+/// The refusal one ending carries, if it carries one.
+fn refusal_of(end: UploadEnd) -> Option<Rejected> {
+    match end {
+        UploadEnd::Refused(rejected) => Some(rejected),
+        UploadEnd::Drained | UploadEnd::Stopped => None,
+    }
+}
+
+/// The refusal a payload that stopped arriving is answered with.
+///
+/// The transport's own fault, kept apart from the bound: a peer whose
+/// connection failed mid-upload sent no oversized request, and telling it to
+/// send less would name the wrong fault.
+fn unreadable(error: hyper::Error) -> UploadEnd {
+    UploadEnd::Refused(Rejected::body_unreadable(Box::new(error)))
+}
+
+/// Whether the coordinator has asked this upload to stop.
+///
+/// It asks by closing the channel a refusal would travel on. Once an answer has
+/// been taken, nothing this upload could still say would change it, so the way
+/// to stop it is to stop listening. An upload that has already reported waits
+/// here forever, which is the poll its caller never makes.
+async fn stop_requested(refusal: Option<&mut oneshot::Sender<Rejected>>) {
+    match refusal {
+        Some(sender) => sender.closed().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The refusal one upload raises, if it raises one.
+///
+/// A channel that closes with nothing on it is an upload that ended inside its
+/// bound: nothing is owed, so this never resolves, and the answer the
+/// coordinator is still waiting for is the upstream's.
+async fn upload_refusal(refusal: &mut oneshot::Receiver<Rejected>) -> Rejected {
+    match refusal.await {
+        Ok(rejected) => rejected,
+        Err(_) => std::future::pending().await,
+    }
+}
+
+/// Settle one streaming request between its own bound and the upstream's answer.
+///
+/// Biased on the bound. Both results can become ready in the same turn — a
+/// crossing frame and a response head — and the tie is decided for the refusal,
+/// because the alternative commits an answer to a request this route already
+/// refused to forward in full.
+async fn settle_upload(
+    mut coordinator: UploadCoordinator,
+    upstream: impl Future<Output = Result<StreamingProxyResponse, ProxyFailure>>,
+) -> Result<StreamingProxyResponse, UploadFailure> {
+    tokio::pin!(upstream);
+    let answered = tokio::select! {
+        biased;
+        rejected = upload_refusal(&mut coordinator.refusal) => {
+            return Err(UploadFailure::Body(rejected));
+        }
+        answered = &mut upstream => answered,
+    };
+    coordinator.commit(answered?).await
+}
+
+impl UploadCoordinator {
+    /// Stop this request's upload, then let the upstream's answer through.
+    async fn commit(
+        mut self,
+        answered: StreamingProxyResponse,
+    ) -> Result<StreamingProxyResponse, UploadFailure> {
+        let upload = self.quiesce().await;
+        LifecycleScript::pause_at(
+            self.observer.as_deref(),
+            LifecycleCheckpoint::BeforeStreamingResponseCommit,
+        )
+        .await;
+        Ok(StreamingProxyResponse { upload, ..answered })
+    }
+
+    /// Ask the upload to stop, and wait until it says it has.
+    ///
+    /// Waited for rather than assumed. The answer is already decided by this
+    /// point, so an upload still polling frames behind it could raise a limit
+    /// nothing would act on; stopping it before the head reaches the peer is
+    /// what makes that state unreachable rather than merely unlikely.
+    ///
+    /// The wait is bounded by [`UPLOAD_QUIESCE_TIMEOUT`], because an upstream
+    /// that answers and then stops reading never polls the body that owes the
+    /// acknowledgement: the answer would be held undelivered for the life of
+    /// that upstream connection. An upload that did not confirm reads as
+    /// [`UploadDisposition::Stopped`] — the conservative answer, which forces
+    /// the close unread payload requires.
+    async fn quiesce(&mut self) -> UploadDisposition {
+        self.refusal.close();
+        let disposition =
+            match tokio::time::timeout(UPLOAD_QUIESCE_TIMEOUT, &mut self.finished).await {
+                Ok(Ok(disposition)) => disposition,
+                Ok(Err(_)) | Err(_) => UploadDisposition::Stopped,
+            };
+        LifecycleScript::pause_at(
+            self.observer.as_deref(),
+            LifecycleCheckpoint::StreamingUploadQuiesced,
+        )
+        .await;
+        disposition
+    }
 }

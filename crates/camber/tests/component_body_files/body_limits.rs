@@ -45,6 +45,11 @@ async fn body_limit_default_allows_normal_requests() {
     server.shutdown_bounded(Duration::from_secs(2)).unwrap();
 }
 
+/// The hard ceiling clamps a configured `usize::MAX` at the router's own plan.
+///
+/// The observation is the resolved plan's, not the connection's: the limit a
+/// request runs under is decided by the route it matched, and reading it off a
+/// connection-wide value would keep passing after that authority moved.
 #[tokio::test(flavor = "multi_thread")]
 async fn configured_body_limit_clamps_at_hard_max() {
     const HARD_MAX: usize = 256 * 1024 * 1024;
@@ -75,7 +80,7 @@ async fn configured_body_limit_clamps_at_hard_max() {
         controller.wait_until_paused(checkpoint),
     )
     .await
-    .expect("Limited construction checkpoint timed out")
+    .expect("the resolved-plan limit checkpoint timed out")
     .unwrap();
     controller.release(checkpoint).unwrap();
 

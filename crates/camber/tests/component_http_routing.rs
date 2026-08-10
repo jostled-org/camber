@@ -11,6 +11,8 @@ pub mod runtime_support;
 mod async_client;
 #[path = "component_http_routing/audit_http_rate_limit.rs"]
 mod audit_http_rate_limit;
+#[path = "component_http_routing/body_admission.rs"]
+mod body_admission;
 #[path = "component_http_routing/client_methods.rs"]
 mod client_methods;
 #[path = "component_http_routing/client_timeouts.rs"]

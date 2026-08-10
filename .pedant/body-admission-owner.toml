@@ -1,0 +1,15 @@
+# Semantic architecture rules for the body-admission owner module.
+#
+# The repository defaults, plus mixed-concern enforcement: this module owns the
+# admission contract, the resolved plan, the permit owner, and the one checked
+# byte bound both body consumers measure through. It owns no transport, no
+# collector, and no route lookup, so a second concern appearing here is the
+# signal that the bound has started following its consumer around.
+check_mixed_concerns = true
+check_dyn_field = false
+check_dyn_param = false
+check_clone_in_loop = false
+check_vec_box_dyn = false
+max_depth = 2
+check_long_function_body = true
+max_function_body_lines = 80

@@ -1,0 +1,22 @@
+# Semantic architecture rules for the buffered body consumer.
+#
+# The repository defaults, plus mixed-concern enforcement: this module reads the
+# wire under a bound it was handed and never derives one. The bound itself lives
+# in `body_admission.rs`, so byte arithmetic appearing here — a second collector,
+# a `Limited`, a hand-rolled running total — is the mixed concern this config
+# exists to catch. Those exact spellings are matched textually by the
+# `body-admission-architecture` and `body-admission-buffered-architecture` proof
+# commands, which is where a pattern ban can be stated; Pedant's config surface
+# carries the structural checks below and no pattern list.
+#
+# The repository's explicit dynamic-dispatch exceptions are retained: this module
+# stores and forwards the heterogeneous handler, mapper, and middleware closures
+# the public API is built from.
+check_mixed_concerns = true
+check_dyn_field = false
+check_dyn_param = false
+check_clone_in_loop = false
+check_vec_box_dyn = false
+max_depth = 2
+check_long_function_body = true
+max_function_body_lines = 80

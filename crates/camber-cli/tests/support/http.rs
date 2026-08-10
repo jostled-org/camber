@@ -18,6 +18,7 @@ const MAX_BODY_SIZE: usize = 1024 * 1024;
 pub struct HttpResponse {
     pub status: u16,
     pub body: Box<str>,
+    pub connection_close: bool,
 }
 
 pub fn connect_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
@@ -229,9 +230,16 @@ fn parse_response(bytes: &[u8]) -> io::Result<HttpResponse> {
     }
     let body = std::str::from_utf8(body_bytes)
         .map_err(|error| invalid_data(format!("response body was not UTF-8: {error}")))?;
+    let connection_close = headers.lines().any(|line| match line.split_once(':') {
+        Some((name, value)) => {
+            name.eq_ignore_ascii_case("connection") && value.trim().eq_ignore_ascii_case("close")
+        }
+        None => false,
+    });
     Ok(HttpResponse {
         status,
         body: body.into(),
+        connection_close,
     })
 }
 

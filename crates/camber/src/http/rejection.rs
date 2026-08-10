@@ -96,6 +96,23 @@ const GATEWAY_TIMEOUT_BODY: &str = "gateway timeout";
 /// The header an HTTP/1 transport disposition is stated through.
 const CONNECTION_HEADER: &str = "Connection";
 
+/// The `Connection` value that ends an HTTP/1 transport with its answer.
+const CLOSE_DISPOSITION: &str = "close";
+
+/// The header pair that ends an HTTP/1 transport with the answer carrying it.
+///
+/// The disposition as a value, for the one stage that appends it: the streaming
+/// commitment that carries an upstream head out over payload a peer still owed.
+/// The mapper's own rule below states the same disposition by replacing the
+/// header by name instead, so it takes the two constants directly. Both read
+/// those same constants, and neither can tell a peer what the other would not.
+pub(super) fn close_header() -> HeaderPair {
+    (
+        Cow::Borrowed(CONNECTION_HEADER),
+        Cow::Borrowed(CLOSE_DISPOSITION),
+    )
+}
+
 /// The headers HTTP/2 forbids on a response.
 ///
 /// A mapper writing any of these is describing an HTTP/1 connection it does not
@@ -182,9 +199,10 @@ pub enum RejectionKind {
     BodyLimit,
     /// Body admission refused the work.
     ///
-    /// Reserved for route-aware admission control, which has no producer today.
-    /// A body Camber failed to read is [`RejectionKind::BodyUnreadable`]: a
-    /// transport account of a request nothing refused, not a refusal.
+    /// Raised by a route's configured body-admission policy, before a payload
+    /// frame is polled. A body Camber failed to read is
+    /// [`RejectionKind::BodyUnreadable`]: a transport account of a request
+    /// nothing refused, not a refusal.
     BodyAdmission,
     /// The body stopped arriving for a reason that is not the limit.
     BodyUnreadable,
@@ -309,6 +327,26 @@ impl Rejection {
             message: message.into(),
             headers: Box::new([]),
         }
+    }
+
+    /// What a peer is told when the service cannot take the work.
+    ///
+    /// Four categories answer this way: a closed scope, a policy that declined
+    /// the work, an upgrade no supervisor would own, and a route with no
+    /// admissible backend. They differ by category alone, so the status and the
+    /// safe body are settled here — a second spelling of the pair is a second
+    /// place it can drift.
+    fn service_unavailable(kind: RejectionKind) -> Self {
+        Self::raw(kind, 503, SERVICE_UNAVAILABLE_BODY)
+    }
+
+    /// What a peer is told about a fault nothing safe can be said of.
+    ///
+    /// Settled here for the reason [`Self::service_unavailable`] is: every
+    /// redacting producer answers with one status and one body, so a peer that
+    /// could tell two of them apart would be reading what was redacted.
+    fn redacted_fault(kind: RejectionKind) -> Self {
+        Self::raw(kind, 500, INTERNAL_ERROR_BODY)
     }
 
     /// Add one safe default header, keeping registration order.
@@ -684,6 +722,16 @@ impl Rejected {
         Self::decided(rejection, detail).forcing_close()
     }
 
+    /// The same, for a refusal whose cause is a failed operation.
+    ///
+    /// [`Self::closing`] covers the stages that state a reason; this covers the
+    /// stages holding a source error. Both exist so a producer that leaves
+    /// payload unread says so by picking a constructor, rather than by
+    /// remembering a modifier after building a reusable refusal.
+    fn plain_closing(rejection: Rejection, diagnostic: Diagnostic) -> Self {
+        Self::plain(rejection, diagnostic).forcing_close()
+    }
+
     /// The producer declared this message client-safe.
     ///
     /// The declared text moves into the safe projection, and the operator's
@@ -699,18 +747,14 @@ impl Rejected {
     /// The service cannot take the work right now.
     fn unavailable(error: RuntimeError) -> Self {
         Self::plain(
-            Rejection::raw(
-                RejectionKind::InternalService,
-                503,
-                SERVICE_UNAVAILABLE_BODY,
-            ),
+            Rejection::service_unavailable(RejectionKind::InternalService),
             Arc::new(error),
         )
     }
 
     /// The producer could not complete, and the peer learns nothing more.
     fn faulted(kind: RejectionKind, diagnostic: Diagnostic) -> Self {
-        Self::plain(Rejection::raw(kind, 500, INTERNAL_ERROR_BODY), diagnostic)
+        Self::plain(Rejection::redacted_fault(kind), diagnostic)
     }
 
     /// A body could not be parsed as the representation it declared.
@@ -738,6 +782,54 @@ impl Rejected {
         )
     }
 
+    /// The peer framed its body under a coding Camber cannot undo.
+    ///
+    /// Hyper accepted the chain because it ends in `chunked` and decoded that
+    /// much; the remaining coding is one this service does not undo on the way
+    /// in. Refused before a data frame is polled, because the bytes underneath
+    /// are not the representation the request claims and no handler could read
+    /// them as one.
+    ///
+    /// Forces close for the reason every pre-read refusal does: the framed body
+    /// is left unread, so nothing establishes where the next request on this
+    /// connection would begin.
+    pub(super) fn undecodable_transfer_coding(coding: &str) -> Self {
+        Self::closing(
+            Rejection::raw(RejectionKind::MalformedBody, 400, UNPARSEABLE_BODY),
+            format!("transfer coding {coding} cannot be decoded"),
+        )
+    }
+
+    /// The application's body-admission policy refused this request's work.
+    ///
+    /// The policy's own error is the diagnostic and reaches neither the mapper
+    /// nor the peer: an admission refusal states that the service declined the
+    /// work, and the reason it declined is the operator's.
+    ///
+    /// Forces close for the reason every pre-read refusal does: the body was
+    /// never read, so nothing establishes where the next request on this
+    /// connection would begin.
+    pub(super) fn body_admission_refused(error: RuntimeError) -> Self {
+        Self::plain_closing(
+            Rejection::service_unavailable(RejectionKind::BodyAdmission),
+            Arc::new(error),
+        )
+    }
+
+    /// The application's body-admission policy panicked.
+    ///
+    /// Camber itself could not complete the request, so the category is
+    /// [`RejectionKind::InternalService`] and the peer is told nothing beyond
+    /// the fixed redacted answer. The unwind is captured here rather than
+    /// allowed to leave the request future.
+    pub(super) fn body_admission_panicked(payload: Box<dyn std::any::Any + Send>) -> Self {
+        Self::faulted(
+            RejectionKind::InternalService,
+            Arc::new(crate::task::panic_to_error(payload)),
+        )
+        .forcing_close()
+    }
+
     /// The body stopped arriving for a reason that is not the limit.
     ///
     /// A mid-body transport failure or a peer reset is not an oversized body,
@@ -751,7 +843,7 @@ impl Rejected {
     /// owed is unread, so nothing establishes where the next request would
     /// begin.
     pub(super) fn body_unreadable(error: Box<dyn Error + Send + Sync>) -> Self {
-        Self::plain(
+        Self::plain_closing(
             Rejection::raw(
                 RejectionKind::BodyUnreadable,
                 400,
@@ -759,7 +851,6 @@ impl Rejected {
             ),
             Arc::from(error),
         )
-        .forcing_close()
     }
 
     /// The body did not finish arriving inside its collection deadline.
@@ -894,15 +985,17 @@ impl Rejected {
     /// request, route and subprotocol this refusal already names.
     #[cfg(feature = "ws")]
     pub(super) fn ws_upgrade_unbuildable(error: hyper::http::Error) -> Self {
-        Self::uncommitted_upgrade(500, INTERNAL_ERROR_BODY, Arc::new(error))
+        Self::uncommitted_upgrade(
+            Rejection::redacted_fault(RejectionKind::InternalService),
+            Arc::new(error),
+        )
     }
 
     /// The supervisor declined to take ownership of this upgrade.
     #[cfg(feature = "ws")]
     pub(super) fn upgrade_registration_refused() -> Self {
         Self::uncommitted_upgrade(
-            503,
-            SERVICE_UNAVAILABLE_BODY,
+            Rejection::service_unavailable(RejectionKind::InternalService),
             RefusalDetail::diagnostic("the supervisor refused to own this upgrade"),
         )
     }
@@ -911,8 +1004,7 @@ impl Rejected {
     #[cfg(feature = "ws")]
     pub(super) fn upgrade_registration_unavailable() -> Self {
         Self::uncommitted_upgrade(
-            500,
-            INTERNAL_ERROR_BODY,
+            Rejection::redacted_fault(RejectionKind::InternalService),
             RefusalDetail::diagnostic("no supervisor could take ownership of this upgrade"),
         )
     }
@@ -924,13 +1016,13 @@ impl Rejected {
     /// refusal in that state comes through here — the `101` that could not be
     /// built and the two the supervisor would not own — so one place decides
     /// what such a connection may do next.
+    ///
+    /// The answer arrives already built. Each of the three is one of the two
+    /// answers this file spells for every producer that gives them, so taking a
+    /// status and a body here would be a third place either could be written.
     #[cfg(feature = "ws")]
-    fn uncommitted_upgrade(status: u16, safe: &'static str, diagnostic: Diagnostic) -> Self {
-        Self::plain(
-            Rejection::raw(RejectionKind::InternalService, status, safe),
-            diagnostic,
-        )
-        .forcing_close()
+    fn uncommitted_upgrade(rejection: Rejection, diagnostic: Diagnostic) -> Self {
+        Self::plain_closing(rejection, diagnostic)
     }
 
     /// The refusal one proxy fault is answered through.
@@ -956,7 +1048,7 @@ impl Rejected {
     /// No upstream is admissible for a proxied route.
     pub(super) fn no_admissible_backend() -> Self {
         Self::decided(
-            Rejection::raw(RejectionKind::Proxy, 503, SERVICE_UNAVAILABLE_BODY),
+            Rejection::service_unavailable(RejectionKind::Proxy),
             "every backend for this route is failing its health check",
         )
     }
@@ -968,7 +1060,7 @@ impl Rejected {
     /// chain agreed" would forward a request whose middleware never ran.
     pub(super) fn gate_unrunnable() -> Self {
         Self::decided(
-            Rejection::raw(RejectionKind::InternalService, 500, INTERNAL_ERROR_BODY),
+            Rejection::redacted_fault(RejectionKind::InternalService),
             "a dispatch class owing a middleware gate resolved no router to run it",
         )
     }
@@ -1478,18 +1570,39 @@ impl RejectionScope {
 
     /// Apply the transport disposition this refusal decided.
     fn enforce_disposition(&self, response: Response, disposition: Disposition) -> Response {
-        match (self.identity.version, disposition) {
+        match (self.closes_transport(), disposition) {
             // HTTP/2 frames every request on its own stream, so neither an
             // unread body nor an unusable authority can desynchronize the
             // connection: there is nothing here for a disposition to enact.
             // The header is illegal on this version besides, so a mapper's copy
             // of it leaves here.
-            (hyper::Version::HTTP_2, _) => response.without_headers(&CONNECTION_SPECIFIC_HEADERS),
-            (_, Disposition::Close) => {
-                response.with_replaced_header(CONNECTION_HEADER, Cow::Borrowed("close"))
+            (false, _) => response.without_headers(&CONNECTION_SPECIFIC_HEADERS),
+            (true, Disposition::Close) => {
+                response.with_replaced_header(CONNECTION_HEADER, Cow::Borrowed(CLOSE_DISPOSITION))
             }
-            (_, Disposition::Reusable) => response,
+            (true, Disposition::Reusable) => response,
         }
+    }
+
+    /// Whether ending this request's transport is what stops it being reused.
+    ///
+    /// The one place the version question is answered for an unread body. An
+    /// HTTP/1 connection frames its next request immediately behind this one,
+    /// so payload left unread has to end the connection; an HTTP/2 stream is
+    /// its own frame sequence, so ending that stream is already the whole
+    /// answer and the connection carries on.
+    pub(super) fn closes_transport(&self) -> bool {
+        !matches!(self.identity.version, hyper::Version::HTTP_2)
+    }
+
+    /// Leave this transport unable to frame a request behind an unread body.
+    ///
+    /// The disposition rule above, applied to an answer that is not a refusal:
+    /// a specialized gate's own response, produced before a payload frame was
+    /// ever polled. A mapped refusal states its disposition on itself; these
+    /// have none to state, so the stage that leaves payload unread says it here.
+    pub(super) fn closing(&self, response: Response) -> Response {
+        self.enforce_disposition(response, Disposition::Close)
     }
 }
 

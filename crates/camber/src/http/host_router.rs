@@ -1,4 +1,5 @@
 use super::Response;
+use super::body_admission::ConfiguredCeiling;
 use super::rejection::{Rejected, Rejection, RejectionContext, RejectionMapper, shared_mapper};
 use super::request::RequestHead;
 use super::router::{FrozenRouter, Router};
@@ -13,6 +14,7 @@ impl std::fmt::Debug for HostRouter {
             .field("has_default", &self.default.is_some())
             .field("buffers", &self.buffers)
             .field("has_rejection_mapper", &self.mapper.is_some())
+            .field("body_ceiling", &self.body_ceiling)
             .finish()
     }
 }
@@ -24,6 +26,7 @@ pub struct HostRouter {
     default: Option<Router>,
     buffers: BufferConfig,
     mapper: Option<Arc<RejectionMapper>>,
+    body_ceiling: ConfiguredCeiling,
 }
 
 impl HostRouter {
@@ -33,9 +36,12 @@ impl HostRouter {
     }
 
     /// Set the maximum request body size in bytes (capped at 256 MB).
+    ///
+    /// This ceiling contains every child router. A child that configures none
+    /// inherits it; a child that configures one can only narrow it.
     #[must_use]
     pub fn max_request_body(mut self, bytes: usize) -> Self {
-        self.buffers = self.buffers.with_max_request_body(bytes);
+        self.body_ceiling = ConfiguredCeiling::configured(bytes);
         self
     }
 
@@ -107,6 +113,7 @@ impl HostRouter {
             hosts: hosts.into_boxed_slice(),
             default,
             mapper: self.mapper,
+            body_ceiling: self.body_ceiling,
         }
     }
 }
@@ -116,6 +123,7 @@ pub(super) struct FrozenHostRouter {
     hosts: Box<[(Box<str>, FrozenRouter)]>,
     default: Option<FrozenRouter>,
     mapper: Option<Arc<RejectionMapper>>,
+    body_ceiling: ConfiguredCeiling,
 }
 
 /// Reject values that are not an HTTP authority.
@@ -180,6 +188,11 @@ impl FrozenHostRouter {
     /// The policy a request uses when its resolved child configured none.
     pub(super) fn mapper(&self) -> Option<Arc<RejectionMapper>> {
         self.mapper.clone()
+    }
+
+    /// The request-body ceiling that contains every child registered here.
+    pub(super) fn body_ceiling(&self) -> ConfiguredCeiling {
+        self.body_ceiling
     }
 
     /// Resolve a router from the authority a request named.

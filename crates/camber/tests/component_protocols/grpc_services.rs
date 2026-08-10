@@ -76,6 +76,54 @@ fn hello_request(name: &str) -> tonic::Request<proto::HelloRequest> {
     tonic::Request::new(proto::HelloRequest { name: name.into() })
 }
 
+/// The decoding ceiling tonic owns for this fixture's service.
+const TONIC_MESSAGE_CEILING: usize = 64;
+
+#[test]
+fn grpc_route_keeps_tonic_body_ownership_under_http_admission_policy() {
+    grpc_runtime()
+        .run(|| {
+            let port = crate::http::reserve_observed();
+            let asked = Arc::new(AtomicUsize::new(0));
+
+            let mut router = Router::new().max_request_body(0);
+            router.grpc(GrpcRouter::new().add_service(
+                greeter_service::serve(MyGreeter).max_decoding_message_size(TONIC_MESSAGE_CEILING),
+            ));
+            let router = router.body_admission(crate::http::refusing_body_admission(&asked));
+            let server = port.serve(router);
+            let addr = server.addr();
+
+            let reply = block_on_protocol(say_hello(addr, hello_request("Tonic")))
+                .expect("a normal unary call succeeds under a restrictive HTTP body policy")
+                .into_inner();
+            assert_eq!(reply.message, "Hello, Tonic!");
+
+            let oversized = block_on_protocol(say_hello(
+                addr,
+                hello_request(&"n".repeat(TONIC_MESSAGE_CEILING * 8)),
+            ))
+            .expect_err("tonic refuses a message above its own decoding ceiling");
+            assert_eq!(
+                oversized.code(),
+                tonic::Code::OutOfRange,
+                "the ceiling that refused is tonic's: {oversized:?}"
+            );
+
+            assert_eq!(
+                asked.load(Ordering::SeqCst),
+                0,
+                "a gRPC request reaches no Camber body policy"
+            );
+            assert_eq!(server.controller().body_frames_polled(), 0);
+            assert_eq!(server.controller().body_peak_retained_bytes(), 0);
+            assert_eq!(server.controller().body_permit_owners_dropped(), 0);
+
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
 #[test]
 fn grpc_async_handler_responds() {
     grpc_runtime()

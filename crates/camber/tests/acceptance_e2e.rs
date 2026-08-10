@@ -35,6 +35,8 @@ pub mod common {
 
 #[path = "acceptance_e2e/async_server_and_scheduling.rs"]
 pub mod async_server_and_scheduling;
+#[path = "acceptance_e2e/body_admission.rs"]
+pub mod body_admission;
 #[path = "acceptance_e2e/concurrent_routes_and_keepalive.rs"]
 pub mod concurrent_routes_and_keepalive;
 #[path = "acceptance_e2e/framework_rejections.rs"]

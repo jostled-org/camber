@@ -25,10 +25,11 @@ use camber::http::RejectionKind;
 /// left the list one short, and `assert_closed_kind` went on passing while
 /// covering one category fewer than the taxonomy had.
 ///
-/// `BodyAdmission` is reserved for route-aware admission control and has no
-/// producer today, so no fixture generates it. It is in the list anyway: the
-/// claim the list makes is which categories exist, not which ones a journey
-/// happened to reach.
+/// The list claims which categories exist, not which ones a journey happened to
+/// reach. A category no fixture drives still belongs here, and one that gains a
+/// producer needs no edit: `BodyAdmission` is raised by route-aware admission
+/// refusal and asserted by its own fixtures, and the list carried it before
+/// either existed.
 pub const KINDS: [RejectionKind; RejectionKind::ALL.len()] = RejectionKind::ALL;
 
 /// The bounded name one category is recorded and counted under.

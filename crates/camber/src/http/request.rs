@@ -79,6 +79,64 @@ impl<'a> RequestHead<'a> {
         self.uri.path()
     }
 
+    /// The identity Camber minted for this request.
+    pub(super) fn request_id(&self) -> RequestId {
+        self.origin.request_id
+    }
+
+    /// The method exactly as the peer sent it.
+    pub(super) fn method_str(&self) -> &str {
+        self.method.as_str()
+    }
+
+    /// The borrowed head's view of [`Request::header`].
+    ///
+    /// One lookup rule for the owned request and the borrowed head, so an
+    /// admission policy and a handler reading the same name cannot disagree.
+    pub(super) fn header(&self, name: &str) -> Option<&str> {
+        header_str(self.headers, name)
+    }
+
+    /// The body length this request declared, after Hyper's normalization.
+    ///
+    /// Read from the framing Hyper accepted, never from the raw wire: a
+    /// malformed, overflowing, or conflicting declaration is refused below this
+    /// service, and an HTTP/1 request carrying both a length and a transfer
+    /// coding reaches here with the length already removed. `None` is a body
+    /// with no usable declaration, which the observed-byte limit bounds.
+    ///
+    /// The value stays a `u64`. Narrowing it to the platform word here is what
+    /// would turn a declaration no machine can hold into a small admitted
+    /// number.
+    pub(super) fn declared_length(&self) -> Option<u64> {
+        header_str(self.headers, hyper::header::CONTENT_LENGTH.as_str())
+            .and_then(|declared| declared.trim().parse().ok())
+    }
+
+    /// The transfer coding this request declared, when Camber cannot undo it.
+    ///
+    /// Hyper accepts any coding chain that ends in `chunked` and decodes only
+    /// the chunked framing, so `gzip, chunked` arrives here as chunked frames
+    /// whose contents are still compressed. Camber undoes no content coding on
+    /// the way in, so what a handler would be handed is not what the peer said
+    /// it sent. A chain that does not end in `chunked` is refused below this
+    /// service and never reaches here.
+    ///
+    /// The first value is the one read, under [`Self::header`]'s rule: a peer
+    /// that sent `Transfer-Encoding: gzip` and `Transfer-Encoding: chunked` as
+    /// two lines declared `gzip` first, and that is the coding this answers
+    /// with.
+    pub(super) fn undecodable_transfer_coding(&self) -> Option<&str> {
+        let declared = header_str(self.headers, hyper::header::TRANSFER_ENCODING.as_str())?;
+        match declared
+            .split(',')
+            .all(|coding| coding.trim().eq_ignore_ascii_case("chunked"))
+        {
+            true => None,
+            false => Some(declared),
+        }
+    }
+
     /// The authority this request names, however its version states one.
     pub(super) fn authority(&self) -> &str {
         authority_of(self.headers, self.uri)
@@ -117,6 +175,7 @@ impl<'a> RequestHead<'a> {
             request_id: self.origin.request_id,
             version: self.origin.version,
             disconnect: self.origin.disconnect.clone(),
+            _admission: None,
         }
     }
 }
@@ -148,6 +207,10 @@ pub struct Request {
     request_id: RequestId,
     version: hyper::Version,
     disconnect: DisconnectSignal,
+    /// The admission permit this request was granted, held for exactly as long
+    /// as the request is. Underscored because nothing reads it and nothing may:
+    /// its whole contract is that dropping this request releases it once.
+    _admission: Option<super::body_admission::BodyPermit>,
 }
 
 impl Request {
@@ -168,6 +231,7 @@ impl Request {
         body_bytes: Bytes,
         origin: RequestOrigin<'_>,
         method: Method,
+        admission: Option<super::body_admission::BodyPermit>,
     ) -> Self {
         Self {
             method: RequestMethod::Known(method),
@@ -184,6 +248,7 @@ impl Request {
             request_id: origin.request_id,
             version: origin.version,
             disconnect: origin.disconnect.clone(),
+            _admission: admission,
         }
     }
 
@@ -591,6 +656,8 @@ impl RequestBuilder {
             // model that could drift from the served one.
             request_id: RequestId::generate(),
             disconnect: DisconnectSignal::detached(),
+            // A built request was admitted by nothing, so it holds no permit.
+            _admission: None,
         })
     }
 }

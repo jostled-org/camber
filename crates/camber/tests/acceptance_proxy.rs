@@ -2,10 +2,14 @@
 pub mod deterministic;
 #[path = "support/http.rs"]
 pub mod http;
+#[path = "support/raw_upstream.rs"]
+pub mod raw_upstream;
 #[path = "support/rejection.rs"]
 pub mod rejection_support;
 #[path = "support/runtime.rs"]
 pub mod runtime_support;
+#[path = "support/stream.rs"]
+pub mod stream;
 #[path = "support/tls.rs"]
 pub mod tls;
 #[cfg(feature = "ws")]
@@ -18,6 +22,7 @@ pub mod ws_async;
 pub mod common {
     pub use crate::deterministic::*;
     pub use crate::http::*;
+    pub use crate::raw_upstream::*;
     pub use crate::rejection_support::*;
     pub use crate::runtime_support::*;
     pub use crate::tls::*;
@@ -27,6 +32,8 @@ pub mod common {
     pub use crate::ws_async::*;
 }
 
+#[path = "acceptance_proxy/body_admission.rs"]
+mod body_admission;
 #[path = "acceptance_proxy/buffered_forwarding.rs"]
 mod buffered_forwarding;
 #[path = "acceptance_proxy/downstream_flow_control.rs"]

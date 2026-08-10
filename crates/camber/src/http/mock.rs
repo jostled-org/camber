@@ -28,6 +28,10 @@ pub enum LifecycleCheckpoint {
     BeforeUpgradeAcknowledge,
     KeepaliveTimeoutConfigured(std::time::Duration),
     RequestBodyLimitConfigured(usize),
+    RequestBodyLimitObserved,
+    StreamingUpstreamHeadReady,
+    StreamingUploadQuiesced,
+    BeforeStreamingResponseCommit,
     SseBufferConfigured(usize),
     WebSocketOutgoingBufferConfigured(usize),
     WebSocketIncomingBufferConfigured(usize),
@@ -67,7 +71,87 @@ struct CheckpointState {
     checkpoint: LifecycleCheckpoint,
     phase: CheckpointPhase,
     reached: Arc<tokio::sync::Notify>,
-    released: Arc<tokio::sync::Notify>,
+    released: Arc<ReleaseGate>,
+}
+
+impl CheckpointState {
+    /// Record that production reached this checkpoint, and wake whoever waited
+    /// to hear it.
+    fn pause(&mut self) -> Arc<ReleaseGate> {
+        self.phase = CheckpointPhase::Paused;
+        self.reached.notify_waiters();
+        Arc::clone(&self.released)
+    }
+}
+
+/// The release one paused checkpoint waits on.
+///
+/// The recorded release is re-read on every poll rather than only when a wake
+/// arrives. Recording and waking are separate, because a case whose claim is
+/// what one turn of a `select!` decides needs both of that turn's results ready
+/// in the same poll: waking the future held here decides the turn before the
+/// second result exists, so such a case records the release quietly and lets the
+/// other result provoke the poll that observes both.
+#[derive(Default)]
+struct ReleaseGate {
+    released: AtomicBool,
+    /// How many times whatever waits here has looked for its release.
+    ///
+    /// One poll is one turn the held future took. A case that stages a release
+    /// without waking anything reads this to tell a turn that has already been
+    /// spent from one still to come.
+    polls: AtomicUsize,
+    waiting: Mutex<Option<std::task::Waker>>,
+}
+
+impl ReleaseGate {
+    /// Record the release. Nothing is woken.
+    fn record(&self) {
+        self.released.store(true, Ordering::Release);
+    }
+
+    /// How many turns whatever waits here has taken.
+    fn polls(&self) -> usize {
+        self.polls.load(Ordering::Acquire)
+    }
+
+    /// Wake whatever waits here.
+    fn wake(&self) {
+        let waiting = self
+            .waiting
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        match waiting {
+            Some(waker) => waker.wake(),
+            None => {}
+        }
+    }
+
+    /// Hold until this gate's release has been recorded.
+    async fn held(&self) {
+        std::future::poll_fn(|cx| self.poll_release(cx)).await;
+    }
+
+    /// Whether the release is recorded, registering for a wake when it is not.
+    ///
+    /// The registration happens under the same lock [`Self::wake`] takes, so a
+    /// release recorded between the check and the registration still finds the
+    /// waker it has to wake.
+    fn poll_release(&self, cx: &std::task::Context<'_>) -> std::task::Poll<()> {
+        self.polls.fetch_add(1, Ordering::Release);
+        let mut waiting = self
+            .waiting
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match self.released.load(Ordering::Acquire) {
+            true => std::task::Poll::Ready(()),
+            false => {
+                *waiting = Some(cx.waker().clone());
+                std::task::Poll::Pending
+            }
+        }
+    }
 }
 
 struct ScriptState {
@@ -76,9 +160,22 @@ struct ScriptState {
     fault: Option<LifecycleFault>,
 }
 
+/// What one listener's requests reported about their body handling.
+///
+/// Monotonic counters only. Nothing here chooses a limit, invokes a policy,
+/// synthesizes a rejection, or takes ownership of anything: each value is
+/// written by the production decision it names and read by the controller.
+#[derive(Default)]
+struct BodyObservations {
+    frames_polled: AtomicUsize,
+    peak_retained_bytes: AtomicUsize,
+    permit_owners_dropped: AtomicUsize,
+}
+
 pub(crate) struct LifecycleScript {
     state: Mutex<ScriptState>,
     supervisor_wake: tokio::sync::Notify,
+    body: BodyObservations,
 }
 
 impl LifecycleScript {
@@ -90,7 +187,48 @@ impl LifecycleScript {
                 fault: None,
             }),
             supervisor_wake: tokio::sync::Notify::new(),
+            body: BodyObservations::default(),
         }
+    }
+
+    /// Write one body observation, and do nothing when no controller watches.
+    ///
+    /// Every counter below reaches its field through here, so "inert with no
+    /// controller registered" is decided in one place rather than restated per
+    /// counter, and a fourth counter is the one line that names its field.
+    fn observe_body(script: Option<&Self>, observe: impl FnOnce(&BodyObservations)) {
+        match script {
+            Some(script) => observe(&script.body),
+            None => {}
+        }
+    }
+
+    /// Record one request-body frame the production collector polled out.
+    ///
+    /// Inert with no controller registered, exactly like [`Self::pause_at`].
+    pub(crate) fn count_body_frame(script: Option<&Self>) {
+        Self::observe_body(script, |body| {
+            body.frames_polled.fetch_add(1, Ordering::Release);
+        });
+    }
+
+    /// Record what one request holds after appending a decoded data frame.
+    ///
+    /// Kept as the high-water mark rather than a running sum: what a case
+    /// claims about a bounded read is the most one request ever held at once,
+    /// and a sum would report the whole listener's traffic instead.
+    pub(crate) fn observe_body_retained(script: Option<&Self>, retained: usize) {
+        Self::observe_body(script, |body| {
+            body.peak_retained_bytes
+                .fetch_max(retained, Ordering::Release);
+        });
+    }
+
+    /// Record one admitted permit owner reaching its drop.
+    pub(crate) fn count_permit_owner_dropped(script: Option<&Self>) {
+        Self::observe_body(script, |body| {
+            body.permit_owners_dropped.fetch_add(1, Ordering::Release);
+        });
     }
 
     fn invalid(message: &'static str) -> RuntimeError {
@@ -115,7 +253,7 @@ impl LifecycleScript {
                     checkpoint,
                     phase: CheckpointPhase::Armed,
                     reached: Arc::new(tokio::sync::Notify::new()),
-                    released: Arc::new(tokio::sync::Notify::new()),
+                    released: Arc::new(ReleaseGate::default()),
                 });
                 Ok(())
             }
@@ -162,25 +300,32 @@ impl LifecycleScript {
     }
 
     fn release_checkpoint(&self, checkpoint: LifecycleCheckpoint) -> Result<(), RuntimeError> {
-        let released = {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            let entry = state
-                .checkpoints
-                .iter_mut()
-                .find(|entry| entry.checkpoint == checkpoint)
-                .ok_or_else(|| Self::invalid("lifecycle checkpoint is not armed"))?;
-            match entry.phase {
-                CheckpointPhase::Paused => {
-                    entry.phase = CheckpointPhase::Released;
-                    Arc::clone(&entry.released)
-                }
-                CheckpointPhase::Armed | CheckpointPhase::Released => {
-                    return Err(Self::invalid("lifecycle checkpoint is not paused"));
-                }
-            }
-        };
-        released.notify_waiters();
+        self.record_release(checkpoint)?.wake();
         Ok(())
+    }
+
+    /// Record one paused checkpoint's release, waking nothing.
+    fn record_release(
+        &self,
+        checkpoint: LifecycleCheckpoint,
+    ) -> Result<Arc<ReleaseGate>, RuntimeError> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let entry = state
+            .checkpoints
+            .iter_mut()
+            .find(|entry| entry.checkpoint == checkpoint)
+            .ok_or_else(|| Self::invalid("lifecycle checkpoint is not armed"))?;
+        match entry.phase {
+            CheckpointPhase::Paused => {
+                entry.phase = CheckpointPhase::Released;
+                let released = Arc::clone(&entry.released);
+                released.record();
+                Ok(released)
+            }
+            CheckpointPhase::Armed | CheckpointPhase::Released => {
+                Err(Self::invalid("lifecycle checkpoint is not paused"))
+            }
+        }
     }
 
     fn inject(&self, fault: LifecycleFault) -> Result<(), RuntimeError> {
@@ -219,45 +364,48 @@ impl LifecycleScript {
     }
 
     pub(crate) async fn pause(&self, checkpoint: LifecycleCheckpoint) {
-        let released = {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if state.closed {
-                return;
-            }
-            let entry = match state.checkpoints.iter_mut().find(|entry| {
-                entry.checkpoint == checkpoint && entry.phase == CheckpointPhase::Armed
-            }) {
-                Some(entry) => entry,
-                None => return,
-            };
-            entry.phase = CheckpointPhase::Paused;
-            entry.reached.notify_waiters();
-            Arc::clone(&entry.released)
-        };
-        loop {
-            let notified = released.notified();
-            tokio::pin!(notified);
-            let done = {
-                let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                let generation = state
-                    .checkpoints
-                    .iter()
-                    .find(|entry| Arc::ptr_eq(&entry.released, &released));
-                state.closed
-                    || match generation {
-                        Some(entry) => entry.phase == CheckpointPhase::Released,
-                        None => true,
-                    }
-            };
-            match done {
-                true => return,
-                false => notified.await,
-            }
+        match self.reach(checkpoint) {
+            Some(released) => released.held().await,
+            None => {}
+        }
+    }
+
+    /// Mark this checkpoint reached, and hand back the gate it now waits on.
+    ///
+    /// `None` is a checkpoint nothing armed, or a closed controller: production
+    /// runs straight through both.
+    fn reach(&self, checkpoint: LifecycleCheckpoint) -> Option<Arc<ReleaseGate>> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        match state.closed {
+            true => None,
+            false => state
+                .checkpoints
+                .iter_mut()
+                .find(|entry| {
+                    entry.checkpoint == checkpoint && entry.phase == CheckpointPhase::Armed
+                })
+                .map(CheckpointState::pause),
         }
     }
 
     pub(crate) async fn wait_for_supervisor_wake(&self) {
         self.supervisor_wake.notified().await;
+    }
+
+    /// How many turns whatever waits at `checkpoint` has taken.
+    ///
+    /// A checkpoint nothing armed is refused, the way every other lookup here
+    /// refuses one. Payload-carrying variants match by value, so a case naming
+    /// a limit it never armed would read a count of zero and pass every claim
+    /// it made about turns without a turn ever being taken.
+    fn checkpoint_polls(&self, checkpoint: LifecycleCheckpoint) -> Result<usize, RuntimeError> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .checkpoints
+            .iter()
+            .find(|entry| entry.checkpoint == checkpoint)
+            .map(|entry| entry.released.polls())
+            .ok_or_else(|| Self::invalid("lifecycle checkpoint is not armed"))
     }
 
     pub(crate) fn take_accept_fault(&self) -> Option<std::io::ErrorKind> {
@@ -298,19 +446,30 @@ impl LifecycleScript {
     }
 
     fn close(&self) {
-        let notifications = {
+        let held = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.closed = true;
             state
                 .checkpoints
                 .iter()
-                .flat_map(|entry| [Arc::clone(&entry.reached), Arc::clone(&entry.released)])
+                .map(|entry| (Arc::clone(&entry.reached), Arc::clone(&entry.released)))
                 .collect::<Vec<_>>()
         };
-        notifications
-            .into_iter()
-            .for_each(|notification| notification.notify_waiters());
+        held.into_iter().for_each(let_go);
     }
+}
+
+/// Let go of one checkpoint outright.
+///
+/// A closing controller owes both halves to every checkpoint it still holds:
+/// whoever waits to hear it was reached, and whatever is held at its release.
+/// Production parked at a checkpoint resumes rather than waiting on a controller
+/// that no longer exists.
+fn let_go(held: (Arc<tokio::sync::Notify>, Arc<ReleaseGate>)) {
+    let (reached, released) = held;
+    reached.notify_waiters();
+    released.record();
+    released.wake();
 }
 
 struct LifecycleRegistration {
@@ -345,8 +504,53 @@ impl LifecycleController {
         self.script.release_checkpoint(checkpoint)
     }
 
+    /// Record one paused checkpoint's release without waking what waits there.
+    ///
+    /// The held future stays parked and observes the release on whatever poll
+    /// something else provokes. That is the only way to stage two results into
+    /// one turn of a `select!`: [`Self::release`] wakes the future it releases,
+    /// so the turn is decided before the second result exists, and a precedence
+    /// rule between two ready results is never exercised.
+    pub fn stage_release(&self, checkpoint: LifecycleCheckpoint) -> Result<(), RuntimeError> {
+        self.script.record_release(checkpoint).map(drop)
+    }
+
+    /// How many turns whatever is held at `checkpoint` has taken.
+    ///
+    /// A held future looks for its release once per poll, so this counts the
+    /// polls that future has been given since the checkpoint was armed. It is
+    /// what tells a staged turn that something else already spent from one that
+    /// is still to come: [`Self::stage_release`] leaves a release nothing has
+    /// looked at yet, and only this says whether anything has since.
+    ///
+    /// A checkpoint nothing armed is an error rather than a count of zero. The
+    /// count only means something against a checkpoint this controller holds,
+    /// and a misnamed one read as zero satisfies every claim a case can make
+    /// about turns.
+    pub fn checkpoint_polls(&self, checkpoint: LifecycleCheckpoint) -> Result<usize, RuntimeError> {
+        self.script.checkpoint_polls(checkpoint)
+    }
+
     pub fn inject_once(&self, fault: LifecycleFault) -> Result<(), RuntimeError> {
         self.script.inject(fault)
+    }
+
+    /// How many request-body frames this listener's collectors have polled out.
+    pub fn body_frames_polled(&self) -> usize {
+        self.script.body.frames_polled.load(Ordering::Acquire)
+    }
+
+    /// The most bytes any one request on this listener retained at once.
+    pub fn body_peak_retained_bytes(&self) -> usize {
+        self.script.body.peak_retained_bytes.load(Ordering::Acquire)
+    }
+
+    /// How many admitted permit owners this listener has released.
+    pub fn body_permit_owners_dropped(&self) -> usize {
+        self.script
+            .body
+            .permit_owners_dropped
+            .load(Ordering::Acquire)
     }
 }
 

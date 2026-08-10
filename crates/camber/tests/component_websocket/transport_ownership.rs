@@ -576,6 +576,17 @@ fn generated_websocket_origins_normalize_or_reject() {
 /// The head itself is the shared one: a copy here could drift from what Camber
 /// accepts, and then every case below would be proving something about a
 /// request no client sends.
+/// The router both body-limit upgrade rows serve: a tight body ceiling, a
+/// policy that would refuse anything it was asked about, and one WS route.
+fn body_limit_ws_router(asked: &Arc<AtomicUsize>) -> Router {
+    let mut router = Router::new().max_request_body(10);
+    router.ws("/ws", |_req: &Request, conn: WsConn| {
+        conn.send("connected")?;
+        Ok(())
+    });
+    router.body_admission(common::refusing_body_admission(asked))
+}
+
 fn ws_connect(
     addr: std::net::SocketAddr,
     path: &str,
@@ -931,13 +942,8 @@ fn websocket_upgrade_ignores_request_body_limit() {
         .keepalive_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
-            let mut router = Router::new().max_request_body(10);
-            router.ws("/ws", |_req: &Request, conn: WsConn| {
-                conn.send("connected")?;
-                Ok(())
-            });
-
-            let addr = common::spawn_server(router);
+            let asked = Arc::new(AtomicUsize::new(0));
+            let addr = common::spawn_server(body_limit_ws_router(&asked));
 
             // Send WS upgrade with Content-Length exceeding the body limit.
             // Head-only dispatch skips body collection, so 413 is not returned.
@@ -948,6 +954,33 @@ fn websocket_upgrade_ignores_request_body_limit() {
             assert_eq!(&*msg, "connected");
 
             write_ws_close_frame(&mut stream);
+
+            // The same upgrade over the observed listener, because the body
+            // counters are wired on the owned server path alone. This row owns
+            // the exclusion claim; the row above owns the handshake predicate,
+            // and its connection disposition is that path's own question.
+            let port = common::reserve_observed();
+            let observed = port.serve(body_limit_ws_router(&asked));
+            let (_watched, watched_head) =
+                ws_connect(observed.addr(), "/ws", &[("Content-Length", "99999")]);
+            assert_eq!(
+                watched_head.status, 101,
+                "observed handshake: {watched_head:?}"
+            );
+            assert_eq!(
+                *watched_head.header_values("sec-websocket-accept"),
+                [VALID_WEBSOCKET_ACCEPT],
+                "observed handshake: accept key"
+            );
+
+            assert_eq!(
+                asked.load(Ordering::SeqCst),
+                0,
+                "a direct WebSocket upgrade is bodyless, so no body policy is asked about it"
+            );
+            assert_eq!(observed.controller().body_frames_polled(), 0);
+            assert_eq!(observed.controller().body_peak_retained_bytes(), 0);
+            assert_eq!(observed.controller().body_permit_owners_dropped(), 0);
             runtime::request_shutdown();
         })
         .unwrap();

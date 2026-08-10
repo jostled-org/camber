@@ -4,6 +4,8 @@ use camber::http::{Request, Router};
 use camber::runtime;
 use std::io::{BufReader, Write};
 use std::net::TcpStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -47,6 +49,8 @@ fn sse_route_ignores_request_body_limit() {
     common::test_runtime()
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
+            let port = crate::http::reserve_observed();
+            let asked = Arc::new(AtomicUsize::new(0));
             let mut router = Router::new().max_request_body(10);
             router.get_sse(
                 "/events",
@@ -55,8 +59,10 @@ fn sse_route_ignores_request_body_limit() {
                     Ok(())
                 },
             );
+            let router = router.body_admission(crate::http::refusing_body_admission(&asked));
 
-            let addr = common::spawn_server(router);
+            let server = port.serve(router);
+            let addr = server.addr();
 
             let body = "x".repeat(1024);
             let response = crate::http::request(
@@ -73,6 +79,15 @@ fn sse_route_ignores_request_body_limit() {
             assert_eq!(response.header("cache-control"), Some("no-cache"));
             assert_eq!(response.header("transfer-encoding"), Some("chunked"));
             assert_eq!(response.body.as_ref(), b"event: ping\ndata: hello\n\n");
+
+            assert_eq!(
+                asked.load(Ordering::SeqCst),
+                0,
+                "an SSE route is bodyless, so no body policy is asked about it"
+            );
+            assert_eq!(server.controller().body_frames_polled(), 0);
+            assert_eq!(server.controller().body_peak_retained_bytes(), 0);
+            assert_eq!(server.controller().body_permit_owners_dropped(), 0);
 
             runtime::request_shutdown();
         })

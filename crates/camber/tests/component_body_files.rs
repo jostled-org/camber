@@ -9,6 +9,8 @@ pub mod runtime_support;
 
 #[path = "component_body_files/binary_bodies.rs"]
 mod binary_bodies;
+#[path = "component_body_files/body_admission.rs"]
+mod body_admission;
 #[path = "component_body_files/body_limits.rs"]
 mod body_limits;
 #[path = "component_body_files/cookie_handling.rs"]

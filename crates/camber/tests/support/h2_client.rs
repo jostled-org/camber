@@ -12,51 +12,24 @@
 //! this suite hands over, so a root reading it needs no second answer type with
 //! its own hand-copied accessors.
 
+use bytes::Bytes;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use super::http::{HttpResponse, bounded, remaining};
 
-/// Send one HTTP/2 request over a connection of its own and read the answer.
+/// Build one HTTP/2 request head.
 ///
 /// The authority travels as `:authority`, which is where an HTTP/2 peer states
-/// what an HTTP/1 peer states in `Host`. The connection is opened and given up
-/// per request: what these cases turn on is what one exchange was answered with,
-/// and a shared connection would make one row's framing a property of the row
-/// before it.
-///
-/// `bound` is the whole exchange's, not each leg's. One deadline is taken here
-/// and every leg is handed what is left of it, so the connect, the handshake,
-/// the response head, and each body frame share the caller's budget instead of
-/// each starting a fresh copy of it — which is the rule
-/// [`super::http::remaining`] states for the whole harness, and a request that
-/// spent a multiple of its bound was breaking it.
-pub async fn h2_request(
-    addr: SocketAddr,
+/// what an HTTP/1 peer states in `Host`. Written once so the per-request client
+/// and the persistent one cannot disagree about what they sent.
+fn h2_request_head(
     method: &str,
     path: &str,
     host: &str,
     headers: &[(&str, &str)],
-    bound: Duration,
-) -> HttpResponse {
-    let deadline = Instant::now() + bound;
-    let tcp = bounded(
-        tokio::net::TcpStream::connect(addr),
-        remaining(deadline),
-        "HTTP/2 connect",
-    )
-    .await
-    .expect("the HTTP/2 peer could not connect");
-    let (mut client, connection) = bounded(
-        h2::client::handshake(tcp),
-        remaining(deadline),
-        "HTTP/2 handshake",
-    )
-    .await
-    .expect("the HTTP/2 handshake did not complete");
-    let driver = tokio::spawn(connection);
-
-    let request = headers
+) -> ::http::Request<()> {
+    headers
         .iter()
         .fold(
             ::http::Request::builder()
@@ -65,14 +38,33 @@ pub async fn h2_request(
             |builder, (name, value)| builder.header(*name, *value),
         )
         .body(())
-        .expect("the HTTP/2 request head is representable");
-    let (response, _) = client
-        .send_request(request, true)
-        .expect("the HTTP/2 stream could not be opened");
-    let response = bounded(response, remaining(deadline), "HTTP/2 response head")
-        .await
-        .expect("no HTTP/2 response head");
+        .expect("the HTTP/2 request head is representable")
+}
 
+/// Read one stream's head and body into the answer every transport here hands
+/// back.
+///
+/// `deadline` is the whole exchange's. The head and the body share it, so a
+/// peer that answers slowly and then dribbles cannot spend a multiple of the
+/// caller's budget.
+async fn read_answer(response: h2::client::ResponseFuture, deadline: Instant) -> HttpResponse {
+    try_read_answer(response, deadline)
+        .await
+        .expect("no HTTP/2 response head")
+}
+
+/// Read one stream's answer, or report why the stream ended without one.
+///
+/// The fallible half of [`read_answer`], for a case whose claim is that no
+/// answer was possible: a declaration the framing layer refuses never becomes a
+/// request head, so the peer ends the stream instead of answering it. Every
+/// caller that expects an answer goes through [`read_answer`], which states that
+/// expectation once.
+async fn try_read_answer(
+    response: h2::client::ResponseFuture,
+    deadline: Instant,
+) -> Result<HttpResponse, h2::Error> {
+    let response = bounded(response, remaining(deadline), "HTTP/2 response head").await?;
     let status = response.status().as_u16();
     let headers = response
         .headers()
@@ -90,10 +82,312 @@ pub async fn h2_request(
         remaining(deadline),
     )
     .await;
+    Ok(HttpResponse::from_parts(status, headers, body))
+}
 
-    drop(client);
-    join_driver(driver).await;
-    HttpResponse::from_parts(status, headers, body)
+/// Send one HTTP/2 request over a connection of its own and read the answer.
+///
+/// The authority travels as `:authority`, which is where an HTTP/2 peer states
+/// what an HTTP/1 peer states in `Host`. The connection is opened and given up
+/// per request: what these cases turn on is what one exchange was answered with,
+/// and a shared connection would make one row's framing a property of the row
+/// before it.
+///
+/// It is [`PersistentH2Client`] holding one exchange, because that is what it
+/// is. Connecting, sending, and closing are each already written there, and a
+/// second copy of the handshake and the driver join is a second thing that can
+/// get either wrong.
+///
+/// `bound` covers the connection's setup and, separately, the exchange it
+/// carries — the budget a persistent connection gives each of its streams.
+/// Within each of those, every leg is handed what is left of one deadline
+/// rather than starting a fresh copy of it, which is the rule
+/// [`super::http::remaining`] states for the whole harness.
+pub async fn h2_request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    host: &str,
+    headers: &[(&str, &str)],
+    bound: Duration,
+) -> HttpResponse {
+    let mut client = PersistentH2Client::connect(addr, bound).await;
+    let answered = client.send_complete(method, path, host, headers, b"").await;
+    client.close().await;
+    answered
+}
+
+/// One HTTP/2 connection held open across several streams.
+///
+/// The per-request client above opens and gives up a connection per exchange,
+/// which makes one row's framing a property of the row before it. A case whose
+/// claim IS the connection — that a refusal ended only its own stream and left
+/// the rest usable — cannot be written through that, and cannot copy the
+/// handshake and driver into itself either: a driver joined without reading its
+/// result discards a real protocol fault as a cancellation.
+///
+/// This owns the sender and the driver, and nothing else. It frames requests
+/// and respects the peer's flow-control window; it chooses no limit, no policy,
+/// no mapping, and no status.
+///
+/// The driver is held in an `Option` so exactly one of the two teardown paths
+/// takes it: [`Self::close`] on the path a case reaches after its assertions,
+/// and `Drop` on the path an assertion that failed unwound through.
+pub struct PersistentH2Client {
+    sender: h2::client::SendRequest<Bytes>,
+    driver: Option<tokio::task::JoinHandle<Result<(), h2::Error>>>,
+    /// The budget one exchange on this connection runs under.
+    bound: Duration,
+}
+
+impl PersistentH2Client {
+    /// Connect, handshake, and take ownership of the connection driver.
+    pub async fn connect(addr: SocketAddr, bound: Duration) -> Self {
+        let deadline = Instant::now() + bound;
+        let tcp = bounded(
+            tokio::net::TcpStream::connect(addr),
+            remaining(deadline),
+            "HTTP/2 connect",
+        )
+        .await
+        .expect("the HTTP/2 peer could not connect");
+        let (sender, connection) = bounded(
+            h2::client::handshake(tcp),
+            remaining(deadline),
+            "HTTP/2 handshake",
+        )
+        .await
+        .expect("the HTTP/2 handshake did not complete");
+        Self {
+            sender,
+            driver: Some(tokio::spawn(connection)),
+            bound,
+        }
+    }
+
+    /// Open one stream on this connection, ready-checked first.
+    ///
+    /// `end_of_stream` states whether the request is complete as sent, which is
+    /// the difference between a body that is finished and one this caller still
+    /// owes.
+    async fn open(
+        &mut self,
+        method: &str,
+        path: &str,
+        host: &str,
+        headers: &[(&str, &str)],
+        end_of_stream: bool,
+        deadline: Instant,
+    ) -> (h2::client::ResponseFuture, h2::SendStream<Bytes>) {
+        let mut ready = bounded(
+            self.sender.clone().ready(),
+            remaining(deadline),
+            "HTTP/2 sender readiness",
+        )
+        .await
+        .expect("the HTTP/2 sender never became ready");
+        ready
+            .send_request(h2_request_head(method, path, host, headers), end_of_stream)
+            .expect("the HTTP/2 stream could not be opened")
+    }
+
+    /// Send one complete request whose body is finished as it is sent.
+    pub async fn send_complete(
+        &mut self,
+        method: &str,
+        path: &str,
+        host: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> HttpResponse {
+        let deadline = Instant::now() + self.bound;
+        let (response, mut stream) = self
+            .open(method, path, host, headers, body.is_empty(), deadline)
+            .await;
+        match body.is_empty() {
+            true => {}
+            false => stream
+                .send_data(Bytes::copy_from_slice(body), true)
+                .expect("the HTTP/2 request body could not be sent"),
+        }
+        read_answer(response, deadline).await
+    }
+
+    /// Send one request head and withhold every byte of the body it declares.
+    ///
+    /// The stream is reset once the answer arrives, because a refusal decided
+    /// from a declaration is the whole claim and the promised bytes are never
+    /// coming.
+    pub async fn send_withheld(
+        &mut self,
+        method: &str,
+        path: &str,
+        host: &str,
+        headers: &[(&str, &str)],
+    ) -> HttpResponse {
+        self.try_send_withheld(method, path, host, headers)
+            .await
+            .expect("no HTTP/2 response head")
+    }
+
+    /// Send one request head the transport itself may refuse, and withhold the
+    /// body it declares.
+    ///
+    /// `Err` is the peer ending this stream instead of answering it, which is
+    /// what a declaration below the framing layer's own rules gets: no request
+    /// head is ever constructed, so nothing above the transport could answer it.
+    /// [`Self::send_withheld`] is this with the expectation of an answer stated,
+    /// because a case whose claim is the answer should not have to unwrap one.
+    pub async fn try_send_withheld(
+        &mut self,
+        method: &str,
+        path: &str,
+        host: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<HttpResponse, h2::Error> {
+        let deadline = Instant::now() + self.bound;
+        let (response, mut stream) = self
+            .open(method, path, host, headers, false, deadline)
+            .await;
+        let answered = try_read_answer(response, deadline).await;
+        stream.send_reset(h2::Reason::NO_ERROR);
+        answered
+    }
+
+    /// Send one request whose body arrives as exactly the frames named.
+    ///
+    /// Each frame waits for the peer to grant window before it is sent, so the
+    /// pacing is the peer's own and not a timer's. A peer that stops accepting
+    /// partway through has answered already, which is what a mid-body refusal
+    /// looks like from here.
+    pub async fn send_paced(
+        &mut self,
+        method: &str,
+        path: &str,
+        host: &str,
+        headers: &[(&str, &str)],
+        frames: &[&[u8]],
+    ) -> HttpResponse {
+        let deadline = Instant::now() + self.bound;
+        let (response, mut stream) = self
+            .open(method, path, host, headers, false, deadline)
+            .await;
+        for frame in frames {
+            match push_frame(&mut stream, frame, deadline).await {
+                FramePush::Accepted => {}
+                FramePush::PeerStopped => break,
+                FramePush::Failed(error) => panic!("an HTTP/2 request body frame failed: {error}"),
+            }
+        }
+        // Best effort: a peer that already refused has reset this stream, and
+        // the answer below is what the case reads either way.
+        let _ = stream.send_data(Bytes::new(), true);
+        read_answer(response, deadline).await
+    }
+
+    /// Drop the sender, then join the driver exactly once.
+    ///
+    /// The driver is taken before the sender goes, so the `Drop` that runs on
+    /// the way out has nothing left to abort and the join below is the only one.
+    pub async fn close(mut self) {
+        let driver = self.driver.take();
+        // The sender is the last handle holding this connection open, so it goes
+        // before the driver is read: the driver's own end is that close.
+        drop(self);
+        match driver {
+            Some(driver) => join_driver(driver).await,
+            None => {}
+        }
+    }
+}
+
+impl Drop for PersistentH2Client {
+    /// Abort a driver [`PersistentH2Client::close`] never reached.
+    ///
+    /// Every case here closes only after a block of assertions, so a failed
+    /// assertion unwinds past that close — and a driver left behind keeps its
+    /// task and the TCP connection under it running for the rest of the binary.
+    /// Aborting rather than joining, because a `Drop` cannot await, and the
+    /// close path is where a driver's own result is read.
+    fn drop(&mut self) {
+        match self.driver.take() {
+            Some(driver) => driver.abort(),
+            None => {}
+        }
+    }
+}
+
+/// What one attempt to push a body frame established.
+///
+/// Three outcomes, because they mean three different things and only one of
+/// them is the signal a paced upload is looking for. Collapsing them made a
+/// server-side `INTERNAL_ERROR` read as "the peer refused mid-body": the loop
+/// stopped, the answer never came, and the case reported the useless "no HTTP/2
+/// response head" for a connection that had failed.
+enum FramePush {
+    /// The peer took the frame.
+    Accepted,
+    /// The peer stopped accepting this stream's body, which is what a mid-body
+    /// refusal looks like from the sending side.
+    PeerStopped,
+    /// The connection itself failed, and that is never a refusal.
+    Failed(h2::Error),
+}
+
+/// Push one frame through the peer's flow-control window.
+///
+/// Capacity is reserved and awaited rather than assumed: a sender that writes
+/// past the window stalls, and the case waiting on the answer would report a
+/// timeout for a server doing exactly what it was told.
+async fn push_frame(
+    stream: &mut h2::SendStream<Bytes>,
+    frame: &[u8],
+    deadline: Instant,
+) -> FramePush {
+    stream.reserve_capacity(frame.len());
+    let capacity = loop {
+        if stream.capacity() >= frame.len() {
+            break FramePush::Accepted;
+        }
+        match bounded(
+            std::future::poll_fn(|cx| stream.poll_capacity(cx)),
+            remaining(deadline),
+            "HTTP/2 request flow-control capacity",
+        )
+        .await
+        {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => break push_failure(error),
+            None => break FramePush::PeerStopped,
+        }
+    };
+    match capacity {
+        FramePush::Accepted => send_frame(stream, frame),
+        FramePush::PeerStopped => FramePush::PeerStopped,
+        FramePush::Failed(error) => FramePush::Failed(error),
+    }
+}
+
+/// Send one frame after the peer grants enough flow-control capacity.
+fn send_frame(stream: &mut h2::SendStream<Bytes>, frame: &[u8]) -> FramePush {
+    match stream.send_data(Bytes::copy_from_slice(frame), false) {
+        Ok(()) => FramePush::Accepted,
+        Err(error) => push_failure(error),
+    }
+}
+
+/// Read one `h2` failure as the peer's disposition or as a fault.
+///
+/// A stream reset carrying `NO_ERROR` is the peer ending this stream gracefully
+/// — the stream-local disposition a refusal applies to a request body it will
+/// never read. Any other reason is the connection failing. The read side states
+/// the same rule in [`drain_h2_body`], and the two sides of one exchange must
+/// not disagree about which resets are an outcome.
+fn push_failure(error: h2::Error) -> FramePush {
+    match error.reason() {
+        Some(h2::Reason::NO_ERROR) => FramePush::PeerStopped,
+        _ => FramePush::Failed(error),
+    }
 }
 
 /// Read one HTTP/2 response body to end of stream.
@@ -115,7 +409,14 @@ pub async fn drain_h2_body(
     let deadline = Instant::now() + bound;
     let mut bytes = Vec::new();
     while let Some(chunk) = bounded(body.data(), remaining(deadline), operation).await {
-        let chunk = chunk.expect("an HTTP/2 body frame failed");
+        // A peer that resets this stream with NO_ERROR after answering has ended
+        // it gracefully — the stream-local disposition a refusal applies to the
+        // request body it will never read. Any other reason is a fault.
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) if error.reason() == Some(h2::Reason::NO_ERROR) => break,
+            Err(error) => panic!("an HTTP/2 body frame failed: {error}"),
+        };
         body.flow_control()
             .release_capacity(chunk.len())
             .expect("the HTTP/2 reader could not release its flow-control capacity");

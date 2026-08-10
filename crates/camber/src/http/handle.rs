@@ -1,4 +1,5 @@
 use super::body::HyperResponseBody;
+use super::body_admission::{BodyBudget, BodyPermit, ResolvedBodyPlan};
 use super::disconnect::DisconnectSignal;
 use super::dispatch::{
     AsyncDispatch, Classified, FrozenRouter, HeadUpgrade, PreBodyScope, RouteClass, Routed,
@@ -36,7 +37,6 @@ pub(super) struct ConnCtx {
     pub(super) metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
     #[cfg(feature = "profiling")]
     pub(super) profiling_enabled: bool,
-    pub(super) max_request_body: usize,
     pub(super) sse_buffer_size: usize,
     #[cfg(feature = "ws")]
     pub(super) ws_buffer_size: usize,
@@ -56,7 +56,6 @@ impl ConnCtx {
             metrics_handle: rt.metrics_handle.clone(),
             #[cfg(feature = "profiling")]
             profiling_enabled: rt.config.profiling_enabled,
-            max_request_body: buffers.max_request_body,
             sse_buffer_size: buffers.sse_buffer_size,
             #[cfg(feature = "ws")]
             ws_buffer_size: buffers.ws_buffer_size,
@@ -95,13 +94,17 @@ type Building = Result<DispatchInput, Box<Refused>>;
 /// it instead of being copied for a refusal that usually never fires.
 async fn collect_body_limited(
     hyper_req: hyper::Request<hyper::body::Incoming>,
-    max_body: usize,
+    buffered: BufferedRead,
     origin: RequestOrigin<'_>,
     lifecycle_script: Option<&super::mock::LifecycleScript>,
-    method: super::method::Method,
 ) -> Result<Request, Box<Refused>> {
     let (parts, body) = hyper_req.into_parts();
-    let body_bytes = match collect_body(body, max_body, lifecycle_script).await {
+    let BufferedRead {
+        method,
+        budget,
+        permit,
+    } = buffered;
+    let body_bytes = match collect_body(body, budget, lifecycle_script).await {
         Ok(bytes) => bytes,
         Err(rejected) => {
             return Err(Box::new(Refused {
@@ -112,48 +115,67 @@ async fn collect_body_limited(
         }
     };
 
-    Ok(Request::from_hyper(parts, body_bytes, origin, method))
+    Ok(Request::from_hyper(
+        parts, body_bytes, origin, method, permit,
+    ))
 }
 
-/// Read and size-limit a request body. Separate function to avoid nested match.
+/// Read a request body under the bound its admission resolved.
 ///
-/// Both refusals are built here, where the limit and the deadline are still
-/// known, rather than as a status a later stage would have to guess the cause
-/// of.
+/// The deadline is this function's alone. It covers the whole read rather than
+/// one frame of it, so a peer dribbling frames cannot renew its budget by
+/// sending another one.
 async fn collect_body(
     body: hyper::body::Incoming,
-    max_body: usize,
+    budget: BodyBudget,
     lifecycle_script: Option<&super::mock::LifecycleScript>,
 ) -> Result<bytes::Bytes, Rejected> {
-    use http_body_util::BodyExt;
-    super::mock::LifecycleScript::pause_at(
-        lifecycle_script,
-        super::mock::LifecycleCheckpoint::RequestBodyLimitConfigured(max_body),
+    match tokio::time::timeout(
+        REQUEST_BODY_TIMEOUT,
+        retain_within_budget(body, budget, lifecycle_script),
     )
-    .await;
-    let limited = http_body_util::Limited::new(body, max_body);
-    match tokio::time::timeout(REQUEST_BODY_TIMEOUT, limited.collect()).await {
-        Ok(Ok(collected)) => Ok(collected.to_bytes()),
-        Ok(Err(error)) => Err(exceeded_or_unreadable(error, max_body)),
+    .await
+    {
+        Ok(collected) => collected,
         Err(_) => Err(Rejected::body_timeout(REQUEST_BODY_TIMEOUT)),
     }
 }
 
-/// Tell an oversized body apart from one that stopped arriving.
+/// Retain one admitted body's data frames, each measured before it is kept.
 ///
-/// `Limited` reports both as one boxed error, and only the length limit is its
-/// own. Reading every failure as the limit answered a mid-body transport error
-/// or a peer reset with `413 request body too large` — a size complaint about a
-/// request that was never too large — and dropped the cause that would have
-/// said otherwise.
-fn exceeded_or_unreadable(
-    error: Box<dyn std::error::Error + Send + Sync>,
-    max_body: usize,
-) -> Rejected {
-    match error.downcast_ref::<http_body_util::LengthLimitError>() {
-        Some(_) => Rejected::body_too_large(max_body),
-        None => Rejected::body_unreadable(error),
+/// Every frame is accounted through the shared bound first and appended second,
+/// so a frame that would carry this request past its limit is dropped while it
+/// is still only a value this loop holds — the buffer never grows past what the
+/// route admitted.
+///
+/// What is reported is the buffer's own length, read after the append. The
+/// bound's running sum only ever names a total it already admitted, so a case
+/// asking what this request held would be shown the arithmetic restating itself
+/// rather than the bytes.
+///
+/// The three failures stay apart. A limit is the bound's own answer, a
+/// transport fault is the wire's, and the deadline is the caller's; collapsing
+/// them told a peer to shrink a request that was the right size.
+async fn retain_within_budget(
+    mut body: hyper::body::Incoming,
+    mut budget: BodyBudget,
+    lifecycle_script: Option<&super::mock::LifecycleScript>,
+) -> Result<bytes::Bytes, Rejected> {
+    use http_body_util::BodyExt;
+    let mut retained = bytes::BytesMut::new();
+    while let Some(frame) = body.frame().await {
+        let data = match frame {
+            Ok(frame) => frame.into_data(),
+            Err(error) => return Err(Rejected::body_unreadable(Box::new(error))),
+        };
+        // Trailers carry no payload, so they are neither counted nor measured.
+        let Ok(data) = data else { continue };
+        super::mock::LifecycleScript::count_body_frame(lifecycle_script);
+        budget.admit_frame(data.len())?;
+        retained.extend_from_slice(&data);
+        super::mock::LifecycleScript::observe_body_retained(lifecycle_script, retained.len());
     }
+    Ok(retained.freeze())
 }
 
 /// What dispatch is given once the head has decided how to read the wire.
@@ -194,14 +216,13 @@ fn build_head_only_request(
 #[cfg(feature = "ws")]
 async fn collect_request(
     hyper_req: hyper::Request<hyper::body::Incoming>,
-    max_body: usize,
+    buffered: BufferedRead,
     origin: RequestOrigin<'_>,
     lifecycle_script: Option<&super::mock::LifecycleScript>,
-    method: super::method::Method,
 ) -> Building {
     let mut r = hyper_req;
     let ws_upgrade = ws_proxy::extract_ws_upgrade(&mut r);
-    let req = collect_body_limited(r, max_body, origin, lifecycle_script, method).await?;
+    let req = collect_body_limited(r, buffered, origin, lifecycle_script).await?;
     Ok((req, ws_upgrade))
 }
 
@@ -209,46 +230,50 @@ async fn collect_request(
 #[cfg(not(feature = "ws"))]
 async fn collect_request(
     hyper_req: hyper::Request<hyper::body::Incoming>,
-    max_body: usize,
+    buffered: BufferedRead,
     origin: RequestOrigin<'_>,
     lifecycle_script: Option<&super::mock::LifecycleScript>,
-    method: super::method::Method,
 ) -> Building {
-    collect_body_limited(hyper_req, max_body, origin, lifecycle_script, method).await
+    collect_body_limited(hyper_req, buffered, origin, lifecycle_script).await
 }
 
 /// How the wire is read for one classified request.
 ///
 /// Head-only routes and routing terminals never expose a body to a handler, so
 /// collecting one would buffer bytes no handler can reach. Only a matched
-/// buffered route names a method here, because only that arm reads a body.
+/// buffered route carries a read plan, because only that arm reads a body, and
+/// the plan is what its admission already settled.
 enum WireRead {
     /// Build from the head alone and drop the incoming body.
     HeadOnly,
-    /// Collect the body under the limit, for the method that matched.
-    Body(super::method::Method),
+    /// Collect the body under the admission this route's plan resolved to.
+    Body(BufferedRead),
+}
+
+/// What one admitted buffered route reads, and under what.
+///
+/// The bound and the permit arrive together from admission, which ran before
+/// this request's first payload frame. The permit moves into the owned
+/// `Request` collection builds, so the decision and the ownership it granted
+/// stay one value all the way through.
+struct BufferedRead {
+    method: super::method::Method,
+    budget: BodyBudget,
+    permit: Option<BodyPermit>,
 }
 
 /// Read the wire the way the head classification decided it should be read.
 async fn build_dispatch_input(
     hyper_req: hyper::Request<hyper::body::Incoming>,
-    ctx: &ConnCtx,
     origin: RequestOrigin<'_>,
     lifecycle: &ConnectionLifecycle,
     read: WireRead,
 ) -> Building {
     match read {
         WireRead::HeadOnly => Ok(build_head_only_request(hyper_req, origin)),
-        WireRead::Body(method) => {
+        WireRead::Body(buffered) => {
             let lifecycle_script = lifecycle.script();
-            collect_request(
-                hyper_req,
-                ctx.max_request_body,
-                origin,
-                lifecycle_script.as_deref(),
-                method,
-            )
-            .await
+            collect_request(hyper_req, buffered, origin, lifecycle_script.as_deref()).await
         }
     }
 }
@@ -372,12 +397,12 @@ pub(super) fn answer_rejected(
 }
 
 /// Shared facts needed after a request head has selected a dispatch route.
-struct RequestDispatch<'a> {
+pub(super) struct RequestDispatch<'a> {
     dispatch: &'a ServerDispatch,
-    ctx: &'a ConnCtx,
-    origin: RequestOrigin<'a>,
-    lifecycle: &'a ConnectionLifecycle,
-    start: std::time::Instant,
+    pub(super) ctx: &'a ConnCtx,
+    pub(super) origin: RequestOrigin<'a>,
+    pub(super) lifecycle: &'a ConnectionLifecycle,
+    pub(super) start: std::time::Instant,
 }
 
 /// How the wire must be read for a class that reaches dispatch.
@@ -386,14 +411,45 @@ struct RequestDispatch<'a> {
 /// instead of a silent fall-through into body collection. `StreamingProxy` is
 /// listed for exhaustiveness alone: classification decides the upgrade, so that
 /// class forwards its own body and returns before reaching here.
-fn wire_read(route_class: &RouteClass) -> WireRead {
+async fn wire_read(
+    route_class: RouteClass,
+    origin: RequestOrigin<'_>,
+    hyper_req: &hyper::Request<hyper::body::Incoming>,
+    lifecycle: &ConnectionLifecycle,
+) -> Result<WireRead, Rejected> {
     match route_class {
-        RouteClass::Buffered(method) => WireRead::Body(*method),
+        RouteClass::Buffered { method, plan } => {
+            admitted_read(method, &plan, origin, hyper_req, lifecycle).await
+        }
         RouteClass::HeadOnly
         | RouteClass::Terminal
         | RouteClass::Refused(_)
-        | RouteClass::StreamingProxy(_) => WireRead::HeadOnly,
+        | RouteClass::StreamingProxy(_) => Ok(WireRead::HeadOnly),
     }
+}
+
+/// Admit one buffered route's body before its first frame is polled.
+///
+/// The head is borrowed here and nowhere else: admission answers from what the
+/// request head established, and the borrow ends before the body is consumed.
+/// Everything past that call is packing: the decision, its reported limit, and
+/// its permit all come from the one admission both body modes enter through.
+async fn admitted_read(
+    method: super::method::Method,
+    plan: &ResolvedBodyPlan,
+    origin: RequestOrigin<'_>,
+    hyper_req: &hyper::Request<hyper::body::Incoming>,
+    lifecycle: &ConnectionLifecycle,
+) -> Result<WireRead, Rejected> {
+    let head = RequestHead::from_hyper_request(hyper_req, origin);
+    let script = lifecycle.script();
+    let admitted = super::body_admission::admit(plan, &head, script.as_ref()).await?;
+    let budget = BodyBudget::new(&admitted);
+    Ok(WireRead::Body(BufferedRead {
+        method,
+        budget,
+        permit: admitted.permit,
+    }))
 }
 
 /// Dispatch a classified route without losing its body-collection contract.
@@ -420,29 +476,55 @@ async fn dispatch_classified_route<'a>(
     // them was work every proxied stream and every head refusal paid to drop.
     let class = match class {
         RouteClass::StreamingProxy(target) => {
-            return dispatch_streaming_proxy(hyper_req, ctx, target, origin, router, &scope, start)
+            return dispatch_streaming_proxy(hyper_req, target, router, &scope, request_dispatch)
                 .await;
         }
         RouteClass::Refused(rejected) => {
-            let scope = scope.scope(RequestIdentity::from_head(
-                &origin,
-                hyper_req.method(),
-                hyper_req.uri(),
+            return Ok(refuse_from_head(
+                ctx, origin, &scope, &hyper_req, rejected, start,
             ));
-            return Ok(answer_rejected(ctx, &scope, rejected, start));
         }
-        read_from_wire
-        @ (RouteClass::HeadOnly | RouteClass::Terminal | RouteClass::Buffered(_)) => read_from_wire,
+        read_from_wire @ (RouteClass::HeadOnly
+        | RouteClass::Terminal
+        | RouteClass::Buffered { .. }) => read_from_wire,
     };
 
-    let read = wire_read(&class);
-    let input = match build_dispatch_input(hyper_req, ctx, origin, lifecycle, read).await {
+    let read = match wire_read(class, origin, &hyper_req, lifecycle).await {
+        Ok(read) => read,
+        Err(rejected) => {
+            return Ok(refuse_from_head(
+                ctx, origin, &scope, &hyper_req, rejected, start,
+            ));
+        }
+    };
+    let input = match build_dispatch_input(hyper_req, origin, lifecycle, read).await {
         Ok(input) => input,
         Err(refused) => {
             return Ok(refuse_body(ctx, origin, &scope, *refused, start));
         }
     };
     dispatch_built_request(input, router, request_dispatch).await
+}
+
+/// Answer a refusal decided from the request head alone.
+///
+/// Both producers reach here — the head classification's own refusal and the
+/// admission decision that precedes the first body poll — so neither can map
+/// under one policy while the other maps under a rebuilt one.
+fn refuse_from_head(
+    ctx: &ConnCtx,
+    origin: RequestOrigin<'_>,
+    pre_body: &PreBodyScope,
+    hyper_req: &hyper::Request<hyper::body::Incoming>,
+    rejected: Rejected,
+    start: std::time::Instant,
+) -> hyper::Response<HyperResponseBody> {
+    let scope = pre_body.scope(RequestIdentity::from_head(
+        &origin,
+        hyper_req.method(),
+        hyper_req.uri(),
+    ));
+    answer_rejected(ctx, &scope, rejected, start)
 }
 
 /// Answer a refusal raised while the request body was being read.

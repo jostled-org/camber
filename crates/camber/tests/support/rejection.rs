@@ -13,7 +13,9 @@ use camber::http::{
     Request, Response,
 };
 use serde::Deserialize;
+use std::future::Future;
 use std::net::IpAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -258,6 +260,47 @@ pub fn counting_handler(
     move |_request: &Request| {
         handled.fetch_add(1, Ordering::SeqCst);
         std::future::ready(Response::text(200, body))
+    }
+}
+
+/// The header an echoing handler names its request under.
+///
+/// A policy's record of which request it was asked about is only meaningful
+/// against the identity the handler went on to report, so the answer carries it.
+pub const HANDLED_REQUEST_ID_HEADER: &str = "X-Handled-Request-Id";
+
+/// A handler that answers with exactly the body it was given, and names the
+/// identity it ran under.
+///
+/// The terminal every admitted body is driven into: a `200` carrying the same
+/// bytes back is what says the whole body reached the handler. Three roots wrote
+/// it out byte for byte.
+///
+/// The body is taken before the future because the request is borrowed: a
+/// handler that carried the borrow into an `async move` would hold it across the
+/// await point the router owns.
+pub fn echo_handler(request: &Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+    let body: Box<str> = request.body().into();
+    let request_id: Box<str> = request.request_id().as_str().into();
+    Box::pin(async move {
+        Response::text(200, &body)
+            .expect("valid echo status")
+            .with_header(HANDLED_REQUEST_ID_HEADER, &request_id)
+    })
+}
+
+/// [`echo_handler`], reporting every entry.
+///
+/// The counter carries [`counting_handler`]'s claim onto the echoing terminal: a
+/// row saying a refusal preceded the handler is only saying so because this
+/// stayed where it was.
+pub fn counting_echo(
+    handled: &Arc<AtomicUsize>,
+) -> impl Fn(&Request) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync + 'static {
+    let handled = Arc::clone(handled);
+    move |request: &Request| {
+        handled.fetch_add(1, Ordering::SeqCst);
+        echo_handler(request)
     }
 }
 

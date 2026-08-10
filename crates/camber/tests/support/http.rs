@@ -1,10 +1,14 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use camber::RuntimeError;
-use camber::http::{self, Request, Response, Router, ServerHandle};
+use camber::http::mock::{LifecycleCheckpoint, LifecycleController, lifecycle};
+use camber::http::{
+    self, BodyAdmission, BodyAdmissionContext, HostRouter, Request, Response, Router, ServerHandle,
+};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// The gap between attempts in every bounded poll the suite runs.
@@ -170,8 +174,26 @@ impl ReadyServer {
         router: Router,
         timeout: Duration,
     ) -> Result<Self, FixtureError> {
+        Self::started_by(listener, timeout, move |listener| {
+            http::serve_background(listener, router)
+        })
+    }
+
+    /// Serve a reservation with whichever server function the caller names, and
+    /// guard it once it answers.
+    ///
+    /// [`ReadyServer::start`] is this for the plain-router case. A fixture that
+    /// serves a host router, or that must register a listener-scoped observer
+    /// before anything serves on its port, needs the same readiness wait and
+    /// the same cancel-on-failure diagnosis, and a second copy of either is a
+    /// second place they can drift.
+    pub fn started_by(
+        listener: BoundListener,
+        timeout: Duration,
+        serve: impl FnOnce(tokio::net::TcpListener) -> ServerHandle,
+    ) -> Result<Self, FixtureError> {
         let local_addr = listener.local_addr();
-        let handle = http::serve_background(listener.into_tokio()?, router);
+        let handle = serve(listener.into_tokio()?);
         let readiness = match wait_for_http_response(local_addr, timeout) {
             Ok(response) => response,
             Err(error) => {
@@ -301,16 +323,29 @@ impl ReadyServer {
     /// owe there, and it has already been sent. They stay recorded, which is
     /// what a case that wants to assert on them reads.
     ///
-    /// Nothing is raised during an unwind: a panic there aborts the process and
-    /// destroys the whole binary's assertion output, and the case's own failure
-    /// is the one worth reading.
+    /// Nothing is raised during an unwind, for the reason
+    /// [`fail_unless_panicking`] states.
     fn report_cleanup_failure(&self, error: &FixtureError) {
         self.record_cleanup_error(error);
-        match (error, std::thread::panicking()) {
-            (FixtureError::NoJoinRuntime | FixtureError::UnjoinableRuntime { .. }, _) => {}
-            (_, true) => {}
-            (_, false) => panic!("the fixture server did not join: {error}"),
+        match error {
+            FixtureError::NoJoinRuntime | FixtureError::UnjoinableRuntime { .. } => {}
+            error => fail_unless_panicking(&format!("the fixture server did not join: {error}")),
         }
+    }
+}
+
+/// Fail the calling test with `fault`, unless this thread is already unwinding.
+///
+/// The rule every fixture teardown reads. A teardown fault is worth a failure —
+/// a server that could not stop, a fixture thread that never returned — but a
+/// panic raised during an unwind aborts the process and destroys the whole
+/// binary's assertion output, and the case's own failure is the one worth
+/// reading. Two `Drop` implementations stated this; two statements of it are two
+/// places one of them can be forgotten.
+pub fn fail_unless_panicking(fault: &str) {
+    match std::thread::panicking() {
+        true => {}
+        false => panic!("{fault}"),
     }
 }
 
@@ -383,6 +418,192 @@ fn cancel_unready(handle: ServerHandle, readiness_error: &io::Error) -> Box<str>
 pub fn spawn_server_ready(router: Router, timeout: Duration) -> Result<ReadyServer, FixtureError> {
     let listener = BoundListener::bind_tcp("127.0.0.1:0")?;
     ReadyServer::start(listener, router, timeout)
+}
+
+/// A body-admission policy that refuses everything it is asked about, and counts
+/// the asking.
+///
+/// Registered on routes that consume no body, so the count staying at zero is
+/// the claim: a bodyless class reaches no application body policy at all. Four
+/// roots make that claim — SSE, direct and proxied WebSocket upgrades, and gRPC
+/// — and a copy of the policy in each is a copy that can drift.
+pub fn refusing_body_admission(
+    asked: &Arc<std::sync::atomic::AtomicUsize>,
+) -> impl Fn(&BodyAdmissionContext<'_>) -> Result<BodyAdmission, RuntimeError> + Send + Sync + 'static
+{
+    let asked = Arc::clone(asked);
+    move |_context: &BodyAdmissionContext<'_>| {
+        asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(RuntimeError::InvalidArgument(
+            "a bodyless route must not reach body admission".into(),
+        ))
+    }
+}
+
+/// How long a release, an outstanding count, or a paused checkpoint has to
+/// settle.
+///
+/// A settling budget, not a sleep: every wait built on it returns as soon as the
+/// observation arrives, and fails the case when it never does.
+pub const SETTLE_BOUND: Duration = Duration::from_secs(5);
+
+/// A body-admission permit whose release is the only thing it records.
+///
+/// The permit a policy hands over is dropped by the owner the runtime gave it
+/// to, so its `Drop` is the only place a release is observable at all. Five
+/// roots wrote a probe of their own for that, and they had already drifted into
+/// two different arithmetics for one observation.
+///
+/// `Send + Sync + 'static`, because that is what `BodyAdmission::with_permit`
+/// takes: an owner that crosses runtime workers.
+pub struct PermitProbe {
+    released: Arc<AtomicUsize>,
+    /// The pool this permit was drawn from, for a case whose claim is what is
+    /// still outstanding rather than what has been released.
+    pool: Option<Arc<AtomicUsize>>,
+}
+
+impl Drop for PermitProbe {
+    fn drop(&mut self) {
+        match self.pool.as_ref() {
+            Some(pool) => {
+                pool.fetch_sub(1, Ordering::SeqCst);
+            }
+            None => {}
+        }
+        self.released.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A permit that counts its own release and nothing else.
+pub fn permit_probe(released: &Arc<AtomicUsize>) -> PermitProbe {
+    PermitProbe {
+        released: Arc::clone(released),
+        pool: None,
+    }
+}
+
+/// Draw one permit from `pool`, counted for the route that admitted it.
+///
+/// The pool is raised here and lowered when the permit is released. A host
+/// table's children draw from one pool, and a per-route release count alone
+/// cannot say that every owner handed back what it took.
+pub fn pooled_permit_probe(released: &Arc<AtomicUsize>, pool: &Arc<AtomicUsize>) -> PermitProbe {
+    pool.fetch_add(1, Ordering::SeqCst);
+    PermitProbe {
+        released: Arc::clone(released),
+        pool: Some(Arc::clone(pool)),
+    }
+}
+
+/// Assert a release count settles at exactly `expected`.
+///
+/// Polled rather than read once: an admitted request's permit owner is released
+/// when the request future finishes, which can happen after the peer already has
+/// its answer. A count that is already right returns on the first look, and one
+/// that never arrives fails here with what it reached instead.
+pub fn assert_released(released: &Arc<AtomicUsize>, expected: usize, label: &str) {
+    let settled = poll_until(SETTLE_BOUND, || released.load(Ordering::SeqCst) == expected);
+    assert!(
+        settled,
+        "{label}: expected {expected} releases, saw {}",
+        released.load(Ordering::SeqCst)
+    );
+}
+
+/// Assert a listener's own permit-owner release count settles at exactly
+/// `expected`.
+///
+/// [`assert_released`] for the counter the production owner writes rather than
+/// the one the application permit does, and polled for the same reason: the
+/// owner is released when the request future finishes, which can happen after
+/// the peer already has its answer.
+pub fn assert_owners_released(controller: &LifecycleController, expected: usize, label: &str) {
+    let settled = poll_until(SETTLE_BOUND, || {
+        controller.body_permit_owners_dropped() == expected
+    });
+    assert!(
+        settled,
+        "{label}: expected {expected} permit owners released, saw {}",
+        controller.body_permit_owners_dropped()
+    );
+}
+
+/// How long an observed fixture has to answer its first probe.
+const OBSERVED_READINESS: Duration = Duration::from_secs(5);
+
+/// A reserved port whose lifecycle observer is registered before anything
+/// serves on it.
+///
+/// The one-step spawn helpers bind and serve together, so a router configured
+/// with a body-admission policy that reads its own listener's counters cannot
+/// be built between those two steps. This splits them: the observer exists
+/// first, the router is built against it, and the same reservation is served.
+///
+/// The owned server path is the one served, because that is where the lifecycle
+/// seam is wired; the synchronous path reads no script.
+pub struct ObservedPort {
+    listener: BoundListener,
+    controller: Arc<LifecycleController>,
+}
+
+/// Reserve an ephemeral port and register its lifecycle observer.
+pub fn reserve_observed() -> ObservedPort {
+    let listener = BoundListener::bind_tcp("127.0.0.1:0").expect("reserve an observed port");
+    let controller =
+        lifecycle(listener.local_addr()).expect("register the reservation's lifecycle observer");
+    ObservedPort {
+        listener,
+        controller: Arc::new(controller),
+    }
+}
+
+impl ObservedPort {
+    pub fn controller(&self) -> Arc<LifecycleController> {
+        Arc::clone(&self.controller)
+    }
+
+    pub fn serve(self, router: Router) -> ObservedServer {
+        self.serve_with(move |listener| http::serve_background(listener, router))
+    }
+
+    pub fn serve_hosts(self, hosts: HostRouter) -> ObservedServer {
+        self.serve_with(move |listener| http::serve_background_hosts(listener, hosts))
+    }
+
+    fn serve_with(
+        self,
+        serve: impl FnOnce(tokio::net::TcpListener) -> ServerHandle,
+    ) -> ObservedServer {
+        let controller = self.controller;
+        let server = ReadyServer::started_by(self.listener, OBSERVED_READINESS, serve)
+            .expect("the observed fixture server answered");
+        ObservedServer { server, controller }
+    }
+}
+
+/// A served fixture and the observer registered for its listener.
+///
+/// Teardown is the guarded server's own: dropping this drops the guard, which
+/// cancels and joins under a bound.
+///
+/// The observer outlives that by design. [`ObservedPort::controller`] hands out
+/// an `Arc` so a body-admission closure captured into the served router can read
+/// the same counters the case does, and the registration is released when the
+/// last of those handles drops — which is the served router's, not this one's.
+pub struct ObservedServer {
+    server: ReadyServer,
+    controller: Arc<LifecycleController>,
+}
+
+impl ObservedServer {
+    pub fn addr(&self) -> SocketAddr {
+        self.server.local_addr()
+    }
+
+    pub fn controller(&self) -> &LifecycleController {
+        &self.controller
+    }
 }
 
 /// Serve `router` on an already-bound reservation and hand back the raw handle
@@ -535,7 +756,11 @@ impl HttpResponse {
 }
 
 /// The authority a request is addressed to when the case turns on no other one.
-const DEFAULT_HOST: &str = "localhost";
+///
+/// Public because the writers that take an authority as a parameter still need
+/// one to name when the case is not about the authority, and a caller spelling
+/// `"localhost"` again is a second copy of the default.
+pub const DEFAULT_HOST: &str = "localhost";
 
 /// The `Connection` value a request that wants no second exchange sends.
 pub const CLOSE_AFTER_RESPONSE: &str = "close";
@@ -978,27 +1203,67 @@ pub fn write_request_with_connection(
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> io::Result<()> {
-    let head = body_request_head(DEFAULT_HOST, connection, method, path, headers, body.len());
+    let head = body_request_head(
+        DEFAULT_HOST,
+        connection,
+        method,
+        path,
+        headers,
+        BodyFraming::Length(body.len()),
+    );
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
     stream.flush()
 }
 
-/// The head of one request that frames a body of `body_len` bytes.
+/// How one request head frames the payload behind it.
 ///
-/// Stated once because the writer that sends onto a caller-owned connection and
-/// the sender that opens its own differ in nothing else, and two copies of a
-/// request head are two things that can disagree about what was sent.
+/// The framing line is the only thing the suite's request heads differ in, so
+/// it is the parameter rather than the reason for a second head builder.
+#[derive(Clone, Copy)]
+pub enum BodyFraming<'a> {
+    /// A payload of exactly this many bytes.
+    Length(usize),
+    /// A declaration exactly as the caller spells it.
+    ///
+    /// A string rather than a number because what several cases turn on is a
+    /// length no `usize` holds — `18446744073709551615` — and a refusal decided
+    /// from a declaration must not need the payload to arrive before it can be
+    /// given.
+    Declared(&'a str),
+    /// Chunked, which declares no length at all. The only way to reach an
+    /// observed-byte bound: a declared oversize is refused before a frame is
+    /// polled.
+    Chunked,
+}
+
+impl BodyFraming<'_> {
+    /// The one header line this framing states, CRLF-terminated.
+    fn header_line(self) -> String {
+        match self {
+            BodyFraming::Length(body_len) => format!("Content-Length: {body_len}\r\n"),
+            BodyFraming::Declared(declared) => format!("Content-Length: {declared}\r\n"),
+            BodyFraming::Chunked => "Transfer-Encoding: chunked\r\n".to_owned(),
+        }
+    }
+}
+
+/// The head of one request, framing its payload as `framing` states.
+///
+/// Stated once because every writer in this module differs from the others in
+/// its framing line and in nothing else, and each hand-written copy of a request
+/// head is one more thing that can disagree with the rest about what was sent.
 fn body_request_head(
     host: &str,
     connection: &str,
     method: &str,
     path: &str,
     headers: &[(&str, &str)],
-    body_len: usize,
+    framing: BodyFraming<'_>,
 ) -> String {
     let mut head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: {connection}\r\nContent-Length: {body_len}\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: {connection}\r\n{}",
+        framing.header_line()
     );
     append_headers(&mut head, headers.iter().copied());
     head.push_str("\r\n");
@@ -1054,6 +1319,116 @@ pub fn send_unreadable_body(
     write_unreadable_body(&mut stream, connection, method, path, content_type)?;
     let refused = read_http_response_bounded(&mut stream)?;
     Ok((refused, stream))
+}
+
+/// Send one request that declares a body length and sends none of it.
+///
+/// The socket comes back because the connection is half the claim: framed bytes
+/// that will never be read decide a disposition, and only the connection shows
+/// it. [`BodyFraming::Declared`] states why the declaration travels as a string.
+pub fn send_withheld_declaration(
+    addr: SocketAddr,
+    connection: &str,
+    method: &str,
+    path: &str,
+    declared: &str,
+) -> io::Result<(HttpResponse, TcpStream)> {
+    let mut stream = connect(addr)?;
+    let head = body_request_head(
+        DEFAULT_HOST,
+        connection,
+        method,
+        path,
+        &[],
+        BodyFraming::Declared(declared),
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.flush()?;
+    let refused = read_http_response_bounded(&mut stream)?;
+    Ok((refused, stream))
+}
+
+/// Open one chunked request to `host` on a connection the caller owns.
+///
+/// The authority is a parameter for the reason [`request_with_host`] gives: a
+/// request carrying two `Host` values is a different request, not the same one
+/// with an override, and a host-routed upload is addressed to a child.
+/// [`BodyFraming::Chunked`] states why a case reaching the observed-byte bound
+/// has to withhold the declaration.
+pub fn write_chunked_head(
+    stream: &mut TcpStream,
+    connection: &str,
+    method: &str,
+    path: &str,
+    host: &str,
+) -> io::Result<()> {
+    let head = body_request_head(host, connection, method, path, &[], BodyFraming::Chunked);
+    stream.write_all(head.as_bytes())?;
+    stream.flush()
+}
+
+/// Write and flush exactly one chunked data frame.
+///
+/// Flushed on its own, so a case naming three chunks is naming the three data
+/// frames the server's collector will poll rather than whatever the transport
+/// decided to coalesce.
+///
+/// Framed into one buffer and written once. Three writes let the size, the
+/// payload, and the terminator reach the peer as three segments, and a case that
+/// staged a scheduling order behind the last frame it sent would be racing the
+/// wake the trailing two bytes provoke.
+pub fn write_chunk(stream: &mut TcpStream, chunk: &[u8]) -> io::Result<()> {
+    let mut framed = format!("{:x}\r\n", chunk.len()).into_bytes();
+    framed.extend_from_slice(chunk);
+    framed.extend_from_slice(b"\r\n");
+    stream.write_all(&framed)?;
+    stream.flush()
+}
+
+/// End a chunked body.
+pub fn write_chunked_end(stream: &mut TcpStream) -> io::Result<()> {
+    stream.write_all(b"0\r\n\r\n")?;
+    stream.flush()
+}
+
+/// Write every named data frame, then end the body.
+///
+/// The terminator is written here so no caller of [`send_chunked`] can leave a
+/// body unfinished by accident.
+fn write_chunks(stream: &mut TcpStream, chunks: &[&[u8]]) -> io::Result<()> {
+    chunks
+        .iter()
+        .try_for_each(|chunk| write_chunk(stream, chunk))?;
+    write_chunked_end(stream)
+}
+
+/// Send one chunked request to `host` whose data frames are exactly `chunks`.
+///
+/// The socket comes back for the same reason [`send_unreadable_body`]'s does: a
+/// refusal that stopped mid-body left framing unread, and what the connection
+/// does next is the only observation of that.
+///
+/// The whole body is written before the answer is read. The frames are small by
+/// construction, so they fit the transport's buffers, and a server that refuses
+/// partway through is answering a request the peer has finished sending rather
+/// than racing one it has not.
+pub fn send_chunked(
+    addr: SocketAddr,
+    connection: &str,
+    method: &str,
+    path: &str,
+    host: &str,
+    chunks: &[&[u8]],
+) -> io::Result<(HttpResponse, TcpStream)> {
+    let mut stream = connect(addr)?;
+    write_chunked_head(&mut stream, connection, method, path, host)?;
+    // A refusal decided partway through the body closes the connection, so the
+    // remaining frames can reach a socket the peer has already ended. That is
+    // the answer arriving early, not a fault, and the response below is what
+    // the case reads either way.
+    tolerate_dead_socket(write_chunks(&mut stream, chunks))?;
+    let answered = read_http_response_bounded(&mut stream)?;
+    Ok((answered, stream))
 }
 
 /// The body length a stalled request declares and never finishes sending.
@@ -1121,7 +1496,7 @@ pub fn request_to_host_with_body(
         method,
         path,
         headers,
-        body.len(),
+        BodyFraming::Length(body.len()),
     );
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
@@ -1160,6 +1535,35 @@ pub fn probe_connection_reuse(
         }
         Err(error) => Err(error),
     }
+}
+
+/// The target an already-answered connection is asked to carry one more request
+/// to.
+///
+/// Its route does not matter. What the assertion below reads is whether the
+/// connection framed and answered anything at all; a server that answers a
+/// target it has no route for has answered.
+const REUSE_PROBE_TARGET: &str = "/reuse-probe";
+
+/// The body that probe carries: small enough that any configured limit admits
+/// it, so a refusal cannot stand in for a connection that was already gone.
+const REUSE_PROBE_BODY: &[u8] = b"probe";
+
+/// Assert a refusal that left payload unread also ended the connection.
+///
+/// Seven sites asserted this as `matches!(reused, Ok(None) | Err(_))`, which
+/// passes on the `Err` arm — and that arm is a deadline expiry as readily as a
+/// genuine transport fault. A server that hung instead of closing reads as the
+/// proof that it closed. The expiry fails here instead, and only an answered
+/// second request or a settled `None` decides the claim.
+pub fn assert_connection_closed(peer: &mut TcpStream, label: &str) {
+    let answered = probe_connection_reuse(peer, "POST", REUSE_PROBE_TARGET, &[], REUSE_PROBE_BODY)
+        .unwrap_or_else(|error| panic!("{label}: the reuse probe did not settle: {error}"));
+    assert!(
+        answered.is_none(),
+        "{label}: payload left unread must not leave the connection able to frame \
+         another request: {answered:?}"
+    );
 }
 
 /// Read the response head: every byte through the blank line that ends it.
@@ -1225,6 +1629,29 @@ pub async fn bounded<F: std::future::Future>(
     tokio::time::timeout(bound, future)
         .await
         .unwrap_or_else(|_| panic!("{operation} timed out after {bound:?}"))
+}
+
+/// Wait until production pauses at `checkpoint`, under a bound.
+///
+/// `LifecycleController::wait_until_paused` has no deadline of its own, so
+/// production that never reaches the checkpoint parks the observer on it and the
+/// case hangs instead of failing. Two roots wrote a bounded form; `context`
+/// names the step, so an expired bound says which pause never arrived.
+///
+/// The bound comes off the runtime's timer, so a case driving a paused clock
+/// needs a real-clock bound of its own rather than this.
+pub async fn wait_until_paused_bounded(
+    controller: &LifecycleController,
+    checkpoint: LifecycleCheckpoint,
+    context: &str,
+) {
+    bounded(
+        controller.wait_until_paused(checkpoint),
+        SETTLE_BOUND,
+        context,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{context}: the lifecycle checkpoint was not armed: {error}"));
 }
 
 /// [`bounded`], for a caller whose runtime clock is paused.

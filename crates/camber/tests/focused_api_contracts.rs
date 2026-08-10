@@ -5,6 +5,8 @@ pub mod temp_support;
 #[path = "support/tls.rs"]
 pub mod tls_support;
 
+#[path = "focused_api_contracts/body_admission.rs"]
+mod body_admission;
 #[path = "focused_api_contracts/certificate_management.rs"]
 mod certificate_management;
 #[path = "focused_api_contracts/channel_errors.rs"]

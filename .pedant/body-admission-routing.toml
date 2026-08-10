@@ -1,0 +1,14 @@
+# Semantic architecture rules for the route-aware body-admission seam.
+#
+# The repository defaults, plus mixed-concern enforcement across the routing
+# and admission modules: route identity, host resolution, and handler selection
+# stay in the router, the host router, and dispatch, and the admission module
+# holds the body contract and nothing that could route a request.
+check_mixed_concerns = true
+check_dyn_field = false
+check_dyn_param = false
+check_clone_in_loop = false
+check_vec_box_dyn = false
+max_depth = 2
+check_long_function_body = true
+max_function_body_lines = 80

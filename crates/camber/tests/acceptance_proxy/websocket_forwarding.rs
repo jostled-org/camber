@@ -613,9 +613,13 @@ fn websocket_proxy_stream_upgrade_ignores_request_body_limit() {
         .run(|| {
             let backend_addr = common::spawn_server(echo_ws_backend());
 
+            let port = common::reserve_observed();
+            let asked = Arc::new(AtomicUsize::new(0));
             let mut proxy = Router::new().max_request_body(10);
             proxy.proxy_stream("/ws", &format!("http://{backend_addr}"));
-            let proxy_addr = common::spawn_server(proxy);
+            let proxy = proxy.body_admission(common::refusing_body_admission(&asked));
+            let server = port.serve(proxy);
+            let proxy_addr = server.addr();
 
             let mut stream = TcpStream::connect(proxy_addr).unwrap();
             let upgrade_req =
@@ -630,6 +634,14 @@ fn websocket_proxy_stream_upgrade_ignores_request_body_limit() {
             assert_eq!(&*msg, "hello");
 
             write_ws_close_frame(&mut stream);
+            assert_eq!(
+                asked.load(Ordering::SeqCst),
+                0,
+                "a proxied WebSocket upgrade is bodyless, not a streaming upload"
+            );
+            assert_eq!(server.controller().body_frames_polled(), 0);
+            assert_eq!(server.controller().body_peak_retained_bytes(), 0);
+            assert_eq!(server.controller().body_permit_owners_dropped(), 0);
             runtime::request_shutdown();
         })
         .unwrap();

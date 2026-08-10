@@ -287,17 +287,41 @@ proxy = "http://{}"
         backend.addr()
     ))?;
 
+    let exercised = exercise_connection_limit(&server);
+    match exercised {
+        Ok(()) => finish_connection_limit_case(server, backend),
+        Err(error) => finish_failed_connection_limit_case(server, backend, error),
+    }
+}
+
+fn exercise_connection_limit(server: &ServeFixture) -> Result<(), FixtureError> {
     let mut first_connection = server.connect()?;
-    write_request(&mut first_connection, "GET", "limit.test", "/first", false)?;
-    assert_eq!(read_response(&mut first_connection)?.status, 200);
+    write_request(&mut first_connection, "GET", "limit.test", "/first", false)
+        .map_err(|error| FixtureError::new(format!("write /first: {error}")))?;
+    let first_response = read_response(&mut first_connection)?;
+    assert_eq!(first_response.status, 200);
+    if first_response.connection_close {
+        return Err(FixtureError::new(
+            "the first response closed a requested keep-alive connection",
+        ));
+    }
     let mut second_connection = server.connect()?;
-    write_request(&mut second_connection, "GET", "limit.test", "/second", true)?;
-    write_request(&mut first_connection, "GET", "limit.test", "/release", true)?;
+    write_request(&mut second_connection, "GET", "limit.test", "/second", true)
+        .map_err(|error| FixtureError::new(format!("write /second: {error}")))?;
+    write_request(&mut first_connection, "GET", "limit.test", "/release", true)
+        .map_err(|error| FixtureError::new(format!("write /release: {error}")))?;
     assert_eq!(read_response(&mut first_connection)?.status, 200);
     drop(first_connection);
     let second_response = read_response(&mut second_connection)?;
     assert_eq!(second_response.status, 200);
     assert_eq!(&*second_response.body, "limited");
+    Ok(())
+}
+
+fn finish_connection_limit_case(
+    server: ServeFixture,
+    backend: Backend,
+) -> Result<(), FixtureError> {
     server.shutdown()?;
     let report = backend.finish()?;
     assert!(
@@ -305,6 +329,27 @@ proxy = "http://{}"
         "the queued second request reached the backend before the active connection released its slot"
     );
     Ok(())
+}
+
+fn finish_failed_connection_limit_case(
+    server: ServeFixture,
+    backend: Backend,
+    failure: FixtureError,
+) -> Result<(), FixtureError> {
+    let backend_cleanup = backend.stop();
+    let server_cleanup = server.shutdown();
+    match (backend_cleanup, server_cleanup) {
+        (Ok(_), Ok(())) => Err(failure),
+        (Err(backend_error), Ok(())) => Err(FixtureError::new(format!(
+            "{failure}; backend cleanup failed: {backend_error}"
+        ))),
+        (Ok(_), Err(server_error)) => Err(FixtureError::new(format!(
+            "{failure}; server cleanup failed: {server_error}"
+        ))),
+        (Err(backend_error), Err(server_error)) => Err(FixtureError::new(format!(
+            "{failure}; backend cleanup failed: {backend_error}; server cleanup failed: {server_error}"
+        ))),
+    }
 }
 
 #[test]

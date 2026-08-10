@@ -1,3 +1,6 @@
+use super::body_admission::{
+    BodyAdmission, BodyAdmissionContext, BodyPolicy, ConfiguredCeiling, shared_policy,
+};
 use super::method::Method;
 use super::middleware::MiddlewareFn;
 use super::rejection::{Rejection, RejectionContext, RejectionMapper, shared_mapper};
@@ -9,6 +12,7 @@ use super::trie::{CANONICAL_METHODS, HandlerOutcome, RouteHandler, TrieNode};
 use super::websocket::WsConn;
 use super::{Request, Response};
 use crate::RuntimeError;
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -35,6 +39,8 @@ impl std::fmt::Debug for Router {
                 &self.skip_middleware_for_internal,
             )
             .field("has_rejection_mapper", &self.mapper.is_some())
+            .field("body_ceiling", &self.body_ceiling)
+            .field("has_body_admission", &self.body_policy.is_some())
             .finish()
     }
 }
@@ -50,6 +56,8 @@ pub struct Router {
     buffers: BufferConfig,
     skip_middleware_for_internal: bool,
     mapper: Option<Arc<RejectionMapper>>,
+    body_ceiling: ConfiguredCeiling,
+    body_policy: Option<Arc<BodyPolicy>>,
     #[cfg(feature = "grpc")]
     grpc_router: Option<super::dispatch::GrpcRouter>,
 }
@@ -62,6 +70,8 @@ impl Default for Router {
             buffers: BufferConfig::default(),
             skip_middleware_for_internal: false,
             mapper: None,
+            body_ceiling: ConfiguredCeiling::default(),
+            body_policy: None,
             #[cfg(feature = "grpc")]
             grpc_router: None,
         }
@@ -75,9 +85,55 @@ impl Router {
     }
 
     /// Set the maximum request body size in bytes (capped at 256 MB).
+    ///
+    /// This is a ceiling, not a target. A body-admission policy may select a
+    /// smaller maximum for one request; it can never select a larger one, and
+    /// under a [`HostRouter`](super::HostRouter) this ceiling can only narrow
+    /// the host's.
     #[must_use]
     pub fn max_request_body(mut self, bytes: usize) -> Self {
-        self.buffers = self.buffers.with_max_request_body(bytes);
+        self.body_ceiling = ConfiguredCeiling::configured(bytes);
+        self
+    }
+
+    /// Decide each body-consuming request's admission before its body is read.
+    ///
+    /// The policy runs once per matched body-consuming route — buffered routes
+    /// and streaming proxy routes alike — before Camber polls a single payload
+    /// frame. It is synchronous: it sees what the request head established and
+    /// answers with the maximum it selects, plus an optional permit Camber
+    /// holds and releases exactly once, at the point its mode names. A buffered
+    /// route releases the permit when the request holding it is released; a
+    /// streaming proxy route releases it when the upload ends.
+    ///
+    /// Returning `Err` refuses the request as `BodyAdmission` — `503` by
+    /// default, with the error kept as a private diagnostic. A panic becomes a
+    /// redacted `500`. Neither re-enters the policy, and neither reads a body
+    /// byte or reaches the handler.
+    ///
+    /// Routes that consume no body — WebSocket upgrades, SSE, gRPC, internal
+    /// routes, and routing terminals — never reach it.
+    ///
+    /// ```rust
+    /// use camber::http::{BodyAdmission, BodyAdmissionContext, Router};
+    /// use camber::RuntimeError;
+    ///
+    /// let router = Router::new().body_admission(|context: &BodyAdmissionContext<'_>| {
+    ///     match context.header("x-upload-token") {
+    ///         Some(_) => Ok(BodyAdmission::new(64 * 1024)),
+    ///         None => Err(RuntimeError::InvalidArgument("upload token required".into())),
+    ///     }
+    /// });
+    /// ```
+    #[must_use]
+    pub fn body_admission<F>(mut self, policy: F) -> Self
+    where
+        F: Fn(&BodyAdmissionContext<'_>) -> Result<BodyAdmission, RuntimeError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.body_policy = Some(shared_policy(policy));
         self
     }
 
@@ -360,46 +416,50 @@ impl Router {
         let backend: Arc<str> = backend.into();
         let prefix_owned: Arc<str> = prefix.into();
         let patterns = PrefixPatterns::under(prefix, "proxy_path");
+        // A proxy forwards the same way under both patterns, so one builder
+        // answers for both: the pair differs in what it matches, not in what it
+        // does with the match.
+        let forward = || {
+            proxy_route_handler(
+                streaming,
+                Arc::clone(&backend),
+                Arc::clone(&prefix_owned),
+                healthy.as_ref().map(Arc::clone),
+            )
+        };
 
         for method in CANONICAL_METHODS {
-            for pattern in [patterns.wildcard.as_ref(), patterns.exact.as_ref()] {
-                let handler = proxy_route_handler(
-                    streaming,
-                    Arc::clone(&backend),
-                    Arc::clone(&prefix_owned),
-                    healthy.as_ref().map(Arc::clone),
-                );
-                self.root.insert_route(method, pattern, handler);
-            }
+            self.mount_prefix(&patterns, method, forward(), forward());
         }
+    }
+
+    /// Register one method under both patterns a prefix claims.
+    ///
+    /// The pair is the whole rule, and both prefix-mounted features owe it.
+    /// What each pattern answers with is theirs: `beneath` answers everything
+    /// under the prefix, and `at_prefix` answers the prefix itself.
+    fn mount_prefix(
+        &mut self,
+        patterns: &PrefixPatterns,
+        method: Method,
+        beneath: RouteHandler,
+        at_prefix: RouteHandler,
+    ) {
+        self.root.insert_route(method, &patterns.wildcard, beneath);
+        self.root.insert_route(method, &patterns.exact, at_prefix);
     }
 
     /// Serve static files from `dir` under the given URL `prefix`.
     pub fn static_files(&mut self, prefix: &str, dir: &str) {
         let base_dir: Arc<std::path::Path> = Arc::from(std::path::PathBuf::from(dir));
-        let exact_base_dir = Arc::clone(&base_dir);
-        let wildcard_base_dir = Arc::clone(&base_dir);
         let patterns = PrefixPatterns::under(prefix, "filepath");
-        self.root.insert_route(
+        self.mount_prefix(
+            &patterns,
             Method::Get,
-            &patterns.exact,
-            RouteHandler::Async(Box::new(move |_req: &Request| {
-                let base_dir = Arc::clone(&exact_base_dir);
-                Box::pin(async move {
-                    Ok(super::static_files::serve_file_async(&base_dir, "index.html").await)
-                }) as Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
-            })),
-        );
-        self.root.insert_route(
-            Method::Get,
-            &patterns.wildcard,
-            RouteHandler::Async(Box::new(move |req: &Request| {
-                let base_dir = Arc::clone(&wildcard_base_dir);
-                let file_path: Box<str> = req.param("filepath").unwrap_or("").into();
-                Box::pin(async move {
-                    Ok(super::static_files::serve_file_async(&base_dir, &file_path).await)
-                }) as Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
-            })),
+            static_route_handler(Arc::clone(&base_dir), |req| {
+                Cow::from(req.param("filepath").unwrap_or("").to_owned())
+            }),
+            static_route_handler(base_dir, |_| Cow::Borrowed("index.html")),
         );
     }
 
@@ -440,6 +500,8 @@ impl Router {
             middleware: self.middleware.into_boxed_slice(),
             skip_middleware_for_internal: self.skip_middleware_for_internal,
             mapper: self.mapper,
+            body_ceiling: self.body_ceiling,
+            body_policy: self.body_policy,
             #[cfg(feature = "grpc")]
             grpc_router: self.grpc_router,
         }
@@ -470,6 +532,26 @@ impl PrefixPatterns {
             },
         }
     }
+}
+
+/// The file one static-files pattern serves, named by `select`.
+///
+/// The bare prefix is a directory request, which is answered with its
+/// `index.html`; everything beneath it names its own file through the captured
+/// tail. A [`Cow`] because only the tail is a value the request carries: the
+/// index name is a constant borrowed for the life of the process, so serving it
+/// costs no allocation to say what it is.
+fn static_route_handler(
+    base_dir: Arc<std::path::Path>,
+    select: impl Fn(&Request) -> Cow<'static, str> + Send + Sync + 'static,
+) -> RouteHandler {
+    RouteHandler::Async(Box::new(move |req: &Request| {
+        let base_dir = Arc::clone(&base_dir);
+        let file_path = select(req);
+        Box::pin(
+            async move { Ok(super::static_files::serve_file_async(&base_dir, &file_path).await) },
+        ) as Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
+    }))
 }
 
 fn proxy_route_handler(

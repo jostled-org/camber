@@ -1,3 +1,4 @@
+use super::body_admission::{BodyPolicy, ConfiguredCeiling, RequestBodyMode, ResolvedBodyPlan};
 use super::host_router::FrozenHostRouter;
 use super::method::Method;
 use super::middleware::{MiddlewareFn, Next, ResponseFuture, Terminal};
@@ -28,6 +29,19 @@ pub(super) struct StreamingProxyTarget {
     pub(super) prefix: Arc<str>,
     pub(super) params: RequestParams,
     pub(super) method: Method,
+    /// The immutable body plan this route resolved to, in
+    /// [`RequestBodyMode::Streaming`].
+    ///
+    /// Resolved here, by the stage holding the authority token, under the same
+    /// host and child ceiling chain a buffered route resolves under: the route
+    /// that chose the upstream is the route that chose the limit, and a
+    /// streaming class that carried no plan would have to re-derive one from a
+    /// selection already gone.
+    ///
+    /// Carried, not consumed. The bounded upload owner is its single admission
+    /// consumer, and until that owner exists this path polls no frame under a
+    /// limit and mints no permit owner.
+    pub(super) plan: ResolvedBodyPlan,
 }
 
 /// What a request head established before its body was read.
@@ -125,11 +139,26 @@ impl HeadUpgrade {
     }
 }
 
+/// Proof that this module's own route selection has already run.
+///
+/// Unforgeable outside this file: the only field is a private unit type, so no
+/// sibling module can name it and none can mint one. A body plan can only be
+/// built from a token, which is what keeps route identity, host resolution, and
+/// handler selection the sole authorities for what a request's body policy is.
+pub(super) struct ResolvedRouteAuthority(PrivateRouteSeal);
+
+/// The private seal only this module can name.
+struct PrivateRouteSeal;
+
 /// Pre-body route classification result.
 pub(super) enum RouteClass {
     /// Normal route — collect body into Request before dispatch, under the
-    /// method the head was classified with.
-    Buffered(Method),
+    /// method the head was classified with and the body plan its route
+    /// resolved to.
+    Buffered {
+        method: Method,
+        plan: ResolvedBodyPlan,
+    },
     /// Streaming proxy — forward hyper body directly to upstream.
     StreamingProxy(StreamingProxyTarget),
     /// Head-only route (WebSocket, SSE) — dispatch from request metadata, skip body collection.
@@ -185,6 +214,14 @@ pub(super) struct FrozenRouter {
     /// One immutable shared allocation per router, because every concurrent
     /// request that reaches this router calls the same closure.
     pub(super) mapper: Option<Arc<RejectionMapper>>,
+    /// The request-body ceiling this router was configured with, and whether it
+    /// was configured at all. The distinction is what lets a host ceiling
+    /// contain a child that set none.
+    pub(super) body_ceiling: ConfiguredCeiling,
+    /// The body-admission policy this router was configured with, frozen with
+    /// it. One immutable shared allocation, read by every concurrent request
+    /// this router answers.
+    pub(super) body_policy: Option<Arc<BodyPolicy>>,
     #[cfg(feature = "grpc")]
     pub(super) grpc_router: Option<GrpcRouter>,
 }
@@ -279,6 +316,7 @@ impl FrozenRouter {
         &self,
         head: &RequestHead<'_>,
         upgrade: HeadUpgrade,
+        outer: Option<ConfiguredCeiling>,
     ) -> (RouteClass, Option<Established>) {
         let path = head.path();
         let selected = match (head.routable_method(), split_path_segments(path)) {
@@ -295,7 +333,7 @@ impl FrozenRouter {
                     protocol: protocol_of(selected.handler),
                 };
                 (
-                    self.classify_matched(selected, method, upgrade),
+                    self.classify_matched(selected, method, upgrade, outer),
                     Some(established),
                 )
             }
@@ -320,8 +358,10 @@ impl FrozenRouter {
         selected: Selected<'_, '_>,
         method: Method,
         upgrade: HeadUpgrade,
+        outer: Option<ConfiguredCeiling>,
     ) -> RouteClass {
         let handler = selected.handler;
+        let route = selected.route;
         match handler {
             RouteHandler::Proxy { healthy, .. } | RouteHandler::ProxyStream { healthy, .. }
                 if upstream_unhealthy(healthy) =>
@@ -347,14 +387,48 @@ impl FrozenRouter {
                 prefix: Arc::clone(prefix),
                 params: self.gate_params(selected),
                 method,
+                plan: self.body_plan(route, RequestBodyMode::Streaming, outer),
             }),
             RouteHandler::Sse(_) => RouteClass::HeadOnly,
             #[cfg(feature = "ws")]
             RouteHandler::WebSocket(_) => RouteClass::HeadOnly,
             RouteHandler::Async(_) | RouteHandler::Stream(_) | RouteHandler::Proxy { .. } => {
-                RouteClass::Buffered(method)
+                RouteClass::Buffered {
+                    method,
+                    plan: self.body_plan(route, RequestBodyMode::Buffered, outer),
+                }
             }
         }
+    }
+
+    /// The body plan a matched body-consuming route resolves to.
+    ///
+    /// Minted here, immediately after selection, because holding the authority
+    /// token is what a plan is built from. `outer` is the ceiling containing
+    /// this router — a host router's own, or nothing for a single router — and
+    /// this router's configured ceiling can only narrow it.
+    fn body_plan(
+        &self,
+        route: &Arc<str>,
+        mode: RequestBodyMode,
+        outer: Option<ConfiguredCeiling>,
+    ) -> ResolvedBodyPlan {
+        ResolvedBodyPlan::new(
+            &self.resolved_route(),
+            Arc::clone(route),
+            mode,
+            self.body_ceiling,
+            outer,
+            self.body_policy.clone(),
+        )
+    }
+
+    /// Attest that this router's own selection has already run.
+    ///
+    /// The one place a token is minted, on a `&self` a selection produced, so
+    /// nothing that has not routed a request can build one.
+    fn resolved_route(&self) -> ResolvedRouteAuthority {
+        ResolvedRouteAuthority(PrivateRouteSeal)
     }
 
     /// The captured parameters this route's middleware gate will be given.
@@ -687,7 +761,8 @@ impl ServerDispatch {
     ) -> Classified<'a> {
         match self.resolve_from_head(head) {
             Ok(Some(router)) => {
-                let (class, established) = router.classify_route(head, upgrade);
+                let (class, established) =
+                    router.classify_route(head, upgrade, self.outer_ceiling());
                 Classified {
                     class,
                     scope: PreBodyScope {
@@ -712,6 +787,18 @@ impl ServerDispatch {
                 scope: PreBodyScope::unrouted(self.select_mapper(None)),
                 router: None,
             },
+        }
+    }
+
+    /// The request-body ceiling that contains every child router here.
+    ///
+    /// `None` for a single router: nothing contains it, so its own configured
+    /// ceiling is the whole answer. A host router's ceiling applies to every
+    /// child, and a child that configured one can only narrow it.
+    fn outer_ceiling(&self) -> Option<ConfiguredCeiling> {
+        match self {
+            Self::Single(_) => None,
+            Self::Host(hosts) => Some(hosts.body_ceiling()),
         }
     }
 

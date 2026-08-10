@@ -25,6 +25,104 @@ Supported registration methods include:
 - `proxy`, `proxy_stream`, and health-checked variants
 - `static_files`
 
+### Request Body Admission
+
+`Router::max_request_body` and `HostRouter::max_request_body` set a ceiling in
+bytes. The default is eight MiB and the hard cap is 256 MiB. A ceiling only ever
+narrows: a host-router ceiling contains every child, a child that configures one
+can narrow it further, and a child that configures none inherits the host's.
+
+`Router::body_admission` decides each body-consuming request — buffered routes
+and streaming proxy routes alike — before Camber polls a single payload frame:
+
+```rust
+use camber::RuntimeError;
+use camber::http::{BodyAdmission, BodyAdmissionContext, RequestBodyMode, Router};
+
+let router = Router::new()
+    .max_request_body(64 * 1024)
+    .body_admission(|context: &BodyAdmissionContext<'_>| {
+        match (context.mode(), context.declared_length()) {
+            (RequestBodyMode::Buffered, Some(declared)) if declared > 4096 => {
+                Err(RuntimeError::InvalidArgument("upload too large for this tenant".into()))
+            }
+            _ => Ok(BodyAdmission::new(4096)),
+        }
+    });
+```
+
+The policy is synchronous. `BodyAdmissionContext` is a borrowed view of what the
+request head established: `request_id`, `method`, `raw_path`, `route`, `mode`,
+`declared_length`, and `header`. `header` follows `Request::header` exactly —
+case-insensitive, first value, `None` for an absent or non-UTF-8 value. Nothing
+it lends out escapes the call, and it exposes no body.
+
+`BodyAdmission::new(max_bytes)` admits under a selected maximum.
+`BodyAdmission::with_permit(max_bytes, permit)` also hands Camber a value to
+hold; Camber drops it exactly once on every terminal path — completion,
+refusal, disconnect, or cancellation alike — at the release point the route's
+mode names. A buffered route releases the permit when the request holding it is
+released. A streaming proxy route releases it when the upload ends, drained or
+stopped or refused, which is before the upstream answers and before the response
+finishes streaming. The selected maximum can only narrow the configured
+ceilings, never raise them.
+
+Returning `Err` refuses the request as `BodyAdmission` — `503` by default, with
+the error kept as a private diagnostic no mapper or peer sees. A panic is a
+different category: `InternalService`, answered with the fixed redacted `500`.
+Neither reads a body byte or reaches the handler, and neither re-enters the
+policy.
+
+Routes that consume no body never reach the policy: WebSocket upgrades on a
+direct or proxied route, SSE, gRPC, internal routes, and routing terminals. They
+acquire no permit, read no payload byte, and run no handler.
+
+#### Route Modes
+
+`RequestBodyMode::Buffered` is a route whose payload is read into the owned
+`Request` before the handler runs. `RequestBodyMode::Streaming` is a streaming
+proxy route, whose payload is forwarded upstream frame by frame. Both are
+measured against the same effective limit; they differ only in where an admitted
+frame goes.
+
+#### Effective Limit Precedence
+
+A request may retain or forward the narrowest of four numbers, in this order:
+
+| Source | Effect |
+|---|---|
+| `HostRouter::max_request_body` | Contains every child |
+| `Router::max_request_body` | Narrows further, or inherits the host's when unset |
+| The 256 MiB hard cap | Clamps every configured ceiling |
+| `BodyAdmission::max_bytes` | Narrows the request the policy just admitted |
+
+A resolved child router uses its own policy and its own ceiling. Nothing raises
+a limit.
+
+#### Framing and Declared Length
+
+A declaration above the effective limit is refused as `BodyLimit` before the
+first payload poll, even when the peer withholds the body. Declarations are
+compared at their own `u64` width, so a length no machine could hold is never
+narrowed into a small admitted number. A body with no usable declaration —
+chunked, or an HTTP/2 stream that stated no size — stops at the first frame that
+would cross the limit; that frame is neither retained by a buffered `Request` nor
+forwarded to an upstream. Framing Hyper itself refuses never reaches Camber, so
+it raises no policy call, request identity, or mapped rejection.
+
+#### Mapper and Transport Disposition
+
+`BodyLimit`, `BodyAdmission`, `BodyUnreadable`, `BodyTimeout`, and `MalformedBody`
+are answered by the mapper the same route classification selected, under the same
+request identity, and each is mapped at most once.
+
+Every refusal that leaves payload unread ends an HTTP/1 connection: the response
+carries `Connection: close`, because the next request would otherwise be framed
+out of bytes nobody read. The same applies when a streaming proxy's upstream
+answers before the upload finishes — the upload is stopped, and the answer goes
+out over a closing connection. On HTTP/2 nothing is closed but the refused
+stream; the connection carries later streams normally.
+
 ## Requests
 
 `Request` exposes string-based accessors:
@@ -203,9 +301,10 @@ answers with the same status stay distinct.
 | `Routing` | `404`, `400` for an unusable `Host`, or `414` for a target nested too deep | `not found`, `invalid host header`, `URI path too deep` | No host or route claims the target, or the path nests past the segment limit the router matches |
 | `MethodSelection` | `405` | `method not allowed` | A route claims the path, not the method |
 | `BodyLimit` | `413` | `request body too large` | The body exceeds the effective limit |
+| `BodyAdmission` | `503` | `service unavailable` | A route's body-admission policy declined the work |
 | `BodyUnreadable` | `400` | `request body could not be read` | The body stopped arriving for a reason that is not the limit |
 | `BodyTimeout` | `408` | `request body timed out` | The body missed its collection deadline |
-| `MalformedBody` | `400` | `malformed request body` | `Request::json` could not parse the body |
+| `MalformedBody` | `400` | `malformed request body` | `Request::json` could not parse the body, or the request framed its body under a transfer coding Camber does not undo |
 | `Multipart` | `400` | `invalid multipart body` | `Request::multipart` could not parse the body |
 | `InvalidHeader` | `500` | `internal server error` | A response cannot be put on the wire |
 | `Application` | `400` | the message the handler declared safe | A handler returned `RuntimeError::BadRequest` |
@@ -214,9 +313,8 @@ answers with the same status stay distinct.
 | `Proxy` | `502`, `503`, or `504` | `bad gateway`, `service unavailable`, `gateway timeout` | A proxied request failed before an upstream head |
 | `InternalService` | `500` or `503` | `internal server error`, `service unavailable` | Camber could not complete the request |
 
-`BodyAdmission` completes the taxonomy. It is reserved for route-aware admission
-control and has no producer today. A mid-body transport failure or a peer reset is
-not an admission refusal: it is `BodyUnreadable`.
+A mid-body transport failure or a peer reset is not an admission refusal: it is
+`BodyUnreadable`.
 
 ### What a mapper is given
 
@@ -254,7 +352,7 @@ returns:
 
 - A final `405` carries the `Allow` set of every route that claims the path, in `GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS` order. A static route and a parameterized one can both claim a concrete path; the header names what they serve between them.
 - A final `426` on an unsupported WebSocket version carries `Sec-WebSocket-Version: 13`.
-- A refusal that must close the connection overwrites `Connection` with `close`. `BodyLimit`, `BodyUnreadable`, and `BodyTimeout` each leave the request body unread, so all three close: nothing establishes where a next request on that connection would begin. Under HTTP/2 there is nothing to close for — each request owns its own stream, so an unread body cannot desynchronize the connection — and the header is illegal on that version, so it is removed.
+- A refusal that must close the connection overwrites `Connection` with `close`. `BodyLimit`, `BodyAdmission`, `BodyUnreadable`, `BodyTimeout`, and the `MalformedBody` an undecodable transfer coding raises each leave a framed request body unread, so all five close: nothing establishes where a next request on that connection would begin. A panicking admission policy closes for the same reason, under `InternalService`. Under HTTP/2 there is nothing to close for — each request owns its own stream, so an unread body cannot desynchronize the connection — and the header is illegal on that version, so it is removed.
 - A `HEAD` sends no body bytes. The status and the representation headers do not change.
 
 Mapper `Err`, a mapper panic, a `1xx` mapped status, or a mapped response Hyper cannot

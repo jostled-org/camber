@@ -399,35 +399,97 @@ fn proxy_stream_preserves_status_and_headers() {
         .unwrap();
 }
 
+/// The host whose child router owns the streaming route under test.
+const STREAM_HOST: &str = "stream.test";
+/// The observed-byte ceiling that child forwards under.
+const STREAM_CEILING: usize = 100;
+
+fn streaming_limit_hosts(
+    backend: &str,
+    drops: &Arc<std::sync::atomic::AtomicUsize>,
+    mapped: &common::Journal,
+) -> camber::http::HostRouter {
+    let mut child = Router::new();
+    child.proxy_stream("/api", backend);
+    let permits = Arc::clone(drops);
+    let mut hosts = camber::http::HostRouter::new();
+    hosts.add(
+        STREAM_HOST,
+        child
+            .max_request_body(STREAM_CEILING)
+            .body_admission(move |_context: &camber::http::BodyAdmissionContext<'_>| {
+                Ok(camber::http::BodyAdmission::with_permit(
+                    STREAM_CEILING,
+                    common::permit_probe(&permits),
+                ))
+            })
+            .rejection_mapper(common::recording_mapper(mapped, "child")),
+    );
+    hosts
+}
+
 #[test]
-fn proxy_stream_post_ignores_router_body_limit_for_upstream_streaming() {
+fn proxy_stream_crossing_frame_is_not_forwarded_and_maps_body_limit_once() {
     common::test_runtime()
         .shutdown_timeout(Duration::from_secs(5))
         .run(|| {
-            // Backend echoes body length
-            let mut backend = Router::new();
-            backend.post("/echo", |req: &Request| {
-                let len = req.body_bytes().len();
-                async move { Response::text(200, &len.to_string()) }
-            });
-            let backend_addr = common::spawn_server(backend);
+            let upstream =
+                common::raw_upstream(200, "upstream-answered", common::UpstreamAnswers::OnBodyEnd);
+            let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mapped: common::Journal = Arc::new(Mutex::new(Vec::new()));
+            let port = common::reserve_observed();
+            let hosts = streaming_limit_hosts(&upstream.backend(), &drops, &mapped);
+            let server = port.serve_hosts(hosts);
 
-            // Proxy with very small body limit + streaming proxy
-            let mut proxy = Router::new().max_request_body(100);
-            proxy.proxy_stream("/api", &format!("http://{backend_addr}"));
-            let proxy_addr = common::spawn_server(proxy);
+            let admitted = [b'a'; STREAM_CEILING - 8];
+            let crossing = [b'x'; STREAM_CEILING];
+            let mut peer = common::connect(server.addr()).expect("the paced peer connected");
+            common::write_chunked_head(
+                &mut peer,
+                common::KEEP_CONNECTION,
+                "POST",
+                "/api/echo",
+                STREAM_HOST,
+            )
+            .expect("the upload head reached the proxy");
+            common::tolerate_dead_socket(
+                common::write_chunk(&mut peer, &admitted)
+                    .and_then(|()| common::write_chunk(&mut peer, &crossing)),
+            )
+            .expect("the paced frames reached the proxy");
 
-            // Send POST with body larger than the 100-byte limit
-            let body = vec![b'X'; 1000];
-            let resp = common::raw_request_with_body(proxy_addr, "POST", "/api/echo", &[], &body);
-            let status = common::status_from_raw(&resp);
+            let refused = common::read_http_response_bounded(&mut peer)
+                .expect("the crossing frame was answered");
             assert_eq!(
-                status, 200,
-                "streaming proxy should bypass body limit, got: {resp}"
+                refused.status, 413,
+                "a streaming upload is bounded by the limit its route admitted"
             );
             assert!(
-                resp.contains("1000"),
-                "upstream should receive full 1000 bytes, got: {resp}"
+                upstream.forwarded(&admitted),
+                "every frame inside the bound reached the upstream"
+            );
+            assert!(
+                !upstream.forwarded(&crossing),
+                "the crossing frame is forwarded to no upstream"
+            );
+
+            let seen = common::only(&mapped, "streaming crossing");
+            assert_eq!(seen.kind, camber::http::RejectionKind::BodyLimit);
+            assert_eq!(seen.route.as_deref(), Some("/api/*proxy_path"));
+            assert_eq!(seen.origin, "child", "the selected child's mapper answered");
+            common::assert_request_id_shape(Some(&seen.request_id), "streaming crossing");
+
+            let released = common::poll_until(Duration::from_secs(5), || {
+                drops.load(std::sync::atomic::Ordering::Acquire) == 1
+            });
+            assert!(released, "the admitted permit is released exactly once");
+            assert_eq!(server.controller().body_permit_owners_dropped(), 1);
+
+            let reused =
+                common::probe_connection_reuse(&mut peer, "POST", "/api/again", &[], b"probe");
+            assert!(
+                matches!(reused, Ok(None) | Err(_)),
+                "payload left unread must not leave the connection reusable: {reused:?}"
             );
 
             runtime::request_shutdown();

@@ -143,7 +143,6 @@ impl ServerContextSnapshot {
             metrics_handle: None,
             #[cfg(feature = "profiling")]
             profiling_enabled: false,
-            max_request_body: self.buffers.max_request_body,
             sse_buffer_size: self.buffers.sse_buffer_size,
             #[cfg(feature = "ws")]
             ws_buffer_size: self.buffers.ws_buffer_size,

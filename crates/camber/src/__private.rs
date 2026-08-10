@@ -1,5 +1,13 @@
 pub use crossbeam_channel;
 
+/// The exact pure operations the production body bound is built from.
+///
+/// Re-exported rather than reimplemented: a focused test that proved its own
+/// copy of the arithmetic right would prove nothing about the copy a served
+/// request runs. Neither reads a configured limit, invokes a policy, consumes a
+/// body, or owns anything.
+pub use crate::http::body_admission::{checked_body_frame_total, declared_length_exceeds_limit};
+
 #[cfg(feature = "sqs")]
 #[doc(hidden)]
 pub fn sqs_message_id(message_id: Option<&str>) -> Result<Box<str>, crate::RuntimeError> {
