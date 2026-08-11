@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/jostled-org/camber/compare/camber-v0.5.0...camber-v0.5.1) - 2026-08-11
+
+### Fixed
+
+- *(http)* preserve streaming body refusal precedence
+
 ## [0.5.0](https://github.com/jostled-org/camber/compare/camber-v0.4.2...camber-v0.5.0) - 2026-08-10
 
 ### Added
