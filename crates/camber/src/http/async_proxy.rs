@@ -1117,7 +1117,19 @@ async fn settle_upload(
         }
         answered = &mut upstream => answered,
     };
-    coordinator.commit(answered?).await
+    let answered = resolve_upstream_result(&mut coordinator, answered)?;
+    coordinator.commit(answered).await
+}
+
+/// Prefer a refusal that caused the upstream request itself to fail.
+fn resolve_upstream_result(
+    coordinator: &mut UploadCoordinator,
+    answered: Result<StreamingProxyResponse, ProxyFailure>,
+) -> Result<StreamingProxyResponse, UploadFailure> {
+    answered.map_err(|failure| match coordinator.refusal.try_recv() {
+        Ok(rejected) => UploadFailure::Body(rejected),
+        Err(_) => UploadFailure::Proxy(failure),
+    })
 }
 
 impl UploadCoordinator {

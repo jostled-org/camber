@@ -964,6 +964,32 @@ fn upload_to_host(addr: std::net::SocketAddr, host: &str, chunks: &[&[u8]]) -> w
     answered
 }
 
+/// Prove a local limit remains authoritative when aborting its outbound body.
+#[test]
+fn streaming_limit_outranks_the_upstream_failure_it_causes() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let upstream = raw_upstream(200, UPSTREAM_BODY, UpstreamAnswers::OnBodyEnd);
+            let probes = Probes::new();
+            let server = streaming_proxy(&upstream.backend(), CEILING, &probes);
+
+            for attempt in 1..=32 {
+                let answered =
+                    upload_to_host(server.addr(), wire::DEFAULT_HOST, &[UNDER, &CROSSING]);
+                assert_eq!(
+                    answered.status, 413,
+                    "attempt {attempt}: the local refusal outranks its derived outbound error"
+                );
+            }
+            assert_eq!(probes.mapped_count(), 32, "every refusal maps once");
+            wire::assert_released(&probes.drops, 32, "derived upstream failures");
+
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
 /// Assert the narrowing child's own selected maximum bounds what it forwards.
 ///
 /// Twelve bytes, which is narrower than that child's own ceiling and narrower
