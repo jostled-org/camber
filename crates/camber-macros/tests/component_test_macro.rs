@@ -2,6 +2,10 @@ use std::fs;
 use std::io::{self, Read};
 #[cfg(unix)]
 use std::io::{BufRead, BufReader};
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -210,6 +214,24 @@ fn terminate_process_tree(child: &mut Child) -> io::Result<()> {
     child.kill()
 }
 
+#[cfg(unix)]
+fn descendant_pipe_failure(process_id: u32, read_error: io::Error) -> io::Error {
+    let process_id = process_id.to_string();
+    let cleanup = Command::new("kill")
+        .args(["-KILL", process_id.as_str()])
+        .status();
+
+    match cleanup {
+        Ok(status) if status.success() => read_error,
+        Ok(status) => io::Error::other(format!(
+            "descendant pipe remained open: {read_error}; cleanup exited {status}"
+        )),
+        Err(cleanup_error) => io::Error::other(format!(
+            "descendant pipe remained open: {read_error}; cleanup failed: {cleanup_error}"
+        )),
+    }
+}
+
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
@@ -375,19 +397,17 @@ fn temporary_target_drop_removes_tree_after_unwind() -> io::Result<()> {
 #[cfg(unix)]
 #[test]
 fn timeout_cleanup_terminates_descendant_processes() -> io::Result<()> {
+    let (stdout, child_stdout) = UnixStream::pair()?;
+    stdout.set_read_timeout(Some(PROCESS_REAP_TIMEOUT))?;
     let mut command = Command::new("sh");
     command
         .args(["-c", "sleep 120 & echo $!; wait"])
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(OwnedFd::from(child_stdout)))
         .stderr(Stdio::null());
     let mut process = FixtureProcess::start(command)?;
-    let stdout = process
-        .child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("process-tree fixture stdout was not captured"))?;
+    let mut stdout = BufReader::new(stdout);
     let mut grandchild_line = String::new();
-    BufReader::new(stdout).read_line(&mut grandchild_line)?;
+    stdout.read_line(&mut grandchild_line)?;
     let grandchild = grandchild_line
         .trim()
         .parse::<u32>()
@@ -395,16 +415,14 @@ fn timeout_cleanup_terminates_descendant_processes() -> io::Result<()> {
 
     process.terminate_and_wait()?;
 
-    let grandchild_id = grandchild.to_string();
-    let status = Command::new("kill")
-        .args(["-0", grandchild_id.as_str()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    assert!(
-        !status.success(),
-        "descendant process {grandchild} survived"
-    );
+    let mut trailing_output = Vec::new();
+    match stdout.read_to_end(&mut trailing_output) {
+        Ok(_) => assert!(
+            trailing_output.is_empty(),
+            "descendant process {grandchild} emitted unexpected output"
+        ),
+        Err(error) => return Err(descendant_pipe_failure(grandchild, error)),
+    }
     Ok(())
 }
 
