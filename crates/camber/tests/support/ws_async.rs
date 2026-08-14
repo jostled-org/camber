@@ -21,6 +21,44 @@ use tokio::net::TcpStream;
 /// that reaches it reports failure instead of parking the test binary.
 pub const ASYNC_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The bound a case that watches its server's own stop deadline expire runs
+/// under.
+///
+/// One value for every harness that needs such a bound: the claim those cases
+/// make is which multiple of the deadline a stop took, so a second value would
+/// only be a second thing to keep in step with [`assert_within_one_deadline`].
+///
+/// Two seconds, and the tolerance is why it is not shorter. The elapsed time a
+/// case measures spans its own scheduling as well as the deadline — a checkpoint
+/// wait, a socket frame read, a whole server join — and the assertion allows one
+/// further deadline for all of it. At two seconds that leaves the case's own work
+/// more than two seconds of slack on the reference environment: a warm
+/// `cargo test` on an 8-core developer machine, one case at a time under
+/// `--test-threads=1`, where that work takes single-digit milliseconds. A
+/// shorter bound spends the same slack on scheduling and fails a loaded runner
+/// for the reason it was loaded rather than for the second armed deadline the
+/// case is about.
+pub const EXPIRING_STOP: Duration = Duration::from_secs(2);
+
+/// A stop that ended within the one deadline its server was given.
+///
+/// The claim the two-stage abort has to keep. A bridge the abort cannot reach is
+/// not a server that hangs — it is a server that ends one whole
+/// `shutdown_timeout` late, because the escalation arms a second deadline of its
+/// own. Elapsed time is the only thing that tells those two apart, so the
+/// tolerance [`EXPIRING_STOP`] documents is what stands between the two answers.
+///
+/// `requested` is taken before the stop is asked for, which is the pessimistic
+/// end of the measurement: everything the case does afterwards counts against
+/// the same budget.
+pub fn assert_within_one_deadline(requested: tokio::time::Instant, what: &str) {
+    let elapsed = requested.elapsed();
+    assert!(
+        elapsed < EXPIRING_STOP * 2,
+        "{what}: the stop took {elapsed:?}, which is past the one {EXPIRING_STOP:?} deadline it was given"
+    );
+}
+
 /// The widest payload these helpers write in one frame.
 ///
 /// A test frame that needed an extended length would be testing the length

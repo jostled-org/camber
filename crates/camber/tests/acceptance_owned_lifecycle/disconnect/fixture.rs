@@ -61,14 +61,15 @@ pub(super) const WORKER_THREADS: usize = 4;
 /// signal watcher exits on `ScopeClosing` before this point.
 pub(crate) const DRIVER_ONLY: RuntimeCheckpoint = RuntimeCheckpoint::ScopeWaitObserved(1);
 
-/// The scope children a drain window sees while a handler's producer is still
-/// running: the supervisor driver plus that producer. The signal watcher, where
-/// it exists, has already exited on `ScopeClosing`.
+/// The scope children a drain window sees while one child a handler admitted is
+/// still running: the supervisor driver plus that child — a response producer,
+/// or the task a WebSocket callback spawned. The signal watcher, where it
+/// exists, has already exited on `ScopeClosing`.
 ///
 /// Beside [`DRIVER_ONLY`] because the two are one enumeration of what the drain
 /// may still be counting, and a third occupancy stated somewhere else would be
 /// a vocabulary nobody can read whole.
-pub(super) const DRIVER_AND_PRODUCER: RuntimeCheckpoint = RuntimeCheckpoint::ScopeWaitObserved(2);
+pub(crate) const DRIVER_AND_PRODUCER: RuntimeCheckpoint = RuntimeCheckpoint::ScopeWaitObserved(2);
 
 /// The terminal drain observation: no scope children left at all.
 const SCOPE_DRAINED: RuntimeCheckpoint = RuntimeCheckpoint::ScopeWaitObserved(0);

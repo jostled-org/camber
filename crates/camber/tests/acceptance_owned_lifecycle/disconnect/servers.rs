@@ -201,7 +201,7 @@ fn serve_ephemeral(
 /// One owner for the thread, the runtime inside it, and the shutdown trigger.
 /// Teardown is explicit and bounded, and runs from `Drop` too, so a panicking
 /// case cannot leave the thread serving.
-pub(super) struct SyncServer {
+pub(crate) struct SyncServer {
     addr: SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     finished: Receiver<Result<(), RuntimeError>>,
@@ -209,7 +209,7 @@ pub(super) struct SyncServer {
 }
 
 impl SyncServer {
-    pub(super) fn start(router: Router) -> Self {
+    pub(crate) fn start(router: Router) -> Self {
         let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let (addr_tx, addr_rx) = channel::<SocketAddr>();
         let (finished_tx, finished) = channel::<Result<(), RuntimeError>>();
@@ -239,7 +239,7 @@ impl SyncServer {
         }
     }
 
-    pub(super) fn addr(&self) -> SocketAddr {
+    pub(crate) fn addr(&self) -> SocketAddr {
         self.addr
     }
 
@@ -275,7 +275,7 @@ impl SyncServer {
     }
 
     /// Stop the server and require that `serve_listener` returned success.
-    pub(super) fn assert_served(&mut self) {
+    pub(crate) fn assert_served(&mut self) {
         match self.try_stop() {
             StopOutcome::Served(Ok(())) => {}
             StopOutcome::Served(Err(error)) => {

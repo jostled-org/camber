@@ -425,8 +425,50 @@ impl Router {
 
     /// Register a WebSocket handler for the given path.
     ///
-    /// The handler receives the upgrade request and a bidirectional `WsConn`.
-    /// The connection stays open until the handler returns or the client disconnects.
+    /// The handler is synchronous and runs on the blocking pool. It receives the
+    /// upgrade request and a [`WsConn`], the compatibility facade over the
+    /// connection's two real owners.
+    ///
+    /// # Ownership
+    ///
+    /// [`WsConn::sender`] hands out a `Clone + Send + Sync` send handle without
+    /// giving up the receive owner; [`WsConn::split`] gives up the facade for
+    /// both. Both halves keep the connection live, so a handler that moves them
+    /// into owned application work may return without ending it. A handler that
+    /// drops the connection, or the last of its halves, ends it.
+    ///
+    /// # Blocking
+    ///
+    /// Sends and receives block. Each asks the connection before it asks the
+    /// runtime, so one that has already ended answers with its cause on every
+    /// flavor. A call that still has to wait waits on the calling thread off a
+    /// runtime, waits through `block_in_place` on a multi-thread Tokio runtime,
+    /// and returns [`RuntimeError::BlockingInAsyncContext`] on a current-thread
+    /// runtime rather than wait.
+    ///
+    /// [`WsReceiver::recv_timeout`](crate::http::WsReceiver::recv_timeout) needs
+    /// a Tokio clock for its deadline. Off a runtime it reports
+    /// [`RuntimeError::NoRuntime`](crate::RuntimeError::NoRuntime) instead of
+    /// waiting untimed, and an expired deadline reports
+    /// [`RuntimeError::Timeout`](crate::RuntimeError::Timeout).
+    ///
+    /// A successful send means the frame entered the connection's bounded
+    /// outbound queue, not that its bytes reached the peer. Once the connection
+    /// ends, every send reports
+    /// [`RuntimeError::WebSocketClosed`](crate::RuntimeError::WebSocketClosed)
+    /// with the one cause both halves read — through the facade, that cause
+    /// stays the broken pipe it has always been.
+    ///
+    /// # Runtime authority
+    ///
+    /// Only a handler served by an owned server that was started inside a Camber
+    /// runtime may admit work with [`camber::spawn`](crate::spawn); that child
+    /// belongs to runtime completion, and a spawn issued after root admission
+    /// closes is refused with [`RuntimeError::ScopeClosed`]. A bare-Tokio owned
+    /// server and the synchronous detached serving path both refuse with
+    /// [`RuntimeError::NoRuntime`], and a refused closure never runs. The
+    /// handler itself is never a root-scope child, and server completion makes
+    /// no claim that it has returned.
     #[cfg(feature = "ws")]
     pub fn ws(
         &mut self,

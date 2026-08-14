@@ -147,6 +147,13 @@ router.ws("/chat", |req, mut conn: WsConn| {
 });
 ```
 
+`conn.sender()` hands out a `Clone + Send + Sync` send handle without giving up
+the receive owner, and `conn.split()` gives up the facade for both halves. Work
+that holds both halves keeps the connection live after the callback returns.
+Sends are admitted to a bounded queue rather than written to the peer, and both
+halves read the same terminal cause. See
+[docs/reference/http.md](docs/reference/http.md#direction-ownership).
+
 ```rust
 router.get_sse("/events", |_req, sse| {
     sse.event("update", r#"{"status":"ok"}"#)?;

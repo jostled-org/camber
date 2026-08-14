@@ -13,7 +13,7 @@ mod http2_stream_reset;
 pub(crate) mod peer;
 mod probes;
 pub(crate) mod routes;
-mod servers;
+pub(crate) mod servers;
 mod streaming_complete;
 mod streaming_idle;
 mod streaming_race;

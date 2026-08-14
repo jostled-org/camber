@@ -35,6 +35,11 @@ pub enum LifecycleCheckpoint {
     SseBufferConfigured(usize),
     WebSocketOutgoingBufferConfigured(usize),
     WebSocketIncomingBufferConfigured(usize),
+    WebSocketBeforeOutboundWrite,
+    WebSocketInboundFrameArrived,
+    WebSocketInboundFrameQueued,
+    WebSocketBeforeTerminalSelection,
+    WebSocketTerminalSelected,
     MultipartCommandAccepted,
     MultipartIngressAdvanced,
     MultipartReplyPublished,
@@ -187,10 +192,77 @@ struct BodyObservations {
     permit_owners_dropped: AtomicUsize,
 }
 
+/// What one listener's direct WebSocket bridges reported about their two
+/// application queues.
+///
+/// Written by the production decisions they name — the bridge's own queue
+/// construction, and the one terminal cause it commits — and read by the
+/// observing case. Nothing here selects a capacity, admits a frame, closes a
+/// queue, polls transport, releases a permit, or chooses a cause.
+#[cfg(feature = "ws")]
+#[derive(Default)]
+struct WebSocketDirectionObservations {
+    outbound_capacity: AtomicUsize,
+    inbound_capacity: AtomicUsize,
+    /// Set-once, exactly as the bridge's own terminal state is: a controller
+    /// that could overwrite the recorded cause would let a case read a cause no
+    /// endpoint ever observed.
+    terminal: OnceLock<super::WsCloseCause>,
+    /// How many causes reached this record, including any the set-once above
+    /// kept out.
+    ///
+    /// The `OnceLock` alone cannot say that. A second commit carrying a
+    /// different cause is discarded by it and reads exactly like a bridge that
+    /// only ever committed one, which leaves "a committed cause survives a later
+    /// escalation" unfalsifiable. Counting every commit is what lets a case
+    /// claim the bridge fixed its cause once rather than merely first.
+    commits: AtomicUsize,
+    /// Peer messages the inbound pump has put in the receive queue.
+    ///
+    /// Counted where admission returns, so a case reads it to tell a message
+    /// the receive owner can still take from one the pump never got in.
+    inbound_admitted: AtomicUsize,
+    inbound_settled: AtomicBool,
+    outbound_settled: AtomicBool,
+    /// Admitted outbound frames the bridge's terminal disposition cancelled.
+    ///
+    /// Counted where the bridge drops them, so a drain row reports zero and a
+    /// cancel row reports what a successful `send` never put on the wire.
+    outbound_cancelled: AtomicUsize,
+    permit_released: AtomicBool,
+}
+
+/// What one listener's direct WebSocket bridges have published so far.
+///
+/// Read-only. The capacities are the ones the production bridge handed its two
+/// bounded channels, not a copy of configuration; the cause is the one it
+/// committed, or `None` while every bridge on this listener is still live.
+#[cfg(feature = "ws")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebSocketDirectionObservation {
+    pub outbound_capacity: usize,
+    pub inbound_capacity: usize,
+    pub terminal: Option<super::WsCloseCause>,
+    /// How many causes the bridges on this listener committed.
+    ///
+    /// One per bridge. A second commit on one bridge is discarded by the
+    /// set-once above, so this is the only place it is visible.
+    pub terminal_commits: usize,
+    pub inbound_admitted: usize,
+    pub inbound_settled: bool,
+    pub outbound_settled: bool,
+    pub outbound_cancelled: usize,
+    pub permit_released: bool,
+}
+
 pub(crate) struct LifecycleScript {
     state: Mutex<ScriptState>,
     supervisor_wake: tokio::sync::Notify,
     body: BodyObservations,
+    /// What this listener's direct WebSocket bridges published.
+    #[cfg(feature = "ws")]
+    websocket: WebSocketDirectionObservations,
     /// What this listener's streaming multipart sessions have published.
     ///
     /// The production counters themselves, held here rather than beside each
@@ -209,8 +281,106 @@ impl LifecycleScript {
             }),
             supervisor_wake: tokio::sync::Notify::new(),
             body: BodyObservations::default(),
+            #[cfg(feature = "ws")]
+            websocket: WebSocketDirectionObservations::default(),
             multipart: super::multipart::SessionMetrics::default(),
         }
+    }
+
+    /// Write one observation onto the record `project` names, and do nothing
+    /// when no controller watches.
+    ///
+    /// Every value this script publishes reaches its field through here, so
+    /// "inert with no controller registered" is decided in one place rather than
+    /// restated by each family of counters and each counter in it.
+    fn observe<T>(
+        script: Option<&Self>,
+        project: impl FnOnce(&Self) -> &T,
+        apply: impl FnOnce(&T),
+    ) {
+        match script {
+            Some(script) => apply(project(script)),
+            None => {}
+        }
+    }
+
+    /// Write one direct-WebSocket observation.
+    #[cfg(feature = "ws")]
+    fn observe_ws(script: Option<&Self>, apply: impl FnOnce(&WebSocketDirectionObservations)) {
+        Self::observe(script, |script| &script.websocket, apply);
+    }
+
+    /// Record the capacities one direct bridge handed its two bounded queues.
+    ///
+    /// Inert with no controller registered, exactly like [`Self::pause_at`].
+    #[cfg(feature = "ws")]
+    pub(in crate::http) fn observe_ws_capacities(
+        script: Option<&Self>,
+        outbound: usize,
+        inbound: usize,
+    ) {
+        Self::observe_ws(script, |websocket| {
+            websocket
+                .outbound_capacity
+                .store(outbound, Ordering::Release);
+            websocket.inbound_capacity.store(inbound, Ordering::Release);
+        });
+    }
+
+    /// Record the one terminal cause a direct bridge committed.
+    ///
+    /// The commit is counted before it is recorded, so a second one that the
+    /// set-once refuses is still visible to a case. The refusal itself is
+    /// discarded rather than reported: the first cause stays authoritative
+    /// either way, and the count is what a row reads to tell one commit from
+    /// two.
+    #[cfg(feature = "ws")]
+    pub(in crate::http) fn observe_ws_terminal(script: Option<&Self>, cause: super::WsCloseCause) {
+        Self::observe_ws(script, |websocket| {
+            websocket.commits.fetch_add(1, Ordering::Release);
+            let _kept_the_first = websocket.terminal.set(cause);
+        });
+    }
+
+    /// Record one peer message the inbound pump put in the receive queue.
+    #[cfg(feature = "ws")]
+    pub(in crate::http) fn count_ws_inbound_admitted(script: Option<&Self>) {
+        Self::observe_ws(script, |websocket| {
+            websocket.inbound_admitted.fetch_add(1, Ordering::Release);
+        });
+    }
+
+    /// Record that one direction pump reached its own settlement.
+    #[cfg(feature = "ws")]
+    pub(in crate::http) fn observe_ws_pump_settled(
+        script: Option<&Self>,
+        direction: super::ws_proxy::WsDirection,
+    ) {
+        Self::observe_ws(script, |websocket| {
+            let settled = match direction {
+                super::ws_proxy::WsDirection::Inbound => &websocket.inbound_settled,
+                super::ws_proxy::WsDirection::Outbound => &websocket.outbound_settled,
+            };
+            settled.store(true, Ordering::Release);
+        });
+    }
+
+    /// Record the admitted outbound frames one terminal disposition cancelled.
+    #[cfg(feature = "ws")]
+    pub(in crate::http) fn count_ws_outbound_cancelled(script: Option<&Self>, cancelled: usize) {
+        Self::observe_ws(script, |websocket| {
+            websocket
+                .outbound_cancelled
+                .fetch_add(cancelled, Ordering::Release);
+        });
+    }
+
+    /// Record that one direct bridge let go of its connection permit.
+    #[cfg(feature = "ws")]
+    pub(in crate::http) fn observe_ws_permit_released(script: Option<&Self>) {
+        Self::observe_ws(script, |websocket| {
+            websocket.permit_released.store(true, Ordering::Release);
+        });
     }
 
     /// The counters this listener's multipart sessions publish through.
@@ -218,16 +388,12 @@ impl LifecycleScript {
         &self.multipart
     }
 
-    /// Write one body observation, and do nothing when no controller watches.
+    /// Write one body observation.
     ///
-    /// Every counter below reaches its field through here, so "inert with no
-    /// controller registered" is decided in one place rather than restated per
-    /// counter, and a fourth counter is the one line that names its field.
-    fn observe_body(script: Option<&Self>, observe: impl FnOnce(&BodyObservations)) {
-        match script {
-            Some(script) => observe(&script.body),
-            None => {}
-        }
+    /// A fourth counter is the one line that names its field: the absence arm
+    /// belongs to [`Self::observe`].
+    fn observe_body(script: Option<&Self>, apply: impl FnOnce(&BodyObservations)) {
+        Self::observe(script, |script| &script.body, apply);
     }
 
     /// Record one request-body frame the production collector polled out.
@@ -578,6 +744,29 @@ impl LifecycleController {
             .body
             .permit_owners_dropped
             .load(Ordering::Acquire)
+    }
+
+    /// What this listener's direct WebSocket bridges have published so far.
+    ///
+    /// Read-only, and every value in it is written by the production decision
+    /// it names — the bridge's own bounded-channel construction, and the single
+    /// cause it commits before it lets go of either queue end. Nothing here
+    /// sets a cause, enqueues a frame, closes a queue, polls transport,
+    /// releases a permit, or synthesizes a result.
+    #[cfg(feature = "ws")]
+    pub fn websocket_directions(&self) -> WebSocketDirectionObservation {
+        let websocket = &self.script.websocket;
+        WebSocketDirectionObservation {
+            outbound_capacity: websocket.outbound_capacity.load(Ordering::Acquire),
+            inbound_capacity: websocket.inbound_capacity.load(Ordering::Acquire),
+            terminal: websocket.terminal.get().copied(),
+            terminal_commits: websocket.commits.load(Ordering::Acquire),
+            inbound_admitted: websocket.inbound_admitted.load(Ordering::Acquire),
+            inbound_settled: websocket.inbound_settled.load(Ordering::Acquire),
+            outbound_settled: websocket.outbound_settled.load(Ordering::Acquire),
+            outbound_cancelled: websocket.outbound_cancelled.load(Ordering::Acquire),
+            permit_released: websocket.permit_released.load(Ordering::Acquire),
+        }
     }
 
     /// What this listener's streaming multipart sessions have done so far.

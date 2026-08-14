@@ -277,10 +277,12 @@ where
 /// context, releasing the scope claim when the body returns.
 ///
 /// A blocking worker starts with no context of its own, so the runtime `Arc`
-/// the spawner already held is re-installed here and restored on return. This
-/// is the single site that writes the `RUNTIME` thread-local outside the
-/// runtime-establishing entry points: it constructs nothing, so no path can
-/// fill runtime absence with a minted orphan.
+/// the spawner already held is re-installed here and restored on return. It
+/// constructs nothing, so no path can fill runtime absence with a minted
+/// orphan. The other site that writes the `RUNTIME` thread-local outside the
+/// runtime-establishing entry points is the direct WebSocket callback, which
+/// re-installs the runtime its own serving connection captured on exactly the
+/// same terms.
 fn run_in_spawner_context<F>(rt: Arc<RuntimeInner>, slot: ScopeSlot, body: F)
 where
     F: FnOnce(),
@@ -706,6 +708,30 @@ where
     match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
         Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
         _ => f(),
+    }
+}
+
+/// Run one blocking wait under Camber's scheduler-safe policy.
+///
+/// The whole policy, in one place, for the Tokio-backed blocking waits the
+/// crate ships. The crossbeam-backed `channel::sync` halves predate it and wait
+/// without it. Off every runtime the wait belongs to the caller's own thread. On a
+/// multi-thread runtime it goes through [`block_in_place`], which hands the
+/// worker to a replacement so the rest of that runtime keeps running. A
+/// current-thread runtime has no second thread to hand anything to, so a wait
+/// there would stop the only thing that could ever end it: those callers are
+/// refused before they wait rather than deadlocked by one.
+///
+/// Held apart from [`block_in_place`], which is total and answers "run this off
+/// the poll path". This one can refuse, and refusing is the point.
+pub(crate) fn wait_blocking<F, T>(wait: F) -> Result<T, RuntimeError>
+where
+    F: FnOnce() -> T,
+{
+    match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Err(_) => Ok(wait()),
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => Ok(tokio::task::block_in_place(wait)),
+        Ok(_) => Err(RuntimeError::BlockingInAsyncContext),
     }
 }
 

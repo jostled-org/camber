@@ -30,6 +30,9 @@ mod trace_capture;
 mod ws;
 #[path = "../support/ws_async.rs"]
 mod ws_async;
+#[cfg(feature = "ws")]
+#[path = "../support/ws_directions.rs"]
+mod ws_directions;
 
 pub use drain::*;
 pub use external::*;
@@ -47,3 +50,5 @@ pub use tls::*;
 pub use trace_capture::*;
 pub use ws::*;
 pub use ws_async::*;
+#[cfg(feature = "ws")]
+pub use ws_directions::*;

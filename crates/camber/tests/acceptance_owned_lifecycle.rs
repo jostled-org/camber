@@ -22,3 +22,6 @@ mod framework_rejections;
 mod scope_drain;
 #[path = "acceptance_owned_lifecycle/serve_variants.rs"]
 mod serve_variants;
+#[cfg(feature = "ws")]
+#[path = "acceptance_owned_lifecycle/websocket_directions.rs"]
+mod websocket_directions;

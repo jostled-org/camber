@@ -197,7 +197,7 @@ pub use sse::SseWriter;
 pub use static_files::serve_file;
 pub use stream::{StreamResponse, StreamSender};
 #[cfg(feature = "ws")]
-pub use websocket::{WsConn, WsMessage};
+pub use websocket::{WsCloseCause, WsConn, WsMessage, WsReceive, WsReceiver, WsSender};
 
 pub(crate) use buffer_config::{BufferConfig, DEFAULT_CHANNEL_BUFFER};
 pub(crate) use util::{map_reqwest_error, strip_quotes};

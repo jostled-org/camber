@@ -20,6 +20,18 @@ pub enum RuntimeError {
     #[error("blocking operation is unavailable in a current-thread async context")]
     BlockingInAsyncContext,
 
+    /// A direct WebSocket operation found its connection already ended.
+    ///
+    /// Carries the connection's one immutable cause, which every sender clone
+    /// and its receive owner read alike. Held apart from
+    /// [`RuntimeError::ChannelClosed`] because the cause is what an application
+    /// acts on: a peer that closed, a server that was cancelled, and a half
+    /// that was dropped are three different answers, and a channel result flattens
+    /// them into one.
+    #[cfg(feature = "ws")]
+    #[error("websocket closed: {0}")]
+    WebSocketClosed(crate::http::WsCloseCause),
+
     /// An operation exceeded its configured timeout.
     #[error("operation timed out")]
     Timeout,

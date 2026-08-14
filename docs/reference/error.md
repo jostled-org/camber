@@ -15,6 +15,7 @@ The variants cluster into a few stable buckets:
 - unparseable request payloads: `MalformedBody`, `Multipart`
 - request payloads Camber refused to keep reading: `RequestBodyLimit`, `RequestBodyUnreadable`
 - transport and integration failures: `Http`, `Tls`, `MessageQueue`
+- direct WebSocket termination: `WebSocketClosed` (behind the `ws` feature)
 - application-supplied: `Database`
 - startup and infrastructure configuration: `Config`, `Secret`, `Dns`, `Acme`, `Schedule`
 
@@ -76,6 +77,41 @@ async fn create_user(req: &Request) -> Result<Response, RuntimeError> {
     Response::empty(201)
 }
 ```
+
+## Direct WebSocket Termination
+
+Behind the `ws` feature, `WebSocketClosed(WsCloseCause)` reports that a direct
+WebSocket operation found its connection already over. It carries the
+connection's one immutable cause — `PeerClosed`, `PeerDisconnected`,
+`ServerShutdown`, `ServerCancelled`, `ReceiverDropped`, or `SendersDropped` —
+and every sender clone and the receive owner read the same value.
+
+It is held apart from the channel variants because the cause is what an
+application acts on, and a channel result flattens six answers into one:
+
+- `ChannelFull` means backpressure. `WsSender::try_send` and
+  `try_send_binary` return it only while the connection is live and its bounded
+  outbound queue is full, so retrying is meaningful.
+- `WebSocketClosed` means the connection is over. Every send after that reports
+  it, including one that found the queue full.
+- `BlockingInAsyncContext` means the caller asked a current-thread Tokio runtime
+  to wait, which would stop the only thread that could end the wait. It is a
+  scheduling mistake, not a closed connection.
+- `NoRuntime` and `Timeout` separate `WsReceiver::recv_timeout`'s two ways of
+  answering nothing: no Tokio clock to take a deadline from, and a deadline that
+  expired.
+
+The same two refusals answer a `camber::spawn` issued from inside the callback,
+and they keep their ordinary meanings. `ScopeClosed` says the callback's own
+Camber runtime has stopped admitting; `NoRuntime` says the serving path never
+carried one, which is every bare-Tokio and synchronous detached connection.
+Neither refusal runs its closure, so a receiver captured by that closure is
+dropped and the connection ends with `ReceiverDropped`.
+
+Adding this variant to the exhaustive `RuntimeError` enum is a breaking API
+change for downstream matches. Calls through the `WsConn` facade are unaffected:
+its receive methods still answer `None` for every cause, and its sends still
+report a closed connection as `Io` with `BrokenPipe`.
 
 ## Choosing Variants
 

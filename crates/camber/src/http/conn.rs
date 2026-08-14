@@ -798,9 +798,9 @@ enum DrainPolicy {
     /// This connection's own budget. One stalled peer cannot outlast it.
     Bounded(std::time::Duration),
     /// Bounded by the owned server's supervisor instead: its `shutdown_timeout`
-    /// expires, `start_abort_if_ready` fires, and `tasks.abort_all()` drops the
-    /// task this connection is being driven on. Awaiting unbounded here is what
-    /// lets that one deadline govern every connection at once.
+    /// expires, `start_abort_if_ready` fires, and `abort_unregistered` drops
+    /// the task this connection is being driven on. Awaiting unbounded here is
+    /// what lets that one deadline govern every connection at once.
     Supervised,
 }
 

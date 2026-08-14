@@ -2,10 +2,11 @@
 
 use crate::common;
 use crate::common::{
-    assert_graceful_close_then_eof, assert_http_ok, assert_optional_close_then_eof,
-    assert_refusal_body_then_eof, assert_transport_eof, attach_dispatch_probe, lifecycle_event,
-    read_async_http_head, read_async_ws_frame_or_eof, read_until_double_crlf, read_ws_text_frame,
-    status_from_raw, write_async_ws_frame, write_ws_close_frame, write_ws_text_frame,
+    EXPIRING_STOP, assert_graceful_close_then_eof, assert_http_ok, assert_optional_close_then_eof,
+    assert_refusal_body_then_eof, assert_transport_eof, assert_within_one_deadline,
+    attach_dispatch_probe, lifecycle_event, read_async_http_head, read_async_ws_frame_or_eof,
+    read_until_double_crlf, read_ws_text_frame, status_from_raw, write_async_ws_frame,
+    write_ws_close_frame, write_ws_text_frame,
 };
 use camber::RuntimeError;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, LifecycleFault, lifecycle};
@@ -760,6 +761,84 @@ async fn forced_proxy_websocket_abort_releases_transport_before_cancelled() {
     assert_optional_close_then_eof(&mut websocket, "forced proxy").await;
     assert_cancelled(lifecycle_event("forced proxy bridge join", owner.as_mut()).await);
     backend.shutdown().await;
+}
+
+/// A backend that completes the WebSocket handshake and then answers nothing.
+///
+/// Not an option on [`spawn_lifecycle_ws_backend`]: that backend is a live peer
+/// whose replies every other proxy row depends on, and this one exists only to
+/// never reply — including to the close a graceful stop sends it.
+async fn spawn_silent_ws_backend() -> LifecycleWsBackend {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind silent WebSocket backend");
+    let addr = listener
+        .local_addr()
+        .expect("silent WebSocket backend address");
+    let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let accepted = tokio::select! {
+            biased;
+            _ = &mut shutdown_rx => return,
+            accepted = listener.accept() => accepted.expect("accept silent backend peer"),
+        };
+        let websocket = tokio_tungstenite::accept_async(accepted.0)
+            .await
+            .expect("accept silent backend WebSocket");
+        // Held and never polled: the proxy's close arrives on this socket and
+        // nothing here ever reads it, let alone answers.
+        let _ = shutdown_rx.await;
+        drop(websocket);
+    });
+    LifecycleWsBackend {
+        addr,
+        shutdown,
+        task,
+    }
+}
+
+// 2.T8, the bound a proxied bridge is still ended under.
+//
+// A proxied bridge is registered, so a server that aborts leaves it to settle
+// the abort itself. This row is the case where it cannot: the graceful stop
+// sends a close to each side, and the backend never answers. The bridge has to
+// hear the abort where it waits, so this server ends within the one deadline
+// its stop was given rather than the two a second armed deadline would cost.
+#[test]
+fn forced_proxy_abort_bounds_a_backend_that_never_answers_its_close() {
+    runtime::builder()
+        .shutdown_timeout(EXPIRING_STOP)
+        .run(|| {
+            runtime::block_on(async {
+                let backend = spawn_silent_ws_backend().await;
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind silent-backend proxy listener");
+                let proxy_addr = listener.local_addr().expect("silent-backend proxy address");
+                let handle =
+                    camber::http::serve_background(listener, lifecycle_proxy_router(backend.addr));
+                let mut websocket = connect_async_proxy_websocket(proxy_addr).await;
+
+                let requested = tokio::time::Instant::now();
+                handle.shutdown();
+                let mut owner = Box::pin(handle.into_future());
+                let (opcode, _) =
+                    read_async_ws_frame_or_eof(&mut websocket, "the silent-backend proxy close")
+                        .await
+                        .expect("graceful proxy shutdown sends a close frame");
+                assert_eq!(opcode, 0x8, "expected graceful proxied close frame");
+                // Neither peer answers from here: the client holds its socket
+                // open and the backend has never read a byte.
+                let completed = lifecycle_event("silent-backend proxy join", owner.as_mut()).await;
+                assert!(
+                    matches!(completed, Err(RuntimeError::Timeout)),
+                    "a proxy stop neither peer answered completed as {completed:?}"
+                );
+                assert_within_one_deadline(requested, "a proxy stop neither peer answered");
+                backend.shutdown().await;
+            });
+        })
+        .unwrap();
 }
 
 async fn pending_proxy_upgrade_shutdown_is_rejected(forced: bool) {

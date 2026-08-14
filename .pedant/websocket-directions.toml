@@ -1,0 +1,30 @@
+# Semantic architecture rules for the direct WebSocket direction family and the
+# tests that own its contract.
+#
+# The repository defaults, plus mixed-concern enforcement. The `websocket`
+# family is split by concern on purpose: `message` owns payload shape and frame
+# conversion, `terminal` owns the one set-once cause every half reads, `sender`
+# owns outbound admission, `receiver` owns inbound delivery and its blocking
+# policy, and `facade` owns the shipped `WsConn` compatibility surface. A second
+# terminal state, a second admission path, a queue disposition decided inside an
+# endpoint, or transport work anywhere in the family is the mixed concern this
+# config exists to catch.
+#
+# The `ws_proxy` bridge family is covered here for the same reason: the direct
+# bridge owns the transport, both queues, and the cause, and the proxied bridge
+# owns its own separate lifecycle. Neither may grow a copy of the other's.
+#
+# These scans are inventory, not capability authority: the capability proof is
+# Pedant MCP `query_capabilities` on the final tree.
+#
+# The repository's explicit dynamic-dispatch exceptions are retained: the bridge
+# reaches its handler through the frozen router's erased `WsHandler`, which is
+# the ownership model this plan reuses rather than replaces.
+check_mixed_concerns = true
+check_dyn_field = false
+check_dyn_param = false
+check_clone_in_loop = false
+check_vec_box_dyn = false
+max_depth = 2
+check_long_function_body = true
+max_function_body_lines = 80

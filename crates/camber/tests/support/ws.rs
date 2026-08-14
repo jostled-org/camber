@@ -165,7 +165,13 @@ fn try_read_until_double_crlf(stream: &mut TcpStream) -> io::Result<Box<str>> {
 /// each. Under that, a peer dribbling one byte per read holds the frame open for
 /// as many timeouts as it sends bytes. One deadline computed here and narrowed
 /// before every read is what bounds the frame as a whole.
-fn try_read_ws_frame_raw(stream: &mut TcpStream) -> io::Result<(u8, Box<[u8]>)> {
+///
+/// Public alongside [`read_ws_frame_raw`], for the callers whose claim is the
+/// failure rather than the frame. A transport that was given up reads as
+/// `UnexpectedEof` or `ConnectionReset`, and one still open that answered
+/// nothing reads as `TimedOut`; the panic the sealed reader raises carries the
+/// two back as the same caught unwind.
+pub fn try_read_ws_frame_raw(stream: &mut TcpStream) -> io::Result<(u8, Box<[u8]>)> {
     let deadline = Instant::now() + WS_IO_TIMEOUT;
     super::http::with_socket_timeout(
         stream,

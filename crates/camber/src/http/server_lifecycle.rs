@@ -736,6 +736,17 @@ struct OwnedTask {
     expected_cancellation: Option<Arc<AtomicU8>>,
 }
 
+impl OwnedTask {
+    /// Whether this task is a registered upgrade bridge.
+    ///
+    /// The registrar's cancellation state is what says so: only a bridge
+    /// submitted through the registrar carries one, and only such a bridge
+    /// settles its own connection when the server publishes an abort.
+    fn is_registered(&self) -> bool {
+        self.expected_cancellation.is_some()
+    }
+}
+
 impl Future for OwnedTask {
     type Output = OwnedTaskCompletion;
 
@@ -802,6 +813,31 @@ impl OwnedHttpTasks {
     fn abort_all(&mut self) {
         self.supervisor_aborted = true;
         self.tasks.iter().for_each(|task| task.handle.abort());
+    }
+
+    /// Abort every owned task that has no settlement of its own.
+    ///
+    /// A registered upgrade bridge is left running. The server has already
+    /// published the abort, and a bridge answers that by settling its own
+    /// connection: it fixes the one cause every half of that connection reads,
+    /// cancels the frames a successful send had admitted, takes both of its
+    /// directions back, and gives the connection permit up. Aborting it here
+    /// would take all four away from the application and leave the halves to
+    /// infer why. Nothing else owned here has an answer of its own — an
+    /// ordinary connection drains for as long as its peer keeps it — so
+    /// nothing else is given the chance.
+    ///
+    /// What makes the difference is that a bridge keeps reading this abort
+    /// while it settles. Every step of its settlement that waits on a peer is
+    /// bounded by the same control watch this abort was published to, so a
+    /// bridge already committed to a graceful close hears the escalation where
+    /// it is parked rather than after it.
+    fn abort_unregistered(&mut self) {
+        self.supervisor_aborted = true;
+        self.tasks
+            .iter()
+            .filter(|task| !task.is_registered())
+            .for_each(|task| task.handle.abort());
     }
 
     async fn next(&mut self) -> Option<OwnedTaskCompletion> {
@@ -1449,8 +1485,27 @@ impl ServerSupervisor {
 
     fn start_abort_if_ready(&mut self) {
         if self.mode == ShutdownMode::Abort && !self.abort_started && self.rejections_complete() {
-            self.force_abort();
+            self.begin_forced_abort();
         }
+    }
+
+    /// End the tasks that cannot end themselves, and leave the deadline armed
+    /// for the ones that can.
+    ///
+    /// The deadline is what makes this safe to do in two stages. A registered
+    /// upgrade bridge is given the abort it was already told about and the time
+    /// to settle its own connection under it; every other owned task is ended
+    /// here, because its answer to an abort is a drain with no bound of its
+    /// own. A bridge that does not settle is still forced, by the same deadline
+    /// this abort has carried since it began.
+    ///
+    /// The time a bridge is given is that deadline and no more of it than the
+    /// bridge needs. A bridge settles against the abort it is reading, so the
+    /// window closes as soon as the last one answers; only a bridge parked
+    /// somewhere no control transition reaches waits the deadline out.
+    fn begin_forced_abort(&mut self) {
+        self.abort_started = true;
+        self.tasks.abort_unregistered();
     }
 
     /// Whether every connection this supervisor rejected has released its
@@ -1466,6 +1521,10 @@ impl ServerSupervisor {
 
     /// Abort every owned task, once, and disarm the deadline that was waiting
     /// to do it.
+    ///
+    /// The deadline's own answer, and the end of the settlement window
+    /// [`Self::begin_forced_abort`] opened: a registered bridge that has not
+    /// settled by now is taken away where it stands.
     fn force_abort(&mut self) {
         self.deadline = None;
         self.abort_started = true;

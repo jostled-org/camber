@@ -456,17 +456,6 @@ where
     drain_peer(peer, body).await;
 }
 
-#[expect(
-    deprecated,
-    reason = "SO_LINGER zero is required to produce a deterministic TCP reset"
-)]
-fn abortive_tcp_socket() -> tokio::net::TcpSocket {
-    let socket = tokio::net::TcpSocket::new_v4().unwrap();
-    socket.set_linger(Some(Duration::ZERO)).unwrap();
-    assert_eq!(socket.linger().unwrap(), Some(Duration::ZERO));
-    socket
-}
-
 fn assert_invalid<T>(result: Result<T, RuntimeError>) {
     assert!(
         matches!(result, Err(RuntimeError::InvalidArgument(_))),

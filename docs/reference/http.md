@@ -564,6 +564,103 @@ Camber enforces a same-host Origin policy for browser WebSocket upgrades.
 WebSocket upgrades are classified before request-body buffering, so upgrade requests do not hit
 the normal request-body limit on the handshake path.
 
+### Direction ownership
+
+A direct WebSocket has one receive owner and any number of send handles.
+`WsConn::sender()` clones the send capability and leaves the receive owner
+alone. `WsConn::split()` gives up the facade for `(WsSender, WsReceiver)`.
+
+```rust
+use camber::http::{Request, Router, WsConn, WsReceive};
+use camber::RuntimeError;
+
+let mut router = Router::new();
+router.ws("/events", |_req: &Request, conn: WsConn| -> Result<(), RuntimeError> {
+    let (sender, mut receiver) = conn.split();
+    let publisher = sender.clone();
+    camber::spawn(move || publisher.send("welcome"));
+    loop {
+        match receiver.recv()? {
+            WsReceive::Message(message) => sender.send(&format!("echo: {message:?}"))?,
+            WsReceive::Closed(_cause) => return Ok(()),
+        }
+    }
+});
+```
+
+`WsSender` is `Clone + Send + Sync`. `WsReceiver` is `Send`, is not `Clone`, and
+takes `&mut self` on every receive, so one receive runs at a time.
+
+Both halves keep the connection live. A callback that moves both halves into
+owned application work may return without ending the connection. A callback that
+drops `WsConn`, or that drops the last of its split halves, ends it.
+
+### Send admission and backpressure
+
+`ws_buffer_size` bounds each direction. Every sender clone enqueues through the
+same outbound queue. `send` returns when the frame enters that queue, not when
+its bytes reach the peer — the terminal table below decides whether an admitted
+frame is written or dropped. `try_send` never waits and reports `ChannelFull`
+while the connection is open. Both report `WebSocketClosed(cause)` once it is
+over.
+
+A borrowed binary send copies the slice once, at admission. Cloning a sender
+copies the handle alone; it makes no zero-copy payload claim.
+
+`send`, `recv`, and `recv_timeout` block. Where they block depends on the
+caller's runtime:
+
+| Caller | Behavior |
+|---|---|
+| No Tokio runtime | waits on the caller's own thread |
+| Multi-thread Tokio | waits through `block_in_place`, so another worker runs |
+| Current-thread Tokio | returns `BlockingInAsyncContext` before any wait |
+
+`recv_timeout` also returns `NoRuntime` when no Tokio clock exists, and `Timeout`
+when its deadline expires.
+
+### Terminal causes
+
+A connection has one cause. It is set once, and every sender clone and the
+receiver read that same cause. When several terminal events are ready in one
+turn, the highest of these wins: `ServerCancelled`, `ServerShutdown`,
+`PeerClosed`, `PeerDisconnected`, `ReceiverDropped`, `SendersDropped`. A cause
+fixed in an earlier turn stays authoritative, so a shutdown deadline that
+escalates cannot rewrite `ServerShutdown` as `ServerCancelled`.
+
+The cause fixes what happens to the frames each queue still holds:
+
+| Cause | Admitted outbound frames | Queued inbound messages | Protocol close |
+|---|---|---|---|
+| `ServerCancelled` | cancel | discard | none |
+| `ServerShutdown` | drain within the server deadline | deliver, then the cause | send close, await peer within the deadline |
+| `PeerClosed` | cancel | deliver, then the cause | echo the peer's close |
+| `PeerDisconnected` | cancel | deliver, then the cause | impossible |
+| `ReceiverDropped` | cancel | discard | attempt a normal close |
+| `SendersDropped` | drain | deliver, then the cause | send a normal close without awaiting the peer |
+
+Every cause closes send admission at once. A send already waiting for capacity
+fails there with `WebSocketClosed`.
+
+### Callback runtime context
+
+The callback runs on the blocking pool. What it may admit through
+`camber::spawn` follows the server that is serving it:
+
+| Serving path | `camber::spawn` in the callback |
+|---|---|
+| Owned server started inside a Camber runtime | admitted to that runtime's root scope, or refused with `ScopeClosed` once admission has closed |
+| Owned server started on bare Tokio | refused with `NoRuntime` |
+| Synchronous detached serving | refused with `NoRuntime`, even when its caller had ambient Camber context |
+
+A refused spawn never runs its closure, so a receiver captured by that closure is
+dropped and the connection ends with `ReceiverDropped`.
+
+The callback itself is not a root-scope child. The child it admits is, and
+runtime completion waits for that child. Server completion is separate: it owns
+the bridge, its two directional pumps, the transport, and the connection permit,
+and it makes no claim about the callback or about application-owned work.
+
 ## Server-Sent Events
 
 Use `router.get_sse(...)` for long-lived event streams:

@@ -1160,9 +1160,24 @@ pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
+#[must_use = "the runtime context is installed only while the returned guard lives"]
 pub(crate) fn install_runtime(inner: Arc<RuntimeInner>) -> RuntimeContextGuard {
     let previous = RUNTIME.with(|cell| cell.borrow_mut().replace(inner));
     RuntimeContextGuard { previous }
+}
+
+/// Install a captured runtime context on this thread for as long as the guard
+/// lives.
+///
+/// The synchronous counterpart of [`carry_runtime`], for a caller that runs a
+/// blocking body rather than awaiting a future. Absence propagates the same
+/// way: a captured `None` installs nothing and leaves the thread's own context
+/// exactly as it found it, so no path fills runtime absence by minting one.
+#[must_use = "the carried context is installed only while the returned guard lives"]
+pub(crate) fn install_carried_runtime(
+    context: Option<Arc<RuntimeInner>>,
+) -> Option<RuntimeContextGuard> {
+    context.map(install_runtime)
 }
 
 /// Scope runtime context to a future so it follows that future across workers.

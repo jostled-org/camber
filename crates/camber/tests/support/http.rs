@@ -50,6 +50,29 @@ pub fn remaining(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
 
+/// A socket whose close is a TCP reset rather than an orderly shutdown.
+///
+/// `SO_LINGER` at zero is what makes a dropped socket send `RST` instead of
+/// `FIN`, which is the only way an in-process case can hand a peer a genuine
+/// transport failure rather than an ordinary end of stream. One definition for
+/// every case that needs one: a second spelling is a second chance to build a
+/// socket that closes cleanly and to assert a disconnect that never happened.
+#[expect(
+    deprecated,
+    reason = "SO_LINGER zero is required to produce a deterministic TCP reset"
+)]
+pub fn abortive_tcp_socket() -> tokio::net::TcpSocket {
+    let socket = tokio::net::TcpSocket::new_v4().expect("open abortive socket");
+    socket
+        .set_linger(Some(Duration::ZERO))
+        .expect("set zero linger");
+    assert_eq!(
+        socket.linger().expect("read back linger"),
+        Some(Duration::ZERO)
+    );
+    socket
+}
+
 /// Poll `attempt` every [`POLL_INTERVAL`] until it produces a value, giving up
 /// at `bound`.
 ///
@@ -569,6 +592,35 @@ impl ObservedPort {
 
     pub fn serve_hosts(self, hosts: HostRouter) -> ObservedServer {
         self.serve_with(move |listener| http::serve_background_hosts(listener, hosts))
+    }
+
+    /// Give the reservation up as an owned Tokio listener, its address, and its
+    /// observer.
+    ///
+    /// [`ObservedPort::serve_with`] hands the listener to [`ReadyServer`], whose
+    /// guard probes readiness and then cancels and joins on its own behalf. A
+    /// fixture whose case reads the server's own completion outcome, or that
+    /// must stop it at an exact moment, has to hold the raw [`ServerHandle`]
+    /// instead — so it takes the reservation here and serves it itself, rather
+    /// than binding a second listener and registering a second observer.
+    ///
+    /// The observer travels with the listener because that is the pairing this
+    /// type exists to keep: registration happens before anything serves on the
+    /// port, and the caller that takes it is the one that decides when to give
+    /// it back.
+    pub fn into_owned_parts(
+        self,
+    ) -> (
+        tokio::net::TcpListener,
+        SocketAddr,
+        Arc<LifecycleController>,
+    ) {
+        let local_addr = self.listener.local_addr();
+        let listener = self
+            .listener
+            .into_tokio()
+            .expect("hand the observed reservation to its own owner");
+        (listener, local_addr, self.controller)
     }
 
     fn serve_with(

@@ -7,9 +7,8 @@ mod deterministic;
 use crate::handshake::{Header, LOCAL_HOST, accepted, accepted_plus, handshake_request};
 
 use crate::common::{
-    ASYNC_EVENT_TIMEOUT, assert_graceful_close_then_eof, assert_http_ok,
-    assert_optional_close_then_eof, assert_refusal_body_then_eof, assert_transport_eof,
-    attach_dispatch_probe, lifecycle_event, read_async_http_head, read_ws_binary_frame,
+    ASYNC_EVENT_TIMEOUT, assert_http_ok, assert_optional_close_then_eof,
+    assert_refusal_body_then_eof, lifecycle_event, read_async_http_head, read_ws_binary_frame,
     read_ws_text_frame, status_from_raw, write_ws_binary_frame, write_ws_close_frame,
     write_ws_text_frame,
 };
@@ -17,15 +16,13 @@ use camber::RuntimeError;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, LifecycleFault, lifecycle};
 use camber::http::{Request, Response, Router, WsConn, WsMessage};
 use camber::runtime;
-use futures_util::FutureExt;
 use std::future::IntoFuture;
 use std::io::Write;
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
-const FLAG_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// The key every accepted handshake here offers.
 ///
 /// The workspace's own, not a copy of it: [`VALID_WEBSOCKET_ACCEPT`] below is
@@ -92,14 +89,6 @@ const INVALID_HANDSHAKE_CASES: [InvalidHandshakeCase; 5] = [
     },
 ];
 
-struct CallbackDropProbe(Arc<AtomicBool>);
-
-impl Drop for CallbackDropProbe {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
 async fn async_ws_request(stream: &mut tokio::net::TcpStream, path: &str) {
     let request = common::ws_upgrade_request(path);
     tokio::io::AsyncWriteExt::write_all(stream, request.as_bytes())
@@ -147,21 +136,6 @@ fn arm_unacknowledged_upgrade(controller: &LifecycleController) {
     controller
         .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
         .expect("pause before upgrade acknowledgement");
-}
-
-/// Await a flag a callback sets while unwinding its own stack.
-///
-/// A callback that reports completion over a channel is still holding its
-/// locals when the receiving task wakes: the send happens inside the callback
-/// body, the drops happen after it returns. Reading the flag once races that
-/// window and only loses under contention, so poll it to the lifecycle
-/// deadline instead.
-async fn wait_for_dropped_flag(flag: &AtomicBool, context: &str) {
-    let deadline = Instant::now() + ASYNC_EVENT_TIMEOUT;
-    while !flag.load(Ordering::Acquire) {
-        assert!(Instant::now() < deadline, "{context}");
-        tokio::time::sleep(FLAG_POLL_INTERVAL).await;
-    }
 }
 
 async fn wait_for_unacknowledged_upgrade(controller: &LifecycleController) {
@@ -1033,231 +1007,6 @@ fn auth_middleware_allows_authenticated_websocket() {
             runtime::request_shutdown();
         })
         .unwrap();
-}
-
-// 1.T9, direct WebSocket portion.
-#[test]
-fn direct_websocket_bridge_holds_permit_and_finishes_before_owned_completion() {
-    runtime::builder()
-        .connection_limit(1)
-        .keepalive_timeout(Duration::from_secs(5))
-        .shutdown_timeout(Duration::from_secs(2))
-        .run(|| {
-            runtime::block_on(async {
-                let mut router = lifecycle_websocket_router();
-                let mut dispatched = attach_dispatch_probe(&mut router);
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("bind owned listener");
-                let addr = listener.local_addr().expect("owned listener address");
-                let controller = lifecycle(addr).expect("install lifecycle controller");
-                let handle = camber::http::serve_background(listener, router);
-                let mut websocket = connect_async_websocket(addr, "/ws").await;
-                controller
-                    .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
-                    .expect("pause once the second client waits for a permit");
-                let mut second = tokio::net::TcpStream::connect(addr)
-                    .await
-                    .expect("connect permit-waiting peer");
-                tokio::io::AsyncWriteExt::write_all(
-                    &mut second,
-                    b"GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-                )
-                .await
-                .expect("write permit-waiting request");
-                lifecycle_event(
-                    "production permit acquisition returned Pending",
-                    controller.wait_until_paused(LifecycleCheckpoint::ConnectionPermitWaitPending),
-                )
-                .await
-                .expect("production permit acquisition returned Pending");
-                assert!(
-                    matches!(
-                        dispatched.try_recv(),
-                        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-                    ),
-                    "second request dispatched while the direct bridge held the permit"
-                );
-
-                runtime::request_shutdown();
-                controller
-                    .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
-                    .expect("release pending permit wait for shutdown");
-                let mut owner = Box::pin(handle.into_future());
-                assert!(
-                    owner.as_mut().now_or_never().is_none(),
-                    "owner completed while the direct bridge still owned its transport"
-                );
-                assert_graceful_close_then_eof(&mut websocket, "permit-holding direct").await;
-                assert_transport_eof(&mut second, "permit-waiting transport EOF").await;
-                assert!(
-                    lifecycle_event("owned direct bridge completion", owner.as_mut())
-                        .await
-                        .is_ok()
-                );
-                assert!(
-                    matches!(
-                        dispatched.try_recv(),
-                        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-                    ),
-                    "permit-waiting dispatch sender remained live after owner completion"
-                );
-            });
-        })
-        .unwrap();
-}
-
-fn blocking_callback_router(
-    entered_tx: tokio::sync::oneshot::Sender<()>,
-    release_rx: std::sync::mpsc::Receiver<()>,
-    callback_result_tx: tokio::sync::oneshot::Sender<bool>,
-    callback_dropped: Arc<AtomicBool>,
-) -> Router {
-    let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
-    let release_rx = Arc::new(Mutex::new(release_rx));
-    let callback_result_tx = Arc::new(Mutex::new(Some(callback_result_tx)));
-    let mut router = Router::new();
-    router.ws("/ws", move |_request: &Request, connection: WsConn| {
-        let _probe = CallbackDropProbe(Arc::clone(&callback_dropped));
-        if let Some(sender) = entered_tx
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-        {
-            let _ = sender.send(());
-        }
-        let _ = release_rx
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .recv();
-        let peers_were_closed = connection.send("after owner completion").is_err();
-        if let Some(sender) = callback_result_tx
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-        {
-            let _ = sender.send(peers_were_closed);
-        }
-        Ok(())
-    });
-    router
-}
-
-struct BlockingCallbackScenario {
-    release: std::sync::mpsc::Sender<()>,
-    callback_result: tokio::sync::oneshot::Receiver<bool>,
-    callback_dropped: Arc<AtomicBool>,
-    handle: camber::http::ServerHandle,
-    websocket: tokio::net::TcpStream,
-}
-
-async fn start_blocking_callback_scenario() -> BlockingCallbackScenario {
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let (callback_result_tx, callback_result_rx) = tokio::sync::oneshot::channel();
-    let callback_dropped = Arc::new(AtomicBool::new(false));
-    let router = blocking_callback_router(
-        entered_tx,
-        release_rx,
-        callback_result_tx,
-        Arc::clone(&callback_dropped),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind callback-boundary listener");
-    let addr = listener.local_addr().expect("callback listener address");
-    let handle = camber::http::serve_background(listener, router);
-    let websocket = connect_async_websocket(addr, "/ws").await;
-    lifecycle_event("blocking WebSocket callback entry", entered_rx)
-        .await
-        .expect("blocking callback reports entry");
-    BlockingCallbackScenario {
-        release: release_tx,
-        callback_result: callback_result_rx,
-        callback_dropped,
-        handle,
-        websocket,
-    }
-}
-
-async fn finish_blocking_callback_scenario(mut scenario: BlockingCallbackScenario) {
-    runtime::request_shutdown();
-    let mut owner = Box::pin(scenario.handle.into_future());
-    assert_graceful_close_then_eof(&mut scenario.websocket, "callback-boundary").await;
-    assert!(
-        lifecycle_event("owner completion across callback boundary", owner.as_mut())
-            .await
-            .is_ok()
-    );
-    assert!(
-        !scenario.callback_dropped.load(Ordering::Acquire),
-        "owner completion incorrectly claimed blocking callback exit"
-    );
-    assert!(
-        matches!(
-            scenario.callback_result.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ),
-        "blocking callback returned before its explicit release"
-    );
-    scenario
-        .release
-        .send(())
-        .expect("release blocking callback");
-    assert!(
-        lifecycle_event("callback-side channel failure", scenario.callback_result)
-            .await
-            .expect("callback reports post-owner send result"),
-        "callback-side WsConn retained a live supervisor peer after owner completion"
-    );
-    wait_for_dropped_flag(
-        &scenario.callback_dropped,
-        "blocking callback did not drop after reporting its result",
-    )
-    .await;
-}
-
-// 1.T15.
-#[camber::test]
-async fn owner_releases_direct_transport_without_claiming_blocking_callback_exit() {
-    let scenario = start_blocking_callback_scenario().await;
-    finish_blocking_callback_scenario(scenario).await;
-}
-
-// 1.T18, graceful direct WebSocket portion.
-#[camber::test]
-async fn graceful_direct_websocket_shutdown_sends_close_before_eof_and_join() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind graceful WebSocket listener");
-    let addr = listener.local_addr().expect("graceful listener address");
-    let handle = camber::http::serve_background(listener, lifecycle_websocket_router());
-    let mut websocket = connect_async_websocket(addr, "/ws").await;
-
-    runtime::request_shutdown();
-    let mut owner = Box::pin(handle.into_future());
-    assert_graceful_close_then_eof(&mut websocket, "graceful direct").await;
-    assert!(
-        lifecycle_event("graceful direct bridge join", owner.as_mut())
-            .await
-            .is_ok()
-    );
-}
-
-// 1.T18, forced direct WebSocket portion.
-#[camber::test]
-async fn forced_direct_websocket_abort_releases_transport_before_cancelled() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind forced WebSocket listener");
-    let addr = listener.local_addr().expect("forced listener address");
-    let handle = camber::http::serve_background(listener, lifecycle_websocket_router());
-    let mut websocket = connect_async_websocket(addr, "/ws").await;
-
-    handle.cancel();
-    let mut owner = Box::pin(handle.into_future());
-    assert_optional_close_then_eof(&mut websocket, "forced direct").await;
-    assert_cancelled(lifecycle_event("forced direct bridge join", owner.as_mut()).await);
 }
 
 async fn pending_direct_upgrade_shutdown_is_rejected(forced: bool) {
