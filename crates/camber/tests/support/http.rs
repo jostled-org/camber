@@ -1305,6 +1305,28 @@ pub fn framed_request_bytes(
     wire.into_boxed_slice()
 }
 
+/// The exact bytes one chunked request head puts on the wire.
+///
+/// A producer that generates its body after the socket accepts the head needs
+/// the fixed-body writers' header authority without fabricating a length.
+pub fn framed_chunked_request_head(
+    connection: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> Box<[u8]> {
+    body_request_head(
+        DEFAULT_HOST,
+        connection,
+        method,
+        path,
+        headers,
+        BodyFraming::Chunked,
+    )
+    .into_bytes()
+    .into_boxed_slice()
+}
+
 /// How one request head frames the payload behind it.
 ///
 /// The framing line is the only thing the suite's request heads differ in, so

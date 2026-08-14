@@ -74,13 +74,20 @@ const TIGHT_FRAME: usize = 256;
 /// rather than at the last byte of the body.
 const OVER_TOTAL_BYTES: usize = 2 * TIGHT_ADMITTED;
 
-/// The payload a held upload offers.
+/// The payload one generated HTTP/1 transfer chunk carries.
 ///
-/// Four megabytes, which is past every buffer between the two peers: a client
-/// send buffer, a server receive buffer, and Hyper's own bounded read buffer
-/// together hold a small fraction of it, and HTTP/2 opens one megabyte of
-/// per-stream credit. A stalled upload is therefore the session's doing rather
-/// than a transport that simply had not run out of room yet.
+/// The HTTP/1 backpressure case generates these chunks until the real socket
+/// refuses another write, so it does not assume a platform-specific buffer
+/// ceiling or allocate a request sized to one.
+const HTTP1_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+
+/// The most one non-blocking producer offer generates before yielding.
+const HTTP1_OFFER_BYTES: usize = 1024 * 1024;
+
+/// The test route's explicit field and request ceiling.
+const HTTP1_STREAM_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// The fixed payload used by held rows that do not discover a socket plateau.
 const HELD_BYTES: usize = 4 * 1024 * 1024;
 
 /// One HTTP/2 request-body frame.
@@ -105,7 +112,7 @@ const LIVE: &str = "live";
 fn held_limits() -> MultipartLimits {
     MultipartLimits::builder()
         .max_fields(4)
-        .max_field_bytes(ADMITTED)
+        .max_field_bytes(HTTP1_STREAM_MAX_BYTES)
         .max_headers_per_field(8)
         .max_header_bytes_per_field(1024)
         .max_chunk_bytes(CHUNK_BYTES)
@@ -238,7 +245,7 @@ impl Fixture {
 /// an HTTP/2 case can complete a second stream while the first has no credit.
 fn live_router(fixture: &Fixture) -> Router {
     let permits = Arc::clone(&fixture.released);
-    let mut router = Router::new();
+    let mut router = Router::new().max_request_body(HTTP1_STREAM_MAX_BYTES);
     router.multipart(
         Method::Post,
         "/hold",
@@ -310,6 +317,7 @@ fn live_router(fixture: &Fixture) -> Router {
 fn admitted_for(route: &str) -> usize {
     match route {
         TIGHT_ROUTE => TIGHT_ADMITTED,
+        "/hold" => HTTP1_STREAM_MAX_BYTES,
         _ => ADMITTED,
     }
 }
@@ -431,21 +439,31 @@ fn declared() -> Box<str> {
     content_type(BOUNDARY)
 }
 
-/// One client's pending request bytes, and how many of them the socket took.
-///
-/// The buffer is explicitly bounded: it is exactly the request, built before
-/// anything is sent. What the count reports is transport progress and nothing
-/// else, so a stalled upload is visible as a count that stops moving while bytes
-/// are still owed.
+/// One counted chunked request that grows only until its real socket stalls.
 struct Producer {
-    wire: Box<[u8]>,
+    pending: Box<[u8]>,
+    offset: usize,
     sent: usize,
+    field_bytes: usize,
+    phase: ProducerPhase,
 }
 
 impl Producer {
-    /// A producer holding one whole request and having sent none of it.
-    fn new(wire: Box<[u8]>) -> Self {
-        Self { wire, sent: 0 }
+    /// Start one chunked multipart request with its first generated data frame.
+    fn new() -> Self {
+        let head = wire::framed_chunked_request_head(
+            wire::CLOSE_AFTER_RESPONSE,
+            "POST",
+            "/hold",
+            &[("Content-Type", declared().as_ref())],
+        );
+        Self {
+            pending: first_stream_frame(&head),
+            offset: 0,
+            sent: 0,
+            field_bytes: HTTP1_STREAM_CHUNK_BYTES,
+            phase: ProducerPhase::Streaming,
+        }
     }
 
     /// How many bytes the socket has taken.
@@ -453,20 +471,40 @@ impl Producer {
         self.sent
     }
 
-    /// How many bytes this producer still owes the peer.
-    fn owed(&self) -> usize {
-        self.wire.len() - self.sent
+    /// How many bytes remain in the frame the socket refused.
+    fn pending(&self) -> usize {
+        self.pending.len() - self.offset
     }
 
-    /// Offer every byte still owed, stopping at the first refusal.
-    ///
-    /// The socket is non-blocking, so a refusal is the transport reporting that
-    /// it has no room rather than this call waiting for room to appear.
+    /// How many field bytes this request will contain once sealed.
+    fn field_bytes(&self) -> usize {
+        self.field_bytes
+    }
+
+    /// Stop generating data after the currently pending frame.
+    fn seal(&mut self) {
+        self.phase = ProducerPhase::Closing;
+    }
+
+    /// Whether the closing delimiter and chunk terminator were sent.
+    fn complete(&self) -> bool {
+        matches!(self.phase, ProducerPhase::Finished) && self.pending() == 0
+    }
+
+    /// Offer a bounded generated batch, stopping at the first socket refusal.
     fn offer(&mut self, socket: &mut TcpStream) -> io::Result<()> {
-        while self.sent < self.wire.len() {
-            match socket.write(&self.wire[self.sent..]) {
+        let started = self.sent;
+        while self.sent - started < HTTP1_OFFER_BYTES {
+            self.refill();
+            if self.complete() {
+                return Ok(());
+            }
+            match socket.write(&self.pending[self.offset..]) {
                 Ok(0) => return Ok(()),
-                Ok(taken) => self.sent += taken,
+                Ok(taken) => {
+                    self.offset += taken;
+                    self.sent += taken;
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(error),
@@ -474,6 +512,66 @@ impl Producer {
         }
         Ok(())
     }
+
+    /// Materialize only the next transfer frame the socket can be offered.
+    fn refill(&mut self) {
+        if self.pending() != 0 {
+            return;
+        }
+        match self.phase {
+            ProducerPhase::Streaming => {
+                self.offset = 0;
+                self.pending = stream_frame();
+                self.field_bytes += HTTP1_STREAM_CHUNK_BYTES;
+            }
+            ProducerPhase::Closing => {
+                self.offset = 0;
+                self.pending = closing_stream_frame();
+                self.phase = ProducerPhase::Finished;
+            }
+            ProducerPhase::Finished => {}
+        }
+    }
+}
+
+/// Which bytes the counted HTTP/1 producer may generate next.
+#[derive(Debug)]
+enum ProducerPhase {
+    Streaming,
+    Closing,
+    Finished,
+}
+
+/// Frame the multipart prefix and first repeated payload as one transfer chunk.
+fn first_stream_frame(head: &[u8]) -> Box<[u8]> {
+    let mut payload =
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"upload\"\r\n\r\n")
+            .into_bytes();
+    payload.resize(payload.len() + HTTP1_STREAM_CHUNK_BYTES, 7);
+    let mut framed = head.to_vec();
+    framed.extend_from_slice(&transfer_chunk(&payload));
+    framed.into_boxed_slice()
+}
+
+/// Frame one generated payload block as one HTTP transfer chunk.
+fn stream_frame() -> Box<[u8]> {
+    transfer_chunk(&[7; HTTP1_STREAM_CHUNK_BYTES])
+}
+
+/// Frame the multipart end and the HTTP chunked terminator.
+fn closing_stream_frame() -> Box<[u8]> {
+    let closing = format!("\r\n--{BOUNDARY}--\r\n");
+    let mut framed = transfer_chunk(closing.as_bytes()).into_vec();
+    framed.extend_from_slice(b"0\r\n\r\n");
+    framed.into_boxed_slice()
+}
+
+/// Put one payload behind its hexadecimal transfer length.
+fn transfer_chunk(payload: &[u8]) -> Box<[u8]> {
+    let mut framed = format!("{:x}\r\n", payload.len()).into_bytes();
+    framed.extend_from_slice(payload);
+    framed.extend_from_slice(b"\r\n");
+    framed.into_boxed_slice()
 }
 
 /// Keep offering pending bytes until `ready`, and report whether it arrived.
@@ -484,9 +582,15 @@ fn offer_until(
     mut ready: impl FnMut(&Producer) -> bool,
 ) -> bool {
     wire::poll_until(bound, || {
-        producer
-            .offer(socket)
-            .expect("the client could not offer its pending request bytes");
+        producer.offer(socket).unwrap_or_else(|error| {
+            panic!(
+                "the client could not offer its pending request bytes: {error}; sent={}, field={}, pending={}, phase={:?}",
+                producer.sent,
+                producer.field_bytes,
+                producer.pending(),
+                producer.phase
+            )
+        });
         ready(producer)
     })
 }
@@ -519,13 +623,7 @@ async fn http1_slow_consumer_stops_socket_progress_within_session_bounds() {
     socket
         .set_nonblocking(true)
         .expect("the client socket refuses no room instead of waiting for it");
-    let mut producer = Producer::new(wire::framed_request_bytes(
-        wire::CLOSE_AFTER_RESPONSE,
-        "POST",
-        "/hold",
-        &[("Content-Type", declared().as_ref())],
-        &held_body(),
-    ));
+    let mut producer = Producer::new();
     assert!(
         offer_until(&mut producer, &mut socket, BOUND, |_| fixture
             .gate
@@ -552,18 +650,18 @@ async fn http1_slow_consumer_stops_socket_progress_within_session_bounds() {
         producer.sent()
     );
     assert!(
-        producer.owed() > 0,
-        "the peer still owes payload the handler has not asked for"
+        producer.pending() > 0,
+        "the socket refused no pending payload while the handler held"
     );
     assert_held_within_session_bounds(&controller, held);
 
+    producer.seal();
+    let field_bytes = producer.field_bytes();
     fixture.gate.release();
     assert!(
-        offer_until(&mut producer, &mut socket, BOUND, |producer| producer
-            .owed()
-            == 0),
+        offer_until(&mut producer, &mut socket, BOUND, Producer::complete),
         "the peer's upload resumes once the hold is released: {} bytes still owed",
-        producer.owed()
+        producer.pending()
     );
     socket
         .set_nonblocking(false)
@@ -572,7 +670,7 @@ async fn http1_slow_consumer_stops_socket_progress_within_session_bounds() {
         wire::read_http_response_bounded(&mut socket).expect("the held upload was answered");
     assert_eq!(
         (answered.status, String::from_utf8_lossy(&answered.body)),
-        (200, format!("held {HELD_BYTES}").into()),
+        (200, format!("held {field_bytes}").into()),
         "the handler read every byte the peer owed"
     );
     wire::assert_released(&fixture.released, 1, "the held session released its permit");
