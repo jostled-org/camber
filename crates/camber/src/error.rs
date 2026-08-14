@@ -73,6 +73,24 @@ pub enum RuntimeError {
     #[error("invalid multipart body: {0}")]
     Multipart(Box<str>),
 
+    /// A request body crossed the byte maximum its route admitted it under.
+    ///
+    /// Held apart from [`RuntimeError::Multipart`] because nothing about the
+    /// body was malformed: it was well-formed and too large, and the two answer
+    /// a peer differently.
+    ///
+    /// Carries the bound that was crossed, which is operator detail; the HTTP
+    /// rejection boundary answers the peer with fixed safe text.
+    #[error("request body limit exceeded: {0}")]
+    RequestBodyLimit(Box<str>),
+
+    /// An incoming request body could not be read from the transport.
+    ///
+    /// The peer's connection failed mid-upload. Nothing was refused and nothing
+    /// was malformed, so this is neither a limit nor a parse failure.
+    #[error("request body unreadable: {0}")]
+    RequestBodyUnreadable(Box<str>),
+
     /// A database interaction failed.
     ///
     /// Camber never constructs this variant — it ships no database layer. It is

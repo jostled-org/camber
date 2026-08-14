@@ -1,0 +1,30 @@
+# Semantic architecture rules for the streaming multipart family and its route
+# consumers.
+#
+# The repository defaults, plus mixed-concern enforcement. The multipart family
+# is split by concern on purpose: `grammar` owns the wire format both parsers
+# read through, `limits` owns configuration, `budget` owns retained-capacity
+# accounting, `parser` owns the state machine, and `session` owns ownership and
+# the command protocol. A byte bound derived inside the parser, a second buffer
+# budget, a second session driver, or filesystem work anywhere in the family is
+# the mixed concern this config exists to catch.
+#
+# Filesystem spellings, a second driver, and a second buffer budget are matched
+# textually by the `multipart-architecture` proof command, which is where a
+# pattern ban can be stated; Pedant's config surface carries the structural
+# checks below and no pattern list. Those scans are inventory, not capability
+# authority: the capability proof is Pedant MCP `query_capabilities` on the
+# final tree.
+#
+# The repository's explicit dynamic-dispatch exceptions are retained: the route
+# consumers store erased handlers, middleware frames, rejection mappers, and
+# body-admission policies, which is the frozen-router ownership model this plan
+# reuses rather than replaces.
+check_mixed_concerns = true
+check_dyn_field = false
+check_dyn_param = false
+check_clone_in_loop = false
+check_vec_box_dyn = false
+max_depth = 2
+check_long_function_body = true
+max_function_body_lines = 80

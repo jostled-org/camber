@@ -132,6 +132,7 @@ mod middleware;
 /// HTTP client mocking for tests.
 pub mod mock;
 mod multipart;
+mod multipart_route;
 #[cfg(feature = "otel")]
 /// OpenTelemetry request propagation and tracing hooks.
 pub mod otel;
@@ -159,6 +160,12 @@ mod ws_proxy;
 
 pub use async_proxy::proxy_forward;
 pub use body_admission::{BodyAdmission, BodyAdmissionContext, RequestBodyMode};
+/// The reference-counted byte buffer Camber's streaming request bodies hand out.
+///
+/// Re-exported because [`MultipartField::next_chunk`](self::MultipartField::next_chunk)
+/// returns one: a public signature naming a type a caller cannot name is not a
+/// usable API.
+pub use bytes::Bytes;
 pub use client::{
     ClientBuilder, client, delete, delete_with_body, get, head, options, patch, patch_form,
     patch_json, post, post_form, post_json, put, put_form, put_json,
@@ -169,13 +176,15 @@ pub use health::{ProxyHealthResource, spawn_health_checker};
 pub use host_router::HostRouter;
 pub use method::{Method, ParseMethodError};
 pub use middleware::{MiddlewareFn, MiddlewareFuture, Next, ResponseFuture};
-pub use multipart::{MultipartReader, Part};
+pub use multipart::{
+    MultipartField, MultipartLimits, MultipartLimitsBuilder, MultipartReader, MultipartStream, Part,
+};
 pub use rejection::{
     NegotiatedResponseMetadata, Rejection, RejectionContext, RejectionKind, RejectionProtocol,
     RequestId,
 };
 pub use request::{Request, RequestBuilder};
-pub use response::{HeaderPair, IntoResponse, Response};
+pub use response::{HandlerOutcome, HeaderPair, IntoResponse, Response};
 #[cfg(feature = "grpc")]
 pub use router::GrpcRouter;
 pub use router::Router;
@@ -187,7 +196,6 @@ pub use server::{
 pub use sse::SseWriter;
 pub use static_files::serve_file;
 pub use stream::{StreamResponse, StreamSender};
-pub use trie::HandlerOutcome;
 #[cfg(feature = "ws")]
 pub use websocket::{WsConn, WsMessage};
 

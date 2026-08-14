@@ -4,6 +4,10 @@ pub mod h2_client;
 pub mod http;
 #[path = "support/metrics_scrape.rs"]
 pub mod metrics_scrape;
+// Mounted under a name of its own here, because this root's own multipart cases
+// live in a module the inventory proof names `streaming_multipart`.
+#[path = "support/streaming_multipart.rs"]
+pub mod multipart_support;
 #[path = "support/rejection_kinds.rs"]
 pub mod rejection_kinds;
 #[path = "support/rejection_metrics.rs"]
@@ -47,5 +51,7 @@ pub mod host_routing_and_outbound_proxy;
 pub mod mixed_content_and_websocket_proxy;
 #[path = "acceptance_e2e/routing_and_outbound_calls.rs"]
 pub mod routing_and_outbound_calls;
+#[path = "acceptance_e2e/streaming_multipart.rs"]
+pub mod streaming_multipart;
 #[path = "acceptance_e2e/unified_rest_sse_websocket.rs"]
 pub mod unified_rest_sse_websocket;

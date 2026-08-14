@@ -133,6 +133,11 @@ pub struct Observed {
 /// Every mapper invocation one fixture saw, in order.
 pub type Journal = Arc<Mutex<Vec<Observed>>>;
 
+/// An empty journal, for a mapper that has recorded nothing yet.
+pub fn journal() -> Journal {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
 /// The `Allow` value a rejection offers as a safe default, if it offers one.
 fn default_allow(rejection: &Rejection) -> Option<Box<str>> {
     rejection

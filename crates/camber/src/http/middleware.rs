@@ -1,6 +1,7 @@
 use super::async_proxy::ProxyRequest;
 use super::rejection::{HANDLER, MIDDLEWARE, Rejected, RejectionScope};
-use super::trie::{Handler, HandlerOutcome};
+use super::response::HandlerOutcome;
+use super::trie::Handler;
 use super::{Request, Response};
 use std::future::Future;
 use std::pin::Pin;

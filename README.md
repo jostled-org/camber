@@ -190,6 +190,30 @@ router.post("/upload", |req| async {
 });
 ```
 
+`req.multipart()` buffers the whole body first. For uploads too large to hold,
+`Router::multipart` hands the handler one bounded chunk at a time. The peer's
+upload advances only while the handler is reading, so a slow consumer stops the
+socket instead of filling memory.
+
+```rust
+use camber::http::{Method, MultipartLimits, MultipartStream, Request, Response};
+
+router.multipart(
+    Method::Post,
+    "/stream",
+    MultipartLimits::default(),
+    |_req: &Request, mut stream: MultipartStream| async move {
+        while let Some(mut field) = stream.next_field().await? {
+            let name = field.name().to_owned();
+            while let Some(chunk) = field.next_chunk().await? {
+                append(&name, &chunk);
+            }
+        }
+        Response::text(200, "uploaded")
+    },
+);
+```
+
 ## Database
 
 ```rust

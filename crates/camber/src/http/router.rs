@@ -3,11 +3,13 @@ use super::body_admission::{
 };
 use super::method::Method;
 use super::middleware::MiddlewareFn;
+use super::multipart::{MultipartLimits, MultipartStream};
 use super::rejection::{Rejection, RejectionContext, RejectionMapper, shared_mapper};
+use super::response::HandlerOutcome;
 use super::response::IntoResponse;
 use super::sse::SseWriter;
 use super::stream::StreamResponse;
-use super::trie::{CANONICAL_METHODS, HandlerOutcome, RouteHandler, TrieNode};
+use super::trie::{CANONICAL_METHODS, MultipartRegistration, RouteHandler, TrieNode};
 #[cfg(feature = "ws")]
 use super::websocket::WsConn;
 use super::{Request, Response};
@@ -302,6 +304,83 @@ impl Router {
         R: IntoResponse + 'static,
     {
         self.add(Method::Options, path, handler);
+    }
+
+    /// Register a streaming multipart handler for `path` under `method`.
+    ///
+    /// The handler is given the metadata-only request — method, path, headers,
+    /// route parameters, peer identity, TLS state, request id, and
+    /// [`Request::on_disconnect`](super::Request::on_disconnect) — and one
+    /// [`MultipartStream`], which is the whole body-access capability. Fields
+    /// arrive in wire order, one at a time, under `limits`; each chunk is at
+    /// most `max_chunk_bytes` and owns its own allocation.
+    ///
+    /// The total a peer may send is not configured here.
+    /// [`Router::max_request_body`], [`HostRouter::max_request_body`](super::HostRouter::max_request_body),
+    /// and [`Router::body_admission`] already resolve one effective maximum
+    /// before the first payload frame is polled, and `limits` bounds the
+    /// structure inside it.
+    ///
+    /// A `GET` registration does not also answer `HEAD`. Every other route kind
+    /// answers a `HEAD` from its `GET` handler; this one reads a payload a
+    /// `HEAD` request never sends, so the route names `GET` alone in its
+    /// `Allow` value and refuses `HEAD` with `405 Method Not Allowed` instead
+    /// of opening a session over an empty body.
+    ///
+    /// Admission and this router's middleware both run before any payload is
+    /// read, and a missing or malformed request boundary is refused before the
+    /// handler is reached. A handler must read to the end — until `next_field`
+    /// answers `None` — for its response to be committed; dropping a field
+    /// before its data ends is refused as an incomplete multipart body, and
+    /// [`MultipartField::discard`](super::MultipartField::discard) is the one
+    /// skip that succeeds.
+    ///
+    /// ```rust
+    /// use camber::http::{Method, MultipartLimits, MultipartStream, Request, Response, Router};
+    ///
+    /// let mut router = Router::new();
+    /// router.multipart(
+    ///     Method::Post,
+    ///     "/uploads/:id",
+    ///     MultipartLimits::default(),
+    ///     |request: &Request, mut stream: MultipartStream| {
+    ///         let id: Box<str> = request.param("id").unwrap_or_default().into();
+    ///         async move {
+    ///             let mut received = 0;
+    ///             while let Some(mut field) = stream.next_field().await? {
+    ///                 while let Some(chunk) = field.next_chunk().await? {
+    ///                     received += chunk.len();
+    ///                 }
+    ///             }
+    ///             Response::text(200, &format!("{id} received {received} bytes"))
+    ///         }
+    ///     },
+    /// );
+    /// ```
+    pub fn multipart<F, Fut, R>(
+        &mut self,
+        method: Method,
+        path: &str,
+        limits: MultipartLimits,
+        handler: F,
+    ) where
+        F: Fn(&Request, MultipartStream) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: IntoResponse + 'static,
+    {
+        let registration = MultipartRegistration::new(
+            Box::new(move |req: &Request, stream: MultipartStream| {
+                let entered = handler(req, stream);
+                Box::pin(async move { entered.await.into_response() })
+                    as Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
+            }),
+            limits,
+        );
+        self.root.insert_route(
+            method,
+            path,
+            RouteHandler::Multipart(Arc::new(registration)),
+        );
     }
 
     /// Register an async streaming handler for GET requests.

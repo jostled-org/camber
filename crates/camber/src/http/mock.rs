@@ -35,6 +35,12 @@ pub enum LifecycleCheckpoint {
     SseBufferConfigured(usize),
     WebSocketOutgoingBufferConfigured(usize),
     WebSocketIncomingBufferConfigured(usize),
+    MultipartCommandAccepted,
+    MultipartIngressAdvanced,
+    MultipartReplyPublished,
+    MultipartHandlerCompleted,
+    MultipartDriverTerminated,
+    BeforeMultipartResponseSelection,
 }
 
 #[doc(hidden)]
@@ -110,6 +116,15 @@ impl ReleaseGate {
         self.released.store(true, Ordering::Release);
     }
 
+    /// Whether the release has been recorded.
+    ///
+    /// A plain read, for a caller deciding whether it has anything to wait for.
+    /// Waiting itself goes through [`Self::poll_release`], which answers the
+    /// same question under the lock that makes the answer race-free.
+    fn is_released(&self) -> bool {
+        self.released.load(Ordering::Acquire)
+    }
+
     /// How many turns whatever waits here has taken.
     fn polls(&self) -> usize {
         self.polls.load(Ordering::Acquire)
@@ -176,6 +191,12 @@ pub(crate) struct LifecycleScript {
     state: Mutex<ScriptState>,
     supervisor_wake: tokio::sync::Notify,
     body: BodyObservations,
+    /// What this listener's streaming multipart sessions have published.
+    ///
+    /// The production counters themselves, held here rather than beside each
+    /// session, so a session reports through the same registration its
+    /// checkpoints run through: one observer per listener, or none at all.
+    multipart: super::multipart::SessionMetrics,
 }
 
 impl LifecycleScript {
@@ -188,7 +209,13 @@ impl LifecycleScript {
             }),
             supervisor_wake: tokio::sync::Notify::new(),
             body: BodyObservations::default(),
+            multipart: super::multipart::SessionMetrics::default(),
         }
+    }
+
+    /// The counters this listener's multipart sessions publish through.
+    pub(in crate::http) fn multipart(&self) -> &super::multipart::SessionMetrics {
+        &self.multipart
     }
 
     /// Write one body observation, and do nothing when no controller watches.
@@ -552,6 +579,17 @@ impl LifecycleController {
             .permit_owners_dropped
             .load(Ordering::Acquire)
     }
+
+    /// What this listener's streaming multipart sessions have done so far.
+    ///
+    /// Read-only, and every number in it is written by the production decision
+    /// it names: nothing here sets a terminal state, polls a body, maps a
+    /// result, releases ownership, or commits a response. A served listener
+    /// owns none of the allocations behind its bodies, so it witnesses no freed
+    /// backing and claims none.
+    pub fn multipart_observed(&self) -> MultipartObservation {
+        MultipartObservation::of(self.script.multipart(), None, None)
+    }
 }
 
 impl Drop for LifecycleController {
@@ -794,5 +832,575 @@ impl Drop for MockHttp {
                 MOCK_ACTIVE.store(false, Ordering::Release);
             }
         });
+    }
+}
+
+/// One controlled source frame, and the witness that fires when its backing
+/// allocation is released.
+///
+/// The backing is what a chunk copied out of it must not keep alive, so the
+/// witness is the whole point: a chunk that borrowed instead of copying would
+/// hold this owner and the witness would stay silent.
+struct WitnessedFrame {
+    bytes: Box<[u8]>,
+    witness: Arc<AtomicUsize>,
+}
+
+impl AsRef<[u8]> for WitnessedFrame {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for WitnessedFrame {
+    fn drop(&mut self) {
+        self.witness.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// The admitted permit's release witness.
+struct WitnessedPermit(Arc<AtomicUsize>);
+
+impl Drop for WitnessedPermit {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// The transport failure a controlled body ends with.
+#[derive(Debug)]
+struct ControlledBodyError(Box<str>);
+
+impl std::fmt::Display for ControlledBodyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// A concrete request body whose frames, stall, and ending a case chose in
+/// advance.
+///
+/// It supplies bytes and scheduling and nothing else: it cannot choose a parser
+/// state, a budget, a terminal summary, or a rejection.
+struct ControlledBody {
+    frames: std::collections::VecDeque<bytes::Bytes>,
+    failure: Option<Box<str>>,
+    /// How many frames this body hands out before it parks.
+    stall_after: Option<usize>,
+    handed: usize,
+    /// Where this body stops handing out frames until a case lets it go.
+    ///
+    /// This is what makes "accepted, ingress advanced, no reply yet" a state a
+    /// case can stand in. A body that is always ready runs from acceptance to
+    /// publication inside one poll, so that phase would never be observable.
+    /// The same gate a paused checkpoint waits on, because the two wait for the
+    /// same thing and a second copy registered its waker after reading the
+    /// release instead of under the lock that guards it — a release landing in
+    /// that window woke nothing and parked the body for good.
+    gate: Arc<ReleaseGate>,
+}
+
+impl ControlledBody {
+    /// Whether this body has handed out everything it may before its gate opens.
+    fn stalled(&self) -> bool {
+        self.stall_after
+            .is_some_and(|limit| self.handed >= limit && !self.gate.is_released())
+    }
+
+    /// The next thing this body hands out: a frame, a failure, or the end.
+    fn next_frame(
+        &mut self,
+    ) -> Option<Result<hyper::body::Frame<bytes::Bytes>, ControlledBodyError>> {
+        match self.frames.pop_front() {
+            Some(frame) => {
+                self.handed += 1;
+                Some(Ok(hyper::body::Frame::data(frame)))
+            }
+            None => self
+                .failure
+                .take()
+                .map(|message| Err(ControlledBodyError(message))),
+        }
+    }
+}
+
+impl hyper::body::Body for ControlledBody {
+    type Data = bytes::Bytes;
+    type Error = ControlledBodyError;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let body = self.get_mut();
+        if body.stalled() && body.gate.poll_release(cx).is_pending() {
+            return std::task::Poll::Pending;
+        }
+        std::task::Poll::Ready(body.next_frame())
+    }
+}
+
+/// How one observed multipart session ended.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MultipartTerminalKind {
+    /// Terminal framing was consumed through end of body.
+    Clean,
+    /// An incomplete field, a canceled operation, or revocation ended it.
+    Abandoned,
+    /// A total or per-field byte crossing ended it.
+    ByteLimit,
+    /// An incoming transport read failure ended it.
+    Unreadable,
+    /// A grammar, structural, or framing failure ended it.
+    Structural,
+}
+
+/// A read-only snapshot of what one multipart session has done so far.
+///
+/// Every number is written by the production decision it names. Nothing here
+/// sets a terminal state, polls a body, maps a result, releases ownership, or
+/// commits a response.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MultipartObservation {
+    body_frames_polled: usize,
+    commands_accepted: usize,
+    replies_published: usize,
+    parser_retained_bytes: usize,
+    parser_peak_bytes: usize,
+    reply_retained_bytes: usize,
+    reply_peak_bytes: usize,
+    active_metadata_peak_bytes: usize,
+    source_frames_released: usize,
+    source_frame_backings_freed: Option<usize>,
+    permit_owners_dropped: usize,
+    permit_backings_freed: Option<usize>,
+    revocations: usize,
+    drivers_terminated: usize,
+}
+
+impl MultipartObservation {
+    /// Snapshot what one set of session counters currently holds.
+    ///
+    /// Every count the driver publishes is read from the counters, so both
+    /// producers mean the same thing by it. The two freed-allocation counts are
+    /// parameters because only a fixture that owns the allocation can witness
+    /// it: a controlled session watches its own frame and permit backings go,
+    /// and a served listener has no such witness and supplies none. One
+    /// constructor, so a field added here cannot reach one producer and not the
+    /// other.
+    fn of(
+        metrics: &super::multipart::SessionMetrics,
+        source_frame_backings_freed: Option<usize>,
+        permit_backings_freed: Option<usize>,
+    ) -> Self {
+        Self {
+            body_frames_polled: metrics.body_frames_polled(),
+            commands_accepted: metrics.commands_accepted(),
+            replies_published: metrics.replies_published(),
+            parser_retained_bytes: metrics.parser_retained_bytes(),
+            parser_peak_bytes: metrics.parser_peak_bytes(),
+            reply_retained_bytes: metrics.reply_retained_bytes(),
+            reply_peak_bytes: metrics.reply_peak_bytes(),
+            active_metadata_peak_bytes: metrics.active_metadata_peak_bytes(),
+            source_frames_released: metrics.source_frames_released(),
+            source_frame_backings_freed,
+            permit_owners_dropped: metrics.permit_owners_dropped(),
+            permit_backings_freed,
+            revocations: metrics.revocations(),
+            drivers_terminated: metrics.drivers_terminated(),
+        }
+    }
+
+    /// How many payload frames the driver polled.
+    pub fn body_frames_polled(&self) -> usize {
+        self.body_frames_polled
+    }
+
+    /// How many commands the driver accepted.
+    pub fn commands_accepted(&self) -> usize {
+        self.commands_accepted
+    }
+
+    /// How many replies the driver published.
+    pub fn replies_published(&self) -> usize {
+        self.replies_published
+    }
+
+    /// What the parser budget and the outstanding reply hold now.
+    pub fn parser_retained_bytes(&self) -> usize {
+        self.parser_retained_bytes
+    }
+
+    /// The most the parser budget ever held.
+    pub fn parser_peak_bytes(&self) -> usize {
+        self.parser_peak_bytes
+    }
+
+    /// What the one outstanding reply payload owns now.
+    pub fn reply_retained_bytes(&self) -> usize {
+        self.reply_retained_bytes
+    }
+
+    /// The largest reply payload this session published.
+    pub fn reply_peak_bytes(&self) -> usize {
+        self.reply_peak_bytes
+    }
+
+    /// The largest active field metadata payload this session retained.
+    pub fn active_metadata_peak_bytes(&self) -> usize {
+        self.active_metadata_peak_bytes
+    }
+
+    /// How many spent source frames the driver released its handle on.
+    ///
+    /// The weaker of the two frame claims, and the one both fixtures can make:
+    /// the driver dropped its `Bytes`, whether or not an application chunk still
+    /// keeps the backing alive. For the copy-not-borrow claim read
+    /// [`Self::source_frame_backings_freed`].
+    pub fn source_frames_released(&self) -> usize {
+        self.source_frames_released
+    }
+
+    /// How many source-frame backing allocations were proven freed.
+    ///
+    /// `None` where nothing witnesses the allocation. A served listener hands
+    /// its bodies to hyper and holds no witness for them, so only a controlled
+    /// session answers this — and its answer is the strong claim: a chunk that
+    /// borrowed its frame instead of copying would keep the backing alive and
+    /// this count would stay behind.
+    pub fn source_frame_backings_freed(&self) -> Option<usize> {
+        self.source_frame_backings_freed
+    }
+
+    /// How many admitted permit owners this session released.
+    ///
+    /// This session's own drivers, never another request class sharing the
+    /// listener: the count is written by the driver that holds the permit.
+    pub fn permit_owners_dropped(&self) -> usize {
+        self.permit_owners_dropped
+    }
+
+    /// How many admitted permit backing allocations were proven freed.
+    ///
+    /// `None` where nothing witnesses the allocation, exactly as with
+    /// [`Self::source_frame_backings_freed`].
+    pub fn permit_backings_freed(&self) -> Option<usize> {
+        self.permit_backings_freed
+    }
+
+    /// How many sessions had their command admission revoked by a coordinator.
+    pub fn revocations(&self) -> usize {
+        self.revocations
+    }
+
+    /// How many drivers returned their terminal summary.
+    pub fn drivers_terminated(&self) -> usize {
+        self.drivers_terminated
+    }
+}
+
+/// What one finished multipart session ended as, and what it did.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultipartOutcome {
+    terminal: MultipartTerminalKind,
+    diagnostic: Option<Box<str>>,
+    observation: MultipartObservation,
+}
+
+impl MultipartOutcome {
+    /// What one finished session ended as, and what it did.
+    ///
+    /// It consumes the terminal summary, so the diagnostic moves out of it
+    /// rather than being copied out of a value dropped on the next line, and the
+    /// terminal set is named here once instead of in one function per field.
+    fn of(
+        terminal: super::multipart::MultipartTerminal,
+        observation: MultipartObservation,
+    ) -> Self {
+        use super::multipart::{MultipartFailure, MultipartTerminal};
+        let (terminal, diagnostic) = match terminal {
+            MultipartTerminal::Clean => (MultipartTerminalKind::Clean, None),
+            MultipartTerminal::Abandoned => (MultipartTerminalKind::Abandoned, None),
+            MultipartTerminal::ParserFailure(MultipartFailure::ByteLimit, diagnostic) => {
+                (MultipartTerminalKind::ByteLimit, Some(diagnostic))
+            }
+            MultipartTerminal::ParserFailure(MultipartFailure::Unreadable, diagnostic) => {
+                (MultipartTerminalKind::Unreadable, Some(diagnostic))
+            }
+            MultipartTerminal::ParserFailure(MultipartFailure::Structural, diagnostic) => {
+                (MultipartTerminalKind::Structural, Some(diagnostic))
+            }
+        };
+        Self {
+            terminal,
+            diagnostic,
+            observation,
+        }
+    }
+
+    /// The terminal summary the driver returned.
+    pub fn terminal(&self) -> MultipartTerminalKind {
+        self.terminal
+    }
+
+    /// The operator diagnostic a failed session recorded, if it failed.
+    ///
+    /// This is the private text the driver kept, not the fixed safe text a peer
+    /// is answered with.
+    pub fn diagnostic(&self) -> Option<&str> {
+        self.diagnostic.as_deref()
+    }
+
+    /// The observations taken after the driver returned.
+    pub fn observed(&self) -> MultipartObservation {
+        self.observation
+    }
+}
+
+/// Whether the admitted session owner still cannot be duplicated.
+///
+/// The driver is `pub(in crate::http)`, so no test outside the crate can name
+/// it. Two implementations, one blanket and one constrained to `Clone`, resolve
+/// the marker only while the driver has no `Clone` implementation: giving the
+/// one owner of the body, the budget, the parser, and the permit a second owner
+/// makes this call ambiguous and the crate stops compiling.
+#[doc(hidden)]
+pub fn multipart_session_owner_is_not_cloneable() -> bool {
+    trait AmbiguousIfClone<Witness> {
+        fn owns_one_session() -> bool {
+            true
+        }
+    }
+    impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+    impl<T: Clone> AmbiguousIfClone<u8> for T {}
+
+    type ProductionDriver = super::multipart::MultipartSessionDriver<hyper::body::Incoming>;
+    <ProductionDriver as AmbiguousIfClone<_>>::owns_one_session()
+}
+
+/// Build one controlled multipart session over the production driver.
+///
+/// The frames, the admitted maximum, and whether a permit exists are the only
+/// inputs. The parser, the budget, the command protocol, the terminal summary,
+/// and every refusal are the production code's.
+#[doc(hidden)]
+pub fn multipart_session(
+    boundary: &str,
+    limits: super::MultipartLimits,
+) -> MultipartSessionBuilder {
+    MultipartSessionBuilder {
+        boundary: boundary.into(),
+        limits,
+        frames: Vec::new(),
+        failure: None,
+        body_limit: usize::MAX,
+        permit: false,
+        stall_after: None,
+        source_drops: Arc::new(AtomicUsize::new(0)),
+    }
+}
+
+#[doc(hidden)]
+pub struct MultipartSessionBuilder {
+    boundary: Box<str>,
+    limits: super::MultipartLimits,
+    frames: Vec<bytes::Bytes>,
+    failure: Option<Box<str>>,
+    body_limit: usize,
+    permit: bool,
+    stall_after: Option<usize>,
+    source_drops: Arc<AtomicUsize>,
+}
+
+impl MultipartSessionBuilder {
+    /// Park the body after `frames`, until the session is told to release it.
+    pub fn stall_after(mut self, frames: usize) -> Self {
+        self.stall_after = Some(frames);
+        self
+    }
+
+    /// Append one controlled source frame, carrying its own drop witness.
+    pub fn frame(mut self, bytes: &[u8]) -> Self {
+        self.frames.push(bytes::Bytes::from_owner(WitnessedFrame {
+            bytes: bytes.into(),
+            witness: Arc::clone(&self.source_drops),
+        }));
+        self
+    }
+
+    /// Append a whole body split into frames of at most `size` bytes.
+    ///
+    /// A `size` of zero is a mistake in the case, not a request for one-byte
+    /// frames: coercing it would silently turn a frame-count claim into a claim
+    /// about a different body.
+    pub fn frames_of(mut self, body: &[u8], size: usize) -> Self {
+        assert!(size > 0, "frames_of requires a size of at least one byte");
+        for chunk in body.chunks(size) {
+            self = self.frame(chunk);
+        }
+        self
+    }
+
+    /// End the controlled body with a transport failure.
+    pub fn transport_failure(mut self, message: &str) -> Self {
+        self.failure = Some(message.into());
+        self
+    }
+
+    /// The effective admitted maximum this session reads under.
+    pub fn body_limit(mut self, bytes: usize) -> Self {
+        self.body_limit = bytes;
+        self
+    }
+
+    /// Retain an admission permit whose release this session observes.
+    pub fn with_permit(mut self) -> Self {
+        self.permit = true;
+        self
+    }
+
+    /// Start the production driver and hand back the access handle.
+    ///
+    /// The observer is this session's own, registered to no listener: it carries
+    /// the production counters the driver publishes through, and every
+    /// checkpoint runs straight through because nothing armed one.
+    pub fn start(self) -> MultipartSession {
+        let permit_drops = Arc::new(AtomicUsize::new(0));
+        let admitted = admitted_controlled_body(
+            self.body_limit,
+            self.permit
+                .then(|| WitnessedPermit(Arc::clone(&permit_drops))),
+        );
+        let observer = Arc::new(LifecycleScript::new());
+        let gate = Arc::new(ReleaseGate::default());
+        let body = ControlledBody {
+            frames: self.frames.into(),
+            failure: self.failure,
+            stall_after: self.stall_after,
+            handed: 0,
+            gate: Arc::clone(&gate),
+        };
+        let (stream, revocation, driver) = super::multipart::open(
+            body,
+            admitted,
+            &self.boundary,
+            self.limits,
+            Some(Arc::clone(&observer)),
+        );
+        MultipartSession {
+            stream: Some(stream),
+            revocation,
+            driver: tokio::spawn(driver.run()),
+            observer,
+            gate,
+            source_drops: self.source_drops,
+            permit_drops,
+        }
+    }
+}
+
+/// Build the admitted body one controlled session reads under.
+fn admitted_controlled_body(
+    limit: usize,
+    permit: Option<WitnessedPermit>,
+) -> super::body_admission::AdmittedBody {
+    let admission = match permit {
+        Some(probe) => super::BodyAdmission::with_permit(limit, probe),
+        None => super::BodyAdmission::new(limit),
+    };
+    super::body_admission::AdmittedBody {
+        limit,
+        permit: admission.into_permit(None),
+    }
+}
+
+/// One running controlled multipart session.
+///
+/// It owns the access handle, the coordinator's revocation, and the driver task.
+/// Dropping it releases the handle and stops the driver, so a case that fails or
+/// panics still leaves nothing running.
+#[doc(hidden)]
+pub struct MultipartSession {
+    stream: Option<super::MultipartStream>,
+    revocation: super::multipart::MultipartRevocation,
+    driver: tokio::task::JoinHandle<super::multipart::MultipartTerminal>,
+    observer: Arc<LifecycleScript>,
+    gate: Arc<ReleaseGate>,
+    source_drops: Arc<AtomicUsize>,
+    permit_drops: Arc<AtomicUsize>,
+}
+
+impl MultipartSession {
+    /// The handler-facing access handle, while this session still holds it.
+    pub fn stream(&mut self) -> Option<&mut super::MultipartStream> {
+        self.stream.as_mut()
+    }
+
+    /// Take the access handle, so a case can move it, hold it, or drop it.
+    pub fn take_stream(&mut self) -> Option<super::MultipartStream> {
+        self.stream.take()
+    }
+
+    /// Close command admission the way handler completion does.
+    pub fn revoke(&self) {
+        self.revocation.revoke();
+    }
+
+    /// Let a parked controlled body hand out the rest of its frames.
+    pub fn release_body(&self) {
+        self.gate.record();
+        self.gate.wake();
+    }
+
+    /// What this session has done so far.
+    ///
+    /// The freed-backing counts are this fixture's own witnesses: they fire when
+    /// the backing allocation is released, which is the claim a chunk that
+    /// borrowed instead of copying would fail.
+    pub fn observed(&self) -> MultipartObservation {
+        MultipartObservation::of(
+            self.observer.multipart(),
+            Some(self.source_drops.load(Ordering::Acquire)),
+            Some(self.permit_drops.load(Ordering::Acquire)),
+        )
+    }
+
+    /// Wait until the driver has published at least `count` replies.
+    pub async fn wait_for_replies(&self, count: usize) {
+        self.observer.multipart().wait_for_replies(count).await;
+    }
+
+    /// Release the handle, join the driver, and report what it ended as.
+    ///
+    /// A case that moved the handle elsewhere must drop it first: the driver
+    /// stops when no handle can issue another command.
+    pub async fn finish(mut self) -> Result<MultipartOutcome, RuntimeError> {
+        self.stream = None;
+        self.release_body();
+        let terminal = (&mut self.driver).await.map_err(Self::unjoined)?;
+        Ok(MultipartOutcome::of(terminal, self.observed()))
+    }
+
+    /// Name one driver task that produced no terminal summary.
+    ///
+    /// A canceled task is not a panicked one: dropping a session aborts its
+    /// driver, and reporting that as a panic sends a case looking for a payload
+    /// that never existed.
+    fn unjoined(error: tokio::task::JoinError) -> RuntimeError {
+        match error.is_cancelled() {
+            true => RuntimeError::Cancelled,
+            false => RuntimeError::TaskPanicked(error.to_string().into()),
+        }
+    }
+}
+
+impl Drop for MultipartSession {
+    fn drop(&mut self) {
+        self.stream = None;
+        self.release_body();
+        self.driver.abort();
     }
 }

@@ -32,26 +32,39 @@ enum BodyStore {
     Empty,
 }
 
+/// The outcome a handler produces.
+///
+/// Fallible, so a handler's error keeps its category and source chain until the
+/// router's one rejection boundary decides what the peer is told.
+///
+/// Public because [`MiddlewareFuture`](super::MiddlewareFuture) resolves to it:
+/// a name a published signature spells has to be a name a reader can follow.
+/// It is transparently `Result<Response, RuntimeError>`, so this documents the
+/// shape rather than adding one. It lives beside [`Response`] rather than beside
+/// the route trie because it is what a response conversion answers with, and the
+/// trie only stores the handlers that produce it.
+pub type HandlerOutcome = Result<Response, RuntimeError>;
+
 /// Trait for types that can be converted into an HTTP response outcome.
 ///
 /// Implemented for `Response` (a deliberate application response) and
-/// `Result<Response, RuntimeError>` (that response, or the failure the router's
-/// rejection boundary classifies). The conversion is fallible so a handler's
-/// error keeps its category, source chain, and client-safe message until one
-/// boundary decides what the peer is told.
+/// [`HandlerOutcome`] (that response, or the failure the router's rejection
+/// boundary classifies). The conversion is fallible so a handler's error keeps
+/// its category, source chain, and client-safe message until one boundary
+/// decides what the peer is told.
 pub trait IntoResponse {
     /// Convert this value into a response outcome.
-    fn into_response(self) -> Result<Response, RuntimeError>;
+    fn into_response(self) -> HandlerOutcome;
 }
 
 impl IntoResponse for Response {
-    fn into_response(self) -> Result<Response, RuntimeError> {
+    fn into_response(self) -> HandlerOutcome {
         Ok(self)
     }
 }
 
-impl IntoResponse for Result<Response, RuntimeError> {
-    fn into_response(self) -> Result<Response, RuntimeError> {
+impl IntoResponse for HandlerOutcome {
+    fn into_response(self) -> HandlerOutcome {
         self
     }
 }

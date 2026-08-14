@@ -183,7 +183,7 @@ impl BodyAdmission {
     }
 
     /// Take the permit into the owner that holds it for the rest of the request.
-    fn into_permit(self, observer: Option<&Arc<LifecycleScript>>) -> Option<BodyPermit> {
+    pub(super) fn into_permit(self, observer: Option<&Arc<LifecycleScript>>) -> Option<BodyPermit> {
         self.permit.map(|permit| BodyPermit {
             _permit: permit,
             observer: observer.map(Arc::clone),
@@ -485,12 +485,23 @@ impl BodyBudget {
     /// caller holds. The refusal names the limit, never the transport: nothing
     /// went wrong with the wire.
     pub(super) fn admit_frame(&mut self, frame_len: usize) -> Result<usize, Rejected> {
+        self.admit_frame_within(frame_len)
+            .map_err(Rejected::body_too_large)
+    }
+
+    /// Account one decoded data frame, naming the maximum a refusal crossed.
+    ///
+    /// The same single comparison as [`Self::admit_frame`], reported as the
+    /// number rather than as a finished refusal. A consumer that produces its
+    /// own typed failure needs the bound, not a rejection it would have to take
+    /// apart again.
+    pub(super) fn admit_frame_within(&mut self, frame_len: usize) -> Result<usize, usize> {
         match checked_body_frame_total(self.observed, frame_len, self.limit) {
             Some(total) => {
                 self.observed = total;
                 Ok(total)
             }
-            None => Err(Rejected::body_too_large(self.limit)),
+            None => Err(self.limit),
         }
     }
 }

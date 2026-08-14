@@ -13,6 +13,7 @@ The variants cluster into a few stable buckets:
 - runtime context and task lifecycle: `NoRuntime`, `ScopeClosed`, `ScopeDrainTimeout`
 - request and API misuse: `BadRequest`, `InvalidArgument`
 - unparseable request payloads: `MalformedBody`, `Multipart`
+- request payloads Camber refused to keep reading: `RequestBodyLimit`, `RequestBodyUnreadable`
 - transport and integration failures: `Http`, `Tls`, `MessageQueue`
 - application-supplied: `Database`
 - startup and infrastructure configuration: `Config`, `Secret`, `Dns`, `Acme`, `Schedule`
@@ -50,6 +51,8 @@ A handler error is not converted where it is raised. `IntoResponse` carries it t
 - `RuntimeError::BadRequest` with `400` and the message you supplied, which you are declaring client-safe
 - `RuntimeError::MalformedBody` with `400` and exactly `malformed request body`
 - `RuntimeError::Multipart` with `400` and exactly `invalid multipart body`
+- `RuntimeError::RequestBodyLimit` with `413` and exactly `request body too large`
+- `RuntimeError::RequestBodyUnreadable` with `400` and exactly `request body could not be read`
 - `RuntimeError::ScopeClosed` with `503` and `service unavailable`
 - every other `RuntimeError` with `500` and exactly `internal server error`
 
@@ -81,7 +84,30 @@ As a rule:
 - use `InvalidArgument` for programmer-facing API misuse
 - use `BadRequest` for caller-supplied HTTP input problems
 - leave `MalformedBody` and `Multipart` to `req.json()` and `req.multipart()`, which raise them for you
+- leave `RequestBodyLimit` and `RequestBodyUnreadable` to Camber's own body reading; they name a payload the framework stopped taking, not one your code found wrong
 - use `Config` for startup configuration errors
 - use `Secret` for secret source lookup failures
 
 That keeps logs and HTTP behavior predictable.
+
+## Streaming Body Refusals
+
+A streaming multipart session reads its payload after the handler has started, so
+its failures reach the handler as errors on `next_field`, `next_chunk`, and
+`discard`. Three variants keep their provenance apart:
+
+- `RequestBodyLimit` — the request or one field ran past the bytes admitted for
+  it. Classified as `BodyLimit`, answered `413`.
+- `RequestBodyUnreadable` — the incoming transport stopped delivering.
+  Classified as `BodyUnreadable`, answered `400`.
+- `Multipart` — the grammar, the counts, the headers, the boundary, nesting, the
+  parser buffer, truncation, or an abandoned session. Answered `400`.
+
+Each carries the framework's own account of what failed. That text is operator
+detail; the peer reads the fixed sentence above.
+
+Catching one of these does not clear it. A handler that swallows the error and
+answers `200` is still answered with the refusal: the session recorded it, and
+the session outranks the handler. A handler error keeps its own category whether
+or not the body was read to its end. Only a handler that returns success over an
+incomplete body is overridden, and it is answered with `Multipart`.

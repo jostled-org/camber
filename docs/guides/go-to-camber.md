@@ -340,6 +340,46 @@ router.post("/upload", |req| async move {
 
 `req.multipart()` parses all parts at once. Each `Part` exposes `name()`, `filename()`, `content_type()`, and `data()`.
 
+### Large uploads
+
+Go's `ParseMultipartForm` spills past its memory argument to temporary files.
+Camber never spills an upload to disk. `Router::multipart` streams the body
+instead, one bounded chunk at a time.
+
+```rust
+use camber::http::{Method, MultipartLimits, MultipartStream, Request, Response};
+
+let limits = MultipartLimits::builder()
+    .max_field_bytes(64 * 1024 * 1024)
+    .max_chunk_bytes(64 * 1024)
+    .build()?;
+
+router.multipart(
+    Method::Post,
+    "/upload",
+    limits,
+    |_req: &Request, mut stream: MultipartStream| async move {
+        while let Some(mut field) = stream.next_field().await? {
+            let filename = field.filename().unwrap_or("(none)").to_owned();
+            while let Some(chunk) = field.next_chunk().await? {
+                append(&filename, &chunk);
+            }
+        }
+        Response::text(200, "uploaded")
+    },
+);
+```
+
+Three differences from Go:
+
+1. The peer's upload only advances while the handler reads. A handler that stops
+   reading stops the socket, so nothing buffers behind it.
+2. The handler owns its access to the body, not the body itself. Move
+   `MultipartStream` into a task and it goes inert as soon as the handler
+   returns.
+3. Read every field to its end. A handler that returns early leaves the body
+   incomplete, and Camber answers `400` rather than committing the response.
+
 ## WebSockets
 
 ### Go (gorilla/websocket)

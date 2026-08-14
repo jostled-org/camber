@@ -33,3 +33,5 @@ mod response_validation;
 mod runtime_configuration;
 #[path = "focused_api_contracts/runtime_results.rs"]
 mod runtime_results;
+#[path = "focused_api_contracts/streaming_multipart.rs"]
+mod streaming_multipart;

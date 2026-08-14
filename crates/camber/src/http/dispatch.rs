@@ -12,7 +12,8 @@ pub(super) use super::trie::SseHandler;
 #[cfg(feature = "ws")]
 pub(super) use super::trie::WsHandler;
 use super::trie::{
-    FrozenNode, PATH_SEGMENT_LIMIT, RouteHandler, RouteLookup, Selected, split_path_segments,
+    FrozenNode, MultipartRegistration, PATH_SEGMENT_LIMIT, RouteHandler, RouteLookup, Selected,
+    split_path_segments,
 };
 use super::{Request, Response};
 use std::future::Future;
@@ -41,6 +42,34 @@ pub(super) struct StreamingProxyTarget {
     /// Carried, not consumed. The bounded upload owner is its single admission
     /// consumer, and until that owner exists this path polls no frame under a
     /// limit and mints no permit owner.
+    pub(super) plan: ResolvedBodyPlan,
+}
+
+/// The bounded multipart session one matched route will run.
+///
+/// One payload rather than three loose parameters, for the reason
+/// [`StreamingProxyTarget`] is one: the route coordinator this feeds carries the
+/// registration as a single value.
+///
+/// No method is carried. This class answers the request itself rather than
+/// forwarding it, and the metadata-only request its gate and handler are given
+/// is built from the same head classification read.
+pub(super) struct StreamingMultipartTarget {
+    /// The selected registration — the handler, and the bounds it reads its
+    /// payload under, validated when the application built them.
+    ///
+    /// Shared, so classification costs a reference count bump rather than a
+    /// copy of the bounds into every matched request's route class.
+    pub(super) registration: Arc<MultipartRegistration>,
+    /// The captured segments, bound here rather than at the gate: a multipart
+    /// handler reads its own route parameters, so the one consumer that always
+    /// wants them is this class's own.
+    pub(super) params: RequestParams,
+    /// The immutable body plan this route resolved to, in
+    /// [`RequestBodyMode::Streaming`].
+    ///
+    /// Resolved by the stage holding the authority token, under the same host
+    /// and child ceiling chain every other body-consuming route resolves under.
     pub(super) plan: ResolvedBodyPlan,
 }
 
@@ -161,6 +190,9 @@ pub(super) enum RouteClass {
     },
     /// Streaming proxy — forward hyper body directly to upstream.
     StreamingProxy(StreamingProxyTarget),
+    /// Streaming multipart — the route coordinator owns a bounded session over
+    /// the incoming body and hands its handler one access handle.
+    StreamingMultipart(StreamingMultipartTarget),
     /// Head-only route (WebSocket, SSE) — dispatch from request metadata, skip body collection.
     HeadOnly,
     /// The routing stage already decided the answer.
@@ -183,7 +215,9 @@ pub use super::grpc_support::GrpcRouter;
 /// report and a failure after it reports the one that was selected.
 fn protocol_of(handler: &RouteHandler) -> RejectionProtocol {
     match handler {
-        RouteHandler::Async(_) => RejectionProtocol::OrdinaryHttp,
+        // Ordinary HTTP, not a streaming class: the payload streams in, and the
+        // answer is one buffered response the route's own mapper can shape.
+        RouteHandler::Async(_) | RouteHandler::Multipart(_) => RejectionProtocol::OrdinaryHttp,
         RouteHandler::Stream(_) => RejectionProtocol::StreamingHttp,
         RouteHandler::Sse(_) => RejectionProtocol::ServerSentEvents,
         #[cfg(feature = "ws")]
@@ -389,6 +423,13 @@ impl FrozenRouter {
                 method,
                 plan: self.body_plan(route, RequestBodyMode::Streaming, outer),
             }),
+            RouteHandler::Multipart(registration) => {
+                RouteClass::StreamingMultipart(StreamingMultipartTarget {
+                    registration: Arc::clone(registration),
+                    params: selected.bind_params(),
+                    plan: self.body_plan(route, RequestBodyMode::Streaming, outer),
+                })
+            }
             RouteHandler::Sse(_) => RouteClass::HeadOnly,
             #[cfg(feature = "ws")]
             RouteHandler::WebSocket(_) => RouteClass::HeadOnly,
@@ -506,6 +547,7 @@ impl FrozenRouter {
                 let fut = handler(&req);
                 DispatchResult::Stream(fut, req)
             }
+            RouteHandler::Multipart(_) => Self::misdispatched(req, scope),
             RouteHandler::Sse(handler) => DispatchResult::Sse(Arc::clone(handler), req),
             #[cfg(feature = "ws")]
             RouteHandler::WebSocket(handler) => DispatchResult::WebSocket(Arc::clone(handler), req),
@@ -529,6 +571,21 @@ impl FrozenRouter {
                 scope,
             ),
         }
+    }
+
+    /// Answer a streaming multipart route that reached buffered dispatch.
+    ///
+    /// Unreachable by construction: classification selects this class from the
+    /// head, and the wire path answers it before an owned request exists. Named
+    /// rather than folded into one of the handler arms, because a multipart
+    /// route that fell through to buffered dispatch would run its handler with
+    /// no session at all — and a `_` arm here would do exactly that silently.
+    fn misdispatched(req: Request, scope: &RejectionScope) -> DispatchResult {
+        let refusal = scope.clone();
+        DispatchResult::Async(
+            Box::pin(async move { refusal.map(Rejected::multipart_misdispatched()) }),
+            req,
+        )
     }
 
     /// Dispatch a proxied route, or refuse it while its upstream is unhealthy.

@@ -76,6 +76,16 @@ const UNPARSEABLE_BODY: &str = "malformed request body";
 /// The body a request whose multipart payload could not be parsed answers with.
 const INVALID_MULTIPART_BODY: &str = "invalid multipart body";
 
+/// The body a request larger than its effective limit answers with.
+///
+/// One spelling for both producers: the buffered collector's own refusal and the
+/// crossing a streaming consumer reports as a typed error are the same answer to
+/// the peer, so a second literal would be a second thing it could be told.
+const BODY_TOO_LARGE_BODY: &str = "request body too large";
+
+/// The body a request Camber could not read answers with, for the same reason.
+const BODY_UNREADABLE_BODY: &str = "request body could not be read";
+
 /// The header a method refusal names its allowed set under.
 const ALLOW_HEADER: &str = "Allow";
 
@@ -347,6 +357,27 @@ impl Rejection {
     /// could tell two of them apart would be reading what was redacted.
     fn redacted_fault(kind: RejectionKind) -> Self {
         Self::raw(kind, 500, INTERNAL_ERROR_BODY)
+    }
+
+    /// What a peer is told when its body outran the limit it was admitted under.
+    ///
+    /// Settled here for the reason [`Self::service_unavailable`] is, one step
+    /// further: the buffered collector and the streaming consumer answer the
+    /// same condition, so the category and the status travel with the safe body
+    /// rather than beside it. A second spelling of the triple is a place where
+    /// one of the two producers could start answering under a status the other
+    /// does not, reported under the same metric label.
+    fn body_limit() -> Self {
+        Self::raw(RejectionKind::BodyLimit, 413, BODY_TOO_LARGE_BODY)
+    }
+
+    /// What a peer is told when Camber could not read the body it sent.
+    ///
+    /// Settled here for the same reason [`Self::body_limit`] is: a mid-body
+    /// transport failure and a streaming consumer's stalled read are one answer
+    /// under one category.
+    fn body_unreadable() -> Self {
+        Self::raw(RejectionKind::BodyUnreadable, 400, BODY_UNREADABLE_BODY)
     }
 
     /// Add one safe default header, keeping registration order.
@@ -777,8 +808,36 @@ impl Rejected {
     /// request on it would begin.
     pub(super) fn body_too_large(limit: usize) -> Self {
         Self::closing(
-            Rejection::raw(RejectionKind::BodyLimit, 413, "request body too large"),
+            Rejection::body_limit(),
             format!("body exceeds the {limit}-byte limit"),
+        )
+    }
+
+    /// A streaming consumer measured its payload past the maximum it was
+    /// admitted under.
+    ///
+    /// The same category and the same safe answer as the buffered refusal above;
+    /// what differs is only who counted. The consumer's own account is the
+    /// diagnostic, because it names the bound that was crossed — the request's
+    /// total or one field's — and the peer is told neither.
+    fn body_limit_crossed(error: RuntimeError) -> Self {
+        Self::plain_closing(Rejection::body_limit(), Arc::new(error))
+    }
+
+    /// A streaming consumer's transport stopped delivering the payload.
+    fn body_read_failed(error: RuntimeError) -> Self {
+        Self::plain_closing(Rejection::body_unreadable(), Arc::new(error))
+    }
+
+    /// A streaming multipart route reached buffered dispatch.
+    ///
+    /// Camber's own fault and nothing the peer did, so the answer is the fixed
+    /// redacted one. It exists because the alternative is a silent fall-through
+    /// that would run a multipart handler with no session behind it.
+    pub(super) fn multipart_misdispatched() -> Self {
+        Self::decided(
+            Rejection::redacted_fault(RejectionKind::InternalService),
+            "a streaming multipart route reached buffered dispatch",
         )
     }
 
@@ -843,14 +902,7 @@ impl Rejected {
     /// owed is unread, so nothing establishes where the next request would
     /// begin.
     pub(super) fn body_unreadable(error: Box<dyn Error + Send + Sync>) -> Self {
-        Self::plain_closing(
-            Rejection::raw(
-                RejectionKind::BodyUnreadable,
-                400,
-                "request body could not be read",
-            ),
-            Arc::from(error),
-        )
+        Self::plain_closing(Rejection::body_unreadable(), Arc::from(error))
     }
 
     /// The body did not finish arriving inside its collection deadline.
@@ -1139,6 +1191,17 @@ pub(super) const MIDDLEWARE: ProducerKinds = ProducerKinds {
     faulted: RejectionKind::Middleware,
 };
 
+/// How one streaming multipart session's own failures are classified.
+///
+/// Every failure it actually raises names its own provenance below — a byte
+/// crossing, a transport read, or the grammar — so these two rows cover only
+/// what the session never produces: it declares no client-safe message of its
+/// own, and a fault it can say nothing about is Camber's.
+pub(super) const MULTIPART_SESSION: ProducerKinds = ProducerKinds {
+    declared: RejectionKind::Multipart,
+    faulted: RejectionKind::InternalService,
+};
+
 /// Classify one failure at the stage that raised it.
 fn classify(error: RuntimeError, kinds: ProducerKinds) -> Rejected {
     match error {
@@ -1150,6 +1213,11 @@ fn classify(error: RuntimeError, kinds: ProducerKinds) -> Rejected {
         parsed @ RuntimeError::Multipart(_) => {
             Rejected::unparseable(RejectionKind::Multipart, INVALID_MULTIPART_BODY, parsed)
         }
+        // Classified by the error's own provenance rather than by the producer's
+        // rows: a handler that propagated one of these with `?` is reporting the
+        // framework's measurement, not declaring a failure of its own.
+        crossed @ RuntimeError::RequestBodyLimit(_) => Rejected::body_limit_crossed(crossed),
+        unread @ RuntimeError::RequestBodyUnreadable(_) => Rejected::body_read_failed(unread),
         other => Rejected::faulted(kinds.faulted, Arc::new(other)),
     }
 }

@@ -6,6 +6,8 @@ pub mod http;
 pub mod rejection_support;
 #[path = "support/runtime.rs"]
 pub mod runtime_support;
+#[path = "support/streaming_multipart.rs"]
+pub mod streaming_multipart;
 
 #[path = "component_body_files/binary_bodies.rs"]
 mod binary_bodies;
@@ -23,5 +25,9 @@ mod json_bodies;
 mod multipart_forms;
 #[path = "component_body_files/static_file_serving.rs"]
 mod static_file_serving;
+#[path = "component_body_files/streaming_multipart_core.rs"]
+mod streaming_multipart_core;
+#[path = "component_body_files/streaming_multipart_route.rs"]
+mod streaming_multipart_route;
 #[path = "component_body_files/urlencoded_forms.rs"]
 mod urlencoded_forms;

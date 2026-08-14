@@ -1,6 +1,6 @@
 use super::handle::ConnCtx;
+use super::response::HandlerOutcome;
 use super::router::Handler;
-use super::trie::HandlerOutcome;
 use super::{Request, Response};
 use crate::RuntimeError;
 use crate::resource::HealthState;

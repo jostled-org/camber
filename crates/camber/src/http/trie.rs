@@ -1,7 +1,8 @@
 use super::Request;
-use super::Response;
 use super::method::Method;
+use super::multipart::{MultipartLimits, MultipartStream};
 use super::request::Params;
+use super::response::HandlerOutcome;
 use super::sse::SseWriter;
 use super::stream::StreamResponse;
 #[cfg(feature = "ws")]
@@ -16,17 +17,6 @@ use std::sync::atomic::AtomicBool;
 
 // ── Handler type aliases ───────────────────────────────────────────
 
-/// The outcome a buffered handler produces.
-///
-/// Fallible, so a handler's error keeps its category and source chain until the
-/// router's one rejection boundary decides what the peer is told.
-///
-/// Public because [`MiddlewareFuture`](super::MiddlewareFuture) resolves to it:
-/// a name a published signature spells has to be a name a reader can follow.
-/// It is transparently `Result<Response, RuntimeError>`, so this documents the
-/// shape rather than adding one.
-pub type HandlerOutcome = Result<Response, RuntimeError>;
-
 pub(super) type Handler =
     Box<dyn Fn(&Request) -> Pin<Box<dyn Future<Output = HandlerOutcome> + Send>> + Send + Sync>;
 pub(super) type SseHandler =
@@ -35,12 +25,64 @@ pub(super) type StreamHandler =
     Box<dyn Fn(&Request) -> Pin<Box<dyn Future<Output = StreamResponse> + Send>> + Send + Sync>;
 #[cfg(feature = "ws")]
 pub(super) type WsHandler = Arc<dyn Fn(&Request, WsConn) -> Result<(), RuntimeError> + Send + Sync>;
+/// One streaming multipart handler, erased the way every stored handler is.
+///
+/// Boxed inside its registration rather than shared on its own. What the route
+/// coordinator takes a handle to is the whole registration, so the handler
+/// outlives the borrow of the router that selected it without a second
+/// reference count of its own.
+pub(super) type MultipartHandler = Box<
+    dyn Fn(&Request, MultipartStream) -> Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// One streaming multipart route: the handler, and the bounds it reads its
+/// payload under.
+///
+/// The limits travel with the handler because they are the registration's, not
+/// the router's: two multipart routes on one router read under their own
+/// bounds, and classification has to hand the selected pair over together.
+///
+/// Shared rather than stored inline, because [`MultipartLimits`] is seven
+/// `usize`s. Inline it set the width of [`RouteHandler`], and through it of
+/// every method slot of every node in every frozen trie — routers with no
+/// multipart route included — and classification copied all of it into the
+/// route class of each matched request. Behind one `Arc`, selecting this route
+/// is a reference count bump.
+pub(super) struct MultipartRegistration {
+    handler: MultipartHandler,
+    limits: MultipartLimits,
+}
+
+impl MultipartRegistration {
+    /// Register one handler under the bounds the application built for it.
+    pub(super) fn new(handler: MultipartHandler, limits: MultipartLimits) -> Self {
+        Self { handler, limits }
+    }
+
+    /// The bounds this registration reads its payload under.
+    pub(super) fn limits(&self) -> MultipartLimits {
+        self.limits
+    }
+
+    /// Enter this registration's handler with the one access handle it is given.
+    pub(super) fn enter(
+        &self,
+        request: &Request,
+        stream: MultipartStream,
+    ) -> Pin<Box<dyn Future<Output = HandlerOutcome> + Send>> {
+        (self.handler)(request, stream)
+    }
+}
 
 /// Distinguishes normal request handlers from streaming handlers.
 pub(super) enum RouteHandler {
     Async(Handler),
     Stream(StreamHandler),
     Sse(SseHandler),
+    /// A streaming multipart route, held as one shared registration.
+    Multipart(Arc<MultipartRegistration>),
     #[cfg(feature = "ws")]
     WebSocket(WsHandler),
     Proxy {
@@ -53,6 +95,33 @@ pub(super) enum RouteHandler {
         prefix: Arc<str>,
         healthy: Option<Arc<AtomicBool>>,
     },
+}
+
+impl RouteHandler {
+    /// Whether a GET registration of this kind may answer a HEAD request.
+    ///
+    /// A streaming multipart route may not. Its handler is a session over a
+    /// payload a HEAD request never sends, so the fallback ran it against an
+    /// empty body: the session was abandoned, the incomplete body outranked
+    /// whatever the handler said, and a plain probe was answered `400` with the
+    /// connection closed under it. A node that serves GET with one therefore
+    /// does not serve HEAD at all, and refuses the method naming what it does
+    /// serve.
+    ///
+    /// Listed rather than wildcarded, so a later body-consuming class states
+    /// its own answer instead of inheriting this one.
+    fn answers_head(&self) -> bool {
+        match self {
+            Self::Async(_)
+            | Self::Stream(_)
+            | Self::Sse(_)
+            | Self::Proxy { .. }
+            | Self::ProxyStream { .. } => true,
+            #[cfg(feature = "ws")]
+            Self::WebSocket(_) => true,
+            Self::Multipart(_) => false,
+        }
+    }
 }
 
 // ── Trie internals ─────────────────────────────────────────────────
@@ -362,8 +431,9 @@ fn freeze_claim(by_method: &MethodSlots) -> Option<Claimed> {
 
 /// The set of methods a node answers.
 ///
-/// `HEAD` is in it whenever `GET` is registered, because that is exactly when
-/// dispatch answers one.
+/// `HEAD` is in it exactly when selection would answer one — for a registered
+/// `HEAD`, and for a `GET` registration [`head_from_get`] admits — because a
+/// method the `Allow` value names is a method the peer may then send.
 fn served_mask(by_method: &MethodSlots) -> MethodMask {
     CANONICAL_METHODS
         .into_iter()
@@ -623,9 +693,18 @@ fn select_slot(by_method: &MethodSlots, method: Method) -> Option<&FrozenHandler
     by_method[method.ordinal()]
         .as_ref()
         .or_else(|| match method {
-            Method::Head => by_method[Method::Get.ordinal()].as_ref(),
+            Method::Head => head_from_get(by_method),
             _ => None,
         })
+}
+
+/// The GET handler a HEAD request may be answered from.
+///
+/// Read by selection and by the `Allow` value alike, so a GET registration that
+/// cannot answer a HEAD does not advertise one either.
+fn head_from_get(by_method: &MethodSlots) -> Option<&FrozenHandler> {
+    let registered = by_method[Method::Get.ordinal()].as_ref()?;
+    registered.handler.answers_head().then_some(registered)
 }
 
 /// Extract the wildcard portion of a path by computing the span from the first

@@ -254,6 +254,30 @@ impl PersistentH2Client {
         answered
     }
 
+    /// Open one stream whose body the caller sends frame by frame.
+    ///
+    /// [`Self::send_paced`] sends every frame it was given and then reads the
+    /// answer, which no case whose claim is *when* a frame was taken can use.
+    /// This hands the stream back instead, so a case can offer one frame, read
+    /// what the peer did with it, and decide what to do next.
+    pub async fn open_paced(
+        &mut self,
+        method: &str,
+        path: &str,
+        host: &str,
+        headers: &[(&str, &str)],
+    ) -> H2RequestStream {
+        let deadline = Instant::now() + self.bound;
+        let (response, stream) = self
+            .open(method, path, host, headers, false, deadline)
+            .await;
+        H2RequestStream {
+            response: Some(response),
+            stream,
+            bound: self.bound,
+        }
+    }
+
     /// Send one request whose body arrives as exactly the frames named.
     ///
     /// Each frame waits for the peer to grant window before it is sent, so the
@@ -317,6 +341,129 @@ impl Drop for PersistentH2Client {
     }
 }
 
+/// One request stream whose body its case sends a frame at a time.
+///
+/// Owned outright rather than borrowed from its connection, so a case can hold
+/// one stream open and complete another on the same connection meanwhile —
+/// which is the only way to tell backpressure that belongs to one stream from
+/// backpressure that belongs to the connection under it.
+pub struct H2RequestStream {
+    /// Taken by [`Self::answer`], so the answer is read exactly once.
+    response: Option<h2::client::ResponseFuture>,
+    stream: h2::SendStream<Bytes>,
+    /// The budget one leg of this exchange runs under.
+    bound: Duration,
+}
+
+/// What one offered request-body frame established.
+#[derive(Debug, Eq, PartialEq)]
+pub enum H2Offer {
+    /// The peer granted credit and took the frame.
+    Sent,
+    /// The bound expired with the peer still withholding credit.
+    Withheld,
+    /// The peer stopped accepting this stream's body, which is what a mid-body
+    /// refusal looks like from the sending side.
+    PeerStopped,
+}
+
+impl H2RequestStream {
+    /// Offer one frame, giving the peer `bound` to grant the credit for it.
+    ///
+    /// The bound is per offer rather than per stream, because it is what the
+    /// caller is measuring: a generous one asks whether the peer will ever take
+    /// the frame, and a short one asks whether it is taking frames right now.
+    pub async fn offer(&mut self, frame: &[u8], bound: Duration) -> H2Offer {
+        match await_credit(&mut self.stream, frame.len(), bound).await {
+            Credit::Granted => offered(send_frame(&mut self.stream, frame)),
+            Credit::Withheld => H2Offer::Withheld,
+            Credit::Closed => H2Offer::PeerStopped,
+            Credit::Failed(error) => {
+                panic!("the HTTP/2 connection failed while offering a frame: {error}")
+            }
+        }
+    }
+
+    /// End this request body.
+    ///
+    /// Best effort: a peer that already refused has reset this stream, and the
+    /// answer is what the case reads either way.
+    pub fn finish(&mut self) {
+        let _ = self.stream.send_data(Bytes::new(), true);
+    }
+
+    /// Cancel this stream, leaving the body it declared unsent.
+    pub fn reset(&mut self) {
+        self.stream.send_reset(h2::Reason::CANCEL);
+    }
+
+    /// Read this stream's answer.
+    pub async fn answer(&mut self) -> HttpResponse {
+        let response = self
+            .response
+            .take()
+            .expect("this HTTP/2 stream's answer was already read");
+        read_answer(response, Instant::now() + self.bound).await
+    }
+}
+
+/// Read one accepted push as the offer outcome it is.
+///
+/// The two vocabularies differ in one thing: an offer can end because credit
+/// never came, and a push cannot. A connection fault is neither, on either side.
+fn offered(push: FramePush) -> H2Offer {
+    match push {
+        FramePush::Accepted => H2Offer::Sent,
+        FramePush::PeerStopped => H2Offer::PeerStopped,
+        FramePush::Failed(error) => panic!("an HTTP/2 request body frame failed: {error}"),
+    }
+}
+
+/// What one wait for request-stream flow-control credit established.
+enum Credit {
+    /// The peer granted enough credit to send the frame.
+    Granted,
+    /// The wait's bound expired with the credit still ungranted.
+    Withheld,
+    /// The peer ended this stream gracefully rather than granting more.
+    Closed,
+    /// The connection itself failed, and that is never a refusal.
+    Failed(h2::Error),
+}
+
+/// Wait for the peer to grant enough credit to send `wanted` bytes.
+///
+/// Capacity is reserved and awaited rather than assumed: a sender that writes
+/// past the window stalls, and the case waiting on the answer would report a
+/// timeout for a server doing exactly what it was told. An expiring bound is
+/// what separates this from [`push_frame`]: a case measuring backpressure needs
+/// "no credit arrived" as an answer rather than as a panic.
+async fn await_credit(
+    stream: &mut h2::SendStream<Bytes>,
+    wanted: usize,
+    bound: Duration,
+) -> Credit {
+    let deadline = Instant::now() + bound;
+    stream.reserve_capacity(wanted);
+    loop {
+        if stream.capacity() >= wanted {
+            return Credit::Granted;
+        }
+        let granted = tokio::time::timeout(
+            remaining(deadline),
+            std::future::poll_fn(|cx| stream.poll_capacity(cx)),
+        )
+        .await;
+        match granted {
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(error))) if is_graceful_end(&error) => return Credit::Closed,
+            Ok(Some(Err(error))) => return Credit::Failed(error),
+            Ok(None) => return Credit::Closed,
+            Err(_) => return Credit::Withheld,
+        }
+    }
+}
+
 /// What one attempt to push a body frame established.
 ///
 /// Three outcomes, because they mean three different things and only one of
@@ -336,35 +483,23 @@ enum FramePush {
 
 /// Push one frame through the peer's flow-control window.
 ///
-/// Capacity is reserved and awaited rather than assumed: a sender that writes
-/// past the window stalls, and the case waiting on the answer would report a
-/// timeout for a server doing exactly what it was told.
+/// The whole-body senders expect their frames to be taken, so a peer that never
+/// grants the credit is a hang rather than an outcome and fails here. A case
+/// whose claim IS the withheld credit reads it through
+/// [`H2RequestStream::offer`] instead.
 async fn push_frame(
     stream: &mut h2::SendStream<Bytes>,
     frame: &[u8],
     deadline: Instant,
 ) -> FramePush {
-    stream.reserve_capacity(frame.len());
-    let capacity = loop {
-        if stream.capacity() >= frame.len() {
-            break FramePush::Accepted;
+    let bound = remaining(deadline);
+    match await_credit(stream, frame.len(), bound).await {
+        Credit::Granted => send_frame(stream, frame),
+        Credit::Closed => FramePush::PeerStopped,
+        Credit::Failed(error) => FramePush::Failed(error),
+        Credit::Withheld => {
+            panic!("HTTP/2 request flow-control capacity timed out after {bound:?}")
         }
-        match bounded(
-            std::future::poll_fn(|cx| stream.poll_capacity(cx)),
-            remaining(deadline),
-            "HTTP/2 request flow-control capacity",
-        )
-        .await
-        {
-            Some(Ok(_)) => {}
-            Some(Err(error)) => break push_failure(error),
-            None => break FramePush::PeerStopped,
-        }
-    };
-    match capacity {
-        FramePush::Accepted => send_frame(stream, frame),
-        FramePush::PeerStopped => FramePush::PeerStopped,
-        FramePush::Failed(error) => FramePush::Failed(error),
     }
 }
 
@@ -376,17 +511,22 @@ fn send_frame(stream: &mut h2::SendStream<Bytes>, frame: &[u8]) -> FramePush {
     }
 }
 
-/// Read one `h2` failure as the peer's disposition or as a fault.
+/// Whether one `h2` failure is the peer ending this stream gracefully.
 ///
-/// A stream reset carrying `NO_ERROR` is the peer ending this stream gracefully
-/// — the stream-local disposition a refusal applies to a request body it will
-/// never read. Any other reason is the connection failing. The read side states
-/// the same rule in [`drain_h2_body`], and the two sides of one exchange must
-/// not disagree about which resets are an outcome.
+/// A stream reset carrying `NO_ERROR` is the stream-local disposition a refusal
+/// applies to a request body it will never read. Any other reason is the
+/// connection failing. Every side of every exchange here reads that distinction
+/// through this one function, because the two sides of one exchange must not
+/// disagree about which resets are an outcome.
+fn is_graceful_end(error: &h2::Error) -> bool {
+    error.reason() == Some(h2::Reason::NO_ERROR)
+}
+
+/// Read one `h2` send failure as the peer's disposition or as a fault.
 fn push_failure(error: h2::Error) -> FramePush {
-    match error.reason() {
-        Some(h2::Reason::NO_ERROR) => FramePush::PeerStopped,
-        _ => FramePush::Failed(error),
+    match is_graceful_end(&error) {
+        true => FramePush::PeerStopped,
+        false => FramePush::Failed(error),
     }
 }
 
@@ -414,7 +554,7 @@ pub async fn drain_h2_body(
         // request body it will never read. Any other reason is a fault.
         let chunk = match chunk {
             Ok(chunk) => chunk,
-            Err(error) if error.reason() == Some(h2::Reason::NO_ERROR) => break,
+            Err(error) if is_graceful_end(&error) => break,
             Err(error) => panic!("an HTTP/2 body frame failed: {error}"),
         };
         body.flow_control()

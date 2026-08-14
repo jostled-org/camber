@@ -300,12 +300,12 @@ answers with the same status stay distinct.
 |---|---|---|---|
 | `Routing` | `404`, `400` for an unusable `Host`, or `414` for a target nested too deep | `not found`, `invalid host header`, `URI path too deep` | No host or route claims the target, or the path nests past the segment limit the router matches |
 | `MethodSelection` | `405` | `method not allowed` | A route claims the path, not the method |
-| `BodyLimit` | `413` | `request body too large` | The body exceeds the effective limit |
+| `BodyLimit` | `413` | `request body too large` | The body exceeds the effective limit, or a streaming multipart field exceeds `max_field_bytes` |
 | `BodyAdmission` | `503` | `service unavailable` | A route's body-admission policy declined the work |
 | `BodyUnreadable` | `400` | `request body could not be read` | The body stopped arriving for a reason that is not the limit |
 | `BodyTimeout` | `408` | `request body timed out` | The body missed its collection deadline |
 | `MalformedBody` | `400` | `malformed request body` | `Request::json` could not parse the body, or the request framed its body under a transfer coding Camber does not undo |
-| `Multipart` | `400` | `invalid multipart body` | `Request::multipart` could not parse the body |
+| `Multipart` | `400` | `invalid multipart body` | `Request::multipart` could not parse the body, or a `Router::multipart` session hit a grammar, count, header, boundary, nesting, buffer, truncation, or abandonment failure |
 | `InvalidHeader` | `500` | `internal server error` | A response cannot be put on the wire |
 | `Application` | `400` | the message the handler declared safe | A handler returned `RuntimeError::BadRequest` |
 | `Middleware` | `400` or `500` | the declared message, or fixed text | A middleware frame failed |
@@ -439,6 +439,107 @@ router.post("/upload", |req| async {
     Response::text(200, "uploaded")?
 });
 ```
+
+## Streaming Multipart Uploads
+
+`Router::multipart` registers an ordinary route whose handler is given metadata
+and payload as they arrive, instead of a materialized body.
+
+```rust
+use camber::http::{Method, MultipartLimits, MultipartStream, Request, Response};
+
+router.multipart(
+    Method::Post,
+    "/upload",
+    MultipartLimits::default(),
+    |_req: &Request, mut stream: MultipartStream| async move {
+        while let Some(mut field) = stream.next_field().await? {
+            let name = field.name().to_owned();
+            while let Some(chunk) = field.next_chunk().await? {
+                append(&name, &chunk);
+            }
+        }
+        Response::text(200, "uploaded")
+    },
+);
+```
+
+`MultipartField` exposes `name()`, `filename()`, and `content_type()` as borrowed
+strings, plus `next_chunk()` and `discard()`. `next_chunk` yields
+`Option<Bytes>`; `camber::http::Bytes` is a re-export of the `bytes` crate's
+type, so `bytes` is part of Camber's public API.
+
+A `GET` multipart route does not answer `HEAD`. Every other route kind answers a
+`HEAD` from its `GET` handler; this one reads a payload a `HEAD` request never
+sends. Such a route names `GET` alone in its `Allow` value and refuses `HEAD`
+with `405`.
+
+### Limits
+
+`MultipartLimits` is immutable and copyable. Build it from the defaults and
+narrow what a route needs narrowed.
+
+| Setting | Default | Bounds |
+|---|---|---|
+| `max_fields` | `128` | fields in one body |
+| `max_field_bytes` | `8 MiB` | data bytes in one field |
+| `max_headers_per_field` | `32` | header lines on one field |
+| `max_header_bytes_per_field` | `16 KiB` | the whole header block of one field |
+| `max_boundary_bytes` | `70` | the request boundary, which RFC 2046 caps at 70 |
+| `max_chunk_bytes` | `64 KiB` | one delivered chunk |
+| `max_parser_buffer_bytes` | `128 KiB` | parser capacity retained at once |
+
+Every value must be greater than zero, `max_boundary_bytes` must not exceed the
+protocol maximum of 70, and `max_parser_buffer_bytes` must be at least `max(2 *
+max_header_bytes_per_field, max_chunk_bytes + max_boundary_bytes + 5)`. `build()`
+returns `RuntimeError::InvalidArgument` otherwise.
+
+There is no total-byte setting here. `Router::max_request_body`,
+`HostRouter::max_request_body`, and the router's body-admission policy already
+resolve one effective maximum before the first payload frame is polled.
+
+### Ownership and backpressure
+
+The framework owns the incoming body, the admitted permit, the parser buffers,
+and the one source frame. The handler owns only its access to them. That split
+decides the rest:
+
+- **Backpressure is the command boundary.** Camber polls the transport only while
+  a `next_field`, `next_chunk`, or `discard` call is outstanding. A handler that
+  stops reading stalls the peer's socket on HTTP/1.1 and withholds flow-control
+  credit on HTTP/2.
+- **An escaped handle goes inert.** Moving `MultipartStream` into a task, a
+  channel, or a longer-lived value cannot keep the body alive. When the handler
+  returns, Camber revokes access and drives the session to a terminal state
+  before it selects a response; later calls on the escaped handle fail.
+- **Read to the end.** A handler that returns success while the body is
+  incomplete is answered with `Multipart` instead. A handler that returns an
+  error keeps its own category either way; the incomplete body changes only the
+  connection disposition. `discard()` completes one field and is not an early
+  exit from the request.
+
+### Failure categories
+
+| Terminal | Kind | Status |
+|---|---|---|
+| Total or per-field bytes exceeded | `BodyLimit` | `413` |
+| The transport stopped delivering | `BodyUnreadable` | `400` |
+| Grammar, count, header, boundary, nesting, buffer, or truncation | `Multipart` | `400` |
+| The handler returned success over an incomplete body | `Multipart` | `400` |
+| The handler returned an error, over a complete or an incomplete body | `Application` | `400` |
+
+A parser or byte-limit failure outranks the handler: catching the error the read
+handed you does not commit a success. An incomplete body is the weaker claim. A
+handler error keeps its own category whether or not the body was read to its
+end; only a handler that returns success over an incomplete body is overridden
+with `Multipart`.
+
+A refusal that left payload unread also decides the transport's disposition.
+HTTP/1.1 answers with `Connection: close`, because no second request can be
+framed behind bytes nothing read. HTTP/2 states no connection disposition; only
+the refused stream ends, and the connection carries later streams.
+
+Camber creates no file while parsing streaming multipart. Nothing spills to disk.
 
 ## WebSocket
 

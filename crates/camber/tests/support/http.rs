@@ -604,6 +604,16 @@ impl ObservedServer {
     pub fn controller(&self) -> &LifecycleController {
         &self.controller
     }
+
+    /// Stop this fixture and join it under `timeout`.
+    ///
+    /// Dropping does the same thing. A case whose claim IS the shutdown needs
+    /// the failure reported rather than swallowed by a destructor, and one
+    /// asserting on what a stopped server released needs the join to have
+    /// happened before it reads its counters.
+    pub fn shutdown_bounded(self, timeout: Duration) -> Result<(), FixtureError> {
+        self.server.shutdown_bounded(timeout)
+    }
 }
 
 /// Serve `router` on an already-bound reservation and hand back the raw handle
@@ -1216,6 +1226,33 @@ pub fn write_request_with_connection(
     stream.flush()
 }
 
+/// The exact bytes one length-framed request puts on the wire.
+///
+/// For a case that paces its own writes. Every other writer here owns the socket
+/// and decides when the bytes leave; a case whose claim is that the peer stopped
+/// taking them needs the head and the payload as one buffer it can offer a piece
+/// at a time. The head is [`body_request_head`]'s, so a paced request and a
+/// written one cannot disagree about what was framed.
+pub fn framed_request_bytes(
+    connection: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Box<[u8]> {
+    let head = body_request_head(
+        DEFAULT_HOST,
+        connection,
+        method,
+        path,
+        headers,
+        BodyFraming::Length(body.len()),
+    );
+    let mut wire = head.into_bytes();
+    wire.extend_from_slice(body);
+    wire.into_boxed_slice()
+}
+
 /// How one request head frames the payload behind it.
 ///
 /// The framing line is the only thing the suite's request heads differ in, so
@@ -1422,11 +1459,7 @@ pub fn send_chunked(
 ) -> io::Result<(HttpResponse, TcpStream)> {
     let mut stream = connect(addr)?;
     write_chunked_head(&mut stream, connection, method, path, host)?;
-    // A refusal decided partway through the body closes the connection, so the
-    // remaining frames can reach a socket the peer has already ended. That is
-    // the answer arriving early, not a fault, and the response below is what
-    // the case reads either way.
-    tolerate_dead_socket(write_chunks(&mut stream, chunks))?;
+    tolerate_answered_peer(write_chunks(&mut stream, chunks))?;
     let answered = read_http_response_bounded(&mut stream)?;
     Ok((answered, stream))
 }
@@ -1824,6 +1857,22 @@ pub fn tolerate_dead_socket(result: io::Result<()>) -> io::Result<()> {
     match result {
         Err(error) if error.raw_os_error() == Some(INVALID_ARGUMENT) => Ok(()),
         result => result,
+    }
+}
+
+/// Accept a write the peer's own answer ended, and report every other failure.
+///
+/// A refusal decided partway through a body closes the connection, so the frames
+/// still in flight reach a socket the peer has already ended. That is the answer
+/// arriving early rather than a fault, and the answer the caller reads next is
+/// the verdict either way. The peer being gone reaches a writer as one of the
+/// kinds [`is_closed_connection_error`] names — never as the `EINVAL` a socket
+/// deadline fails with, which is why tolerating only that one would panic the
+/// very rows this covers.
+pub fn tolerate_answered_peer(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error) if is_closed_connection_error(&error) => Ok(()),
+        result => tolerate_dead_socket(result),
     }
 }
 

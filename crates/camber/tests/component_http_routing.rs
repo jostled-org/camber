@@ -6,6 +6,8 @@ pub mod http;
 pub mod rejection_support;
 #[path = "support/runtime.rs"]
 pub mod runtime_support;
+#[path = "support/streaming_multipart.rs"]
+pub mod streaming_multipart;
 
 #[path = "component_http_routing/async_client.rs"]
 mod async_client;
@@ -39,3 +41,5 @@ mod retry_policy;
 mod route_dispatch;
 #[path = "component_http_routing/server_requests.rs"]
 mod server_requests;
+#[path = "component_http_routing/streaming_multipart_route.rs"]
+mod streaming_multipart_route;

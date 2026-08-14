@@ -408,9 +408,10 @@ pub(super) struct RequestDispatch<'a> {
 /// How the wire must be read for a class that reaches dispatch.
 ///
 /// Listed rather than wildcarded, so a new `RouteClass` is a compile error here
-/// instead of a silent fall-through into body collection. `StreamingProxy` is
-/// listed for exhaustiveness alone: classification decides the upgrade, so that
-/// class forwards its own body and returns before reaching here.
+/// instead of a silent fall-through into body collection. `StreamingProxy` and
+/// `StreamingMultipart` are listed for exhaustiveness alone: the caller answers
+/// both before this runs — one forwards its own body, the other opens its own
+/// session over it — so neither reaches here.
 async fn wire_read(
     route_class: RouteClass,
     origin: RequestOrigin<'_>,
@@ -424,7 +425,8 @@ async fn wire_read(
         RouteClass::HeadOnly
         | RouteClass::Terminal
         | RouteClass::Refused(_)
-        | RouteClass::StreamingProxy(_) => Ok(WireRead::HeadOnly),
+        | RouteClass::StreamingProxy(_)
+        | RouteClass::StreamingMultipart(_) => Ok(WireRead::HeadOnly),
     }
 }
 
@@ -478,6 +480,16 @@ async fn dispatch_classified_route<'a>(
         RouteClass::StreamingProxy(target) => {
             return dispatch_streaming_proxy(hyper_req, target, router, &scope, request_dispatch)
                 .await;
+        }
+        RouteClass::StreamingMultipart(target) => {
+            return super::multipart_route::dispatch_streaming_multipart(
+                hyper_req,
+                target,
+                router,
+                &scope,
+                request_dispatch,
+            )
+            .await;
         }
         RouteClass::Refused(rejected) => {
             return Ok(refuse_from_head(
@@ -583,10 +595,10 @@ async fn dispatch_built_request<'a>(
         true => scope.reclassified(RejectionProtocol::WebSocket),
         false => scope,
     };
-    let gate_blocked = match pending_middleware_gate(&result, router, &scope) {
-        None => None,
-        Some(gate) => gate_result(gate.await),
-    };
+    // Built in its own statement: `DispatchResult` is not `Sync`, so the borrow
+    // this takes must end before the check is awaited.
+    let gate = pending_middleware_gate(&result, router, &scope);
+    let gate_blocked = gate_outcome(gate).await;
     if let Some(blocked) = gate_blocked {
         return Ok(answer(ctx, blocked, start, &scope));
     }
@@ -963,9 +975,21 @@ pub(super) async fn run_head_gate(
     params: Option<super::request::Params>,
     scope: &RejectionScope,
 ) -> Option<Response> {
-    let gate = match router.and_then(|router| router.middleware_gate_head(head, params, scope)) {
-        Some(gate) => gate,
-        None => return None,
-    };
-    gate_result(gate.await)
+    gate_outcome(router.and_then(|router| router.middleware_gate_head(head, params, scope))).await
+}
+
+/// What one gate check answers with, for every caller that runs one.
+///
+/// `None` is a pass, either because the chain passed the request through or
+/// because there was no chain to run. Written once because a caller that read a
+/// pass as a short-circuit would answer a request the chain admitted, and one
+/// that read a short-circuit as a pass would run a handler the chain refused.
+/// Which request a gate is given is each caller's own decision — the streaming
+/// classes gate borrowed head metadata, the multipart class gates the very
+/// request its handler receives — and this is the one part they share.
+pub(super) async fn gate_outcome(gate: Option<GateCheck>) -> Option<Response> {
+    match gate {
+        Some(gate) => gate_result(gate.await),
+        None => None,
+    }
 }
