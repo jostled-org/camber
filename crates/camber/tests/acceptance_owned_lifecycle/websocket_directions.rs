@@ -292,10 +292,7 @@ async fn cancelled_row() {
     direction_row(1, |fixture, mut peer, connection| async move {
         let (sender, mut receiver) = connection.split();
         stage_admitted_and_queued(&fixture, &mut peer, &sender).await;
-        fixture.arm(SELECTED);
-        fixture.cancel_server();
-        fixture.wait_paused(SELECTED).await;
-        assert_terminal(&fixture, WsCloseCause::ServerCancelled);
+        select_server_cancellation(&fixture).await;
         assert_closed_send(&sender, WsCloseCause::ServerCancelled);
         fixture.release(SELECTED);
         fixture.release(BEFORE_WRITE);
@@ -528,10 +525,7 @@ async fn forced_cancellation_row() {
         let blocked =
             fixture.spawn_worker("cancelled-send", move || waiting.send("never-admitted"));
         let receiving = fixture.spawn_worker("cancelled-receive", move || receive_once(receiver));
-        fixture.arm(SELECTED);
-        fixture.cancel_server();
-        fixture.wait_paused(SELECTED).await;
-        assert_terminal(&fixture, WsCloseCause::ServerCancelled);
+        select_server_cancellation(&fixture).await;
         assert_permit_still_held(&fixture);
         fixture.release(SELECTED);
         assert_eq!(
@@ -614,11 +608,8 @@ async fn cancelled_close_await_row() {
 async fn unsettling_bridge_row() {
     direction_row(1, |fixture, peer, connection| async move {
         let (sender, receiver) = connection.split();
-        fixture.arm(SELECTED);
         let requested = tokio::time::Instant::now();
-        fixture.cancel_server();
-        fixture.wait_paused(SELECTED).await;
-        assert_terminal(&fixture, WsCloseCause::ServerCancelled);
+        select_server_cancellation(&fixture).await;
         let completed = fixture.join_server().await;
         assert!(
             matches!(completed, Err(RuntimeError::Cancelled)),
@@ -632,6 +623,22 @@ async fn unsettling_bridge_row() {
         drop((sender, receiver, peer));
     })
     .await;
+}
+
+/// Publish cancellation before the coordinator polls any terminal source.
+///
+/// Holding only [`SELECTED`] observes a cause after the coordinator chose it;
+/// it does not order the server request before that choice. The poll gate makes
+/// cancellation ready first, then releases one turn whose documented
+/// precedence must select it.
+async fn select_server_cancellation(fixture: &DirectionTestFixture) {
+    fixture.arm(BEFORE_TERMINAL_POLL);
+    fixture.cancel_server();
+    fixture.wait_paused(BEFORE_TERMINAL_POLL).await;
+    fixture.arm(SELECTED);
+    fixture.release(BEFORE_TERMINAL_POLL);
+    fixture.wait_paused(SELECTED).await;
+    assert_terminal(fixture, WsCloseCause::ServerCancelled);
 }
 
 /// The bridge answered the abort itself, rather than being taken away by it.
