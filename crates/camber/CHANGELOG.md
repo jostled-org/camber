@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/jostled-org/camber/compare/camber-v0.6.0...camber-v0.7.0) - 2026-08-15
+
+### Added
+
+- [**breaking**] implement independent-websocket-directions
+
+### Fixed
+
+- *(ws)* [**breaking**] make terminal precedence deterministic
+- *(ws)* gate carried runtime helper with websocket feature
+
+### Other
+
+- *(ws)* fix equal-ready checkpoint ordering
+- *(multipart)* make HTTP/1 backpressure proof deterministic
+
 ## [0.6.0](https://github.com/jostled-org/camber/compare/camber-v0.5.2...camber-v0.6.0) - 2026-08-14
 
 ### Added
