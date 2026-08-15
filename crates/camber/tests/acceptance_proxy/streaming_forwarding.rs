@@ -464,6 +464,12 @@ fn proxy_stream_crossing_frame_is_not_forwarded_and_maps_body_limit_once() {
                 refused.status, 413,
                 "a streaming upload is bounded by the limit its route admitted"
             );
+            let upstream_settled =
+                common::poll_until(Duration::from_secs(5), || upstream.dropped() == 1);
+            assert!(
+                upstream_settled,
+                "the refused upstream leg closed before its byte record was read"
+            );
             assert!(
                 upstream.forwarded(&admitted),
                 "every frame inside the bound reached the upstream"

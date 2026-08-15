@@ -131,14 +131,14 @@ async fn bridge_ws_handler(
     handler: WsHandler,
     req: Request,
     buffer_size: usize,
-    attachment: Option<BridgeAttachment>,
+    attachment: BridgeAttachment,
     script: Option<Arc<LifecycleScript>>,
     permit: Arc<ConnectionPermit>,
 ) {
     // Read before the attachment is spent on opening the bridge: what a
     // callback may admit is decided by which server owns this connection, and
     // the attachment is what says.
-    let authority = BridgeAttachment::callback_runtime(&attachment);
+    let authority = attachment.callback_runtime();
     let opened = open_bridge(on_upgrade, attachment, "WebSocket client upgrade failed").await;
     let (mut control, stream) = match opened {
         Some(opened) => opened,
@@ -226,7 +226,7 @@ fn report_callback_error(error: &crate::error::RuntimeError) {
 /// nothing to shut down: dropping both closes the same socket the shutdown
 /// would have.
 async fn run_direct_bridge(
-    control: &mut Option<tokio::sync::watch::Receiver<ServerControl>>,
+    control: &mut tokio::sync::watch::Receiver<ServerControl>,
     stream: ClientWs,
     queues: DirectQueues,
     terminal: &TerminalState,
@@ -275,7 +275,7 @@ struct DirectBridge<'a> {
 
 impl DirectBridge<'_> {
     /// Fix this connection's one cause, then apply what that cause decides.
-    async fn run(&mut self, control: &mut Option<tokio::sync::watch::Receiver<ServerControl>>) {
+    async fn run(&mut self, control: &mut tokio::sync::watch::Receiver<ServerControl>) {
         LifecycleScript::pause_at(
             self.script,
             LifecycleCheckpoint::WebSocketBeforeTerminalSelection,
@@ -299,7 +299,7 @@ impl DirectBridge<'_> {
     /// polled again after it has.
     async fn race(
         &mut self,
-        control: &mut Option<tokio::sync::watch::Receiver<ServerControl>>,
+        control: &mut tokio::sync::watch::Receiver<ServerControl>,
     ) -> WsCloseCause {
         use std::future::Future;
         let Self {
@@ -351,7 +351,7 @@ impl DirectBridge<'_> {
     async fn settle(
         &mut self,
         cause: WsCloseCause,
-        control: &mut Option<tokio::sync::watch::Receiver<ServerControl>>,
+        control: &mut tokio::sync::watch::Receiver<ServerControl>,
     ) {
         self.outbound.close_admission();
         self.close_receive_queue();
@@ -630,7 +630,7 @@ impl OutboundPump<'_> {
     async fn apply(
         &mut self,
         disposition: OutboundDisposition,
-        control: &mut Option<tokio::sync::watch::Receiver<ServerControl>>,
+        control: &mut tokio::sync::watch::Receiver<ServerControl>,
     ) {
         match disposition {
             OutboundDisposition::Drain => until_abort(control, self.drain()).await,

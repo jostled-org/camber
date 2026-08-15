@@ -2,10 +2,10 @@
 //!
 //! The direct and proxied bridges differ in everything they do with a
 //! transport and agree on everything about how they get one: an owned server
-//! registers the bridge before the response reaches the wire, a detached
-//! connection has no scope to register into, and neither bridge frames against a
-//! peer that never saw the response. That sequence lives here, once. What the
-//! handshake handed over lives beside it.
+//! registers the bridge before the response reaches the wire, an unavailable
+//! registrar refuses the upgrade, and neither bridge frames against a peer that
+//! never saw the response. That sequence lives here, once. What the handshake
+//! handed over lives beside it.
 
 use super::super::body::HyperResponseBody;
 use super::super::disconnect::DisconnectSignal;
@@ -26,9 +26,6 @@ pub(super) type ClientWs =
     tokio_tungstenite::WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>;
 
 /// What an owned server contributes to a bridge it is about to register.
-///
-/// Absent exactly on the detached path, where no registrar exists to take
-/// ownership of the bridge.
 pub(super) struct BridgeAttachment {
     control: tokio::sync::watch::Receiver<ServerControl>,
     dispatch: super::super::server_lifecycle::UpgradeDispatchGate,
@@ -50,46 +47,39 @@ impl BridgeAttachment {
     /// happened on the connection task, so a server with no Camber runtime over
     /// it — bare-Tokio serving — carries `None` here, and its callback cannot
     /// pick up a blocking worker's leftover context by accident.
-    pub(super) fn callback_runtime(
-        attachment: &Option<Self>,
-    ) -> Option<Arc<crate::runtime_state::RuntimeInner>> {
-        attachment
-            .as_ref()
-            .and_then(|attachment| attachment.callback_runtime.clone())
+    pub(super) fn callback_runtime(&self) -> Option<Arc<crate::runtime_state::RuntimeInner>> {
+        self.callback_runtime.clone()
     }
 
-    /// Spread an optional attachment over the parts a bridge holds separately.
+    /// Spread an attachment over the parts a bridge holds separately.
     ///
     /// Stated once, beside the struct, so a field added here reaches both
     /// bridges. Split at each bridge instead, a bridge that forgot the new
-    /// field would still compile — every part is an `Option`.
+    /// field would still compile because the parts are independent values.
     fn split(
-        attachment: Option<Self>,
+        attachment: Self,
     ) -> (
-        Option<tokio::sync::watch::Receiver<ServerControl>>,
-        Option<super::super::server_lifecycle::UpgradeDispatchGate>,
+        tokio::sync::watch::Receiver<ServerControl>,
+        super::super::server_lifecycle::UpgradeDispatchGate,
     ) {
-        match attachment {
-            // Every field is named, including the one this spread does not
-            // carry: the callback authority is read from the whole attachment
-            // before it is spent, so a `..` here would also swallow the next
-            // field somebody adds.
-            Some(Self {
-                control,
-                dispatch,
-                callback_runtime: _,
-            }) => (Some(control), Some(dispatch)),
-            None => (None, None),
-        }
+        // Every field is named, including the one this spread does not carry:
+        // the callback authority is read from the whole attachment before it is
+        // spent, so a `..` here would also swallow the next field somebody adds.
+        let Self {
+            control,
+            dispatch,
+            callback_runtime: _,
+        } = attachment;
+        (control, dispatch)
     }
 }
 
 /// Choose who owns the bridge, then resolve the response lifetime to match.
 ///
-/// An owned server registers the bridge and commits the `101` only once its
-/// registrar has admitted it; a detached connection has no scope to be
-/// admitted into, so it commits at once. Every upgrade kind routes through
-/// here, so a new one inherits the choice instead of restating it.
+/// The server registers the bridge and commits the `101` only once its registrar
+/// has admitted it. An unavailable registrar refuses the upgrade instead of
+/// launching work no supervisor owns. Every upgrade kind routes through here,
+/// so a new one inherits the rule instead of restating it.
 pub(super) async fn own_upgrade_bridge<F, Fut>(
     lifecycle: &ConnectionLifecycle,
     response: hyper::Response<HyperResponseBody>,
@@ -97,15 +87,12 @@ pub(super) async fn own_upgrade_bridge<F, Fut>(
     build_bridge: F,
 ) -> Result<hyper::Response<HyperResponseBody>, Rejected>
 where
-    F: FnOnce(Option<BridgeAttachment>) -> Fut,
+    F: FnOnce(BridgeAttachment) -> Fut,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     let registrar = match lifecycle.upgrade_registrar() {
         Some(registrar) => registrar,
-        None => {
-            detach_bridge(build_bridge(None));
-            return Ok(commit_upgrade(response, handoff));
-        }
+        None => return Err(Rejected::upgrade_registration_unavailable()),
     };
     // Captured HERE, on the connection task, because that task is the last
     // owner of this runtime's context: the launch below is a bare
@@ -116,32 +103,8 @@ where
         callback_runtime: crate::runtime_state::try_current_runtime(),
     };
     let (gate, start) = tokio::sync::oneshot::channel();
-    let handle = spawn_gated_bridge(start, build_bridge(Some(attachment)));
+    let handle = spawn_gated_bridge(start, build_bridge(attachment));
     complete_upgrade_registration(registrar, handle, gate, response, handoff).await
-}
-
-/// Launch a WebSocket bridge with no registrar to hand it to.
-///
-/// A lifecycle that bound no upgrade transport has no root scope for the bridge
-/// to be admitted into, so the bridge inherits that connection's lifetime rather
-/// than becoming an orphaned scope child. Since 2026-08-15 no serving entry
-/// point produces such a lifecycle: `serve_owned_connection` binds the upgrade
-/// transport on every connection the supervisor spawns, synchronous terminals
-/// included. This arm is what the type still admits, not a path callers reach.
-///
-/// `own_upgrade_bridge` is its only caller. It stays a named function because
-/// `docs/scripts/check_no_orphan_spawns.sh` allowlists spawns by
-/// `file:function`, never by file: this is the site that anchors the detached
-/// contract. This module's other allowlisted spawn is per-connection rather
-/// than a background subsystem — `spawn_gated_bridge` hands its join handle
-/// straight to the registrar that owns it — and the direct bridge's own
-/// blocking-callback launch is allowlisted in `direct.rs`. A spawn at any
-/// fourth site across the family is reported.
-fn detach_bridge<F>(bridge: F)
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    drop(tokio::spawn(bridge));
 }
 
 /// Resolve the response lifetime at a successful `101` handoff.
@@ -249,16 +212,12 @@ async fn upgrade_client_ws(
 /// An uncommitted dispatch means the response never reached the wire, so the
 /// transport is shut down rather than spoken WebSocket over. Both bridges gate
 /// on this answer, so neither can start framing against a peer that is still
-/// waiting on an HTTP response. A connection with no gate — the detached
-/// path — has no such handoff to wait on.
+/// waiting on an HTTP response.
 async fn commit_dispatch(
-    gate: Option<super::super::server_lifecycle::UpgradeDispatchGate>,
+    gate: super::super::server_lifecycle::UpgradeDispatchGate,
     stream: &mut ClientWs,
 ) -> ControlFlow<()> {
-    let committed = match gate {
-        Some(gate) => gate.committed().await,
-        None => true,
-    };
+    let committed = gate.committed().await;
     match committed {
         true => ControlFlow::Continue(()),
         false => {
@@ -270,10 +229,7 @@ async fn commit_dispatch(
 
 /// What a bridge holds once it is open: the control watch it stops on, and the
 /// client transport it frames over.
-type OpenBridge = (
-    Option<tokio::sync::watch::Receiver<ServerControl>>,
-    ClientWs,
-);
+type OpenBridge = (tokio::sync::watch::Receiver<ServerControl>, ClientWs);
 
 /// Open a bridge: spread the attachment, take over the client transport, and
 /// wait for the `101` to reach the wire.
@@ -285,7 +241,7 @@ type OpenBridge = (
 /// caller to do, because both have already logged or shut the transport down.
 pub(super) async fn open_bridge(
     on_upgrade: hyper::upgrade::OnUpgrade,
-    attachment: Option<BridgeAttachment>,
+    attachment: BridgeAttachment,
     context: &str,
 ) -> Option<OpenBridge> {
     let (control, dispatch) = BridgeAttachment::split(attachment);

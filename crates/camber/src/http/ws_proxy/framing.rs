@@ -144,7 +144,7 @@ pub(super) fn next_frame(frame: WsFrame, context: &str) -> ControlFlow<(), WsFra
 
 /// Wait for this server's next control transition away from `Running`.
 pub(super) async fn next_control(
-    control: &mut Option<tokio::sync::watch::Receiver<ServerControl>>,
+    control: &mut tokio::sync::watch::Receiver<ServerControl>,
 ) -> ServerControl {
     awaited_control(control, |mode| mode != ServerControl::Running).await
 }
@@ -165,7 +165,7 @@ pub(super) async fn next_control(
 /// owes its peers no close, so a step abandoned here is one the abort has
 /// already made pointless.
 pub(super) async fn until_abort<F>(
-    control: &mut Option<tokio::sync::watch::Receiver<ServerControl>>,
+    control: &mut tokio::sync::watch::Receiver<ServerControl>,
     step: F,
 ) where
     F: std::future::Future<Output = ()>,
@@ -179,19 +179,13 @@ pub(super) async fn until_abort<F>(
 
 /// Wait for a control mode that answers `reached`.
 ///
-/// A bridge with no control watch has no server to be asked by, so it waits
-/// forever rather than reporting a transition that cannot come. A sender that
-/// is gone is the last answer there will ever be — the server it belonged to
-/// is no longer there to ask for anything — so whatever it last published is
-/// what this returns.
+/// A sender that is gone is the last answer there will ever be — the server it
+/// belonged to is no longer there to ask for anything — so whatever it last
+/// published is what this returns.
 async fn awaited_control(
-    control: &mut Option<tokio::sync::watch::Receiver<ServerControl>>,
+    receiver: &mut tokio::sync::watch::Receiver<ServerControl>,
     reached: fn(ServerControl) -> bool,
 ) -> ServerControl {
-    let receiver = match control {
-        Some(receiver) => receiver,
-        None => return std::future::pending().await,
-    };
     loop {
         let current = *receiver.borrow_and_update();
         if reached(current) {

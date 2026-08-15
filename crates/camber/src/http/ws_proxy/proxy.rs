@@ -151,7 +151,7 @@ async fn bridge_ws_proxy(
     on_upgrade: hyper::upgrade::OnUpgrade,
     backend_ws_url: Box<str>,
     forwarded_headers: Box<[HeaderPair]>,
-    attachment: Option<super::ownership::BridgeAttachment>,
+    attachment: super::ownership::BridgeAttachment,
     permit: Arc<ConnectionPermit>,
 ) {
     let opened = open_bridge(
@@ -193,7 +193,7 @@ async fn bridge_ws_proxy(
 
 /// Forward frames in both directions until one side ends the bridge.
 async fn forward_proxy_frames<B>(
-    control: &mut Option<tokio::sync::watch::Receiver<ServerControl>>,
+    control: &mut tokio::sync::watch::Receiver<ServerControl>,
     client_ws: &mut ClientWs,
     backend_ws: &mut tokio_tungstenite::WebSocketStream<B>,
 ) -> ProxyExit
@@ -299,7 +299,7 @@ fn backend_fault_close() -> WsClose {
 /// deadline expiring — published to it.
 async fn stop_proxy_bridge<C, B>(
     mode: ServerControl,
-    control: &mut Option<tokio::sync::watch::Receiver<ServerControl>>,
+    control: &mut tokio::sync::watch::Receiver<ServerControl>,
     client: &mut tokio_tungstenite::WebSocketStream<C>,
     backend: &mut tokio_tungstenite::WebSocketStream<B>,
 ) -> ControlFlow<ProxyExit>
