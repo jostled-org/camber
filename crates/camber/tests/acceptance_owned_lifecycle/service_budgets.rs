@@ -333,27 +333,78 @@ async fn assert_omitted_limit_admits_concurrent_transports() {
         .expect("the unbounded server ended cleanly");
 }
 
-/// A positive limit holds one permit for a whole HTTP transport, and returns
-/// exactly one when that transport ends.
-async fn assert_one_permit_covers_each_http_transport() {
-    let held = held_router();
+/// A background server limited to one concurrent transport, with the observer
+/// that watches its permit.
+struct LimitedServer {
+    handle: camber::http::ServerHandle,
+    addr: std::net::SocketAddr,
+    controller: LifecycleController,
+}
+
+/// Serve `router` in the background under a one-transport connection limit.
+///
+/// Every permit row needs the same three things — a bound address, an observer
+/// registered against it, and a server frozen at `connection_limit(1)` — so they
+/// are assembled once here and the rows differ only in what they then do.
+async fn serve_one_transport(router: Router, label: &str) -> LimitedServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind the limited listener");
-    let addr = listener.local_addr().expect("limited address");
-    let controller = lifecycle(addr).expect("register the limited observer");
-    let handle = camber::http::server(held.router)
+        .unwrap_or_else(|_| panic!("bind the {label} listener"));
+    let addr = listener
+        .local_addr()
+        .unwrap_or_else(|_| panic!("{label} address"));
+    let controller = lifecycle(addr).unwrap_or_else(|_| panic!("register the {label} observer"));
+    let handle = camber::http::server(router)
         .policy(
             ServerPolicy::default()
                 .connection_limit(1)
                 .expect("one concurrent transport"),
         )
         .serve_background(listener)
-        .expect("owned server requires a Tokio runtime");
+        .unwrap_or_else(|_| panic!("the {label} server needs a Tokio executor"));
+    LimitedServer {
+        handle,
+        addr,
+        controller,
+    }
+}
 
+/// Arm the one production checkpoint every permit row waits on.
+fn arm_permit_wait(controller: &LifecycleController, label: &str) {
     controller
         .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
-        .expect("arm the permit wait");
+        .unwrap_or_else(|_| panic!("arm the {label} permit wait"));
+}
+
+/// Prove `blocked` is parked on the permit rather than merely slow.
+///
+/// Waiting on the production checkpoint is what makes this a proof: the peer has
+/// reached the permit wait, so the silence that follows the release is the limit
+/// holding, not a race the test happened to win.
+async fn assert_blocked_on_permit(
+    controller: &LifecycleController,
+    blocked: &mut tokio::net::TcpStream,
+    label: &str,
+) {
+    wait_paused(
+        controller,
+        LifecycleCheckpoint::ConnectionPermitWaitPending,
+        label,
+    )
+    .await;
+    controller
+        .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+        .unwrap_or_else(|_| panic!("release the {label} permit wait"));
+    assert_unanswered(blocked, label).await;
+}
+
+/// A positive limit holds one permit for a whole HTTP transport, and returns
+/// exactly one when that transport ends.
+async fn assert_one_permit_covers_each_http_transport() {
+    let held = held_router();
+    let server = serve_one_transport(held.router, "limited").await;
+    let addr = server.addr;
+    arm_permit_wait(&server.controller, "limited");
 
     let mut first = connect(addr).await;
     send_get(&mut first, "/held").await;
@@ -362,16 +413,7 @@ async fn assert_one_permit_covers_each_http_transport() {
 
     // The second transport is accepted and then parked: the permit its
     // predecessor holds is what it waits on.
-    wait_paused(
-        &controller,
-        LifecycleCheckpoint::ConnectionPermitWaitPending,
-        "limited second",
-    )
-    .await;
-    controller
-        .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
-        .expect("release the permit wait");
-    assert_unanswered(&mut second, "limited second").await;
+    assert_blocked_on_permit(&server.controller, &mut second, "limited second").await;
 
     // Releasing the first request ends its transport, which returns its permit.
     held.release.add_permits(1);
@@ -387,8 +429,8 @@ async fn assert_one_permit_covers_each_http_transport() {
     held.release.add_permits(1);
     assert_answered(&mut third, "limited third").await;
 
-    handle.shutdown();
-    tokio::time::timeout(EVENT_TIMEOUT, handle.join())
+    server.handle.shutdown();
+    tokio::time::timeout(EVENT_TIMEOUT, server.handle.join())
         .await
         .expect("the limited server joined")
         .expect("the limited server ended cleanly");
@@ -427,40 +469,15 @@ async fn open_subscription(addr: std::net::SocketAddr) -> tokio::net::TcpStream 
 }
 
 async fn assert_one_permit_covers_an_sse_response() {
-    let router = endless_sse_router();
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind the SSE listener");
-    let addr = listener.local_addr().expect("SSE address");
-    let controller = lifecycle(addr).expect("register the SSE observer");
-    let handle = camber::http::server(router)
-        .policy(
-            ServerPolicy::default()
-                .connection_limit(1)
-                .expect("one concurrent transport"),
-        )
-        .serve_background(listener)
-        .expect("owned server requires a Tokio runtime");
-
-    controller
-        .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
-        .expect("arm the SSE permit wait");
+    let server = serve_one_transport(endless_sse_router(), "SSE").await;
+    let addr = server.addr;
+    arm_permit_wait(&server.controller, "SSE");
 
     let subscriber = open_subscription(addr).await;
 
     let mut blocked = connect(addr).await;
     send_get(&mut blocked, "/events").await;
-    wait_paused(
-        &controller,
-        LifecycleCheckpoint::ConnectionPermitWaitPending,
-        "SSE blocked",
-    )
-    .await;
-    controller
-        .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
-        .expect("release the SSE permit wait");
-    assert_unanswered(&mut blocked, "SSE blocked").await;
+    assert_blocked_on_permit(&server.controller, &mut blocked, "SSE blocked").await;
 
     // Closing the subscriber ends the streaming response and returns its one
     // permit; the waiting peer then enters.
@@ -477,8 +494,8 @@ async fn assert_one_permit_covers_an_sse_response() {
         "the waiting peer was closed instead of being admitted"
     );
 
-    handle.cancel();
-    let ended = tokio::time::timeout(EVENT_TIMEOUT, handle.join())
+    server.handle.cancel();
+    let ended = tokio::time::timeout(EVENT_TIMEOUT, server.handle.join())
         .await
         .expect("the SSE server joined");
     assert!(
@@ -548,64 +565,22 @@ async fn assert_one_permit_covers_a_grpc_transport() {
         })),
     );
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind the gRPC listener");
-    let addr = listener.local_addr().expect("gRPC address");
-    let controller = lifecycle(addr).expect("register the gRPC observer");
-    let handle = camber::http::server(router)
-        .policy(
-            ServerPolicy::default()
-                .connection_limit(1)
-                .expect("one concurrent transport"),
-        )
-        .serve_background(listener)
-        .expect("owned server requires a Tokio runtime");
-
-    let channel = tokio::time::timeout(
-        EVENT_TIMEOUT,
-        tonic::transport::Channel::from_shared(format!("http://{addr}"))
-            .expect("build the gRPC endpoint")
-            .connect(),
-    )
-    .await
-    .expect("the gRPC channel never connected")
-    .expect("the gRPC channel failed to connect");
-    let mut caller = grpc_proto::greeter_client::GreeterClient::new(channel);
-    // The client is returned rather than dropped inside the task: the transport
-    // must stay open after the RPC ends, because that gap is what this row reads.
-    let call = tokio::spawn(async move {
-        let reply = caller
-            .say_hello(tonic::Request::new(grpc_proto::HelloRequest {
-                name: "Camber".into(),
-            }))
-            .await
-            .expect("the gRPC call failed")
-            .into_inner()
-            .message;
-        (caller, reply)
-    });
-
+    let server = serve_one_transport(router, "gRPC").await;
+    let call = park_one_rpc(server.addr).await;
     tokio::time::timeout(EVENT_TIMEOUT, entries.recv())
         .await
         .expect("the parked RPC was never entered")
         .expect("the parked RPC's entry channel closed");
 
-    controller
-        .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
-        .expect("arm the gRPC permit wait");
-    let mut blocked = connect(addr).await;
+    arm_permit_wait(&server.controller, "gRPC");
+    let mut blocked = connect(server.addr).await;
     send_get(&mut blocked, "/ping").await;
-    wait_paused(
-        &controller,
-        LifecycleCheckpoint::ConnectionPermitWaitPending,
-        "gRPC blocked",
+    assert_blocked_on_permit(
+        &server.controller,
+        &mut blocked,
+        "gRPC blocked while the RPC is parked",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
-        .expect("release the gRPC permit wait");
-    assert_unanswered(&mut blocked, "gRPC blocked while the RPC is parked").await;
 
     release.add_permits(1);
     let (client, reply) = tokio::time::timeout(EVENT_TIMEOUT, call)
@@ -618,16 +593,53 @@ async fn assert_one_permit_covers_a_grpc_transport() {
         "the parked RPC did not complete through tonic"
     );
 
+    // The second read: the RPC is answered, but its channel is still open, so
+    // the permit must still be held.
     assert_unanswered(&mut blocked, "gRPC blocked after the RPC completed").await;
 
     drop(client);
     assert_answered(&mut blocked, "gRPC blocked").await;
 
-    handle.shutdown();
-    tokio::time::timeout(EVENT_TIMEOUT, handle.join())
+    server.handle.shutdown();
+    tokio::time::timeout(EVENT_TIMEOUT, server.handle.join())
         .await
         .expect("the gRPC server joined")
         .expect("the gRPC server ended cleanly");
+}
+
+/// Start the RPC that parks inside `ParkedGreeter` and hand back its join.
+///
+/// The client rides back out of the task rather than being dropped inside it:
+/// the transport must stay open after the RPC ends, because that gap between a
+/// finished call and a closed channel is exactly what this row reads.
+#[cfg(feature = "grpc")]
+async fn park_one_rpc(
+    addr: std::net::SocketAddr,
+) -> tokio::task::JoinHandle<(
+    grpc_proto::greeter_client::GreeterClient<tonic::transport::Channel>,
+    String,
+)> {
+    let channel = tokio::time::timeout(
+        EVENT_TIMEOUT,
+        tonic::transport::Channel::from_shared(format!("http://{addr}"))
+            .expect("build the gRPC endpoint")
+            .connect(),
+    )
+    .await
+    .expect("the gRPC channel never connected")
+    .expect("the gRPC channel failed to connect");
+    let mut caller = grpc_proto::greeter_client::GreeterClient::new(channel);
+    tokio::spawn(async move {
+        let reply = caller
+            .say_hello(tonic::Request::new(grpc_proto::HelloRequest {
+                name: "Camber".into(),
+            }))
+            .await
+            .expect("the gRPC call failed")
+            .into_inner()
+            .message;
+        (caller, reply)
+    })
 }
 
 /// The limit is the server's own authority, not the Camber runtime's.
@@ -652,39 +664,16 @@ async fn assert_bare_tokio_limit_holds() {
     }
 
     let held = held_router();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind the bare-Tokio listener");
-    let addr = listener.local_addr().expect("bare-Tokio address");
-    let controller = lifecycle(addr).expect("register the bare-Tokio observer");
-    let handle = camber::http::server(held.router)
-        .policy(
-            ServerPolicy::default()
-                .connection_limit(1)
-                .expect("one concurrent transport"),
-        )
-        .serve_background(listener)
-        .expect("a bare Tokio executor is all a background server needs");
-
-    controller
-        .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
-        .expect("arm the bare-Tokio permit wait");
+    let server = serve_one_transport(held.router, "bare-Tokio").await;
+    let addr = server.addr;
+    arm_permit_wait(&server.controller, "bare-Tokio");
 
     let mut first = connect(addr).await;
     send_get(&mut first, "/held").await;
     let mut second = connect(addr).await;
     send_get(&mut second, "/held").await;
 
-    wait_paused(
-        &controller,
-        LifecycleCheckpoint::ConnectionPermitWaitPending,
-        "bare-Tokio second",
-    )
-    .await;
-    controller
-        .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
-        .expect("release the bare-Tokio permit wait");
-    assert_unanswered(&mut second, "bare-Tokio second").await;
+    assert_blocked_on_permit(&server.controller, &mut second, "bare-Tokio second").await;
 
     held.release.add_permits(1);
     assert_answered(&mut first, "bare-Tokio first").await;
@@ -692,8 +681,8 @@ async fn assert_bare_tokio_limit_holds() {
     held.release.add_permits(1);
     assert_answered(&mut second, "bare-Tokio second").await;
 
-    handle.shutdown();
-    tokio::time::timeout(EVENT_TIMEOUT, handle.join())
+    server.handle.shutdown();
+    tokio::time::timeout(EVENT_TIMEOUT, server.handle.join())
         .await
         .expect("the bare-Tokio server joined")
         .expect("the bare-Tokio server ended cleanly");
