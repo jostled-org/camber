@@ -12,5 +12,8 @@ mod framework_rejections;
 #[path = "component_websocket/handshake.rs"]
 mod handshake;
 #[cfg(feature = "ws")]
+#[path = "component_websocket/shared_binary_payloads.rs"]
+mod shared_binary_payloads;
+#[cfg(feature = "ws")]
 #[path = "component_websocket/transport_ownership.rs"]
 mod transport_ownership;

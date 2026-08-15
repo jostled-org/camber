@@ -62,7 +62,9 @@ impl WsSender {
     /// Send a binary message, waiting for outbound queue capacity.
     ///
     /// The borrowed payload is copied once, here, because the frame outlives
-    /// this call by exactly as long as it sits in the queue.
+    /// this call by exactly as long as it sits in the queue. A producer that
+    /// already owns immutable storage can give that storage to
+    /// [`Self::send_shared_binary`] instead and pay no copy at all.
     ///
     /// # Errors
     ///
@@ -74,6 +76,8 @@ impl WsSender {
 
     /// Send a binary message only if the outbound queue has a free slot now.
     ///
+    /// Copies the borrowed payload once, exactly as [`Self::send_binary`] does.
+    ///
     /// # Errors
     ///
     /// The same two as [`Self::try_send`].
@@ -82,13 +86,64 @@ impl WsSender {
         self.try_admit(WsMessage::Binary(Bytes::copy_from_slice(data)))
     }
 
+    /// Send shared immutable binary storage, waiting for outbound queue
+    /// capacity.
+    ///
+    /// Taken by value, because success is this connection taking the handle:
+    /// the frame it becomes outlives the call, and nothing here may copy the
+    /// bytes to make that true. Cloning a [`Bytes`] changes a reference count,
+    /// so one payload offered to many connections is one allocation however
+    /// many recipients there are — and dropping the caller's own handle after
+    /// admission leaves every queued clone valid.
+    ///
+    /// ```rust,no_run
+    /// # use camber::http::{Bytes, WsSender};
+    /// # fn fan_out(payload: Bytes, recipients: &[WsSender]) -> Result<(), camber::RuntimeError> {
+    /// for recipient in recipients {
+    ///     recipient.send_shared_binary(payload.clone())?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Success means the same thing every other send means: the frame entered
+    /// this connection's bounded queue. Whether it is then written or dropped
+    /// is the connection's terminal cause to decide, and either way the handle
+    /// is released when the bridge is done with it.
+    ///
+    /// # Errors
+    ///
+    /// The same two as [`Self::send`]. A refused call drops only the handle it
+    /// was given; every other clone of that payload is untouched.
+    pub fn send_shared_binary(&self, data: Bytes) -> Result<(), RuntimeError> {
+        self.live()?;
+        self.admit(WsMessage::Binary(data))
+    }
+
+    /// Send shared immutable binary storage only if the outbound queue has a
+    /// free slot now.
+    ///
+    /// Takes the handle by value and copies nothing, exactly as
+    /// [`Self::send_shared_binary`] does.
+    ///
+    /// # Errors
+    ///
+    /// The same two as [`Self::try_send`]. A refused call drops only the handle
+    /// it was given.
+    pub fn try_send_shared_binary(&self, data: Bytes) -> Result<(), RuntimeError> {
+        self.live()?;
+        self.try_admit(WsMessage::Binary(data))
+    }
+
     /// Whether this connection is still worth building a frame for.
     ///
-    /// Asked by every public send before it copies the caller's payload. A
+    /// Asked by every public send before it takes the caller's payload. A
     /// borrowed payload becomes an owned frame only to be admitted, so a
     /// connection that has already ended would otherwise pay a heap copy per
     /// attempt for a frame nothing can write — the cost a fan-out producer that
-    /// has not yet noticed the close pays on every send.
+    /// has not yet noticed the close pays on every send. A shared payload pays
+    /// no copy, but the same check is what lets its refusal answer with this
+    /// connection's cause before the handle is spent.
     ///
     /// A fast path only. The admissions below keep their own check, which is
     /// what closes the race with a closure that lands between the two.

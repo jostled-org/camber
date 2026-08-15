@@ -607,6 +607,52 @@ over.
 A borrowed binary send copies the slice once, at admission. Cloning a sender
 copies the handle alone; it makes no zero-copy payload claim.
 
+### Shared binary payloads
+
+`send_binary(&[u8])` and `try_send_binary(&[u8])` take a borrow, so each
+admission copies the slice into an owned buffer — the frame outlives the call
+and the borrow does not. A producer that already owns immutable storage uses the
+shared pair instead, which takes `Bytes` by value and copies nothing:
+
+```rust
+use camber::http::{Bytes, WsSender};
+
+fn broadcast(encoded: Vec<u8>, recipients: &[WsSender]) -> Result<(), camber::RuntimeError> {
+    let payload = Bytes::from(encoded);
+    for recipient in recipients {
+        recipient.send_shared_binary(payload.clone())?;
+    }
+    Ok(())
+}
+```
+
+Cloning a `Bytes` changes a reference count. One payload sent to a hundred
+recipients is one allocation, not a hundred copies, and dropping the producer's
+own handle after admission leaves every queued clone valid.
+
+| Operation | Input | Payload cost | Waits |
+|---|---|---|---|
+| `send_binary` | `&[u8]` | one copy per admission | yes |
+| `try_send_binary` | `&[u8]` | one copy per admission | no |
+| `send_shared_binary` | `Bytes` | none — the handle moves | yes |
+| `try_send_shared_binary` | `Bytes` | none — the handle moves | no |
+
+All four report the same results: success means the frame entered this
+connection's bounded queue, `ChannelFull` means a live queue with no free slot,
+and `WebSocketClosed(cause)` means the connection is over. A refused shared send
+drops only the handle it was given; every other clone of that payload is
+untouched.
+
+The admitted handle belongs to the connection until its terminal cause decides
+what to do with it. A cause that drains writes the frame; a cause that cancels
+drops it. Either way every queued, pending, and framed handle is released when
+that connection's bridge completes. `WsConn` gains no second spelling of this:
+a facade caller takes its own sender with `WsConn::sender()`.
+
+Camber makes no claim about copies the transport or the operating system makes
+while writing each recipient's socket. The guarantee is that Camber creates no
+new payload-sized buffer per recipient.
+
 `send`, `recv`, and `recv_timeout` block. Where they block depends on the
 caller's runtime:
 

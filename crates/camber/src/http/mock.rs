@@ -36,6 +36,7 @@ pub enum LifecycleCheckpoint {
     WebSocketOutgoingBufferConfigured(usize),
     WebSocketIncomingBufferConfigured(usize),
     WebSocketBeforeOutboundWrite,
+    WebSocketOutboundFrameBuilt,
     WebSocketInboundFrameArrived,
     WebSocketInboundFrameQueued,
     WebSocketBeforeTerminalSelection,

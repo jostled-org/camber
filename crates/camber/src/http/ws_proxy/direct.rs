@@ -672,24 +672,49 @@ impl OutboundPump<'_> {
 
     /// Wait until the sink will take a frame, then give it the held one.
     ///
-    /// The frame stays in `pending` across that wait, which is this write's one
-    /// cancellation point: a sink that is not ready parks here, and a
-    /// coordinator that answers meanwhile drops this future — a frame already
-    /// taken out of `pending` would go with it, and a successful send has
-    /// already promised the application it would not. Handing the frame over is
-    /// synchronous, so past the wait the sink owns it. A flush cut short leaves
-    /// it there, where the close this settlement still owes the peer writes it.
+    /// The frame stays in `pending` across that wait, which is this write's
+    /// only production cancellation point: a sink that is not ready parks here,
+    /// and a coordinator that answers meanwhile drops this future — a frame
+    /// already taken out of `pending` would go with it, and a successful send
+    /// has already promised the application it would not. Past the wait,
+    /// [`Self::hand_over`] builds the frame and the sink takes it in one turn;
+    /// only a listener controller holds those two apart. A flush cut short
+    /// leaves it there, where the close this settlement still owes the peer
+    /// writes it.
     async fn write_held(&mut self) -> Result<(), WsError> {
         use futures_util::{Sink, SinkExt};
         std::future::poll_fn(|cx| Pin::new(&mut self.sink).poll_ready(cx)).await?;
         match self.pending.take() {
-            Some(message) => {
-                let frame = super::super::websocket::into_frame(message);
-                Pin::new(&mut self.sink).start_send(frame)?;
-            }
+            Some(message) => self.hand_over(message).await?,
             None => {}
         }
         self.sink.flush().await
+    }
+
+    /// Build one admitted message's transport frame and give it to the sink.
+    ///
+    /// The conversion moves the message's own storage: a binary payload reaches
+    /// the frame as the same buffer the caller admitted, and nothing here
+    /// copies it. The checkpoint between the two exposes exactly that boundary
+    /// — the frame is built and this future alone owns it, and the sink has not
+    /// taken it yet — and does nothing at all with no listener controller
+    /// registered.
+    ///
+    /// Held on this future's own stack rather than in `pending` for the length
+    /// of that pause, which is the one moment a cancelling coordinator drops
+    /// the converted frame instead of the settlement cancelling it. A case that
+    /// wants the frame written under a graceful stop stages the checkpoint's
+    /// release before it wakes server control, so the coordinator's same turn
+    /// advances this future into the sink.
+    async fn hand_over(&mut self, message: WsMessage) -> Result<(), WsError> {
+        use futures_util::Sink;
+        let frame = super::super::websocket::into_frame(message);
+        LifecycleScript::pause_at(
+            self.script,
+            LifecycleCheckpoint::WebSocketOutboundFrameBuilt,
+        )
+        .await;
+        Pin::new(&mut self.sink).start_send(frame)
     }
 
     /// Refuse every further send on this connection, and wake the ones waiting.

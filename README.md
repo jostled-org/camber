@@ -154,6 +154,21 @@ Sends are admitted to a bounded queue rather than written to the peer, and both
 halves read the same terminal cause. See
 [docs/reference/http.md](docs/reference/http.md#direction-ownership).
 
+To broadcast one binary payload, build it once and clone the handle:
+
+```rust
+let payload = Bytes::from(encoded);
+for recipient in recipients {
+    recipient.send_shared_binary(payload.clone())?;
+}
+```
+
+`send_shared_binary` and `try_send_shared_binary` take `Bytes` by value and copy
+nothing, so a hundred recipients cost one allocation. `send_binary(&[u8])` and
+`try_send_binary(&[u8])` stay the borrowed-slice convenience and copy once at
+admission. See
+[docs/reference/http.md](docs/reference/http.md#shared-binary-payloads).
+
 ```rust
 router.get_sse("/events", |_req, sse| {
     sse.event("update", r#"{"status":"ok"}"#)?;
