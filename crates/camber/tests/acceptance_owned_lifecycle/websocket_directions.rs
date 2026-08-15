@@ -670,7 +670,7 @@ async fn cancellation_outranks_peer_close() {
         stage_peer_close(&fixture, &mut peer).await;
         fixture.arm(SELECTED);
         fixture.cancel_server();
-        release_equal_ready_turn(&fixture).await;
+        release_equal_ready_turn(&fixture);
         fixture.wait_paused(SELECTED).await;
         assert_terminal(&fixture, WsCloseCause::ServerCancelled);
         fixture.release(SELECTED);
@@ -685,7 +685,7 @@ async fn shutdown_outranks_peer_close() {
         stage_peer_close(&fixture, &mut peer).await;
         fixture.arm(SELECTED);
         fixture.shutdown_server();
-        release_equal_ready_turn(&fixture).await;
+        release_equal_ready_turn(&fixture);
         fixture.wait_paused(SELECTED).await;
         assert_terminal(&fixture, WsCloseCause::ServerShutdown);
         fixture.release(SELECTED);
@@ -714,7 +714,7 @@ async fn peer_close_outranks_receiver_drop() {
         stage_peer_close(&fixture, &mut peer).await;
         fixture.arm(SELECTED);
         drop(receiver);
-        release_equal_ready_turn(&fixture).await;
+        release_equal_ready_turn(&fixture);
         fixture.wait_paused(SELECTED).await;
         assert_terminal(&fixture, WsCloseCause::PeerClosed);
         fixture.release(SELECTED);
@@ -730,7 +730,7 @@ async fn peer_disconnect_outranks_receiver_drop() {
         stage_peer_disconnect(&fixture, peer).await;
         fixture.arm(SELECTED);
         drop(receiver);
-        release_equal_ready_turn(&fixture).await;
+        release_equal_ready_turn(&fixture);
         fixture.wait_paused(SELECTED).await;
         assert_terminal(&fixture, WsCloseCause::PeerDisconnected);
         fixture.release(SELECTED);
@@ -1308,16 +1308,16 @@ fn exchange_authority_frames(peer: &mut TcpStream, connection: &mut WsConn) {
 
 /// Put the peer's close frame in the inbound pump's hand.
 ///
-/// The quiet release makes the result ready without waking the coordinator.
-/// The poll gate catches any concurrent wake before it can inspect a source, so
-/// the row can publish its second event and release exactly one equal-ready
-/// turn.
+/// Releasing the parsed frame wakes the coordinator into the poll gate. The
+/// helper waits for that pause before returning, so the row can publish its
+/// second event and then release exactly one equal-ready turn.
 async fn stage_peer_close(fixture: &DirectionTestFixture, peer: &mut TcpStream) {
     fixture.arm(ARRIVED);
     write_ws_close_frame(peer);
     fixture.wait_paused(ARRIVED).await;
     fixture.arm(BEFORE_TERMINAL_POLL);
-    fixture.stage_release(ARRIVED);
+    fixture.release(ARRIVED);
+    fixture.wait_paused(BEFORE_TERMINAL_POLL).await;
 }
 
 /// Put the peer's departure in the inbound pump's hand.
@@ -1330,12 +1330,12 @@ async fn stage_peer_disconnect(fixture: &DirectionTestFixture, peer: TcpStream) 
     drop(peer);
     fixture.wait_paused(ARRIVED).await;
     fixture.arm(BEFORE_TERMINAL_POLL);
-    fixture.stage_release(ARRIVED);
+    fixture.release(ARRIVED);
+    fixture.wait_paused(BEFORE_TERMINAL_POLL).await;
 }
 
-/// Release one coordinator poll after its competing event has woken it.
-async fn release_equal_ready_turn(fixture: &DirectionTestFixture) {
-    fixture.wait_paused(BEFORE_TERMINAL_POLL).await;
+/// Release one coordinator poll after the row publishes its competing event.
+fn release_equal_ready_turn(fixture: &DirectionTestFixture) {
     fixture.release(BEFORE_TERMINAL_POLL);
 }
 
