@@ -1459,6 +1459,9 @@ async fn prepare_completed_task(controller: &LifecycleController, addr: SocketAd
     controller
         .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
         .unwrap();
+    controller
+        .pause_once(LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted)
+        .unwrap();
     wait_until_paused_bounded(
         controller,
         LifecycleCheckpoint::BeforeSupervisorSelect,
@@ -1483,6 +1486,12 @@ async fn prepare_completed_task(controller: &LifecycleController, addr: SocketAd
     assert!(response.starts_with("HTTP/1.1 200"));
     assert_http_body(&mut client, b"ok").await;
     assert_eof(&mut client).await;
+    wait_and_release_bounded(
+        controller,
+        LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted,
+        "completed task did not reach its terminal boundary",
+    )
+    .await;
 }
 
 async fn observe_deferred_task_reap(

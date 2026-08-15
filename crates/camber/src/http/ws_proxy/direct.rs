@@ -11,7 +11,7 @@
 
 use super::super::Request;
 use super::super::body::HyperResponseBody;
-use super::super::mock::{LifecycleCheckpoint, LifecycleScript};
+use super::super::mock::{LifecycleCheckpoint, LifecyclePollGate, LifecycleScript};
 use super::super::router::WsHandler;
 use super::super::server_lifecycle::{ConnectionLifecycle, ConnectionPermit, ServerControl};
 use super::super::websocket::{
@@ -164,10 +164,11 @@ async fn bridge_ws_handler(
 /// Give this connection's slot back, then say that it is back.
 ///
 /// Dropping the permit is what returns the slot, so the observation follows the
-/// drop: a controller woken by the release and reading the free slot would
-/// otherwise be racing the drop it was told about. Every way this bridge ends
-/// leaves through here — including an upgrade that never opened — so the
-/// release is published exactly once on each of them.
+/// drop. A live-server test uses a second handshake as the authoritative release
+/// barrier because a waiter on another runtime worker can acquire the permit
+/// before this following observation is visible. Every way this bridge ends
+/// leaves through here, including an upgrade that never opened, so the release
+/// is published exactly once.
 fn release_permit(permit: Arc<ConnectionPermit>, script: Option<&LifecycleScript>) {
     drop(permit);
     LifecycleScript::observe_ws_permit_released(script);
@@ -311,8 +312,13 @@ impl DirectBridge<'_> {
         let unreceived = receive_owner_left(receive_owner);
         let received = inbound.run();
         let written = outbound.run();
+        let mut turn_gate = LifecyclePollGate::new(
+            self.script,
+            LifecycleCheckpoint::WebSocketBeforeTerminalPoll,
+        );
         tokio::pin!(stopped, unreceived, received, written);
         std::future::poll_fn(|cx| {
+            std::task::ready!(turn_gate.poll(cx));
             let mut selected = None;
             consider(&mut selected, stopped.as_mut().poll(cx).map(control_cause));
             consider(&mut selected, received.as_mut().poll(cx));
@@ -389,6 +395,11 @@ impl DirectBridge<'_> {
             WsCloseCause::ServerCancelled | WsCloseCause::PeerDisconnected => {}
             WsCloseCause::ServerShutdown => {
                 send_close(&mut self.outbound.sink, None).await;
+                LifecycleScript::pause_at(
+                    self.script,
+                    LifecycleCheckpoint::WebSocketBeforePeerCloseAwait,
+                )
+                .await;
                 drain_until_close(&mut self.inbound.source).await;
             }
             WsCloseCause::PeerClosed => flush_transport(&mut self.outbound.sink).await,

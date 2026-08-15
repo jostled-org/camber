@@ -1630,11 +1630,15 @@ impl ServerSupervisor {
 
     fn take_result(&mut self) -> Result<(), RuntimeError> {
         let terminal = std::mem::replace(&mut self.terminal, TerminalOutcome::Success);
-        match terminal {
-            TerminalOutcome::Success => Ok(()),
-            TerminalOutcome::Fatal(error) => Err(error),
-            TerminalOutcome::Cancelled => Err(RuntimeError::Cancelled),
-            TerminalOutcome::Timeout => Err(RuntimeError::Timeout),
+        match (terminal, self.current_control()) {
+            (TerminalOutcome::Timeout, _) => Err(RuntimeError::Timeout),
+            (_, ServerControl::Abort) | (TerminalOutcome::Cancelled, _) => {
+                Err(RuntimeError::Cancelled)
+            }
+            (TerminalOutcome::Success, ServerControl::Running | ServerControl::Graceful) => Ok(()),
+            (TerminalOutcome::Fatal(error), ServerControl::Running | ServerControl::Graceful) => {
+                Err(error)
+            }
         }
     }
 

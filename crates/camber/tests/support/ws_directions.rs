@@ -480,30 +480,6 @@ impl<T> WorkerResult<T> {
     }
 }
 
-/// A checkpoint's turn count, taken while the fixture still holds it.
-///
-/// Produced by [`DirectionTestFixture::stage_turn`] and read back by
-/// [`StagedTurn::assert_unspent`] immediately before a row's second event.
-pub struct StagedTurn {
-    checkpoint: LifecycleCheckpoint,
-    polls: usize,
-}
-
-impl StagedTurn {
-    /// Require that nothing has spent this turn yet.
-    ///
-    /// Read immediately before the row's second event, which is the last moment
-    /// the claim can still be made about production rather than about the row's
-    /// own scheduling.
-    pub fn assert_unspent(&self, fixture: &DirectionTestFixture, what: &str) {
-        assert_eq!(
-            fixture.checkpoint_polls(self.checkpoint),
-            self.polls,
-            "{what}: the staged pump took a turn of its own before the second event existed"
-        );
-    }
-}
-
 /// What the three untimed facade receives answered, and the connection that
 /// answered them.
 pub struct FacadeReceives {
@@ -712,33 +688,6 @@ impl DirectionTestFixture {
             .stage_release(checkpoint)
             .expect("stage direction checkpoint release");
         self.forget(checkpoint);
-    }
-
-    /// How many turns whatever is held at `checkpoint` has taken.
-    ///
-    /// The companion to [`Self::stage_release`]: a staged release is one nothing
-    /// has looked at yet, and this is what says whether something has since. A
-    /// row that staged a turn reads it to tell a turn another wake already spent
-    /// from the one it staged. A checkpoint nothing armed is refused by the seam
-    /// rather than counted as zero, and that refusal fails the case here.
-    pub fn checkpoint_polls(&self, checkpoint: LifecycleCheckpoint) -> usize {
-        self.controller()
-            .checkpoint_polls(checkpoint)
-            .expect("read a direction checkpoint's polls")
-    }
-
-    /// Record the turn count of a checkpoint this fixture still holds.
-    ///
-    /// The staging is only worth anything while nothing has looked at it: the
-    /// pump resumes on whatever poll something else provokes, and a poll before
-    /// the row's second event lets the pump commit its cause in a turn of its
-    /// own. The row would then read the cause it expected without the two events
-    /// ever having been ready together, which is the entire claim.
-    pub fn stage_turn(&self, checkpoint: LifecycleCheckpoint) -> StagedTurn {
-        StagedTurn {
-            checkpoint,
-            polls: self.checkpoint_polls(checkpoint),
-        }
     }
 
     /// Take one message through each untimed facade receiver, on a worker.

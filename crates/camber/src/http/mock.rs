@@ -39,7 +39,9 @@ pub enum LifecycleCheckpoint {
     WebSocketInboundFrameArrived,
     WebSocketInboundFrameQueued,
     WebSocketBeforeTerminalSelection,
+    WebSocketBeforeTerminalPoll,
     WebSocketTerminalSelected,
+    WebSocketBeforePeerCloseAwait,
     MultipartCommandAccepted,
     MultipartIngressAdvanced,
     MultipartReplyPublished,
@@ -171,6 +173,53 @@ impl ReleaseGate {
                 std::task::Poll::Pending
             }
         }
+    }
+}
+
+/// A test-only barrier checked before one production poll.
+///
+/// The barrier keeps looking until its checkpoint is armed. This lets a test
+/// stage one nested future first, then stop the coordinator before another wake
+/// lets it poll any terminal source. It can delay a poll but cannot choose its
+/// result or change source readiness.
+#[cfg(feature = "ws")]
+pub(in crate::http) struct LifecyclePollGate<'a> {
+    script: Option<&'a LifecycleScript>,
+    checkpoint: LifecycleCheckpoint,
+    release: Option<Arc<ReleaseGate>>,
+    passed: bool,
+}
+
+#[cfg(feature = "ws")]
+impl<'a> LifecyclePollGate<'a> {
+    pub(in crate::http) const fn new(
+        script: Option<&'a LifecycleScript>,
+        checkpoint: LifecycleCheckpoint,
+    ) -> Self {
+        Self {
+            script,
+            checkpoint,
+            release: None,
+            passed: false,
+        }
+    }
+
+    /// Hold the first poll that observes the armed checkpoint.
+    pub(in crate::http) fn poll(&mut self, cx: &std::task::Context<'_>) -> std::task::Poll<()> {
+        if self.passed {
+            return std::task::Poll::Ready(());
+        }
+        if self.release.is_none() {
+            self.release = self.script.and_then(|script| script.reach(self.checkpoint));
+        }
+        let ready = match self.release.as_ref() {
+            Some(release) => release.poll_release(cx),
+            None => std::task::Poll::Ready(()),
+        };
+        if ready.is_ready() && self.release.is_some() {
+            self.passed = true;
+        }
+        ready
     }
 }
 

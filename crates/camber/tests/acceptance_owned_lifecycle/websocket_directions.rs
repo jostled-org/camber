@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use crate::common::{
     BEFORE_WRITE, CLOSE, DIRECTION_DEADLINE, DIRECTION_PATH, DirectionTestFixture, EXPIRING_STOP,
-    PARKED_PATH, StagedTurn, abortive_direction_row, assert_broken_pipe, assert_closed_with,
+    PARKED_PATH, abortive_direction_row, assert_broken_pipe, assert_closed_with,
     assert_received_text, assert_within_one_deadline, closed_cause, direction_peer, direction_row,
     fill_outbound_behind_the_writer, park_until_released, read_ws_text_frame, receive_once,
     returning_direction_row, staged_direction_row, try_read_ws_frame_raw, write_ws_close_frame,
@@ -40,6 +40,10 @@ const ARRIVED: LifecycleCheckpoint = LifecycleCheckpoint::WebSocketInboundFrameA
 const QUEUED: LifecycleCheckpoint = LifecycleCheckpoint::WebSocketInboundFrameQueued;
 /// The checkpoint that holds the coordinator before it looks for a cause.
 const BEFORE_SELECTION: LifecycleCheckpoint = LifecycleCheckpoint::WebSocketBeforeTerminalSelection;
+/// The checkpoint that holds a coordinator turn before it polls any cause.
+const BEFORE_TERMINAL_POLL: LifecycleCheckpoint = LifecycleCheckpoint::WebSocketBeforeTerminalPoll;
+/// The checkpoint that holds a graceful bridge before it awaits the peer close.
+const CLOSE_AWAIT: LifecycleCheckpoint = LifecycleCheckpoint::WebSocketBeforePeerCloseAwait;
 /// The checkpoint that holds the coordinator once its cause is fixed.
 const SELECTED: LifecycleCheckpoint = LifecycleCheckpoint::WebSocketTerminalSelected;
 
@@ -245,7 +249,7 @@ async fn outbound_write_failure_row() {
         fixture.release(SELECTED);
         assert_closed_receive(&mut receiver, WsCloseCause::PeerDisconnected);
         drop((sender, receiver));
-        assert_owners_released(&fixture, WsCloseCause::PeerDisconnected, 0);
+        assert_write_failure_released(&fixture);
     })
     .await;
 }
@@ -477,6 +481,7 @@ async fn drained_close_row() {
 async fn silent_peer_row() {
     direction_row(1, |fixture, mut peer, connection| async move {
         let (sender, receiver) = connection.split();
+        fixture.arm(CLOSE_AWAIT);
         fixture.arm(SELECTED);
         let requested = tokio::time::Instant::now();
         fixture.shutdown_server();
@@ -484,6 +489,8 @@ async fn silent_peer_row() {
         assert_terminal(&fixture, WsCloseCause::ServerShutdown);
         fixture.release(SELECTED);
         expect_peer_close(&mut peer, "a graceful stop sent no close frame");
+        fixture.wait_paused(CLOSE_AWAIT).await;
+        fixture.release(CLOSE_AWAIT);
         let completed = fixture.join_server().await;
         assert!(
             matches!(completed, Err(RuntimeError::Timeout)),
@@ -573,15 +580,19 @@ fn assert_permit_still_held(fixture: &DirectionTestFixture) {
 async fn cancelled_close_await_row() {
     direction_row(1, |fixture, mut peer, connection| async move {
         let (sender, receiver) = connection.split();
+        fixture.arm(CLOSE_AWAIT);
         fixture.arm(SELECTED);
         fixture.shutdown_server();
         fixture.wait_paused(SELECTED).await;
         assert_terminal(&fixture, WsCloseCause::ServerShutdown);
         fixture.release(SELECTED);
         // The close reaching the peer is what says the bridge is past its own
-        // write and into the wait for an answer. The peer sends none.
+        // write. The checkpoint proves it has reached the wait for an answer.
+        // The peer sends none.
         expect_peer_close(&mut peer, "a graceful stop sent no close frame");
+        fixture.wait_paused(CLOSE_AWAIT).await;
         fixture.cancel_server();
+        fixture.release(CLOSE_AWAIT);
         let completed = fixture.join_server().await;
         assert!(
             matches!(completed, Err(RuntimeError::Cancelled)),
@@ -656,10 +667,10 @@ async fn equal_ready_terminal_events_use_documented_precedence() {
 /// already delivered.
 async fn cancellation_outranks_peer_close() {
     direction_row(1, |fixture, mut peer, connection| async move {
-        let staged = stage_peer_close(&fixture, &mut peer).await;
+        stage_peer_close(&fixture, &mut peer).await;
         fixture.arm(SELECTED);
-        staged.assert_unspent(&fixture, "a cancellation against a delivered peer close");
         fixture.cancel_server();
+        release_equal_ready_turn(&fixture).await;
         fixture.wait_paused(SELECTED).await;
         assert_terminal(&fixture, WsCloseCause::ServerCancelled);
         fixture.release(SELECTED);
@@ -671,10 +682,10 @@ async fn cancellation_outranks_peer_close() {
 /// A stop the server asked for outranks a close the peer already delivered.
 async fn shutdown_outranks_peer_close() {
     direction_row(1, |fixture, mut peer, connection| async move {
-        let staged = stage_peer_close(&fixture, &mut peer).await;
+        stage_peer_close(&fixture, &mut peer).await;
         fixture.arm(SELECTED);
-        staged.assert_unspent(&fixture, "a stop against a delivered peer close");
         fixture.shutdown_server();
+        release_equal_ready_turn(&fixture).await;
         fixture.wait_paused(SELECTED).await;
         assert_terminal(&fixture, WsCloseCause::ServerShutdown);
         fixture.release(SELECTED);
@@ -700,10 +711,10 @@ async fn shutdown_outranks_last_sender_drop() {
 async fn peer_close_outranks_receiver_drop() {
     direction_row(1, |fixture, mut peer, connection| async move {
         let (sender, receiver) = connection.split();
-        let staged = stage_peer_close(&fixture, &mut peer).await;
+        stage_peer_close(&fixture, &mut peer).await;
         fixture.arm(SELECTED);
-        staged.assert_unspent(&fixture, "a receiver drop against a delivered peer close");
         drop(receiver);
+        release_equal_ready_turn(&fixture).await;
         fixture.wait_paused(SELECTED).await;
         assert_terminal(&fixture, WsCloseCause::PeerClosed);
         fixture.release(SELECTED);
@@ -716,10 +727,10 @@ async fn peer_close_outranks_receiver_drop() {
 async fn peer_disconnect_outranks_receiver_drop() {
     direction_row(1, |fixture, peer, connection| async move {
         let (sender, receiver) = connection.split();
-        let staged = stage_peer_disconnect(&fixture, peer).await;
+        stage_peer_disconnect(&fixture, peer).await;
         fixture.arm(SELECTED);
-        staged.assert_unspent(&fixture, "a receiver drop against a peer that disconnected");
         drop(receiver);
+        release_equal_ready_turn(&fixture).await;
         fixture.wait_paused(SELECTED).await;
         assert_terminal(&fixture, WsCloseCause::PeerDisconnected);
         fixture.release(SELECTED);
@@ -1295,33 +1306,37 @@ fn exchange_authority_frames(peer: &mut TcpStream, connection: &mut WsConn) {
     );
 }
 
-/// Put the peer's close frame in the inbound pump's hand, ready for whatever
-/// turn the next event provokes.
+/// Put the peer's close frame in the inbound pump's hand.
 ///
-/// The frame is read off the real transport before the row's second event
-/// exists, and its release is recorded rather than woken. So the poll that the
-/// second event provokes is the first poll in which either is ready, and the
-/// precedence between them is what decides the cause.
-async fn stage_peer_close(fixture: &DirectionTestFixture, peer: &mut TcpStream) -> StagedTurn {
+/// The quiet release makes the result ready without waking the coordinator.
+/// The poll gate catches any concurrent wake before it can inspect a source, so
+/// the row can publish its second event and release exactly one equal-ready
+/// turn.
+async fn stage_peer_close(fixture: &DirectionTestFixture, peer: &mut TcpStream) {
     fixture.arm(ARRIVED);
     write_ws_close_frame(peer);
     fixture.wait_paused(ARRIVED).await;
+    fixture.arm(BEFORE_TERMINAL_POLL);
     fixture.stage_release(ARRIVED);
-    fixture.stage_turn(ARRIVED)
 }
 
-/// Put the peer's departure in the inbound pump's hand, ready for whatever turn
-/// the next event provokes.
+/// Put the peer's departure in the inbound pump's hand.
 ///
 /// The same staging as [`stage_peer_close`], over the other thing one read can
 /// answer with. The peer's socket is gone before the pump is released, so the
 /// item the pump is holding is the end of the transport rather than a frame.
-async fn stage_peer_disconnect(fixture: &DirectionTestFixture, peer: TcpStream) -> StagedTurn {
+async fn stage_peer_disconnect(fixture: &DirectionTestFixture, peer: TcpStream) {
     fixture.arm(ARRIVED);
     drop(peer);
     fixture.wait_paused(ARRIVED).await;
+    fixture.arm(BEFORE_TERMINAL_POLL);
     fixture.stage_release(ARRIVED);
-    fixture.stage_turn(ARRIVED)
+}
+
+/// Release one coordinator poll after its competing event has woken it.
+async fn release_equal_ready_turn(fixture: &DirectionTestFixture) {
+    fixture.wait_paused(BEFORE_TERMINAL_POLL).await;
+    fixture.release(BEFORE_TERMINAL_POLL);
 }
 
 /// Hold the coordinator before it looks for a cause, so a row can make two
@@ -1421,6 +1436,7 @@ async fn assert_stopped_owners_released(
         .await
         .expect("the owned server completed");
     assert_released(fixture, cause, cancelled);
+    assert_settlement_observed(fixture, cause);
 }
 
 /// The same owners, for a row whose cause was the server being cancelled.
@@ -1436,24 +1452,61 @@ async fn assert_cancelled_owners_released(fixture: &DirectionTestFixture, cancel
         "a cancelled server completed as {completed:?}"
     );
     assert_released(fixture, WsCloseCause::ServerCancelled, cancelled);
+    assert_settlement_observed(fixture, WsCloseCause::ServerCancelled);
 }
 
 fn assert_released(fixture: &DirectionTestFixture, cause: WsCloseCause, cancelled: usize) {
+    let observed = assert_release_state(fixture, cause);
+    assert_eq!(
+        observed.outbound_cancelled, cancelled,
+        "the {cause:?} row cancelled the wrong number of admitted frames"
+    );
+}
+
+/// A reset may land before or after the sink accepts the sole pending frame.
+///
+/// Before acceptance, settlement cancels the frame and reports one. After
+/// acceptance, the transport owns it and settlement reports zero. Both paths
+/// must release every bridge owner, and neither may account for another frame.
+fn assert_write_failure_released(fixture: &DirectionTestFixture) {
+    let observed = assert_release_state(fixture, WsCloseCause::PeerDisconnected);
+    assert!(
+        observed.outbound_cancelled <= 1,
+        "the failed write cancelled more than its sole admitted frame"
+    );
+}
+
+fn assert_release_state(
+    fixture: &DirectionTestFixture,
+    cause: WsCloseCause,
+) -> camber::http::mock::WebSocketDirectionObservation {
     let observed = fixture.observed();
     assert_eq!(
         observed.terminal,
         Some(cause),
         "the row fixed another cause"
     );
-    assert!(observed.outbound_settled, "the outbound pump never settled");
-    assert!(observed.inbound_settled, "the inbound pump never settled");
+    observed
+}
+
+/// A stopped server has no second handshake to prove its bridge settled.
+///
+/// Its join is the ownership barrier, and these observations distinguish a
+/// coordinator settlement from a task that was taken away while still owning
+/// a direction or permit.
+fn assert_settlement_observed(fixture: &DirectionTestFixture, cause: WsCloseCause) {
+    let observed = fixture.observed();
+    assert!(
+        observed.outbound_settled,
+        "the {cause:?} outbound pump never settled"
+    );
+    assert!(
+        observed.inbound_settled,
+        "the {cause:?} inbound pump never settled"
+    );
     assert!(
         observed.permit_released,
-        "the bridge kept its connection permit"
-    );
-    assert_eq!(
-        observed.outbound_cancelled, cancelled,
-        "the row cancelled the wrong number of admitted frames"
+        "the {cause:?} bridge kept its connection permit"
     );
 }
 
