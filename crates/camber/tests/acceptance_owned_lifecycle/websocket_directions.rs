@@ -659,15 +659,21 @@ fn assert_settled_itself(fixture: &DirectionTestFixture) {
 }
 
 // 2.T7
-#[camber::test]
-async fn equal_ready_terminal_events_use_documented_precedence() {
-    cancellation_outranks_peer_close().await;
-    shutdown_outranks_peer_close().await;
-    shutdown_outranks_last_sender_drop().await;
-    peer_close_outranks_receiver_drop().await;
-    peer_disconnect_outranks_receiver_drop().await;
-    receiver_drop_outranks_last_sender_drop().await;
-    a_committed_cause_survives_a_later_escalation().await;
+// The cancellation rows deliberately hold the coordinator after asking the
+// server to abort. Its forced-abort deadline must stay beyond the fixture's
+// observation bound, or runner load can take the bridge away before the proof
+// reads the cause it selected.
+#[test]
+fn equal_ready_terminal_events_use_documented_precedence() {
+    direction_runtime(UNREACHED_SHUTDOWN, || async {
+        cancellation_outranks_peer_close().await;
+        shutdown_outranks_peer_close().await;
+        shutdown_outranks_last_sender_drop().await;
+        peer_close_outranks_receiver_drop().await;
+        peer_disconnect_outranks_receiver_drop().await;
+        receiver_drop_outranks_last_sender_drop().await;
+        a_committed_cause_survives_a_later_escalation().await;
+    });
 }
 
 /// A cancelled server outranks every other event, including a close the peer
