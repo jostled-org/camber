@@ -608,7 +608,7 @@ fn websocket_proxy_rejects_invalid_backend_scheme() {
 }
 
 #[test]
-fn websocket_proxy_stream_upgrade_ignores_request_body_limit() {
+fn websocket_proxy_stream_upgrade_excludes_body_policy_and_refuses_a_declared_payload() {
     common::test_runtime()
         .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
@@ -623,10 +623,13 @@ fn websocket_proxy_stream_upgrade_ignores_request_body_limit() {
             let server = port.serve(proxy);
             let proxy_addr = server.addr();
 
+            // A proxied handshake under a 10-byte route limit still upgrades:
+            // it is bodyless, not a streaming upload, so the limit has nothing
+            // to refuse and the body policy is never asked.
             let mut stream = TcpStream::connect(proxy_addr).unwrap();
-            let upgrade_req =
-                common::ws_upgrade_request_with("/ws/echo", &[("Content-Length", "99999")]);
-            stream.write_all(upgrade_req.as_bytes()).unwrap();
+            stream
+                .write_all(common::ws_upgrade_request("/ws/echo").as_bytes())
+                .unwrap();
 
             let resp = read_until_double_crlf(&mut stream);
             assert_eq!(status_from_raw(&resp), 101, "response: {resp}");
@@ -636,6 +639,27 @@ fn websocket_proxy_stream_upgrade_ignores_request_body_limit() {
             assert_eq!(&*msg, "hello");
 
             write_ws_close_frame(&mut stream);
+
+            // A handshake declaring a payload is refused at the head, the same
+            // as a direct one: the `101` would hand the transport to the bridge
+            // with those bytes unframed, and the reply RFC 6455 §4.1 makes a
+            // conforming client fail is the only one Hyper could then write.
+            // One handshake owner validates for both bridges, so the proxied
+            // path answers exactly as the direct one does.
+            let mut declared = TcpStream::connect(proxy_addr).unwrap();
+            declared
+                .write_all(
+                    common::ws_upgrade_request_with("/ws/echo", &[("Content-Length", "99999")])
+                        .as_bytes(),
+                )
+                .unwrap();
+            let declared_resp = read_until_double_crlf(&mut declared);
+            assert_eq!(
+                status_from_raw(&declared_resp),
+                400,
+                "declared-payload handshake: {declared_resp}"
+            );
+
             assert_eq!(
                 asked.load(Ordering::SeqCst),
                 0,

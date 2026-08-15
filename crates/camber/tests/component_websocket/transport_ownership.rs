@@ -197,13 +197,17 @@ fn perform_raw_ws_handshake(
     (stream, response)
 }
 
-/// The switch every accepted upgrade answers with, minus the disposition of
-/// the transport underneath it.
+/// The switch every accepted upgrade answers with, transport disposition
+/// included.
 ///
-/// A handshake whose request declared a body Camber never reads cannot keep its
-/// transport framed, so its connection header is the protocol's answer rather
-/// than the handshake's. Rows that own that question assert it separately.
-fn assert_websocket_switch_head(head: &common::HttpResponse, context: &str) {
+/// One helper for every accepted upgrade, on both serving families: a `101`
+/// that does not say `Connection: Upgrade` is one RFC 6455 §4.1 requires a
+/// conforming client to fail the handshake over, so no row is entitled to a
+/// weaker predicate. The only request that could earn a different answer — one
+/// declaring a payload the bridge would leave unframed — is refused at the head
+/// instead, and `websocket_upgrade_excludes_body_policy_and_refuses_a_declared_payload`
+/// owns that row.
+fn assert_websocket_switch(head: &common::HttpResponse, context: &str) {
     assert_eq!(head.status, 101, "{context}: unexpected status: {head:?}");
     let upgrade = head.header_values("upgrade");
     assert_eq!(upgrade.len(), 1, "{context}: Upgrade header: {head:?}");
@@ -216,10 +220,6 @@ fn assert_websocket_switch_head(head: &common::HttpResponse, context: &str) {
         [VALID_WEBSOCKET_ACCEPT],
         "{context}: Sec-WebSocket-Accept header"
     );
-}
-
-fn assert_websocket_switch(head: &common::HttpResponse, context: &str) {
-    assert_websocket_switch_head(head, context);
     let connection = head.header_values("connection");
     assert_eq!(
         connection.len(),
@@ -921,7 +921,7 @@ fn auth_middleware_blocks_unauthenticated_websocket() {
 }
 
 #[test]
-fn websocket_upgrade_ignores_request_body_limit() {
+fn websocket_upgrade_excludes_body_policy_and_refuses_a_declared_payload() {
     common::test_runtime()
         .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
@@ -929,38 +929,56 @@ fn websocket_upgrade_ignores_request_body_limit() {
             let asked = Arc::new(AtomicUsize::new(0));
             let addr = common::spawn_server(body_limit_ws_router(&asked));
 
-            // Send WS upgrade with Content-Length exceeding the body limit.
-            // Head-only dispatch skips body collection, so 413 is not returned.
-            let (mut stream, head) = ws_connect(addr, "/ws", &[("Content-Length", "99999")]);
-            // The switch itself, without the connection disposition: a declared
-            // body that head-only dispatch never reads leaves Hyper unable to
-            // keep the transport framed, so it marks the connection to close.
-            // Both serving families answer that way, because since the
-            // synchronous entry points moved onto the shared supervisor there
-            // is only one family.
-            assert_websocket_switch_head(&head, "body-limit handshake");
+            // A handshake under a 10-byte route limit still earns its switch:
+            // head-only dispatch never asks the body policy, so the limit has
+            // nothing to refuse and no `413` is reachable here. The switch is
+            // asserted whole — a `101` that does not say `Connection: Upgrade`
+            // is one RFC 6455 §4.1 makes a conforming client fail.
+            let (mut stream, head) = ws_connect(addr, "/ws", &[]);
+            assert_websocket_switch(&head, "body-limit handshake");
 
             let msg = read_ws_text_frame(&mut stream);
             assert_eq!(&*msg, "connected");
 
             write_ws_close_frame(&mut stream);
 
-            // The same upgrade over the observed listener, because the body
-            // counters are wired on the owned server path alone. This row owns
-            // the exclusion claim; the row above owns the handshake predicate,
-            // and its connection disposition is that path's own question.
+            // A handshake declaring a payload is refused at the head instead.
+            // The `101` would hand the transport to the bridge with those bytes
+            // unframed, and Hyper answers such a response by marking the
+            // connection to close — the one answer a conforming client cannot
+            // accept. Both serving families refuse alike, because since the
+            // synchronous entry points moved onto the shared supervisor there
+            // is only one family.
+            let (_declared, declared_head) =
+                ws_connect(addr, "/ws", &[("Content-Length", "99999")]);
+            assert_handshake_rejected(&declared_head, 400, "declared-payload handshake");
+
+            // The refusal reads the declared length, not the header's presence:
+            // `Content-Length: 0` declares no payload, leaves the transport
+            // framed, and upgrades like any other handshake.
+            let (mut empty, empty_head) = ws_connect(addr, "/ws", &[("Content-Length", "0")]);
+            assert_websocket_switch(&empty_head, "zero-length handshake");
+            assert_eq!(&*read_ws_text_frame(&mut empty), "connected");
+            write_ws_close_frame(&mut empty);
+
+            // Both rows again over the observed listener, because the body
+            // counters are wired on the owned server path alone. The refusal
+            // has to reach the same head-only exclusion the accepted upgrade
+            // does: a `400` produced by reading the payload would be the body
+            // policy answering after all.
             let port = common::reserve_observed();
             let observed = port.serve(body_limit_ws_router(&asked));
-            let (_watched, watched_head) =
+            let (mut watched, watched_head) = ws_connect(observed.addr(), "/ws", &[]);
+            assert_websocket_switch(&watched_head, "observed handshake");
+            assert_eq!(&*read_ws_text_frame(&mut watched), "connected");
+            write_ws_close_frame(&mut watched);
+
+            let (_watched_declared, watched_declared_head) =
                 ws_connect(observed.addr(), "/ws", &[("Content-Length", "99999")]);
-            assert_eq!(
-                watched_head.status, 101,
-                "observed handshake: {watched_head:?}"
-            );
-            assert_eq!(
-                *watched_head.header_values("sec-websocket-accept"),
-                [VALID_WEBSOCKET_ACCEPT],
-                "observed handshake: accept key"
+            assert_handshake_rejected(
+                &watched_declared_head,
+                400,
+                "observed declared-payload handshake",
             );
 
             assert_eq!(

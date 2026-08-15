@@ -46,6 +46,7 @@ fn validate_ws_handshake(
         true => {}
         false => return Err(WsHandshakeError::BadRequest),
     }
+    validate_bodyless_handshake(headers)?;
     validate_ws_version(headers)?;
     validate_ws_subprotocols(headers)?;
 
@@ -54,6 +55,31 @@ fn validate_ws_handshake(
         _ => return Err(WsHandshakeError::BadRequest),
     };
     Ok(key)
+}
+
+/// Refuse a handshake that declares a payload.
+///
+/// A `101` hands the transport to the bridge, which leaves those declared bytes
+/// unframed. HTTP/1 cannot both honour that framing and give the connection
+/// away, so Hyper marks such a response to close — and RFC 6455 §4.1 requires a
+/// conforming client to fail a handshake whose reply does not say `Connection:
+/// Upgrade`. Refusing at the head is the only answer that is not an
+/// unusable `101`: a handshake carries no payload, so nothing legitimate is
+/// turned away, and the route's body policy is still never asked.
+///
+/// `Content-Length: 0` declares no payload and is not a refusal. A repeated
+/// length that disagrees with itself never reaches here — Hyper answers that
+/// from the head.
+fn validate_bodyless_handshake(headers: &hyper::HeaderMap) -> Result<(), WsHandshakeError> {
+    let declares_payload = headers.contains_key(hyper::header::TRANSFER_ENCODING)
+        || headers
+            .get_all(hyper::header::CONTENT_LENGTH)
+            .iter()
+            .any(|length| length != "0");
+    match declares_payload {
+        true => Err(WsHandshakeError::BadRequest),
+        false => Ok(()),
+    }
 }
 
 fn validate_ws_subprotocols(headers: &hyper::HeaderMap) -> Result<(), WsHandshakeError> {

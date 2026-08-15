@@ -564,6 +564,12 @@ Camber enforces a same-host Origin policy for browser WebSocket upgrades.
 WebSocket upgrades are classified before request-body buffering, so upgrade requests do not hit
 the normal request-body limit on the handshake path.
 
+A handshake carries no payload. A request that declares one — a non-zero `Content-Length`, or any
+`Transfer-Encoding` — is refused `400` instead of earning a `101`. The upgrade hands the transport
+to the WebSocket bridge, which would leave those declared bytes unframed, and the `101` would then
+go out marked `Connection: close` — the one reply RFC 6455 requires a conforming client to fail the
+handshake over. Every `101` Camber emits carries `Connection: Upgrade`.
+
 ### Direction ownership
 
 A direct WebSocket has one receive owner and any number of send handles.
