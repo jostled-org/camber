@@ -1173,6 +1173,7 @@ pub(crate) fn install_runtime(inner: Arc<RuntimeInner>) -> RuntimeContextGuard {
 /// blocking body rather than awaiting a future. Absence propagates the same
 /// way: a captured `None` installs nothing and leaves the thread's own context
 /// exactly as it found it, so no path fills runtime absence by minting one.
+#[cfg(feature = "ws")]
 #[must_use = "the carried context is installed only while the returned guard lives"]
 pub(crate) fn install_carried_runtime(
     context: Option<Arc<RuntimeInner>>,
