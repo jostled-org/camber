@@ -1064,6 +1064,7 @@ async fn body_collection_deadline_maps_before_the_handler() {
 
     let server = wire::serve_owned(listener, |listener| {
         camber::http::serve_background(listener, router)
+            .expect("owned server requires a Tokio runtime")
     })
     .unwrap_or_else(|error| panic!("the stalled fixture's server took its listener: {error}"));
     let exchange = answered

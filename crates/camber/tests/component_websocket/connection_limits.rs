@@ -5,7 +5,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use camber::RuntimeError;
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController, LifecycleFault, lifecycle};
+use camber::http::mock::{LifecycleCheckpoint, LifecycleController, lifecycle};
 #[cfg(feature = "ws")]
 use camber::http::{HostRouter, WsConn};
 use camber::http::{Request, Response, Router};
@@ -35,7 +35,7 @@ const SYNCHRONOUS_ISOLATION_MARKER: &str = "synchronous-lifecycle-isolation-comp
 fn connection_limit_zero_rejected() {
     let err = camber::runtime::builder()
         .connection_limit(0)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| Ok::<(), camber::RuntimeError>(()))
         .unwrap_err();
@@ -306,83 +306,35 @@ fn assert_dispatched(dispatched: &Receiver<()>) {
         .expect("second client dispatches after WebSocket close");
 }
 
-fn synchronous_normal_checkpoints() -> [LifecycleCheckpoint; 12] {
-    [
-        LifecycleCheckpoint::BeforeSupervisorSelect,
-        LifecycleCheckpoint::SupervisorSelectedDeadline,
-        LifecycleCheckpoint::SupervisorSelectedControl,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
-        LifecycleCheckpoint::SupervisorSelectedPermit,
-        LifecycleCheckpoint::SupervisorSelectedRegistration,
-        LifecycleCheckpoint::SupervisorSelectedTask,
-        LifecycleCheckpoint::AfterSupervisorResultSend,
-        LifecycleCheckpoint::AfterPermit,
-        LifecycleCheckpoint::BeforeRuntimeWait,
-        LifecycleCheckpoint::KeepaliveTimeoutConfigured(Duration::from_secs(5)),
-    ]
+/// The per-connection checkpoint every supervised server configures Hyper at.
+fn synchronous_connection_checkpoint() -> LifecycleCheckpoint {
+    LifecycleCheckpoint::HeaderTimeoutConfigured(Duration::from_secs(5))
 }
 
-#[cfg(feature = "ws")]
-fn synchronous_sse_checkpoints() -> [LifecycleCheckpoint; 3] {
-    [
-        LifecycleCheckpoint::AfterPermit,
-        LifecycleCheckpoint::BeforeRuntimeWait,
-        LifecycleCheckpoint::SseBufferConfigured(32),
-    ]
-}
-
-#[cfg(feature = "ws")]
-fn synchronous_websocket_checkpoints() -> [LifecycleCheckpoint; 6] {
-    [
-        LifecycleCheckpoint::AfterPermit,
-        LifecycleCheckpoint::BeforeRuntimeWait,
-        LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
-        LifecycleCheckpoint::BeforeUpgradeAcknowledge,
-        LifecycleCheckpoint::WebSocketOutgoingBufferConfigured(32),
-        LifecycleCheckpoint::WebSocketIncomingBufferConfigured(32),
-    ]
-}
-
-fn arm_checkpoints(controller: &LifecycleController, checkpoints: &[LifecycleCheckpoint]) {
-    for checkpoint in checkpoints {
-        controller
-            .pause_once(*checkpoint)
-            .expect("arm synchronous-forbidden checkpoint");
-    }
-}
-
-fn assert_checkpoints_unconsumed(
+/// Prove synchronous serving reaches the supervisor checkpoint every owned
+/// server reaches.
+///
+/// Since the synchronous entry points were moved onto `ServerSupervisor`, this
+/// is a reachability claim rather than the isolation one it replaced: one
+/// supervisor owns both families, so a checkpoint the owned path pauses at is
+/// one this path pauses at too. The client runs on its own thread, because the
+/// pause holds its connection until this thread releases it.
+fn assert_supervisor_checkpoint_reached(
     controller: &LifecycleController,
-    checkpoints: &[LifecycleCheckpoint],
+    checkpoint: LifecycleCheckpoint,
 ) {
-    for checkpoint in checkpoints {
-        assert_invalid(controller.release(*checkpoint));
-    }
-}
-
-fn lifecycle_faults() -> [LifecycleFault; 5] {
-    [
-        LifecycleFault::Accept(std::io::ErrorKind::Other),
-        LifecycleFault::PanicNextOwnedTask,
-        LifecycleFault::PanicNextOwnedTaskOpaque,
-        LifecycleFault::CancelNextOwnedTask,
-        LifecycleFault::PanicSupervisorCore,
-    ]
-}
-
-fn assert_invalid<T>(result: Result<T, RuntimeError>) {
-    assert!(
-        matches!(result, Err(RuntimeError::InvalidArgument(_))),
-        "expected InvalidArgument"
-    );
+    common::block_on(controller.wait_until_paused(checkpoint))
+        .expect("synchronous serving never reached the supervisor checkpoint");
+    controller
+        .release(checkpoint)
+        .expect("release the supervisor checkpoint");
 }
 
 #[test]
 fn connection_limit_blocks_third_connection_until_slot_frees() {
     camber::runtime::builder()
         .connection_limit(2)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = camber::http::Router::new();
@@ -444,7 +396,7 @@ fn connection_limit_blocks_third_connection_until_slot_frees() {
 fn connection_limit_releases_slot_after_connection_exit() {
     camber::runtime::builder()
         .connection_limit(1)
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = camber::http::Router::new();
@@ -613,9 +565,9 @@ fn synchronous_serve_shutdown_cancels_pending_connection_permit() {
 }
 
 #[test]
-fn synchronous_serve_cannot_consume_supervisor_checkpoints_or_faults() {
+fn synchronous_serve_reaches_the_shared_supervisor_checkpoints() {
     const TEST_NAME: &str =
-        "connection_limits::synchronous_serve_cannot_consume_supervisor_checkpoints_or_faults";
+        "connection_limits::synchronous_serve_reaches_the_shared_supervisor_checkpoints";
 
     match common::is_private_child(SYNCHRONOUS_ISOLATION_MODE) {
         true => {}
@@ -636,61 +588,62 @@ fn synchronous_serve_cannot_consume_supervisor_checkpoints_or_faults() {
         }
     }
 
-    for fault in lifecycle_faults() {
-        camber::runtime::builder()
-            .connection_limit(1)
-            .keepalive_timeout(Duration::from_secs(5))
-            .shutdown_timeout(Duration::from_secs(2))
-            .run(move || {
-                let listener = camber::net::listen("127.0.0.1:0")
-                    .expect("bind synchronous isolation listener");
-                let addr = listener
-                    .local_addr()
-                    .expect("synchronous isolation listener address")
-                    .tcp()
-                    .expect("TCP listener address");
-                let controller =
-                    lifecycle(addr).expect("register synchronous isolation listener address");
-                let checkpoints = synchronous_normal_checkpoints();
-                arm_checkpoints(&controller, &checkpoints);
-                controller
-                    .inject_once(fault)
-                    .expect("inject owned-path-only fault");
+    camber::runtime::builder()
+        .connection_limit(1)
+        .header_timeout(Duration::from_secs(5))
+        .shutdown_timeout(Duration::from_secs(2))
+        .run(move || {
+            let listener =
+                camber::net::listen("127.0.0.1:0").expect("bind synchronous isolation listener");
+            let addr = listener
+                .local_addr()
+                .expect("synchronous isolation listener address")
+                .tcp()
+                .expect("TCP listener address");
+            let controller =
+                lifecycle(addr).expect("register synchronous isolation listener address");
+            let checkpoint = synchronous_connection_checkpoint();
+            controller
+                .pause_once(checkpoint)
+                .expect("arm the shared supervisor checkpoint");
 
-                let mut router = Router::new();
-                router.get("/sync", |_req: &Request| async {
-                    Response::text(200, "sync")
-                });
-                let server = camber::spawn(move || camber::http::serve_listener(listener, router));
+            let mut router = Router::new();
+            router.get("/sync", |_req: &Request| async {
+                Response::text(200, "sync")
+            });
+            let server = camber::spawn(move || camber::http::serve_listener(listener, router));
 
+            let client = std::thread::spawn(move || {
                 let mut client = plain_stream(addr);
                 send_request(&mut client, "/sync");
-                assert_eq!(read_status(&mut client), 200);
+                read_status(&mut client)
+            });
+            assert_supervisor_checkpoint_reached(&controller, checkpoint);
+            assert_eq!(
+                client.join().expect("the synchronous client thread joined"),
+                200
+            );
+            drop(controller);
 
-                assert_checkpoints_unconsumed(&controller, &checkpoints);
-                assert_invalid(controller.inject_once(LifecycleFault::PanicSupervisorCore));
-                drop(controller);
-
-                camber::runtime::request_shutdown();
-                assert!(
-                    server
-                        .join()
-                        .expect("join synchronous isolation server")
-                        .is_ok(),
-                    "synchronous isolation server returns successfully"
-                );
-            })
-            .unwrap();
-    }
+            camber::runtime::request_shutdown();
+            assert!(
+                server
+                    .join()
+                    .expect("join synchronous isolation server")
+                    .is_ok(),
+                "synchronous isolation server returns successfully"
+            );
+        })
+        .unwrap();
     println!("{SYNCHRONOUS_ISOLATION_MARKER}");
 }
 
 #[cfg(feature = "ws")]
 #[test]
-fn synchronous_sse_cannot_consume_owned_buffer_checkpoint() {
+fn synchronous_sse_serves_under_the_shared_supervisor() {
     camber::runtime::builder()
         .connection_limit(1)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let listener =
@@ -701,8 +654,6 @@ fn synchronous_sse_cannot_consume_owned_buffer_checkpoint() {
                 .tcp()
                 .expect("TCP listener address");
             let controller = lifecycle(addr).expect("register synchronous SSE listener address");
-            let checkpoints = synchronous_sse_checkpoints();
-            arm_checkpoints(&controller, &checkpoints);
 
             let mut router = Router::new();
             router.get_sse("/events", |_req: &Request, writer| {
@@ -719,7 +670,6 @@ fn synchronous_sse_cannot_consume_owned_buffer_checkpoint() {
             assert!(response.starts_with("HTTP/1.1 200"), "{response}");
             assert!(response.contains("text/event-stream"), "{response}");
             assert!(response.contains("data: synchronous"), "{response}");
-            assert_checkpoints_unconsumed(&controller, &checkpoints);
             drop(controller);
 
             camber::runtime::request_shutdown();
@@ -733,10 +683,10 @@ fn synchronous_sse_cannot_consume_owned_buffer_checkpoint() {
 
 #[cfg(feature = "ws")]
 #[test]
-fn synchronous_direct_websocket_cannot_consume_owned_upgrade_or_buffer_checkpoints() {
+fn synchronous_direct_websocket_serves_under_the_shared_supervisor() {
     camber::runtime::builder()
         .connection_limit(1)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let listener = camber::net::listen("127.0.0.1:0")
@@ -748,8 +698,6 @@ fn synchronous_direct_websocket_cannot_consume_owned_upgrade_or_buffer_checkpoin
                 .expect("TCP listener address");
             let controller =
                 lifecycle(addr).expect("register synchronous direct WebSocket listener address");
-            let checkpoints = synchronous_websocket_checkpoints();
-            arm_checkpoints(&controller, &checkpoints);
             let (dispatched, _) = dispatch_channel();
             let server = camber::spawn(move || {
                 camber::http::serve_listener(listener, direct_ws_router(dispatched))
@@ -757,7 +705,6 @@ fn synchronous_direct_websocket_cannot_consume_owned_upgrade_or_buffer_checkpoin
 
             let mut websocket = upgrade_websocket(plain_stream(addr), "/ws", "localhost");
             assert_ws_echo(&mut websocket);
-            assert_checkpoints_unconsumed(&controller, &checkpoints);
             complete_client_initiated_close(&mut websocket);
             drop(controller);
 
@@ -775,10 +722,10 @@ fn synchronous_direct_websocket_cannot_consume_owned_upgrade_or_buffer_checkpoin
 
 #[cfg(feature = "ws")]
 #[test]
-fn synchronous_proxy_websocket_cannot_consume_owned_upgrade_or_buffer_checkpoints() {
+fn synchronous_proxy_websocket_serves_under_the_shared_supervisor() {
     camber::runtime::builder()
         .connection_limit(1)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let backend_addr = spawn_ws_backend();
@@ -791,8 +738,6 @@ fn synchronous_proxy_websocket_cannot_consume_owned_upgrade_or_buffer_checkpoint
                 .expect("TCP listener address");
             let controller =
                 lifecycle(addr).expect("register synchronous proxy WebSocket listener address");
-            let checkpoints = synchronous_websocket_checkpoints();
-            arm_checkpoints(&controller, &checkpoints);
             let (dispatched, _) = dispatch_channel();
             let server = camber::spawn(move || {
                 camber::http::serve_listener(listener, proxy_ws_router(backend_addr, dispatched))
@@ -800,7 +745,6 @@ fn synchronous_proxy_websocket_cannot_consume_owned_upgrade_or_buffer_checkpoint
 
             let mut websocket = upgrade_websocket(plain_stream(addr), "/ws/echo", "localhost");
             assert_ws_echo(&mut websocket);
-            assert_checkpoints_unconsumed(&controller, &checkpoints);
             complete_client_initiated_close(&mut websocket);
             drop(controller);
 
@@ -821,7 +765,7 @@ fn synchronous_proxy_websocket_cannot_consume_owned_upgrade_or_buffer_checkpoint
 fn serve_async_direct_websocket_holds_permit_until_owned_bridge_finishes() {
     camber::runtime::builder()
         .connection_limit(1)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let (dispatched_tx, dispatched_rx) = dispatch_channel();
@@ -830,7 +774,10 @@ fn serve_async_direct_websocket_holds_permit_until_owned_bridge_finishes() {
                 .expect("bind owned listener");
             let addr = listener.local_addr().expect("owned listener address");
             let controller = lifecycle(addr).expect("install owned listener controller");
-            let completion = observe_owner(camber::http::serve_async(listener, router));
+            let completion = observe_owner(
+                camber::http::serve_async(listener, router)
+                    .expect("owned server requires a Tokio runtime"),
+            );
 
             let mut websocket = upgrade_websocket(plain_stream(addr), "/ws", "localhost");
             assert_ws_echo(&mut websocket);
@@ -859,7 +806,7 @@ fn serve_async_direct_websocket_holds_permit_until_owned_bridge_finishes() {
 fn serve_async_hosts_tls_proxy_websocket_holds_permit_until_owned_bridge_finishes() {
     camber::runtime::builder()
         .connection_limit(1)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let backend_addr = spawn_ws_backend();
@@ -875,11 +822,10 @@ fn serve_async_hosts_tls_proxy_websocket_holds_permit_until_owned_bridge_finishe
                 .expect("bind owned TLS listener");
             let addr = listener.local_addr().expect("owned TLS listener address");
             let controller = lifecycle(addr).expect("install owned TLS listener controller");
-            let completion = observe_owner(camber::http::serve_async_hosts_tls(
-                listener,
-                hosts,
-                server_config,
-            ));
+            let completion = observe_owner(
+                camber::http::serve_async_hosts_tls(listener, hosts, server_config)
+                    .expect("owned server requires a Tokio runtime"),
+            );
 
             let mut websocket = upgrade_websocket(
                 tls_stream(addr, Arc::clone(&client_config)),
@@ -927,7 +873,7 @@ fn serve_async_hosts_tls_proxy_websocket_holds_permit_until_owned_bridge_finishe
 fn serve_background_hosts_direct_websocket_holds_permit_until_owned_bridge_finishes() {
     camber::runtime::builder()
         .connection_limit(1)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let (dispatched_tx, dispatched_rx) = dispatch_channel();
@@ -937,7 +883,8 @@ fn serve_background_hosts_direct_websocket_holds_permit_until_owned_bridge_finis
                 .expect("bind owned host listener");
             let addr = listener.local_addr().expect("owned host listener address");
             let controller = lifecycle(addr).expect("install owned host listener controller");
-            let handle = camber::http::serve_background_hosts(listener, hosts);
+            let handle = camber::http::serve_background_hosts(listener, hosts)
+                .expect("owned server requires a Tokio runtime");
             let completion = observe_owner(handle.into_future());
 
             let mut websocket = upgrade_websocket(plain_stream(addr), "/ws", "matrix.test");
@@ -967,7 +914,7 @@ fn serve_background_hosts_direct_websocket_holds_permit_until_owned_bridge_finis
 fn serve_background_tls_proxy_websocket_holds_permit_until_owned_bridge_finishes() {
     camber::runtime::builder()
         .connection_limit(1)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let backend_addr = spawn_ws_backend();
@@ -983,7 +930,8 @@ fn serve_background_tls_proxy_websocket_holds_permit_until_owned_bridge_finishes
                 .local_addr()
                 .expect("background TLS listener address");
             let controller = lifecycle(addr).expect("install background TLS controller");
-            let handle = camber::http::serve_background_tls(listener, proxy, server_config);
+            let handle = camber::http::serve_background_tls(listener, proxy, server_config)
+                .expect("owned server requires a Tokio runtime");
             let completion = observe_owner(handle.into_future());
 
             let mut websocket = upgrade_websocket(
@@ -1032,7 +980,7 @@ fn serve_background_tls_proxy_websocket_holds_permit_until_owned_bridge_finishes
 fn serve_listener_direct_websocket_releases_permit_after_bridge_transport() {
     camber::runtime::builder()
         .connection_limit(1)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let (dispatched_tx, dispatched_rx) = dispatch_channel();
@@ -1075,7 +1023,7 @@ fn serve_listener_direct_websocket_releases_permit_after_bridge_transport() {
 fn serve_listener_proxy_websocket_releases_permit_after_bridge_transport() {
     camber::runtime::builder()
         .connection_limit(1)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let backend_addr = spawn_ws_backend();

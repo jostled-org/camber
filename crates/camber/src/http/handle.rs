@@ -42,6 +42,10 @@ pub(super) struct ConnCtx {
     pub(super) ws_buffer_size: usize,
     pub(super) health_state: Option<HealthState>,
     pub(super) is_tls: bool,
+    /// The bounds this server serves under, already narrowed against the
+    /// runtime that contains it. Every request this connection carries resolves
+    /// its own budgets under this one value.
+    pub(super) policy: super::ServerPolicy,
 }
 
 impl ConnCtx {
@@ -50,6 +54,7 @@ impl ConnCtx {
         rt: &Arc<RuntimeInner>,
         buffers: BufferConfig,
         is_tls: bool,
+        policy: super::ServerPolicy,
     ) -> Self {
         Self {
             tracing_enabled: rt.config.tracing_enabled,
@@ -61,6 +66,7 @@ impl ConnCtx {
             ws_buffer_size: buffers.ws_buffer_size,
             health_state: rt.health_state.clone(),
             is_tls,
+            policy,
         }
     }
 }
@@ -279,6 +285,17 @@ async fn build_dispatch_input(
 }
 
 /// What the request head decides before a body is read.
+///
+/// The two variants differ in size because a classified route carries the
+/// budgets its layers resolved, which are validated `Copy` values. Boxing that
+/// variant would put a heap allocation on every routed request to shrink a
+/// value that is built, matched, and consumed inside one frame — and the
+/// internal-route variant, which the difference is measured against, is
+/// reachable only for the three built-in paths.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one stack-local value per request; boxing would allocate to save nothing"
+)]
 enum PreBodyRoute<'a> {
     /// An internal route (`/health`, `/metrics`, `/debug/pprof/cpu`), which
     /// bypasses body collection entirely.
@@ -315,9 +332,11 @@ fn classify_pre_body<'a>(
     let asks_websocket = false;
     match internal {
         Some(route) => PreBodyRoute::Internal(route),
-        None => {
-            PreBodyRoute::Class(dispatch.classify_route(&head, HeadUpgrade::of(asks_websocket)))
-        }
+        None => PreBodyRoute::Class(dispatch.classify_route(
+            &head,
+            HeadUpgrade::of(asks_websocket),
+            ctx.policy,
+        )),
     }
 }
 
@@ -472,7 +491,21 @@ async fn dispatch_classified_route<'a>(
         class,
         scope,
         router,
+        budgets,
     } = classified;
+    // Reported where routing resolved it, for the same reason the admitted body
+    // limit is: the number an operator or a test reads is the one the routing
+    // owner decided, not one a later consumer re-derived.
+    let script = lifecycle.script();
+    super::mock::LifecycleScript::pause_at(
+        script.as_deref(),
+        super::mock::LifecycleCheckpoint::RouteBudgetsResolved {
+            request: budgets.request(),
+            upload: budgets.upload(),
+            download: budgets.download(),
+        },
+    )
+    .await;
     // The wire contract is asked for only by the classes that go on to read the
     // wire. The two arms below answer without reading one, so deriving it for
     // them was work every proxied stream and every head refusal paid to drop.

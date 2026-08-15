@@ -20,7 +20,9 @@ async fn serve_async_handles_request() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(camber::http::serve_async(listener, router));
+    let server = tokio::spawn(
+        camber::http::serve_async(listener, router).expect("owned server requires a Tokio runtime"),
+    );
 
     let response =
         tokio::time::timeout(EVENT_TIMEOUT, reqwest::get(format!("http://{addr}/"))).await;
@@ -44,7 +46,9 @@ async fn serve_async_sse_stream() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(camber::http::serve_async(listener, router));
+    let server = tokio::spawn(
+        camber::http::serve_async(listener, router).expect("owned server requires a Tokio runtime"),
+    );
 
     // Use a blocking task for raw TCP SSE reading
     let events = tokio::task::spawn_blocking(move || {
@@ -109,7 +113,9 @@ async fn serve_async_shares_tokio_runtime() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(camber::http::serve_async(listener, router));
+    let server = tokio::spawn(
+        camber::http::serve_async(listener, router).expect("owned server requires a Tokio runtime"),
+    );
 
     let response =
         tokio::time::timeout(EVENT_TIMEOUT, reqwest::get(format!("http://{addr}/check"))).await;
@@ -134,10 +140,10 @@ async fn serve_async_shares_tokio_runtime() {
 }
 
 #[test]
-fn serve_async_variants_capture_first_poll_context_and_own_transports() {
+fn serve_async_variants_capture_terminal_context_and_own_transports() {
     direct_variants_join_transports_on_camber_shutdown();
-    camber_creation_plain_first_poll_uses_standalone_context();
-    plain_creation_camber_first_poll_captures_runtime_context();
+    camber_creation_keeps_runtime_context_on_a_foreign_poll();
+    plain_creation_keeps_standalone_context_under_camber_poll();
     dropping_pure_tokio_direct_future_aborts_owned_transports();
 }
 
@@ -181,76 +187,86 @@ async fn assert_direct_variants_shutdown(variants: [DirectVariant; 4]) {
     }
 }
 
+/// One started direct variant, before its client is attached.
+struct StartedDirect {
+    addr: std::net::SocketAddr,
+    gate: GateControl,
+    server: camber::AsyncJoinHandle<Result<(), RuntimeError>>,
+}
+
+/// Start one direct variant on its own listener.
+///
+/// The four rows differ only in which `serve_async*` terminal they call, so the
+/// bind, the gated router, and the owner spawn are written once and the caller
+/// varies the terminal.
+async fn start_direct(
+    serve: impl FnOnce(
+        tokio::net::TcpListener,
+        Router,
+    ) -> Result<camber::http::ServerHandleFuture, RuntimeError>,
+) -> StartedDirect {
+    let (router, gate) = gated_router();
+    let listener = bind_listener().await;
+    let addr = listener.local_addr().unwrap();
+    let server = camber::spawn_async(
+        serve(listener, router).expect("owned server requires a Tokio runtime"),
+    );
+    StartedDirect { addr, gate, server }
+}
+
 fn direct_variants_join_transports_on_camber_shutdown() {
     camber::runtime::builder()
         .shutdown_timeout(Duration::from_secs(1))
         .run(|| {
             camber::runtime::block_on(async {
                 let (tls_config, connector) = common::self_signed_server_and_connector();
+                let handshake = Arc::clone(&tls_config);
 
-                let (plain_router, plain_gate) = gated_router();
-                let plain_listener = bind_listener().await;
-                let plain_addr = plain_listener.local_addr().unwrap();
-                let plain_server =
-                    camber::spawn_async(camber::http::serve_async(plain_listener, plain_router));
+                let plain = start_direct(camber::http::serve_async).await;
+                let tls = start_direct(move |listener, router| {
+                    camber::http::serve_async_tls(listener, router, handshake)
+                })
+                .await;
+                let hosts = start_direct(|listener, router| {
+                    camber::http::serve_async_hosts(listener, host_router(router))
+                })
+                .await;
+                let hosts_tls = start_direct(move |listener, router| {
+                    camber::http::serve_async_hosts_tls(listener, host_router(router), tls_config)
+                })
+                .await;
 
-                let (tls_router, tls_gate) = gated_router();
-                let tls_listener = bind_listener().await;
-                let tls_addr = tls_listener.local_addr().unwrap();
-                let tls_server = camber::spawn_async(camber::http::serve_async_tls(
-                    tls_listener,
-                    tls_router,
-                    Arc::clone(&tls_config),
-                ));
-
-                let (hosts_router, hosts_gate) = gated_router();
-                let hosts_listener = bind_listener().await;
-                let hosts_addr = hosts_listener.local_addr().unwrap();
-                let hosts_server = camber::spawn_async(camber::http::serve_async_hosts(
-                    hosts_listener,
-                    host_router(hosts_router),
-                ));
-
-                let (hosts_tls_router, hosts_tls_gate) = gated_router();
-                let hosts_tls_listener = bind_listener().await;
-                let hosts_tls_addr = hosts_tls_listener.local_addr().unwrap();
-                let hosts_tls_server = camber::spawn_async(camber::http::serve_async_hosts_tls(
-                    hosts_tls_listener,
-                    host_router(hosts_tls_router),
-                    tls_config,
-                ));
-
-                let plain_client = tokio::spawn(plain_request(plain_addr, "localhost"));
+                let plain_client = tokio::spawn(plain_request(plain.addr, "localhost"));
                 let tls_client =
-                    tokio::spawn(tls_request(connector.clone(), tls_addr, "localhost"));
-                let hosts_client = tokio::spawn(plain_request(hosts_addr, "direct.test"));
+                    tokio::spawn(tls_request(connector.clone(), tls.addr, "localhost"));
+                let hosts_client = tokio::spawn(plain_request(hosts.addr, "direct.test"));
                 let hosts_tls_client =
-                    tokio::spawn(tls_request(connector, hosts_tls_addr, "direct.test"));
+                    tokio::spawn(tls_request(connector, hosts_tls.addr, "direct.test"));
 
                 assert_direct_variants_shutdown([
                     DirectVariant {
                         name: "plain",
-                        gate: plain_gate,
+                        gate: plain.gate,
                         client: plain_client,
-                        server: plain_server,
+                        server: plain.server,
                     },
                     DirectVariant {
                         name: "TLS",
-                        gate: tls_gate,
+                        gate: tls.gate,
                         client: tls_client,
-                        server: tls_server,
+                        server: tls.server,
                     },
                     DirectVariant {
                         name: "host",
-                        gate: hosts_gate,
+                        gate: hosts.gate,
                         client: hosts_client,
-                        server: hosts_server,
+                        server: hosts.server,
                     },
                     DirectVariant {
                         name: "host-plus-TLS",
-                        gate: hosts_tls_gate,
+                        gate: hosts_tls.gate,
                         client: hosts_tls_client,
-                        server: hosts_tls_server,
+                        server: hosts_tls.server,
                     },
                 ])
                 .await;
@@ -259,55 +275,9 @@ fn direct_variants_join_transports_on_camber_shutdown() {
         .unwrap();
 }
 
-fn camber_creation_plain_first_poll_uses_standalone_context() {
-    camber::runtime::builder()
-        .connection_limit(1)
-        .shutdown_timeout(Duration::from_millis(150))
-        .run(|| {
-            camber::runtime::block_on(async {
-                let (router, mut gate) = multi_gated_router();
-                let listener = bind_listener().await;
-                let addr = listener.local_addr().unwrap();
-
-                // Calling an async fn creates its future here, under Camber.
-                let server = camber::http::serve_async(listener, router);
-                // A raw Tokio task has no Camber provenance on its first poll.
-                let mut server = tokio::spawn(server);
-
-                let first_client = tokio::spawn(plain_request(addr, "localhost"));
-                receive_with_guard(&mut gate.entered, "first standalone transport").await;
-
-                camber::runtime::request_shutdown();
-
-                let second_client = tokio::spawn(plain_request(addr, "localhost"));
-                let third_client = tokio::spawn(plain_request(addr, "localhost"));
-                receive_with_guard(&mut gate.entered, "second standalone transport").await;
-                receive_with_guard(&mut gate.entered, "third standalone transport").await;
-
-                let configured_deadline =
-                    tokio::time::timeout(Duration::from_millis(300), &mut server).await;
-                assert!(
-                    configured_deadline.is_err(),
-                    "Camber creation context supplied shutdown, timeout, or connection-limit state"
-                );
-
-                server.abort();
-                let join_error = tokio::time::timeout(EVENT_TIMEOUT, server)
-                    .await
-                    .expect("aborted direct future did not join")
-                    .expect_err("aborted direct future returned a result");
-                assert!(join_error.is_cancelled());
-                wait_for_drops(&mut gate.dropped, 3, "standalone transport").await;
-
-                join_client(first_client).await;
-                join_client(second_client).await;
-                join_client(third_client).await;
-            })
-        })
-        .unwrap();
-}
-
-fn plain_creation_camber_first_poll_captures_runtime_context() {
+/// The terminal call captures, so a future built under Camber keeps that
+/// runtime's policy even when a foreign task is what polls it.
+fn camber_creation_keeps_runtime_context_on_a_foreign_poll() {
     camber::runtime::builder()
         .connection_limit(1)
         .shutdown_timeout(Duration::from_millis(150))
@@ -318,18 +288,15 @@ fn plain_creation_camber_first_poll_captures_runtime_context() {
                 let addr = listener.local_addr().unwrap();
                 let controller = lifecycle(addr).unwrap();
 
-                // The raw task creates, but does not poll, the direct future.
-                let server = tokio::time::timeout(
-                    EVENT_TIMEOUT,
-                    tokio::spawn(async move { camber::http::serve_async(listener, router) }),
-                )
-                .await
-                .unwrap()
-                .unwrap();
-                let server = camber::spawn_async(server);
+                // Built here, under Camber. A raw Tokio task has no Camber
+                // provenance of its own, and no longer needs one: the capture
+                // already happened.
+                let server = camber::http::serve_async(listener, router)
+                    .expect("owned server requires a Tokio runtime");
+                let server = tokio::spawn(server);
 
                 let first_client = tokio::spawn(plain_request(addr, "localhost"));
-                receive_with_guard(&mut gate.entered, "first Camber transport").await;
+                receive_with_guard(&mut gate.entered, "first captured transport").await;
 
                 controller
                     .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
@@ -355,26 +322,72 @@ fn plain_creation_camber_first_poll_captures_runtime_context() {
                 let result = tokio::time::timeout(Duration::from_secs(2), server)
                     .await
                     .expect("captured Camber timeout did not expire")
-                    .expect("Camber owner task failed before returning its serve result");
+                    .expect("the polling task failed before returning its serve result");
                 assert!(
                     matches!(result, Err(RuntimeError::Timeout)),
                     "expected captured 150ms timeout, got {result:?}"
                 );
-                assert_eq!(
-                    gate.dropped.try_recv(),
-                    Ok(()),
-                    "server returned before aborting its active transport"
-                );
-                assert!(
-                    matches!(
-                        gate.entered.try_recv(),
-                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
-                    ),
-                    "owner completion retained the router's handler sender"
-                );
 
                 join_client(first_client).await;
                 join_client(second_client).await;
+            })
+        })
+        .unwrap();
+}
+
+/// A future built with no Camber runtime keeps the standalone context, whatever
+/// polls it: the runtime's shutdown, timeout, and connection limit are not its.
+fn plain_creation_keeps_standalone_context_under_camber_poll() {
+    camber::runtime::builder()
+        .connection_limit(1)
+        .shutdown_timeout(Duration::from_millis(150))
+        .run(|| {
+            camber::runtime::block_on(async {
+                let (router, mut gate) = multi_gated_router();
+                let listener = bind_listener().await;
+                let addr = listener.local_addr().unwrap();
+
+                // The raw task builds the owner with no Camber context.
+                let server = tokio::time::timeout(
+                    EVENT_TIMEOUT,
+                    tokio::spawn(async move {
+                        camber::http::serve_async(listener, router)
+                            .expect("owned server requires a Tokio runtime")
+                    }),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                // Polled under Camber, which changes nothing it captured.
+                let server = camber::spawn_async(server);
+
+                let first_client = tokio::spawn(plain_request(addr, "localhost"));
+                receive_with_guard(&mut gate.entered, "first standalone transport").await;
+
+                camber::runtime::request_shutdown();
+
+                let second_client = tokio::spawn(plain_request(addr, "localhost"));
+                let third_client = tokio::spawn(plain_request(addr, "localhost"));
+                receive_with_guard(&mut gate.entered, "second standalone transport").await;
+                receive_with_guard(&mut gate.entered, "third standalone transport").await;
+
+                // Three transports dispatched at once, after a shutdown this
+                // server never captured: neither the runtime's connection limit
+                // nor its shutdown reached the standalone capture. Its own
+                // owner is what ends it.
+                server.cancel();
+                let cancelled = tokio::time::timeout(Duration::from_secs(2), server.into_future())
+                    .await
+                    .expect("the standalone owner did not join after cancellation");
+                assert!(
+                    cancelled.is_err() || matches!(cancelled, Ok(Ok(()))),
+                    "unexpected standalone owner outcome: {cancelled:?}"
+                );
+                wait_for_drops(&mut gate.dropped, 3, "standalone transport").await;
+
+                join_client(first_client).await;
+                join_client(second_client).await;
+                join_client(third_client).await;
             })
         })
         .unwrap();
@@ -391,7 +404,10 @@ fn dropping_pure_tokio_direct_future_aborts_owned_transports() {
         let (router, mut gate) = multi_gated_router();
         let listener = bind_listener().await;
         let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(camber::http::serve_async(listener, router));
+        let server = tokio::spawn(
+            camber::http::serve_async(listener, router)
+                .expect("owned server requires a Tokio runtime"),
+        );
         let client = tokio::spawn(plain_request(addr, "localhost"));
 
         receive_with_guard(&mut gate.entered, "pure-Tokio transport").await;

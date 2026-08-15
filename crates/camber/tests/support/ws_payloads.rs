@@ -408,7 +408,10 @@ where
 {
     let (router, mut handoff) = direction_router(DIRECTION_PATH, buffer);
     DirectionTestFixture::run(
-        |listener| camber::http::serve_background(listener, router),
+        |listener| {
+            camber::http::serve_background(listener, router)
+                .expect("owned server requires a Tokio runtime")
+        },
         |listener| async move {
             let clients = connect_clients(&listener, &mut handoff, recipients).await;
             case(SharedPayloadFixture { listener, clients }).await;

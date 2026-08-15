@@ -52,7 +52,7 @@ async fn pool_dispatches_concurrent_http_requests() {
 fn pool_backpressure_under_load() {
     runtime::builder()
         .worker_threads(2)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(1))
         .run(|| {
             common::block_on(async {

@@ -27,12 +27,37 @@ pub struct HostRouter {
     buffers: BufferConfig,
     mapper: Option<Arc<RejectionMapper>>,
     body_ceiling: ConfiguredCeiling,
+    budgets: super::route_budgets::RouteBudgets,
 }
 
 impl HostRouter {
     /// Create an empty host router.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the deadlines every request under this host router runs under.
+    ///
+    /// This budget contains every child router: a child that configures none
+    /// inherits it, and a child that configures one can only narrow it.
+    #[must_use]
+    pub fn request_budget(mut self, budget: super::RequestBudget) -> Self {
+        self.budgets = self.budgets.with_request(budget);
+        self
+    }
+
+    /// Set the streaming-upload budget containing every child router.
+    #[must_use]
+    pub fn upload_budget(mut self, budget: super::TransferBudget) -> Self {
+        self.budgets = self.budgets.with_upload(budget);
+        self
+    }
+
+    /// Set the streaming-download budget containing every child router.
+    #[must_use]
+    pub fn download_budget(mut self, budget: super::TransferBudget) -> Self {
+        self.budgets = self.budgets.with_download(budget);
+        self
     }
 
     /// Set the maximum request body size in bytes (capped at 256 MB).
@@ -114,6 +139,7 @@ impl HostRouter {
             default,
             mapper: self.mapper,
             body_ceiling: self.body_ceiling,
+            budgets: self.budgets,
         }
     }
 }
@@ -124,6 +150,7 @@ pub(super) struct FrozenHostRouter {
     default: Option<FrozenRouter>,
     mapper: Option<Arc<RejectionMapper>>,
     body_ceiling: ConfiguredCeiling,
+    budgets: super::route_budgets::RouteBudgets,
 }
 
 /// Reject values that are not an HTTP authority.
@@ -193,6 +220,11 @@ impl FrozenHostRouter {
     /// The request-body ceiling that contains every child registered here.
     pub(super) fn body_ceiling(&self) -> ConfiguredCeiling {
         self.body_ceiling
+    }
+
+    /// The budgets containing every child router here.
+    pub(super) fn budgets(&self) -> super::route_budgets::RouteBudgets {
+        self.budgets
     }
 
     /// Resolve a router from the authority a request named.

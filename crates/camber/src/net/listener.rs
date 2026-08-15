@@ -66,7 +66,74 @@ impl OwnedSocketPath {
     }
 }
 
+/// One transport a server accepted, whichever listener produced it.
+///
+/// The server supervisor owns both listener kinds through one accept loop, so
+/// what it accepts has to be one type as well. TLS is a TCP concern: a Unix
+/// peer is already confined to the host's filesystem permissions, and no entry
+/// point has ever offered to wrap one.
+pub(crate) enum AcceptedStream {
+    Tcp(tokio::net::TcpStream),
+    Unix(tokio::net::UnixStream),
+}
+
+impl AcceptedStream {
+    /// Shut a transport down that this server will not serve.
+    ///
+    /// Every refusal — closed admission, an unavailable permit — goes through
+    /// here, so a socket the server declines is closed rather than dropped raw.
+    pub(crate) async fn close(self) {
+        use tokio::io::AsyncWriteExt;
+        match self {
+            Self::Tcp(mut stream) => {
+                let _ = stream.shutdown().await;
+            }
+            Self::Unix(mut stream) => {
+                let _ = stream.shutdown().await;
+            }
+        }
+    }
+}
+
 impl Listener {
+    /// Adopt a listener the caller already bound on its own Tokio runtime.
+    ///
+    /// The owned serving entry points take a `tokio::net::TcpListener`, and the
+    /// supervisor accepts through one type; this is where the two meet. A TCP
+    /// listener owns no socket path, so it has nothing to clean up.
+    pub(crate) fn from_tcp(listener: tokio::net::TcpListener) -> Self {
+        Self {
+            inner: ListenerInner::Tcp(listener),
+        }
+    }
+
+    /// Accept one transport, whichever kind this listener binds.
+    ///
+    /// Cancel-safe: both inner accepts are, so a caller may race this in a
+    /// `select!` and leave a pending connection queued on the listener.
+    pub(crate) async fn accept(
+        &self,
+    ) -> Result<(AcceptedStream, Option<std::net::SocketAddr>), std::io::Error> {
+        match &self.inner {
+            ListenerInner::Tcp(listener) => {
+                let (stream, addr) = listener.accept().await?;
+                Ok((AcceptedStream::Tcp(stream), Some(addr)))
+            }
+            ListenerInner::Unix(listener, _) => {
+                let (stream, _addr) = listener.accept().await?;
+                Ok((AcceptedStream::Unix(stream), None))
+            }
+        }
+    }
+
+    /// The bound TCP address, or `None` for a Unix socket.
+    pub(crate) fn tcp_addr(&self) -> Option<std::net::SocketAddr> {
+        match &self.inner {
+            ListenerInner::Tcp(listener) => listener.local_addr().ok(),
+            ListenerInner::Unix(_, _) => None,
+        }
+    }
+
     /// Returns the local address for TCP listeners, or the socket path for Unix listeners.
     pub fn local_addr(&self) -> Result<ListenerAddr, RuntimeError> {
         match &self.inner {

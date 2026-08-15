@@ -132,7 +132,8 @@ async fn shutdown_drains_inflight_requests() {
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let handle = camber::http::serve_background(listener, router);
+    let handle = camber::http::serve_background(listener, router)
+        .expect("owned server requires a Tokio runtime");
     let client = tokio::spawn(reqwest::get(format!("http://{addr}/slow")));
     tokio::time::timeout(EVENT_TIMEOUT, entered_receiver)
         .await

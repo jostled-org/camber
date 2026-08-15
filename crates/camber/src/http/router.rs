@@ -60,6 +60,7 @@ pub struct Router {
     mapper: Option<Arc<RejectionMapper>>,
     body_ceiling: ConfiguredCeiling,
     body_policy: Option<Arc<BodyPolicy>>,
+    budgets: super::route_budgets::RouteBudgets,
     #[cfg(feature = "grpc")]
     grpc_router: Option<super::dispatch::GrpcRouter>,
 }
@@ -74,6 +75,7 @@ impl Default for Router {
             mapper: None,
             body_ceiling: ConfiguredCeiling::default(),
             body_policy: None,
+            budgets: super::route_budgets::RouteBudgets::default(),
             #[cfg(feature = "grpc")]
             grpc_router: None,
         }
@@ -84,6 +86,35 @@ impl Router {
     /// Create an empty router with default buffer settings.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the deadlines every request this router admits runs under.
+    ///
+    /// This narrows the server's own request budget and can never widen it: an
+    /// unbounded dimension here inherits the containing bound rather than
+    /// erasing it. Under a [`HostRouter`](super::HostRouter) the host's budget
+    /// contains this one as well.
+    #[must_use]
+    pub fn request_budget(mut self, budget: super::RequestBudget) -> Self {
+        self.budgets = self.budgets.with_request(budget);
+        self
+    }
+
+    /// Set the budget for streaming uploads this router admits.
+    ///
+    /// Route-aware body admission remains the request payload byte authority;
+    /// this budget can only narrow it further.
+    #[must_use]
+    pub fn upload_budget(mut self, budget: super::TransferBudget) -> Self {
+        self.budgets = self.budgets.with_upload(budget);
+        self
+    }
+
+    /// Set the budget for streaming downloads this router produces.
+    #[must_use]
+    pub fn download_budget(mut self, budget: super::TransferBudget) -> Self {
+        self.budgets = self.budgets.with_download(budget);
+        self
     }
 
     /// Set the maximum request body size in bytes (capped at 256 MB).
@@ -623,6 +654,7 @@ impl Router {
             mapper: self.mapper,
             body_ceiling: self.body_ceiling,
             body_policy: self.body_policy,
+            budgets: self.budgets,
             #[cfg(feature = "grpc")]
             grpc_router: self.grpc_router,
         }

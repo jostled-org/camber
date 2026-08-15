@@ -135,7 +135,7 @@ fn run_full_runtime_journey() {
 #[test]
 fn e2e_full_v02_runtime() {
     runtime::builder()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(run_full_runtime_journey)
         .unwrap();

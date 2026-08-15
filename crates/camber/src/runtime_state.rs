@@ -8,8 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-pub(crate) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
-pub(crate) const DEFAULT_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const DEFAULT_HEALTH_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How long the scope waits for aborted children to join before it stops
@@ -49,14 +47,18 @@ pub(crate) fn default_worker_threads() -> usize {
 #[derive(Clone)]
 pub(crate) struct RuntimeConfig {
     pub(crate) worker_threads: usize,
-    pub(crate) shutdown_timeout: Duration,
-    pub(crate) keepalive_timeout: Duration,
+    /// The complete outer service envelope, stored once.
+    ///
+    /// The runtime's header, request, transfer, shutdown, profiling, and
+    /// connection bounds are one validated value rather than a field each, so a
+    /// server started inside this runtime narrows a single policy instead of
+    /// reassembling it from parts that can disagree.
+    pub(crate) server_policy: crate::http::ServerPolicy,
     pub(crate) tracing_enabled: bool,
     pub(crate) metrics_enabled: bool,
     #[cfg(feature = "profiling")]
     pub(crate) profiling_enabled: bool,
     pub(crate) health_interval: Duration,
-    pub(crate) connection_limit: Option<usize>,
     pub(crate) tls_config: Option<TlsConfig>,
     pub(crate) cert_store: Option<CertStore>,
 }
@@ -65,14 +67,12 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             worker_threads: default_worker_threads(),
-            shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
-            keepalive_timeout: DEFAULT_KEEPALIVE_TIMEOUT,
+            server_policy: crate::http::ServerPolicy::default(),
             tracing_enabled: false,
             metrics_enabled: false,
             #[cfg(feature = "profiling")]
             profiling_enabled: false,
             health_interval: DEFAULT_HEALTH_INTERVAL,
-            connection_limit: None,
             tls_config: None,
             cert_store: None,
         }
@@ -130,10 +130,6 @@ impl LatchSignal {
     pub(crate) fn fire(&self) {
         self.fired.store(true, Ordering::Release);
         self.notify.notify_waiters();
-    }
-
-    pub(crate) fn flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.fired)
     }
 
     /// Rebuild the latch from the two halves a caller already holds.
@@ -1246,7 +1242,7 @@ pub(crate) fn drain_root_scope(
     inner: &RuntimeInner,
     executor: &tokio::runtime::Handle,
 ) -> Option<crate::RuntimeError> {
-    let shutdown_timeout = inner.config.shutdown_timeout;
+    let shutdown_timeout = inner.config.server_policy.shutdown_timeout_value();
     let outstanding = inner
         .scope
         .wait_timeout(shutdown_timeout, inner.test_schedule.as_deref());

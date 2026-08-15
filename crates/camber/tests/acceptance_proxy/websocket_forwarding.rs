@@ -186,7 +186,8 @@ async fn proxied_websocket_resolves_completed_at_handoff() {
     controller
         .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
         .expect("pause proxy handoff acknowledgement");
-    let handle = camber::http::serve_background(listener, proxy);
+    let handle = camber::http::serve_background(listener, proxy)
+        .expect("owned server requires a Tokio runtime");
 
     let mut peer = tokio::net::TcpStream::connect(proxy_addr)
         .await
@@ -281,7 +282,7 @@ fn echo_ws_backend() -> Router {
 #[test]
 fn synchronous_entry_proxied_websocket_resolves_completed_at_handoff() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let backend_addr = common::spawn_server(echo_ws_backend());
@@ -346,7 +347,7 @@ fn assert_cancelled(result: Result<(), RuntimeError>) {
 #[test]
 fn websocket_proxy_forwards_text_messages() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let backend_addr = common::spawn_server(echo_ws_backend());
@@ -378,7 +379,7 @@ fn websocket_proxy_forwards_text_messages() {
 #[test]
 fn websocket_proxy_handles_client_close() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             // Backend: sends 3 messages then waits
@@ -420,7 +421,7 @@ fn websocket_proxy_handles_client_close() {
 #[test]
 fn websocket_proxy_coexists_with_http_proxy() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             // Backend: serves both HTTP and WebSocket
@@ -464,7 +465,7 @@ fn websocket_proxy_coexists_with_http_proxy() {
 #[test]
 fn websocket_proxy_rejects_cross_host_origin_before_upstream_upgrade() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             // Backend: WebSocket echo server
@@ -496,7 +497,7 @@ fn websocket_proxy_rejects_cross_host_origin_before_upstream_upgrade() {
 #[test]
 fn ws_proxy_forwards_sec_websocket_protocol() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             // Backend: echo Sec-WebSocket-Protocol as first WS message
@@ -547,7 +548,7 @@ fn ws_proxy_forwards_sec_websocket_protocol() {
 #[test]
 fn ws_proxy_strips_spoofed_forwarded_headers() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut backend = Router::new();
@@ -585,7 +586,7 @@ fn ws_proxy_strips_spoofed_forwarded_headers() {
 #[test]
 fn websocket_proxy_rejects_invalid_backend_scheme() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             // Backend configured with ftp:// — not http:// or https://, should return 502
@@ -609,7 +610,7 @@ fn websocket_proxy_rejects_invalid_backend_scheme() {
 #[test]
 fn websocket_proxy_stream_upgrade_ignores_request_body_limit() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let backend_addr = common::spawn_server(echo_ws_backend());
@@ -653,7 +654,7 @@ fn websocket_proxy_stream_upgrade_ignores_request_body_limit() {
 fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() {
     runtime::builder()
         .connection_limit(1)
-        .keepalive_timeout(Duration::from_secs(5))
+        .header_timeout(Duration::from_secs(5))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             runtime::block_on(async {
@@ -666,7 +667,8 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
                     .expect("bind owned proxy listener");
                 let proxy_addr = listener.local_addr().expect("owned proxy listener address");
                 let controller = lifecycle(proxy_addr).expect("install proxy controller");
-                let handle = camber::http::serve_background(listener, proxy);
+                let handle = camber::http::serve_background(listener, proxy)
+                    .expect("owned server requires a Tokio runtime");
                 let mut websocket = connect_async_proxy_websocket(proxy_addr).await;
                 assert_proxy_echo(&mut websocket).await;
                 assert_eq!(backend_connections.load(Ordering::Acquire), 1);
@@ -728,7 +730,8 @@ async fn graceful_proxy_websocket_shutdown_sends_close_before_eof_and_join() {
         .await
         .expect("bind graceful proxy listener");
     let proxy_addr = listener.local_addr().expect("graceful proxy address");
-    let handle = camber::http::serve_background(listener, lifecycle_proxy_router(backend_addr));
+    let handle = camber::http::serve_background(listener, lifecycle_proxy_router(backend_addr))
+        .expect("owned server requires a Tokio runtime");
     let mut websocket = connect_async_proxy_websocket(proxy_addr).await;
     assert_proxy_echo(&mut websocket).await;
 
@@ -752,7 +755,8 @@ async fn forced_proxy_websocket_abort_releases_transport_before_cancelled() {
         .await
         .expect("bind forced proxy listener");
     let proxy_addr = listener.local_addr().expect("forced proxy address");
-    let handle = camber::http::serve_background(listener, lifecycle_proxy_router(backend_addr));
+    let handle = camber::http::serve_background(listener, lifecycle_proxy_router(backend_addr))
+        .expect("owned server requires a Tokio runtime");
     let mut websocket = connect_async_proxy_websocket(proxy_addr).await;
     assert_proxy_echo(&mut websocket).await;
 
@@ -816,7 +820,8 @@ fn forced_proxy_abort_bounds_a_backend_that_never_answers_its_close() {
                     .expect("bind silent-backend proxy listener");
                 let proxy_addr = listener.local_addr().expect("silent-backend proxy address");
                 let handle =
-                    camber::http::serve_background(listener, lifecycle_proxy_router(backend.addr));
+                    camber::http::serve_background(listener, lifecycle_proxy_router(backend.addr))
+                        .expect("owned server requires a Tokio runtime");
                 let mut websocket = connect_async_proxy_websocket(proxy_addr).await;
 
                 let requested = tokio::time::Instant::now();
@@ -856,7 +861,8 @@ async fn pending_proxy_upgrade_shutdown_is_rejected(forced: bool) {
     controller
         .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
         .expect("pause pending proxy upgrade");
-    let handle = camber::http::serve_background(listener, lifecycle_proxy_router(backend_addr));
+    let handle = camber::http::serve_background(listener, lifecycle_proxy_router(backend_addr))
+        .expect("owned server requires a Tokio runtime");
     let mut pending = tokio::net::TcpStream::connect(proxy_addr)
         .await
         .expect("connect pending proxied WebSocket peer");
@@ -935,7 +941,8 @@ async fn cancelled_pending_proxy_upgrade_is_joined_and_connection_local() {
     controller
         .pause_once(LifecycleCheckpoint::UpgradePeerClosed)
         .expect("pause after proxy peer closure is observed");
-    let handle = camber::http::serve_background(listener, proxy);
+    let handle = camber::http::serve_background(listener, proxy)
+        .expect("owned server requires a Tokio runtime");
     let mut pending = tokio::net::TcpStream::connect(proxy_addr)
         .await
         .expect("connect cancellable proxy peer");
@@ -1023,7 +1030,8 @@ async fn start_proxy_unwind_scenario() -> ProxyUnwindScenario {
         .expect("bind proxy unwind listener");
     let proxy_addr = listener.local_addr().expect("proxy unwind address");
     let controller = lifecycle(proxy_addr).expect("install proxy unwind controller");
-    let handle = camber::http::serve_background(listener, lifecycle_proxy_router(backend.addr));
+    let handle = camber::http::serve_background(listener, lifecycle_proxy_router(backend.addr))
+        .expect("owned server requires a Tokio runtime");
     let mut acknowledged = connect_async_proxy_websocket(proxy_addr).await;
     assert_proxy_echo(&mut acknowledged).await;
     assert_eq!(backend_connections.load(Ordering::Acquire), 1);

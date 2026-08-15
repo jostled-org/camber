@@ -491,7 +491,7 @@ async fn release_after_shutdown_race(checkpoint: LifecycleCheckpoint, forced: bo
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
     controller.pause_once(checkpoint).unwrap();
-    let handle = camber::http::serve_background(listener, counting_router(Arc::clone(&counter)));
+    let handle = camber::http::serve_background(listener, counting_router(Arc::clone(&counter))).expect("owned server requires a Tokio runtime");
 
     let mut client = connect_request(addr).await;
     wait_until_paused_bounded(
@@ -562,9 +562,9 @@ async fn lifecycle_controller_is_listener_scoped_and_fail_closed() {
         .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
 
-    let first_handle = camber::http::serve_background(first, ok_router());
-    let second_handle = camber::http::serve_background(second, ok_router());
-    let third_handle = camber::http::serve_background(third, ok_router());
+    let first_handle = camber::http::serve_background(first, ok_router()).expect("owned server requires a Tokio runtime");
+    let second_handle = camber::http::serve_background(second, ok_router()).expect("owned server requires a Tokio runtime");
+    let third_handle = camber::http::serve_background(third, ok_router()).expect("owned server requires a Tokio runtime");
     let mut first_client = connect_request(first_addr).await;
     wait_until_paused_bounded(
         &first_controller,
@@ -620,7 +620,7 @@ async fn dropping_controller_releases_waiter_and_allows_address_reuse() {
     controller
         .pause_once(LifecycleCheckpoint::AfterAccept)
         .unwrap();
-    let handle = camber::http::serve_background(listener, ok_router());
+    let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
     let mut client = connect_request(addr).await;
     wait_until_paused_bounded(
         &controller,
@@ -684,7 +684,7 @@ async fn camber_background_join_flattens_success() {
     controller
         .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
         .unwrap();
-    let handle = camber::http::serve_background(listener, ok_router());
+    let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
     wait_until_paused_bounded(
         &controller,
         LifecycleCheckpoint::BeforeSupervisorSelect,
@@ -734,7 +734,7 @@ async fn admitted_plain_transport_keeps_owner_pending_until_release() {
     let handle = camber::http::serve_background(
         listener,
         held_router(entered_tx, Arc::clone(&release), Arc::clone(&dropped)),
-    );
+    ).expect("owned server requires a Tokio runtime");
     let mut client = connect_request(addr).await;
     await_handler_entry(
         entered_rx,
@@ -763,7 +763,7 @@ async fn admitted_tls_transport_keeps_owner_pending_until_release() {
         listener,
         held_router(entered_tx, Arc::clone(&release), Arc::clone(&dropped)),
         tls_config,
-    );
+    ).expect("owned server requires a Tokio runtime");
     let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let mut client = connector.connect(server_name, tcp).await.unwrap();
@@ -869,7 +869,7 @@ async fn write_websocket_close(stream: &mut tokio::net::TcpStream) {
 async fn admitted_websocket_bridge_keeps_owner_pending_until_transport_closes() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let handle = camber::http::serve_background(listener, websocket_router());
+    let handle = camber::http::serve_background(listener, websocket_router()).expect("owned server requires a Tokio runtime");
     let mut client = websocket_client(addr, "/ws").await;
     runtime::request_shutdown();
     let mut completion = Box::pin(handle.into_future());
@@ -944,7 +944,7 @@ async fn default_grace_deadline_aborts_joins_and_releases_direct_transport() {
     let server = tokio::spawn(camber::http::serve_async(
         listener,
         held_router(entered_tx, release, Arc::clone(&dropped)),
-    ));
+    ).expect("owned server requires a Tokio runtime"));
     let client = connect_request(addr).await;
     await_handler_entry(
         entered_rx,
@@ -1018,7 +1018,7 @@ fn configured_grace_deadline_is_used_by_background_owner() {
                         Arc::new(tokio::sync::Semaphore::new(0)),
                         Arc::clone(&observed),
                     ),
-                );
+                ).expect("owned server requires a Tokio runtime");
                 let mut client = connect_request(addr).await;
                 await_handler_entry(
                     entered_rx,
@@ -1056,7 +1056,7 @@ fn shutdown_while_waiting_for_permit_closes_unadmitted_socket() {
                 let addr = listener.local_addr().unwrap();
                 let controller = lifecycle(addr).unwrap();
                 let handle =
-                    camber::http::serve_background(listener, counting_router(Arc::clone(&counter)));
+                    camber::http::serve_background(listener, counting_router(Arc::clone(&counter))).expect("owned server requires a Tokio runtime");
                 let mut first = connect_request(addr).await;
                 let response =
                     read_http_head_bounded(&mut first, "first admitted response timed out").await;
@@ -1121,7 +1121,7 @@ async fn shutdown_joins_incomplete_tls_handshake() {
     controller
         .pause_once(LifecycleCheckpoint::AfterPermit)
         .unwrap();
-    let handle = camber::http::serve_background_tls(listener, ok_router(), tls_config);
+    let handle = camber::http::serve_background_tls(listener, ok_router(), tls_config).expect("owned server requires a Tokio runtime");
     let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
     wait_until_paused_bounded(
         &controller,
@@ -1175,7 +1175,7 @@ async fn retained_server() -> (
             Arc::clone(&release),
             Arc::new(AtomicBool::new(false)),
         ),
-    );
+    ).expect("owned server requires a Tokio runtime");
     let client = connect_request(addr).await;
     await_handler_entry(
         entered_rx,
@@ -1207,7 +1207,7 @@ async fn retained_owner_server() -> (
             Arc::clone(&dropped),
             Arc::new(AtomicUsize::new(0)),
         ),
-    );
+    ).expect("owned server requires a Tokio runtime");
     let client = connect_request_path(addr, "/active").await;
     await_handler_entry(
         entered_rx,
@@ -1523,7 +1523,7 @@ async fn owned_task_fault_result(fault: LifecycleFault, expected: &str) {
         .pause_once(LifecycleCheckpoint::AfterPermit)
         .unwrap();
     controller.inject_once(fault).unwrap();
-    let handle = camber::http::serve_background(listener, ok_router());
+    let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
     let mut client = connect_request(addr).await;
     wait_until_paused_bounded(
         &controller,
@@ -1780,7 +1780,7 @@ async fn control_branch_wins_and_completed_task_is_reaped_next_iteration() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, ok_router());
+    let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
     prepare_completed_task(&controller, addr).await;
     controller
         .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
@@ -1803,7 +1803,7 @@ async fn runtime_branch_drops_losing_accept_error_and_reaps_task_next() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, ok_router());
+    let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
     prepare_completed_task(&controller, addr).await;
     controller
         .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
@@ -1825,7 +1825,7 @@ async fn accept_branch_wins_over_task_then_reaps_task() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, ok_router());
+    let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
     prepare_completed_task(&controller, addr).await;
     let mut second = connect_request(addr).await;
     select_next(
@@ -1847,7 +1847,7 @@ async fn task_branch_is_selected_when_task_is_only_ready_work() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, ok_router());
+    let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
     prepare_completed_task(&controller, addr).await;
     select_next(
         &controller,
@@ -1870,7 +1870,7 @@ async fn shutdown_wins_over_ready_accept(forced: bool) {
     controller
         .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
         .unwrap();
-    let handle = camber::http::serve_background(listener, counting_router(Arc::clone(&counter)));
+    let handle = camber::http::serve_background(listener, counting_router(Arc::clone(&counter))).expect("owned server requires a Tokio runtime");
     wait_until_paused_bounded(
         &controller,
         LifecycleCheckpoint::BeforeSupervisorSelect,
@@ -1929,7 +1929,7 @@ fn control_branch_wins_over_ready_permit() {
                 let addr = listener.local_addr().unwrap();
                 let controller = lifecycle(addr).unwrap();
                 let handle =
-                    camber::http::serve_background(listener, counting_router(Arc::clone(&counter)));
+                    camber::http::serve_background(listener, counting_router(Arc::clone(&counter))).expect("owned server requires a Tokio runtime");
                 let mut first = connect_request(addr).await;
                 assert!(read_http_head(&mut first).await.starts_with("HTTP/1.1 200"));
                 controller
@@ -2161,7 +2161,7 @@ fn deadline_branch_wins_over_pending_permit_becoming_ready() {
                         Arc::clone(&release),
                         Arc::new(AtomicBool::new(false)),
                     ),
-                );
+                ).expect("owned server requires a Tokio runtime");
                 let mut first = connect_request(addr).await;
                 await_handler_entry(entered_rx, "first request did not enter the handler").await;
                 controller
@@ -2220,7 +2220,7 @@ async fn deadline_branch_wins_over_submitted_registration_and_joins_it() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, websocket_router());
+    let handle = camber::http::serve_background(listener, websocket_router()).expect("owned server requires a Tokio runtime");
     let mut client = prepare_submitted_upgrade(&controller, addr).await;
     controller
         .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
@@ -2273,7 +2273,7 @@ async fn control_after_result_send_does_not_replace_io_result() {
     controller
         .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
-    let handle = camber::http::serve_background(listener, ok_router());
+    let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
     wait_until_paused_bounded(
         &controller,
         LifecycleCheckpoint::BeforeSupervisorSelect,
@@ -2484,7 +2484,7 @@ async fn pending_registration_cancellation_is_expected_and_joined() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, router);
+    let handle = camber::http::serve_background(listener, router).expect("owned server requires a Tokio runtime");
     let client = prepare_submitted_upgrade(&controller, addr).await;
     drop(client);
     controller
@@ -2514,7 +2514,7 @@ async fn control_wins_over_submitted_registration_and_joins_wrapper() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, websocket_router());
+    let handle = camber::http::serve_background(listener, websocket_router()).expect("owned server requires a Tokio runtime");
     let mut client = prepare_submitted_upgrade(&controller, addr).await;
     controller
         .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
@@ -2546,7 +2546,7 @@ async fn runtime_wins_over_submitted_registration_and_joins_wrapper() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, websocket_router());
+    let handle = camber::http::serve_background(listener, websocket_router()).expect("owned server requires a Tokio runtime");
     let mut client = prepare_submitted_upgrade(&controller, addr).await;
     controller
         .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
@@ -2582,7 +2582,7 @@ async fn accept_branch_wins_over_submitted_registration() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, router);
+    let handle = camber::http::serve_background(listener, router).expect("owned server requires a Tokio runtime");
     let mut upgrade = prepare_submitted_upgrade(&controller, addr).await;
     let mut ordinary = connect_request(addr).await;
     select_next(
@@ -2645,7 +2645,7 @@ async fn permit_registration_fixture() -> PermitRegistrationFixture {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, router);
+    let handle = camber::http::serve_background(listener, router).expect("owned server requires a Tokio runtime");
     let mut ordinary =
         tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
             .await
@@ -2793,7 +2793,7 @@ fn permit_branch_wins_over_completed_task() {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
                 let controller = lifecycle(addr).unwrap();
-                let handle = camber::http::serve_background(listener, ok_router());
+                let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
                 let mut first = connect_request(addr).await;
                 assert!(read_http_head(&mut first).await.starts_with("HTTP/1.1 200"));
                 controller
@@ -2882,7 +2882,7 @@ async fn registration_branch_wins_over_completed_task() {
     router.get("/", |_request: &Request| async {
         Response::text(200, "ok")
     });
-    let handle = camber::http::serve_background(listener, router);
+    let handle = camber::http::serve_background(listener, router).expect("owned server requires a Tokio runtime");
     prepare_completed_task(&controller, addr).await;
 
     let mut client = submit_registration_over_completed_task(&controller, addr).await;
@@ -2951,15 +2951,14 @@ fn background_constructor_checks_tokio_before_stale_camber_marker() {
         tokio_runtime.block_on(async { tokio::net::TcpListener::from_std(std_listener).unwrap() });
     drop(tokio_runtime);
 
-    let result = camber::http::serve_background(listener, ok_router())
-        .into_future()
-        .now_or_never()
-        .expect("constructor error must already be ready");
-    // The absent executor has its own variant: a stale Camber marker must not
-    // turn a missing Tokio runtime into an argument complaint.
-    match result {
+    // The absent executor has its own variant, and the terminal answers it
+    // synchronously: a stale Camber marker must not turn a missing Tokio
+    // runtime into an argument complaint, and no owner is handed back for a
+    // server that never started.
+    match camber::http::serve_background(listener, ok_router()) {
         Err(RuntimeError::NoRuntime) => {}
-        other => panic!("expected ready NoRuntime, got {other:?}"),
+        Ok(_) => panic!("the terminal handed back an owner with no Tokio runtime"),
+        Err(other) => panic!("expected NoRuntime, got {other:?}"),
     }
 }
 
@@ -2971,7 +2970,7 @@ async fn capture_standalone_default_keepalive(controller: &LifecycleController, 
         .pause_once(LifecycleCheckpoint::AfterPermit)
         .unwrap();
     let keepalive_checkpoint =
-        LifecycleCheckpoint::KeepaliveTimeoutConfigured(Duration::from_secs(60));
+        LifecycleCheckpoint::HeaderTimeoutConfigured(Duration::from_secs(60));
     controller.pause_once(keepalive_checkpoint).unwrap();
     let mut partial = tokio::net::TcpStream::connect(addr).await.unwrap();
     partial.write_all(b"GET / HTTP/1.1\r\nHost:").await.unwrap();
@@ -3014,7 +3013,7 @@ async fn standalone_background_ignores_unrelated_camber_shutdown_and_uses_defaul
     router.get("/second", |_req: &Request| async {
         Response::text(200, "second")
     });
-    let handle = camber::http::serve_background(listener, router);
+    let handle = camber::http::serve_background(listener, router).expect("owned server requires a Tokio runtime");
     let _first = connect_request(addr).await;
     await_handler_entry(
         entered_rx,
@@ -3113,7 +3112,7 @@ fn configured_background_participates_in_runtime_task_accounting() {
             controller
                 .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
                 .unwrap();
-            let _handle = camber::http::serve_background(listener, ok_router());
+            let _handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
             let returned = Arc::clone(&run_returned);
             let paused = Arc::clone(&supervisor_was_paused);
             let thread = std::thread::spawn(move || {
@@ -3156,7 +3155,7 @@ fn configured_background_participates_in_runtime_task_accounting() {
 fn configured_background_captures_limit_keepalive_health_metrics_and_shutdown() {
     runtime::builder()
         .connection_limit(1)
-        .keepalive_timeout(Duration::from_millis(150))
+        .header_timeout(Duration::from_millis(150))
         .shutdown_timeout(Duration::from_secs(1))
         .with_metrics()
         .resource(HealthyResource)
@@ -3165,7 +3164,7 @@ fn configured_background_captures_limit_keepalive_health_metrics_and_shutdown() 
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
                 let controller = lifecycle(addr).unwrap();
-                let handle = camber::http::serve_background(listener, ok_router());
+                let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
                 let health = reqwest::get(format!("http://{addr}/health")).await.unwrap();
                 assert_eq!(health.status(), 200);
                 drop(health);
@@ -3239,7 +3238,7 @@ fn configured_background_captures_router_body_buffers() {
                 });
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let handle = camber::http::serve_background(listener, router);
+                let handle = camber::http::serve_background(listener, router).expect("owned server requires a Tokio runtime");
                 let response = reqwest::Client::new()
                     .post(format!("http://{addr}/"))
                     .body("12345")
@@ -3335,7 +3334,7 @@ fn configured_background_captures_sse_and_websocket_buffers() {
                         .pause_once(LifecycleCheckpoint::WebSocketIncomingBufferConfigured(5))
                         .unwrap();
                 }
-                let handle = camber::http::serve_background(listener, router);
+                let handle = camber::http::serve_background(listener, router).expect("owned server requires a Tokio runtime");
                 let sse_client = assert_configured_sse_buffer(&controller, addr).await;
 
                 #[cfg(feature = "ws")]
@@ -3391,13 +3390,13 @@ fn configured_tls_background_marks_requests_as_tls() {
                 let backend = tokio::spawn(camber::http::serve_async(
                     backend_listener,
                     backend_router,
-                ));
+                ).expect("owned server requires a Tokio runtime"));
 
                 let mut router = Router::new();
                 router.proxy("/proxy", &format!("http://{backend_addr}"));
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let handle = camber::http::serve_background_tls(listener, router, tls_config);
+                let handle = camber::http::serve_background_tls(listener, router, tls_config).expect("owned server requires a Tokio runtime");
                 let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
                 let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
                 let mut stream = connector.connect(name, tcp).await.unwrap();
@@ -3414,8 +3413,15 @@ fn configured_tls_background_marks_requests_as_tls() {
                 assert_eq!(&body, b"https");
                 runtime::request_shutdown();
                 assert!(handle.await.is_ok());
-                backend.abort();
-                assert!(backend.await.unwrap_err().is_cancelled());
+                // The backend captured this runtime when `serve_async` returned
+                // its owner, so the same shutdown request ends it.
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(5), backend)
+                        .await
+                        .expect("the captured backend never ended on runtime shutdown")
+                        .expect("the backend task failed")
+                        .is_ok()
+                );
             });
         })
         .unwrap();
@@ -3435,13 +3441,13 @@ async fn standalone_tls_background_marks_proxy_scheme_as_https() {
     });
     let backend_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = backend_listener.local_addr().unwrap();
-    let backend = tokio::spawn(camber::http::serve_async(backend_listener, backend_router));
+    let backend = tokio::spawn(camber::http::serve_async(backend_listener, backend_router).expect("owned server requires a Tokio runtime"));
     let mut router = Router::new();
     router.proxy("/proxy", &format!("http://{backend_addr}"));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background_tls(listener, router, tls_config);
+    let handle = camber::http::serve_background_tls(listener, router, tls_config).expect("owned server requires a Tokio runtime");
     let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
     let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let mut stream = connector.connect(name, tcp).await.unwrap();
@@ -3502,7 +3508,7 @@ fn configured_background_captures_request_tracing() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let controller = lifecycle(addr).unwrap();
-        let handle = camber::http::serve_background(listener, router);
+        let handle = camber::http::serve_background(listener, router).expect("owned server requires a Tokio runtime");
         assert_ok_request_path(addr, "/standalone-untraced").await;
         controller
             .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
@@ -3532,7 +3538,7 @@ fn configured_background_captures_request_tracing() {
                 });
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let handle = camber::http::serve_background(listener, router);
+                let handle = camber::http::serve_background(listener, router).expect("owned server requires a Tokio runtime");
                 assert_ok_request_path(addr, "/captured-lifecycle").await;
                 runtime::request_shutdown();
                 assert!(handle.await.is_ok());
@@ -3563,7 +3569,7 @@ fn configured_background_captures_profiling_route() {
             runtime::block_on(async {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let handle = camber::http::serve_background(listener, Router::new());
+                let handle = camber::http::serve_background(listener, Router::new()).expect("owned server requires a Tokio runtime");
                 let response = reqwest::get(format!("http://{addr}/debug/pprof/cpu?seconds=1"))
                     .await
                     .unwrap();
@@ -3590,7 +3596,7 @@ async fn request_shutdown_cannot_be_missed_after_runtime_wait_registration() {
     controller
         .pause_once(LifecycleCheckpoint::BeforeRuntimeWait)
         .unwrap();
-    let handle = camber::http::serve_background(listener, ok_router());
+    let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
     wait_until_paused_bounded(
         &controller,
         LifecycleCheckpoint::BeforeRuntimeWait,
@@ -3612,7 +3618,7 @@ async fn on_cancel_cannot_be_missed_after_runtime_wait_registration() {
     controller
         .pause_once(LifecycleCheckpoint::BeforeRuntimeWait)
         .unwrap();
-    let handle = camber::http::serve_background(listener, ok_router());
+    let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
     wait_until_paused_bounded(
         &controller,
         LifecycleCheckpoint::BeforeRuntimeWait,
@@ -4051,7 +4057,7 @@ fn run_active_signal_child() {
                 controller
                     .pause_once(LifecycleCheckpoint::BeforeRuntimeWait)
                     .unwrap();
-                let handle = camber::http::serve_background(listener, ok_router());
+                let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
                 let mut retained =
                     tokio::time::timeout(Duration::from_secs(5), connect_request(http_addr))
                         .await
@@ -4114,7 +4120,7 @@ fn run_closure_return_child() {
             runtime::block_on(async {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let http_addr = listener.local_addr().unwrap();
-                let handle = camber::http::serve_background(listener, ok_router());
+                let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
                 tokio::time::timeout(Duration::from_secs(2), assert_ok_request(http_addr))
                     .await
                     .expect("closure child initial request timed out");
@@ -4169,7 +4175,7 @@ fn run_cleanup_hold_child() {
 async fn malformed_and_abrupt_http_peers_remain_connection_local() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let handle = camber::http::serve_background(listener, ok_router());
+    let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
 
     let mut malformed = tokio::net::TcpStream::connect(addr).await.unwrap();
     malformed.write_all(b"not http\r\n\r\n").await.unwrap();
@@ -4202,7 +4208,7 @@ async fn unclean_websocket_peer_close_remains_connection_local() {
     router.get("/ok", |_req: &Request| async { Response::text(200, "ok") });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let handle = camber::http::serve_background(listener, router);
+    let handle = camber::http::serve_background(listener, router).expect("owned server requires a Tokio runtime");
     let websocket = websocket_client(addr, "/ws").await;
     drop(websocket);
     assert_ok_request_path(addr, "/ok").await;
@@ -4217,7 +4223,7 @@ async fn supervisor_unwind_joins_acknowledged_and_buffered_upgrades() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, websocket_router());
+    let handle = camber::http::serve_background(listener, websocket_router()).expect("owned server requires a Tokio runtime");
     let mut acknowledged = websocket_client(addr, "/ws").await;
 
     controller
@@ -4312,7 +4318,7 @@ async fn join_transfers_control_without_stopping_admission() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, counting_router(Arc::clone(&counter)));
+    let handle = camber::http::serve_background(listener, counting_router(Arc::clone(&counter))).expect("owned server requires a Tokio runtime");
     let mut future = Box::pin(handle.join());
     assert!(future.as_mut().now_or_never().is_none());
     tokio::time::timeout(Duration::from_secs(5), assert_ok_request(addr))
@@ -4362,7 +4368,7 @@ async fn owner_graceful_wins_over_runtime_accept_error_and_completed_task() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, ok_router());
+    let handle = camber::http::serve_background(listener, ok_router()).expect("owned server requires a Tokio runtime");
     let mut future = Box::pin(handle.join());
     tokio::time::timeout(
         Duration::from_secs(5),
@@ -4434,7 +4440,7 @@ fn owner_graceful_wins_over_ready_permit() {
                         Arc::clone(&release),
                         Arc::new(AtomicBool::new(false)),
                     ),
-                );
+                ).expect("owned server requires a Tokio runtime");
                 let mut first = tokio::net::TcpStream::connect(addr).await.unwrap();
                 first.write_all(CLOSE_REQUEST).await.unwrap();
                 await_handler_entry(entered_rx, "owner permit request did not enter the handler")
@@ -4494,7 +4500,7 @@ async fn owner_graceful_wins_over_submitted_registration() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, websocket_router());
+    let handle = camber::http::serve_background(listener, websocket_router()).expect("owned server requires a Tokio runtime");
     let mut future = Box::pin(handle.join());
     let mut client = tokio::time::timeout(
         Duration::from_secs(5),
@@ -4855,7 +4861,7 @@ async fn assert_post_result_owner_drop_continues(form: OwnerForm) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let controller = lifecycle(listener.local_addr().unwrap()).unwrap();
     let (dispatch_tx, mut dispatch_rx) = tokio::sync::oneshot::channel();
-    let handle = camber::http::serve_background(listener, dispatch_drop_router(dispatch_tx));
+    let handle = camber::http::serve_background(listener, dispatch_drop_router(dispatch_tx)).expect("owned server requires a Tokio runtime");
     let owner = PendingOwner::new(handle, form);
     pause_after_success_result_send(&controller, || owner.shutdown()).await;
     drop(owner);
@@ -4902,7 +4908,7 @@ async fn graceful_http1_finishes_current_response_then_closes_admission() {
             Arc::clone(&dropped),
             Arc::clone(&next_requests),
         ),
-    );
+    ).expect("owned server requires a Tokio runtime");
     let mut client = connect_request_path(addr, "/active").await;
     await_handler_entry(
         entered_rx,

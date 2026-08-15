@@ -91,7 +91,7 @@ async fn await_goaway(client: &mut h2::client::SendRequest<Bytes>) -> h2::Error 
 #[test]
 fn http2_cleartext_request() {
     runtime_support::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .run(|| {
             let mut router = Router::new();
             router.get("/hello", |_: &Request| async { Response::text(200, "hi") });
@@ -131,7 +131,8 @@ async fn graceful_http2_sends_goaway_drains_stream_and_then_joins() {
     let (router, entered_rx, release) = retained_stream_router();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let handle = camber::http::serve_background(listener, router);
+    let handle = camber::http::serve_background(listener, router)
+        .expect("owned server requires a Tokio runtime");
     let (mut client, connection) = open_http2_client(addr).await;
 
     let request = ::http::Request::get(format!("http://{addr}/retained"))

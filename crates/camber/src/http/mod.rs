@@ -110,6 +110,7 @@
 mod async_proxy;
 mod body;
 pub(crate) mod body_admission;
+mod boundary;
 mod buffer_config;
 mod client;
 /// Response compression helpers.
@@ -136,19 +137,25 @@ mod multipart_route;
 #[cfg(feature = "otel")]
 /// OpenTelemetry request propagation and tracing hooks.
 pub mod otel;
+mod policy_value;
+mod proxy_policy;
 /// Rate limiting middleware.
 pub mod rate_limit;
 mod record;
 mod rejection;
 mod request;
+mod request_budget;
 mod response;
+mod route_budgets;
 mod router;
 mod server;
 mod server_lifecycle;
+mod server_policy;
 mod sse;
 mod static_files;
 mod stream;
 mod streaming;
+mod transfer_budget;
 mod trie;
 mod util;
 /// Request validation middleware.
@@ -160,6 +167,7 @@ mod ws_proxy;
 
 pub use async_proxy::proxy_forward;
 pub use body_admission::{BodyAdmission, BodyAdmissionContext, RequestBodyMode};
+pub use boundary::{ByteBoundary, DeadlineBoundary};
 /// The reference-counted byte buffer Camber's streaming request bodies hand out.
 ///
 /// Re-exported because [`MultipartField::next_chunk`](self::MultipartField::next_chunk)
@@ -179,23 +187,28 @@ pub use middleware::{MiddlewareFn, MiddlewareFuture, Next, ResponseFuture};
 pub use multipart::{
     MultipartField, MultipartLimits, MultipartLimitsBuilder, MultipartReader, MultipartStream, Part,
 };
+pub use proxy_policy::ProxyPolicy;
 pub use rejection::{
     NegotiatedResponseMetadata, Rejection, RejectionContext, RejectionKind, RejectionProtocol,
     RequestId,
 };
 pub use request::{Request, RequestBuilder};
+pub use request_budget::RequestBudget;
 pub use response::{HandlerOutcome, HeaderPair, IntoResponse, Response};
 #[cfg(feature = "grpc")]
 pub use router::GrpcRouter;
 pub use router::Router;
 pub use server::{
-    ServerHandle, ServerHandleFuture, serve, serve_async, serve_async_hosts, serve_async_hosts_tls,
-    serve_async_tls, serve_background, serve_background_hosts, serve_background_hosts_tls,
-    serve_background_tls, serve_hosts, serve_listener,
+    ServerBuilder, ServerHandle, ServerHandleFuture, serve, serve_async, serve_async_hosts,
+    serve_async_hosts_tls, serve_async_tls, serve_background, serve_background_hosts,
+    serve_background_hosts_tls, serve_background_tls, serve_hosts, serve_listener, server,
+    server_hosts,
 };
+pub use server_policy::ServerPolicy;
 pub use sse::SseWriter;
 pub use static_files::serve_file;
 pub use stream::{StreamResponse, StreamSender};
+pub use transfer_budget::TransferBudget;
 #[cfg(feature = "ws")]
 pub use websocket::{WsCloseCause, WsConn, WsMessage, WsReceive, WsReceiver, WsSender};
 

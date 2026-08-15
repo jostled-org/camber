@@ -1,6 +1,5 @@
 use super::BufferConfig;
-use super::conn::accept_loop;
-use super::handle::ConnCtx;
+use super::ServerPolicy;
 use super::router::{Router, ServerDispatch};
 use super::server_lifecycle::{
     ServerContextSnapshot, ServerControl, ServerSupervisor, SupervisorJoin, poll_supervisor_join,
@@ -163,246 +162,387 @@ pub(super) fn make_conn_limit(limit: Option<usize>) -> Option<Arc<tokio::sync::S
     limit.map(|n| Arc::new(tokio::sync::Semaphore::new(n)))
 }
 
+/// The routes one server serves, before they are frozen.
+///
+/// A builder holds its router by value until a terminal `serve*` call, so the
+/// two router kinds travel through one type and freeze at the same instant.
+enum ServerRoutes {
+    Single(Router),
+    Host(super::host_router::HostRouter),
+}
+
+impl ServerRoutes {
+    fn buffer_config(&self) -> BufferConfig {
+        match self {
+            Self::Single(router) => router.buffer_config(),
+            Self::Host(host_router) => host_router.buffer_config(),
+        }
+    }
+
+    fn freeze(self) -> ServerDispatch {
+        match self {
+            Self::Single(router) => ServerDispatch::Single(router.freeze()),
+            Self::Host(host_router) => ServerDispatch::Host(host_router.freeze()),
+        }
+    }
+}
+
+/// The canonical owned server: routes, policy, and transport, frozen at one
+/// terminal call.
+///
+/// Every serving entry point in Camber — blocking, listener-bound, async, and
+/// background; single-router and host-router; plain and TLS — assembles this
+/// builder and hands it to one supervisor. There is no second accept loop and
+/// no second configuration path.
+///
+/// Each terminal captures the current Camber runtime, or its absence, before it
+/// returns. A returned [`ServerHandleFuture`] moved to another executor
+/// therefore keeps the authority its constructor saw, and ambient context that
+/// changes afterwards cannot reach the server.
+///
+/// ```rust,no_run
+/// use camber::RuntimeError;
+/// use camber::http::{self, Response, Router, ServerPolicy};
+/// use std::time::Duration;
+///
+/// fn main() -> Result<(), RuntimeError> {
+///     let mut router = Router::new();
+///     router.get("/hello", |_req| async { Response::text(200, "hi") });
+///
+///     http::server(router)
+///         .policy(
+///             ServerPolicy::default()
+///                 .header_timeout(Duration::from_secs(10))?
+///                 .connection_limit(1024)?,
+///         )
+///         .serve("0.0.0.0:8080")
+/// }
+/// ```
+pub struct ServerBuilder {
+    routes: ServerRoutes,
+    policy: ServerPolicy,
+    tls: Option<Arc<rustls::ServerConfig>>,
+}
+
+/// Start building an owned server for one router.
+#[must_use]
+pub fn server(router: Router) -> ServerBuilder {
+    ServerBuilder::new(ServerRoutes::Single(router))
+}
+
+/// Start building an owned server that dispatches by Host header.
+#[must_use]
+pub fn server_hosts(host_router: super::host_router::HostRouter) -> ServerBuilder {
+    ServerBuilder::new(ServerRoutes::Host(host_router))
+}
+
+impl ServerBuilder {
+    fn new(routes: ServerRoutes) -> Self {
+        Self {
+            routes,
+            policy: ServerPolicy::default(),
+            tls: None,
+        }
+    }
+
+    /// Set the bounds this server serves under.
+    ///
+    /// Inside a Camber runtime the runtime's own policy contains this one: each
+    /// dimension resolves to the narrower of the two, so a server can tighten
+    /// its runtime's envelope and can never escape it. Under bare Tokio this
+    /// policy is the sole authority.
+    #[must_use]
+    pub fn policy(mut self, policy: ServerPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Serve TLS with this configuration.
+    ///
+    /// A server started inside a runtime that configured TLS inherits that
+    /// configuration; this overrides it for this server alone.
+    #[must_use]
+    pub fn tls(mut self, config: Arc<rustls::ServerConfig>) -> Self {
+        self.tls = Some(config);
+        self
+    }
+
+    /// Bind an address and serve until shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RuntimeError::Io` if `addr` cannot be parsed or bound, and any
+    /// error the supervisor propagates. When no runtime context is established
+    /// this establishes one rather than refusing, so runtime startup and
+    /// teardown failures from `runtime::run` propagate here too — that is the
+    /// difference between this terminal and
+    /// [`serve_listener`](Self::serve_listener).
+    pub fn serve(self, addr: &str) -> Result<(), RuntimeError> {
+        let bind_and_serve = move || {
+            let listener = net::listen(addr)?;
+            self.serve_listener(listener)
+        };
+        match runtime::has_runtime() {
+            true => bind_and_serve(),
+            false => runtime::run(bind_and_serve)?,
+        }
+    }
+
+    /// Serve an already bound listener until shutdown. Blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RuntimeError::NoRuntime` if no runtime context is established.
+    /// This terminal serves on the current runtime rather than creating one, so
+    /// absence is refused before the listener is ever polled — use
+    /// [`serve`](Self::serve) for the bind-and-run form. Returns
+    /// `RuntimeError::Http` when the caller is already inside a current-thread
+    /// runtime, which has no worker core to hand off for the blocking wait.
+    /// Listener and connection failures propagate as `RuntimeError::Io`.
+    pub fn serve_listener(self, listener: net::Listener) -> Result<(), RuntimeError> {
+        let (supervisor, control) = self.freeze(listener);
+        // The executor this server belongs to, named rather than resolved from
+        // ambient context: `Handle::current()` panics with none established and
+        // would silently run this supervisor on a foreign runtime when a
+        // different one is ambient. A runtime with no executor cannot serve,
+        // and that absence is the same typed refusal a missing context gets.
+        let executor = runtime::runtime_context()?
+            .tokio_handle
+            .clone()
+            .ok_or(RuntimeError::NoRuntime)?;
+        refuse_unless_multi_thread()?;
+        drop(control);
+        // `block_in_place` so the calling thread hands its worker core back
+        // while it waits on the supervisor it owns.
+        tokio::task::block_in_place(|| executor.block_on(supervisor.run()))
+    }
+
+    /// Serve on a Tokio listener, returning the owned join future.
+    ///
+    /// The returned future is a concrete owner, not an `async fn`: routing is
+    /// frozen and the serving context captured before it exists, so moving it
+    /// to another executor cannot change either.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RuntimeError::NoRuntime` when no Tokio executor is established
+    /// to spawn connection work on.
+    pub fn serve_async(
+        self,
+        listener: tokio::net::TcpListener,
+    ) -> Result<ServerHandleFuture, RuntimeError> {
+        refuse_without_tokio()?;
+        let (supervisor, control) = self.freeze(net::Listener::from_tcp(listener));
+        drop(control);
+        Ok(ServerHandleFuture::from_join(SupervisorJoin::Owned(
+            Box::pin(supervisor.run()),
+        )))
+    }
+
+    /// Spawn the server as a background task and return its lifecycle owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RuntimeError::NoRuntime` when no Tokio executor is established.
+    /// The refusal is synchronous: there is no owner to hand back for a server
+    /// that was never started.
+    pub fn serve_background(
+        self,
+        listener: tokio::net::TcpListener,
+    ) -> Result<ServerHandle, RuntimeError> {
+        refuse_without_tokio()?;
+        let (supervisor, control) = self.freeze(net::Listener::from_tcp(listener));
+        let join = match supervisor.is_camber() {
+            true => SupervisorJoin::Camber(spawn_async(supervisor.run()).into_future()),
+            false => SupervisorJoin::Tokio(tokio::spawn(supervisor.run())),
+        };
+        Ok(ServerHandle(ServerHandleFuture::new(Some(control), join)))
+    }
+
+    /// Freeze routing and capture this server's context at one instant.
+    ///
+    /// TLS is resolved from the captured runtime rather than a second lookup,
+    /// so the runtime that supplies the policy is the runtime that supplies the
+    /// certificate.
+    fn freeze(
+        self,
+        listener: net::Listener,
+    ) -> (ServerSupervisor, tokio::sync::watch::Sender<ServerControl>) {
+        let buffers = self.routes.buffer_config();
+        let snapshot = ServerContextSnapshot::capture(buffers, self.policy);
+        let tls_acceptor = self
+            .tls
+            .or_else(|| snapshot.runtime_tls())
+            .map(tokio_rustls::TlsAcceptor::from);
+        let snapshot = snapshot.with_tls(tls_acceptor.is_some());
+        ServerSupervisor::new(listener, self.routes.freeze(), tls_acceptor, snapshot)
+    }
+}
+
+/// Refuse an owned server with no executor to run on.
+///
+/// Both owned terminals ask before they freeze anything, so a caller with no
+/// Tokio runtime is told immediately rather than being handed an owner whose
+/// only possible answer is the same refusal.
+fn refuse_without_tokio() -> Result<(), RuntimeError> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => Ok(()),
+        Err(_) => Err(RuntimeError::NoRuntime),
+    }
+}
+
 /// Serve HTTP on a Tokio TCP listener without Camber's runtime.
 ///
-/// Runs the hyper accept loop directly on the caller's Tokio runtime.
-/// Designed for embedding Camber's router in another application
-/// (e.g. Kingpin's dashboard alongside its DNS server).
+/// Shorthand for [`server(router).serve_async(listener)`](ServerBuilder::serve_async).
+/// The returned owner is built before this call returns, so the runtime context
+/// it serves under is the one current here.
 ///
-/// Runs until the spawned task is cancelled or the listener is closed.
-pub async fn serve_async(
+/// # Errors
+///
+/// Returns `RuntimeError::NoRuntime` when no Tokio executor is established.
+pub fn serve_async(
     listener: tokio::net::TcpListener,
     router: Router,
-) -> Result<(), RuntimeError> {
-    let buffers = router.buffer_config();
-    let dispatch = ServerDispatch::Single(router.freeze());
-    serve_async_dispatch(listener, dispatch, None, buffers).await
+) -> Result<ServerHandleFuture, RuntimeError> {
+    server(router).serve_async(listener)
 }
 
 /// Serve HTTPS on a Tokio TCP listener without Camber's runtime.
 ///
-/// Same as `serve_async` but wraps each connection in TLS via tokio-rustls.
-pub async fn serve_async_tls(
+/// # Errors
+///
+/// Returns `RuntimeError::NoRuntime` when no Tokio executor is established.
+pub fn serve_async_tls(
     listener: tokio::net::TcpListener,
     router: Router,
     tls_config: Arc<rustls::ServerConfig>,
-) -> Result<(), RuntimeError> {
-    let buffers = router.buffer_config();
-    let dispatch = ServerDispatch::Single(router.freeze());
-    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
-    serve_async_dispatch(listener, dispatch, Some(acceptor), buffers).await
+) -> Result<ServerHandleFuture, RuntimeError> {
+    server(router).tls(tls_config).serve_async(listener)
 }
 
 /// Serve HTTP with host-based routing on a Tokio TCP listener.
 ///
-/// Dispatches by Host header.
-/// Unmatched hosts fall through to the default router (if set).
-pub async fn serve_async_hosts(
+/// Unmatched hosts fall through to the default router, if one is set.
+///
+/// # Errors
+///
+/// Returns `RuntimeError::NoRuntime` when no Tokio executor is established.
+pub fn serve_async_hosts(
     listener: tokio::net::TcpListener,
     host_router: super::host_router::HostRouter,
-) -> Result<(), RuntimeError> {
-    let buffers = host_router.buffer_config();
-    let dispatch = ServerDispatch::Host(host_router.freeze());
-    serve_async_dispatch(listener, dispatch, None, buffers).await
+) -> Result<ServerHandleFuture, RuntimeError> {
+    server_hosts(host_router).serve_async(listener)
 }
 
 /// Serve HTTPS with host-based routing on a Tokio TCP listener.
-pub async fn serve_async_hosts_tls(
+///
+/// # Errors
+///
+/// Returns `RuntimeError::NoRuntime` when no Tokio executor is established.
+pub fn serve_async_hosts_tls(
     listener: tokio::net::TcpListener,
     host_router: super::host_router::HostRouter,
     tls_config: Arc<rustls::ServerConfig>,
-) -> Result<(), RuntimeError> {
-    let buffers = host_router.buffer_config();
-    let dispatch = ServerDispatch::Host(host_router.freeze());
-    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
-    serve_async_dispatch(listener, dispatch, Some(acceptor), buffers).await
+) -> Result<ServerHandleFuture, RuntimeError> {
+    server_hosts(host_router)
+        .tls(tls_config)
+        .serve_async(listener)
 }
 
 /// Spawn an HTTP server as a background async task.
 ///
-/// Returns a [`ServerHandle`] for lifecycle control — cancel to stop the server.
-/// Participates in Camber's structured concurrency. Awaiting the handle returns
-/// `Result<(), RuntimeError>` with flattened error semantics.
-pub fn serve_background(listener: tokio::net::TcpListener, router: Router) -> ServerHandle {
-    let buffers = router.buffer_config();
-    let dispatch = ServerDispatch::Single(router.freeze());
-    serve_background_dispatch(listener, dispatch, None, buffers)
+/// Returns a [`ServerHandle`] for lifecycle control. Participates in Camber's
+/// structured concurrency, and awaiting the handle returns one flat
+/// `Result<(), RuntimeError>`.
+///
+/// # Errors
+///
+/// Returns `RuntimeError::NoRuntime` when no Tokio executor is established.
+pub fn serve_background(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> Result<ServerHandle, RuntimeError> {
+    server(router).serve_background(listener)
 }
 
 /// Spawn an HTTPS server as a background async task.
+///
+/// # Errors
+///
+/// Returns `RuntimeError::NoRuntime` when no Tokio executor is established.
 pub fn serve_background_tls(
     listener: tokio::net::TcpListener,
     router: Router,
     tls_config: Arc<rustls::ServerConfig>,
-) -> ServerHandle {
-    let buffers = router.buffer_config();
-    let dispatch = ServerDispatch::Single(router.freeze());
-    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
-    serve_background_dispatch(listener, dispatch, Some(acceptor), buffers)
+) -> Result<ServerHandle, RuntimeError> {
+    server(router).tls(tls_config).serve_background(listener)
 }
 
 /// Spawn an HTTP server with host-based routing as a background async task.
+///
+/// # Errors
+///
+/// Returns `RuntimeError::NoRuntime` when no Tokio executor is established.
 pub fn serve_background_hosts(
     listener: tokio::net::TcpListener,
     host_router: super::host_router::HostRouter,
-) -> ServerHandle {
-    let buffers = host_router.buffer_config();
-    let dispatch = ServerDispatch::Host(host_router.freeze());
-    serve_background_dispatch(listener, dispatch, None, buffers)
+) -> Result<ServerHandle, RuntimeError> {
+    server_hosts(host_router).serve_background(listener)
 }
 
 /// Spawn an HTTPS server with host-based routing as a background async task.
+///
+/// # Errors
+///
+/// Returns `RuntimeError::NoRuntime` when no Tokio executor is established.
 pub fn serve_background_hosts_tls(
     listener: tokio::net::TcpListener,
     host_router: super::host_router::HostRouter,
     tls_config: Arc<rustls::ServerConfig>,
-) -> ServerHandle {
-    let buffers = host_router.buffer_config();
-    let dispatch = ServerDispatch::Host(host_router.freeze());
-    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
-    serve_background_dispatch(listener, dispatch, Some(acceptor), buffers)
-}
-
-fn serve_background_dispatch(
-    listener: tokio::net::TcpListener,
-    dispatch: ServerDispatch,
-    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-    buffers: BufferConfig,
-) -> ServerHandle {
-    if tokio::runtime::Handle::try_current().is_err() {
-        // The absent executor is the whole failure, and it has a variant: an
-        // owner is still handed back so the caller's shutdown and join calls
-        // behave, and awaiting it reports the missing runtime. There is no
-        // supervisor to carry a request to, so the handle holds no control
-        // authority — the absent case its `shutdown`, `cancel`, and `Drop`
-        // already answer.
-        let refusal = SupervisorJoin::Ready(std::future::ready(Err(RuntimeError::NoRuntime)));
-        return ServerHandle(ServerHandleFuture::from_join(refusal));
-    }
-    let snapshot = ServerContextSnapshot::capture(buffers, tls_acceptor.is_some());
-    let is_camber = snapshot.is_camber();
-    let (supervisor, control) = ServerSupervisor::new(listener, dispatch, tls_acceptor, snapshot);
-    let join = match is_camber {
-        true => SupervisorJoin::Camber(spawn_async(supervisor.run()).into_future()),
-        false => SupervisorJoin::Tokio(tokio::spawn(supervisor.run())),
-    };
-    ServerHandle(ServerHandleFuture::new(Some(control), join))
-}
-
-async fn serve_async_dispatch(
-    listener: tokio::net::TcpListener,
-    dispatch: ServerDispatch,
-    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-    buffers: BufferConfig,
-) -> Result<(), RuntimeError> {
-    let is_tls = tls_acceptor.is_some();
-    let snapshot = ServerContextSnapshot::capture(buffers, is_tls);
-    let (supervisor, control) = ServerSupervisor::new(listener, dispatch, tls_acceptor, snapshot);
-    drop(control);
-    supervisor.run().await
+) -> Result<ServerHandle, RuntimeError> {
+    server_hosts(host_router)
+        .tls(tls_config)
+        .serve_background(listener)
 }
 
 /// Bind an HTTP server and route requests until shutdown.
 ///
+/// Shorthand for [`server(router).serve(addr)`](ServerBuilder::serve).
+///
 /// # Errors
 ///
 /// Returns `RuntimeError::Io` if `addr` cannot be parsed or bound, and any
-/// error the accept loop propagates. When no runtime context is established
-/// this establishes one rather than refusing, so runtime startup and teardown
-/// failures from `runtime::run` propagate here too — that is the difference
-/// between this entry point and [`serve_listener`].
+/// error the supervisor propagates. When no runtime context is established this
+/// establishes one, so runtime startup and teardown failures propagate here
+/// too — that is the difference between this entry point and
+/// [`serve_listener`].
 pub fn serve(addr: &str, router: Router) -> Result<(), RuntimeError> {
-    let bind_and_serve = move || {
-        let listener = net::listen(addr)?;
-        serve_listener(listener, router)
-    };
-    match runtime::has_runtime() {
-        true => bind_and_serve(),
-        false => runtime::run(bind_and_serve)?,
-    }
+    server(router).serve(addr)
 }
 
 /// Serve HTTP on an existing listener. Blocks until shutdown.
 ///
 /// # Errors
 ///
-/// Returns `RuntimeError::NoRuntime` if no runtime context is established.
-/// This entry point serves on the current runtime rather than creating one, so
-/// absence is refused before the listener is ever polled — use [`serve`] for
-/// the bind-and-run form, which establishes a runtime when there is none.
-/// Returns `RuntimeError::Http` when the caller is already inside a
-/// current-thread runtime, which has no worker core to hand off for the
-/// blocking accept loop. Listener and connection failures propagate as
-/// `RuntimeError::Io`.
+/// Returns `RuntimeError::NoRuntime` if no runtime context is established, and
+/// `RuntimeError::Http` when the caller is already inside a current-thread
+/// runtime. Listener and connection failures propagate as `RuntimeError::Io`.
 pub fn serve_listener(listener: net::Listener, router: Router) -> Result<(), RuntimeError> {
-    let buffers = router.buffer_config();
-    let dispatch = ServerDispatch::Single(router.freeze());
-    serve_dispatch(listener, dispatch, buffers)
+    server(router).serve_listener(listener)
 }
 
 /// Serve HTTP with host-based routing on an existing listener. Blocks until shutdown.
 ///
 /// # Errors
 ///
-/// Returns `RuntimeError::NoRuntime` if no runtime context is established.
-/// This entry point serves on the current runtime rather than creating one, so
-/// absence is refused before the listener is ever polled — use [`serve`] for
-/// the bind-and-run form, which establishes a runtime when there is none.
-/// Returns `RuntimeError::Http` when the caller is already inside a
-/// current-thread runtime, which has no worker core to hand off for the
-/// blocking accept loop. Listener and connection failures propagate as
-/// `RuntimeError::Io`.
+/// Returns `RuntimeError::NoRuntime` if no runtime context is established, and
+/// `RuntimeError::Http` when the caller is already inside a current-thread
+/// runtime. Listener and connection failures propagate as `RuntimeError::Io`.
 pub fn serve_hosts(
     listener: net::Listener,
     host_router: super::host_router::HostRouter,
 ) -> Result<(), RuntimeError> {
-    let buffers = host_router.buffer_config();
-    let dispatch = ServerDispatch::Host(host_router.freeze());
-    serve_dispatch(listener, dispatch, buffers)
-}
-
-fn serve_dispatch(
-    listener: net::Listener,
-    dispatch: ServerDispatch,
-    buffers: BufferConfig,
-) -> Result<(), RuntimeError> {
-    let router = Arc::new(dispatch);
-    let rt = runtime::runtime_context()?;
-    let shutdown = rt.shutdown_signal();
-    let keepalive_timeout = rt.config.keepalive_timeout;
-    let conn_limit = make_conn_limit(rt.config.connection_limit);
-    let tls_acceptor = rt
-        .config
-        .tls_config
-        .as_ref()
-        .map(|cfg| tokio_rustls::TlsAcceptor::from(Arc::clone(cfg)));
-    let is_tls = tls_acceptor.is_some();
-    let ctx = Arc::new(ConnCtx::from_runtime(&rt, buffers, is_tls));
-    // The executor this server belongs to, named rather than resolved from
-    // ambient context: `Handle::current()` panics with none established and
-    // would silently run this loop on a foreign runtime when a different one is
-    // ambient. A runtime with no executor cannot serve, and that absence is the
-    // same typed refusal a missing context gets.
-    let executor = rt.tokio_handle.clone().ok_or(RuntimeError::NoRuntime)?;
-    drop(rt);
-    refuse_unless_multi_thread()?;
-
-    // Run the hyper accept loop in block_in_place so the calling thread
-    // can participate in async work without blocking the Tokio runtime.
-    let served = tokio::task::block_in_place(|| {
-        executor.block_on(accept_loop(
-            &listener,
-            router,
-            ctx,
-            shutdown,
-            keepalive_timeout,
-            tls_acceptor,
-            conn_limit,
-        ))
-    });
-    // Cleanup runs whether or not the accept loop failed — a listener that
-    // ended badly is exactly the one whose socket file is still on disk.
-    report_serve_outcome(served, listener.cleanup())
+    server_hosts(host_router).serve_listener(listener)
 }
 
 /// Refuse a runtime flavor this accept loop cannot be driven from.
@@ -420,24 +560,5 @@ fn refuse_unless_multi_thread() -> Result<(), RuntimeError> {
         Ok(_) => Err(RuntimeError::Http(
             "serving on an existing listener requires a multi-thread runtime".into(),
         )),
-    }
-}
-
-/// Report both halves of a served listener's outcome.
-///
-/// Only one error can be returned, and the accept loop's is the one that says
-/// why serving ended; a cleanup failure behind it is logged rather than
-/// destroyed.
-fn report_serve_outcome(
-    served: Result<(), RuntimeError>,
-    cleaned: Result<(), RuntimeError>,
-) -> Result<(), RuntimeError> {
-    match (served, cleaned) {
-        (Ok(()), cleaned) => cleaned,
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(cleanup_error)) => {
-            tracing::warn!(%cleanup_error, "listener cleanup failed after a serve error");
-            Err(error)
-        }
     }
 }

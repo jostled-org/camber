@@ -4,18 +4,32 @@ use camber::{RuntimeError, runtime};
 
 #[test]
 fn run_returns_error_on_invalid_config() {
-    let result = runtime::builder()
-        .worker_threads(0)
-        .run(|| "should not reach here");
+    assert_refused(
+        runtime::builder()
+            .worker_threads(0)
+            .run(|| "should not reach here"),
+        "worker_threads",
+    );
+    // The infallible policy setters cannot report a refusal themselves, so the
+    // value they could not take is held and returned here — before the runtime
+    // is established, and naming the dimension that was refused.
+    assert_refused(
+        runtime::builder()
+            .connection_limit(0)
+            .run(|| "should not reach here"),
+        "connection_limit",
+    );
+}
 
+fn assert_refused<T: std::fmt::Debug>(result: Result<T, RuntimeError>, expected_name: &str) {
     match result {
         Err(RuntimeError::InvalidArgument(msg)) => {
             assert!(
-                msg.contains("worker_threads"),
-                "error should mention worker_threads, got: {msg}"
+                msg.contains(expected_name),
+                "error should mention {expected_name}, got: {msg}"
             );
         }
-        Ok(_) => panic!("expected Err, got Ok"),
+        Ok(value) => panic!("expected Err, got Ok({value:?})"),
         Err(other) => panic!("expected InvalidArgument, got: {other}"),
     }
 }

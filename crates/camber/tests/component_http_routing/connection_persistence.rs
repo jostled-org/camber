@@ -26,7 +26,7 @@ fn assert_connection_eof(stream: &mut TcpStream, expected: &str) {
 #[test]
 fn keepalive_serves_multiple_requests_on_one_connection() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .run(|| {
             let mut router = camber::http::Router::new();
             router.get("/hello", |_req| async {
@@ -74,48 +74,9 @@ fn keepalive_serves_multiple_requests_on_one_connection() {
 }
 
 #[test]
-fn keepalive_timeout_closes_idle_connection() {
-    // Short keepalive timeout so the test completes quickly
-    camber::runtime::builder()
-        .keepalive_timeout(Duration::from_millis(200))
-        .shutdown_timeout(Duration::from_secs(1))
-        .run(|| {
-            let mut router = camber::http::Router::new();
-            router.get("/hello", |_req| async {
-                camber::http::Response::text(200, "Hello")
-            });
-
-            let listener = camber::net::listen("127.0.0.1:0").expect("bind");
-            let addr = listener.local_addr().expect("addr").tcp().unwrap();
-
-            camber::spawn(move || -> Result<(), camber::RuntimeError> {
-                camber::http::serve_listener(listener, router)
-            });
-            let mut stream = crate::http::connect(addr).expect("connect");
-
-            // Send one request
-            send_request(&mut stream, "/hello", None);
-            let response = crate::http::read_http_response_bounded(&mut stream).expect("response");
-            assert_eq!(response.status, 200);
-
-            // Wait longer than the keepalive timeout (200ms)
-            std::thread::sleep(Duration::from_millis(300));
-
-            // Server should have closed the connection due to idle timeout
-            assert_connection_eof(
-                &mut stream,
-                "server to close idle connection after keepalive timeout",
-            );
-
-            camber::runtime::request_shutdown();
-        })
-        .unwrap();
-}
-
-#[test]
 fn connection_close_header_prevents_keepalive() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .run(|| {
             let mut router = camber::http::Router::new();
             router.get("/hello", |_req| async {

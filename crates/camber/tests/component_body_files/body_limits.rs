@@ -66,7 +66,8 @@ async fn configured_body_limit_clamps_at_hard_max() {
     let checkpoint = LifecycleCheckpoint::RequestBodyLimitConfigured(HARD_MAX);
     controller.pause_once(checkpoint).unwrap();
 
-    let server = camber::http::serve_background(listener, router);
+    let server = camber::http::serve_background(listener, router)
+        .expect("owned server requires a Tokio runtime");
     let request = tokio::spawn(async move {
         reqwest::Client::new()
             .post(format!("http://{addr}/upload"))

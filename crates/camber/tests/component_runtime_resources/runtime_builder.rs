@@ -23,7 +23,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_millis(200);
 fn builder_configures_concurrent_requests() {
     runtime::builder()
         .worker_threads(2)
-        .keepalive_timeout(Duration::from_millis(100))
+        .header_timeout(Duration::from_millis(100))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let barrier = Arc::new(tokio::sync::Barrier::new(CONCURRENT_REQUESTS));

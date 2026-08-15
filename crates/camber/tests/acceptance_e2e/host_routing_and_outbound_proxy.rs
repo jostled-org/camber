@@ -29,7 +29,7 @@ fn get_with_host(addr: std::net::SocketAddr, path: &str, host: &str) -> crate::h
 #[test]
 fn e2e_proxy_mode_with_async_forwarding() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             // Backend A: returns "site-a"
@@ -119,7 +119,7 @@ async fn e2e_handler_outbound_with_reqwest() {
 #[test]
 fn e2e_websocket_proxy_still_works() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             // Backend: WebSocket echo server

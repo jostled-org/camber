@@ -45,7 +45,7 @@ fn uds_serves_http_request() {
     let sock_addr = format!("unix:{}", sock_path.display());
 
     runtime_support::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .run(|| {
             let mut router = Router::new();
             router.get("/hello", |_: &Request| async { Response::text(200, "hi") });
@@ -70,7 +70,7 @@ fn uds_cleans_up_socket_file() {
     let sock_addr = format!("unix:{}", sock_path.display());
 
     runtime_support::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .run(|| {
             let listener = camber::net::listen(&sock_addr).unwrap();
             assert!(sock_path.exists(), "socket file should exist after listen");

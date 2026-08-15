@@ -70,7 +70,8 @@ async fn buffered_request_body_has_a_finite_read_deadline() {
     router.post("/upload", |_req: &Request| async {
         Response::text(200, "uploaded")
     });
-    let handle = http::serve_background(listener, router);
+    let handle =
+        http::serve_background(listener, router).expect("owned server requires a Tokio runtime");
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     stream
         .write_all(

@@ -129,55 +129,6 @@ async fn stop_handlers(handlers: &mut tokio::task::JoinSet<()>) {
     while handlers.join_next().await.is_some() {}
 }
 
-/// Run the synchronous HTTP accept loop while transferring an acquired permit
-/// into the connection future. The lifecycle script can observe only the real
-/// pending semaphore acquisition.
-pub(crate) async fn accept_loop_with_permit<L, F, Fut>(
-    listener: &L,
-    shutdown: &crate::runtime_state::ShutdownSignal,
-    conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
-    script: Option<&Arc<crate::http::mock::LifecycleScript>>,
-    on_accept: F,
-) -> Result<(), RuntimeError>
-where
-    L: Acceptor,
-    F: Fn(L::Accepted, Option<tokio::sync::OwnedSemaphorePermit>) -> Fut,
-    Fut: Future<Output = ()> + Send + 'static,
-{
-    // Registered once for the listener, not once per connection — the same
-    // reason `accept_loop` hoists its wait. This loop would otherwise pay the
-    // registration twice per connection: once on the accept, once on the permit.
-    let stop = shutdown.wait();
-    tokio::pin!(stop);
-    loop {
-        let accepted = tokio::select! {
-            biased;
-            () = &mut stop => return Ok(()),
-            result = listener.accept() => result,
-        };
-        let connection = match accepted {
-            Ok(connection) => connection,
-            Err(error) if crate::error::is_transient_accept_error(&error) => {
-                tracing::warn!("accept: fd limit reached, backing off");
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let permit = match conn_limit {
-            Some(_) => tokio::select! {
-                biased;
-                () = &mut stop => return Ok(()),
-                permit = acquire_connection_permit(conn_limit, script.map(Arc::as_ref)) => permit.ok(),
-            },
-            None => None,
-        };
-        if conn_limit.is_none() || permit.is_some() {
-            tokio::spawn(on_accept(connection, permit));
-        }
-    }
-}
-
 pub(crate) async fn acquire_connection_permit(
     conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
     script: Option<&crate::http::mock::LifecycleScript>,

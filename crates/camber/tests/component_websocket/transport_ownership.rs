@@ -197,7 +197,13 @@ fn perform_raw_ws_handshake(
     (stream, response)
 }
 
-fn assert_websocket_switch(head: &common::HttpResponse, context: &str) {
+/// The switch every accepted upgrade answers with, minus the disposition of
+/// the transport underneath it.
+///
+/// A handshake whose request declared a body Camber never reads cannot keep its
+/// transport framed, so its connection header is the protocol's answer rather
+/// than the handshake's. Rows that own that question assert it separately.
+fn assert_websocket_switch_head(head: &common::HttpResponse, context: &str) {
     assert_eq!(head.status, 101, "{context}: unexpected status: {head:?}");
     let upgrade = head.header_values("upgrade");
     assert_eq!(upgrade.len(), 1, "{context}: Upgrade header: {head:?}");
@@ -205,6 +211,15 @@ fn assert_websocket_switch(head: &common::HttpResponse, context: &str) {
         upgrade[0].eq_ignore_ascii_case("websocket"),
         "{context}: invalid Upgrade header: {head:?}"
     );
+    assert_eq!(
+        *head.header_values("sec-websocket-accept"),
+        [VALID_WEBSOCKET_ACCEPT],
+        "{context}: Sec-WebSocket-Accept header"
+    );
+}
+
+fn assert_websocket_switch(head: &common::HttpResponse, context: &str) {
+    assert_websocket_switch_head(head, context);
     let connection = head.header_values("connection");
     assert_eq!(
         connection.len(),
@@ -214,11 +229,6 @@ fn assert_websocket_switch(head: &common::HttpResponse, context: &str) {
     assert!(
         connection[0].eq_ignore_ascii_case("upgrade"),
         "{context}: invalid Connection header: {head:?}"
-    );
-    assert_eq!(
-        *head.header_values("sec-websocket-accept"),
-        [VALID_WEBSOCKET_ACCEPT],
-        "{context}: Sec-WebSocket-Accept header"
     );
 }
 
@@ -434,7 +444,7 @@ fn generated_origin(
 #[test]
 fn websocket_rejects_invalid_version_and_key() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let dispatch_count = Arc::new(AtomicUsize::new(0));
@@ -453,7 +463,7 @@ fn websocket_selects_one_offered_subprotocol() {
     const OFFERED_AND_SUPPORTED: [&str; 2] = ["chat", "superchat"];
 
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let dispatch_count = Arc::new(AtomicUsize::new(0));
@@ -493,7 +503,7 @@ fn generated_websocket_origins_normalize_or_reject() {
     const GENERATED_CASES: u64 = 44;
 
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let generator = deterministic::DeterministicGenerator::stable();
@@ -572,7 +582,7 @@ fn ws_connect(
 #[test]
 fn websocket_echo() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
@@ -608,7 +618,7 @@ fn websocket_echo() {
 #[test]
 fn websocket_server_sends_multiple() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
@@ -638,7 +648,7 @@ fn websocket_server_sends_multiple() {
 #[test]
 fn websocket_handler_sees_request_path_and_headers() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
@@ -663,7 +673,7 @@ fn websocket_handler_sees_request_path_and_headers() {
 #[test]
 fn ws_send_and_recv_binary_frames() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
@@ -695,7 +705,7 @@ fn ws_send_and_recv_binary_frames() {
 #[test]
 fn ws_recv_timeout_bounds_a_silent_peer() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let (reported, outcome) = std::sync::mpsc::channel();
@@ -726,7 +736,7 @@ fn ws_recv_timeout_bounds_a_silent_peer() {
 #[test]
 fn ws_recv_message_returns_both_types() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
@@ -764,7 +774,7 @@ fn ws_recv_message_returns_both_types() {
 #[test]
 fn ws_recv_binary_skips_text_frames() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
@@ -796,7 +806,7 @@ fn ws_recv_binary_skips_text_frames() {
 #[test]
 fn websocket_accepts_same_host_origin() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
@@ -830,7 +840,7 @@ fn websocket_accepts_same_host_origin() {
 #[test]
 fn websocket_rejects_cross_host_origin() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
@@ -853,7 +863,7 @@ fn websocket_rejects_cross_host_origin() {
 #[test]
 fn websocket_rejects_null_origin() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
@@ -875,7 +885,7 @@ fn websocket_rejects_null_origin() {
 #[test]
 fn auth_middleware_blocks_unauthenticated_websocket() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
@@ -913,7 +923,7 @@ fn auth_middleware_blocks_unauthenticated_websocket() {
 #[test]
 fn websocket_upgrade_ignores_request_body_limit() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let asked = Arc::new(AtomicUsize::new(0));
@@ -922,7 +932,13 @@ fn websocket_upgrade_ignores_request_body_limit() {
             // Send WS upgrade with Content-Length exceeding the body limit.
             // Head-only dispatch skips body collection, so 413 is not returned.
             let (mut stream, head) = ws_connect(addr, "/ws", &[("Content-Length", "99999")]);
-            assert_websocket_switch(&head, "body-limit handshake");
+            // The switch itself, without the connection disposition: a declared
+            // body that head-only dispatch never reads leaves Hyper unable to
+            // keep the transport framed, so it marks the connection to close.
+            // Both serving families answer that way, because since the
+            // synchronous entry points moved onto the shared supervisor there
+            // is only one family.
+            assert_websocket_switch_head(&head, "body-limit handshake");
 
             let msg = read_ws_text_frame(&mut stream);
             assert_eq!(&*msg, "connected");
@@ -963,7 +979,7 @@ fn websocket_upgrade_ignores_request_body_limit() {
 #[test]
 fn auth_middleware_allows_authenticated_websocket() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
@@ -1016,7 +1032,8 @@ async fn pending_direct_upgrade_shutdown_is_rejected(forced: bool) {
     let addr = listener.local_addr().expect("pending listener address");
     let controller = lifecycle(addr).expect("install lifecycle controller");
     arm_unacknowledged_upgrade(&controller);
-    let handle = camber::http::serve_background(listener, lifecycle_websocket_router());
+    let handle = camber::http::serve_background(listener, lifecycle_websocket_router())
+        .expect("owned server requires a Tokio runtime");
     let mut pending = tokio::net::TcpStream::connect(addr)
         .await
         .expect("connect pending WebSocket peer");
@@ -1081,7 +1098,8 @@ async fn cancelled_pending_direct_upgrade_is_joined_and_connection_local() {
     controller
         .pause_once(LifecycleCheckpoint::UpgradePeerClosed)
         .expect("pause after direct peer closure is observed");
-    let handle = camber::http::serve_background(listener, router);
+    let handle = camber::http::serve_background(listener, router)
+        .expect("owned server requires a Tokio runtime");
     let mut pending = tokio::net::TcpStream::connect(addr)
         .await
         .expect("connect cancellable WebSocket peer");
@@ -1138,7 +1156,8 @@ async fn supervisor_unwind_joins_acknowledged_and_pending_direct_upgrades() {
         .expect("bind unwind listener");
     let addr = listener.local_addr().expect("unwind listener address");
     let controller = lifecycle(addr).expect("install lifecycle controller");
-    let handle = camber::http::serve_background(listener, lifecycle_websocket_router());
+    let handle = camber::http::serve_background(listener, lifecycle_websocket_router())
+        .expect("owned server requires a Tokio runtime");
     let mut acknowledged = connect_async_websocket(addr, "/ws").await;
 
     arm_unacknowledged_upgrade(&controller);

@@ -232,7 +232,8 @@ async fn upgrade_registration_rejection_keeps_close_permit_and_completion_contra
     // on every exit, and it stands until the case sends its own cancel.
     let served = ReadyServer::adopt(
         addr,
-        camber::http::serve_background(listener, counted_router(&journal, &dispatched)),
+        camber::http::serve_background(listener, counted_router(&journal, &dispatched))
+            .expect("owned server requires a Tokio runtime"),
     );
 
     let calibrated = calibrate_dispatch(addr, &dispatched).await;
@@ -514,8 +515,11 @@ fn refused_upgrade_registration_holds_its_connection_permit() {
                 // Adopted rather than held bare, for the reason the unlimited
                 // case gives: `ServerHandle` has no `Drop`, so the guard owes the
                 // cancel and the join until this case sends its own cancel.
-                let served =
-                    ReadyServer::adopt(addr, camber::http::serve_background(listener, router));
+                let served = ReadyServer::adopt(
+                    addr,
+                    camber::http::serve_background(listener, router)
+                        .expect("owned server requires a Tokio runtime"),
+                );
                 // Declared after the server so it drops first: an unwind has to
                 // release the waits before anything waits on this server's join.
                 let held = HeldWaits(&controller);

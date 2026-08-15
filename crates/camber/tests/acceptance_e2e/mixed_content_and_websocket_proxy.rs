@@ -91,7 +91,7 @@ async fn e2e_proxy_handles_mixed_content() {
 #[test]
 fn e2e_websocket_chat_through_proxy() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             // Backend: WebSocket echo server

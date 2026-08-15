@@ -7,8 +7,11 @@ use std::time::Duration;
 #[camber::test]
 async fn client_read_timeout_fires() {
     let mut router = Router::new();
+    // Slow enough to outlast the client's 100ms read bound by a wide margin,
+    // and short enough to release the connection its server now joins before
+    // that server's shutdown deadline.
     router.get("/slow", |_req: &Request| {
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(500));
         async { Response::text(200, "slow") }
     });
 

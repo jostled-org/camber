@@ -81,7 +81,7 @@ async fn hyper_serves_post_with_body() {
 #[test]
 fn hyper_keepalive_reuses_connection() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .run(|| {
             let mut router = Router::new();
             router.get("/ping", |_req: &Request| async {

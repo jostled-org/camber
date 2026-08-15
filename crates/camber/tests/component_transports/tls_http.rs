@@ -60,7 +60,7 @@ fn configured_runtime(
     key_path: &std::path::Path,
 ) -> runtime::RuntimeBuilder {
     runtime::builder()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(1))
         .tls_cert(cert_path)
         .tls_key(key_path)
@@ -165,7 +165,7 @@ fn cert_hot_swap() {
     let cert_store = CertStore::new(tls_support::certified_key_from_pem(&cert_a_pem, &key_a_pem));
 
     runtime::builder()
-        .keepalive_timeout(Duration::from_millis(200))
+        .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(1))
         // The runtime and test intentionally share the live certificate store.
         .tls_resolver(cert_store.clone())

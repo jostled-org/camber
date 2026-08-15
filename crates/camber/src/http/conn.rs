@@ -4,17 +4,7 @@ use super::handle::{ConnCtx, handle_request};
 use super::router::ServerDispatch;
 use super::server_lifecycle::{ConnectionLifecycle, ServerControl, wait_shutdown_control};
 use crate::net::accept;
-use crate::{RuntimeError, net};
 use std::sync::Arc;
-
-/// How long one synchronous connection may keep draining after GOAWAY.
-///
-/// Deliberately not `DEFAULT_SHUTDOWN_TIMEOUT`: that budget is the runtime's,
-/// spent across every connection at once, while this one caps a single
-/// connection's drain so one stalled peer cannot hold the whole budget. Guards
-/// still outstanding when it expires resolve `ServerShutdown`, because the
-/// latch is already set by the time the connection future drops.
-const CONNECTION_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The transport-independent state one connection serves requests with.
 ///
@@ -24,7 +14,7 @@ pub(super) struct ConnectionState {
     router: Arc<ServerDispatch>,
     ctx: Arc<ConnCtx>,
     lifecycle: ConnectionLifecycle,
-    keepalive_timeout: std::time::Duration,
+    header_timeout: std::time::Duration,
     remote_addr: Option<std::net::IpAddr>,
 }
 
@@ -33,14 +23,14 @@ impl ConnectionState {
         router: Arc<ServerDispatch>,
         ctx: Arc<ConnCtx>,
         lifecycle: ConnectionLifecycle,
-        keepalive_timeout: std::time::Duration,
+        header_timeout: std::time::Duration,
         remote_addr: Option<std::net::IpAddr>,
     ) -> Self {
         Self {
             router,
             ctx,
             lifecycle,
-            keepalive_timeout,
+            header_timeout,
             remote_addr,
         }
     }
@@ -88,168 +78,6 @@ fn connection_service(
     })
 }
 
-pub(super) async fn accept_loop(
-    listener: &net::Listener,
-    router: Arc<ServerDispatch>,
-    ctx: Arc<ConnCtx>,
-    shutdown: crate::runtime_state::ShutdownSignal,
-    keepalive_timeout: std::time::Duration,
-    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-    conn_limit: Option<Arc<tokio::sync::Semaphore>>,
-) -> Result<(), RuntimeError> {
-    match &listener.inner {
-        net::ListenerInner::Tcp(tcp) => {
-            accept_tcp(
-                tcp,
-                router,
-                ctx,
-                shutdown,
-                keepalive_timeout,
-                tls_acceptor,
-                conn_limit,
-            )
-            .await
-        }
-        net::ListenerInner::Unix(unix, _) => {
-            accept_unix(unix, router, ctx, shutdown, keepalive_timeout, conn_limit).await
-        }
-    }
-}
-
-pub(super) async fn accept_tcp(
-    listener: &tokio::net::TcpListener,
-    router: Arc<ServerDispatch>,
-    ctx: Arc<ConnCtx>,
-    shutdown: crate::runtime_state::ShutdownSignal,
-    keepalive_timeout: std::time::Duration,
-    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-    conn_limit: Option<Arc<tokio::sync::Semaphore>>,
-) -> Result<(), RuntimeError> {
-    let script = listener
-        .local_addr()
-        .ok()
-        .and_then(super::mock::lifecycle_script);
-    accept::accept_loop_with_permit(
-        listener,
-        &shutdown,
-        conn_limit.as_ref(),
-        script.as_ref(),
-        |(stream, addr), permit| {
-            let state =
-                synchronous_state(&router, &ctx, permit, keepalive_timeout, Some(addr.ip()));
-            let shutdown = shutdown.clone();
-            let acceptor = tls_acceptor.clone();
-            async move {
-                match acceptor {
-                    Some(a) => serve_tls_connection(stream, a, state, shutdown).await,
-                    None => serve_stream(stream, state, shutdown).await,
-                }
-            }
-        },
-    )
-    .await
-}
-
-async fn accept_unix(
-    listener: &tokio::net::UnixListener,
-    router: Arc<ServerDispatch>,
-    ctx: Arc<ConnCtx>,
-    shutdown: crate::runtime_state::ShutdownSignal,
-    keepalive_timeout: std::time::Duration,
-    conn_limit: Option<Arc<tokio::sync::Semaphore>>,
-) -> Result<(), RuntimeError> {
-    accept::accept_loop_with_permit(
-        listener,
-        &shutdown,
-        conn_limit.as_ref(),
-        None,
-        |stream, permit| {
-            let state = synchronous_state(&router, &ctx, permit, keepalive_timeout, None);
-            let shutdown = shutdown.clone();
-            async move {
-                serve_stream(stream, state, shutdown).await;
-            }
-        },
-    )
-    .await
-}
-
-/// The connection state a synchronously-accepted connection serves with.
-///
-/// Both listeners build the identical value: the per-server router and context
-/// by refcount, and a lifecycle holding nothing but this connection's admission
-/// permit, because a synchronous server has no supervisor to register with.
-/// Only the peer address differs, and a Unix peer has none.
-fn synchronous_state(
-    router: &Arc<ServerDispatch>,
-    ctx: &Arc<ConnCtx>,
-    permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    keepalive_timeout: std::time::Duration,
-    remote_addr: Option<std::net::IpAddr>,
-) -> ConnectionState {
-    ConnectionState::new(
-        Arc::clone(router),
-        Arc::clone(ctx),
-        ConnectionLifecycle::synchronous(permit),
-        keepalive_timeout,
-        remote_addr,
-    )
-}
-
-async fn serve_stream<S>(
-    stream: S,
-    state: ConnectionState,
-    shutdown: crate::runtime_state::ShutdownSignal,
-) where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-    // Per-connection liveness is created where the stream is accepted and
-    // wraps the raw stream INSIDE the Hyper IO adapter, so a dying transport
-    // is recorded before Hyper reacts to it.
-    let liveness = ConnectionLiveness::latched(shutdown.flag());
-    let io = hyper_util::rt::TokioIo::new(liveness.wrap(stream));
-    serve_io(io, state, shutdown, liveness).await;
-}
-
-async fn serve_tls_connection(
-    stream: tokio::net::TcpStream,
-    acceptor: tokio_rustls::TlsAcceptor,
-    state: ConnectionState,
-    shutdown: crate::runtime_state::ShutdownSignal,
-) {
-    let tls_stream = match accept::tls_handshake(stream, &acceptor).await {
-        Some(s) => s,
-        None => return,
-    };
-    serve_stream(tls_stream, state, shutdown).await;
-}
-
-async fn serve_io<I>(
-    io: hyper_util::rt::TokioIo<I>,
-    state: ConnectionState,
-    shutdown: crate::runtime_state::ShutdownSignal,
-    liveness: Arc<ConnectionLiveness>,
-) where
-    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-    let connection = build_connection(io, state, liveness);
-    tokio::pin!(connection);
-    drive_connection_until_shutdown(
-        connection.as_mut(),
-        // A latched flag carries no mode, and the only thing it can mean is a
-        // graceful wind-down: a synchronous server has no supervisor to abort
-        // through, so `ConnectionShutdown::Abort` is unreachable here.
-        async {
-            shutdown.wait().await;
-            ConnectionShutdown::Graceful
-        },
-        // Nothing outside this task can end this connection either, so the
-        // bound on its drain is its own rather than a supervisor's deadline.
-        DrainPolicy::Bounded(CONNECTION_DRAIN_TIMEOUT),
-    )
-    .await;
-}
-
 /// Serve one connection an owned server accepted.
 ///
 /// The shutdown authority arrives by value from the supervisor that subscribed
@@ -258,7 +86,7 @@ async fn serve_io<I>(
 /// subscription. No arm can invent a different answer to "is the server
 /// shutting down", and no arm can find the answer missing.
 pub(super) async fn serve_owned_connection(
-    stream: tokio::net::TcpStream,
+    stream: crate::net::AcceptedStream,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     state: ConnectionState,
     control: tokio::sync::watch::Receiver<ServerControl>,
@@ -266,9 +94,20 @@ pub(super) async fn serve_owned_connection(
     // Per-connection liveness belongs to the accepted stream, never to the
     // per-server context every connection shares.
     let liveness = ConnectionLiveness::controlled(control.clone());
-    match tls_acceptor {
-        Some(acceptor) => serve_owned_tls(stream, acceptor, state, liveness, control).await,
-        None => serve_owned_stream(stream, state, liveness, control).await,
+    // TLS is offered on TCP alone. A Unix peer is already confined by the
+    // socket's filesystem permissions, and no entry point has ever wrapped one,
+    // so a configured acceptor does not silently change what a Unix client
+    // speaks.
+    match (stream, tls_acceptor) {
+        (crate::net::AcceptedStream::Tcp(stream), Some(acceptor)) => {
+            serve_owned_tls(stream, acceptor, state, liveness, control).await;
+        }
+        (crate::net::AcceptedStream::Tcp(stream), None) => {
+            serve_owned_stream(stream, state, liveness, control).await;
+        }
+        (crate::net::AcceptedStream::Unix(stream), _) => {
+            serve_owned_stream(stream, state, liveness, control).await;
+        }
     }
 }
 
@@ -725,12 +564,8 @@ async fn serve_owned_io<I>(
     }
 
     #[cfg(not(feature = "ws"))]
-    drive_connection_until_shutdown(
-        connection.as_mut(),
-        wait_connection_shutdown(&mut control),
-        DrainPolicy::Supervised,
-    )
-    .await;
+    drive_connection_until_shutdown(connection.as_mut(), wait_connection_shutdown(&mut control))
+        .await;
 }
 
 /// What driving one Hyper connection to its end answers with.
@@ -746,8 +581,8 @@ type ConnectionResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 trait HyperConnection: std::future::Future<Output = ConnectionResult> {
     /// Send the peer a GOAWAY and stop accepting new work on this connection.
     ///
-    /// The connection still has to be polled after this; what bounds that poll
-    /// is the caller's [`DrainPolicy`].
+    /// The connection still has to be polled after this; the supervisor's one
+    /// shutdown deadline is what bounds that poll.
     fn begin_graceful_shutdown(self: std::pin::Pin<&mut Self>);
 }
 
@@ -783,25 +618,11 @@ fn build_connection<I>(
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let builder = connection_builder(state.keepalive_timeout);
+    let builder = connection_builder(state.header_timeout);
     let service = connection_service(state, liveness);
     builder
         .serve_connection_with_upgrades(io, service)
         .into_owned()
-}
-
-/// What bounds a connection's drain once its graceful shutdown has begun.
-///
-/// Both paths drain the same way and stop for different reasons, so the reason
-/// travels with the call rather than being inferred from which path made it.
-enum DrainPolicy {
-    /// This connection's own budget. One stalled peer cannot outlast it.
-    Bounded(std::time::Duration),
-    /// Bounded by the owned server's supervisor instead: its `shutdown_timeout`
-    /// expires, `start_abort_if_ready` fires, and `abort_unregistered` drops
-    /// the task this connection is being driven on. Awaiting unbounded here is
-    /// what lets that one deadline govern every connection at once.
-    Supervised,
 }
 
 /// Why a connection is winding down.
@@ -943,61 +764,33 @@ async fn finish_owned_connection(
 async fn shutdown_hyper_connection<C>(
     mode: ConnectionShutdown,
     mut connection: std::pin::Pin<&mut C>,
-    drain: DrainPolicy,
 ) where
     C: HyperConnection,
 {
     match mode {
         ConnectionShutdown::Graceful | ConnectionShutdown::Abort => {
             connection.as_mut().begin_graceful_shutdown();
-            drain_connection(connection, drain).await;
+            log_connection_result(connection.await, ConnectionPhase::Draining);
         }
     }
 }
 
 /// Drive a connection until it ends on its own or a shutdown winds it down.
 ///
-/// The race both non-upgrade serve paths run. They differ only in where the
-/// shutdown reason comes from and in what bounds the drain that follows, so
-/// both travel in as arguments and the race itself is written once. The
-/// upgrade-aware loop is deliberately not a caller: it races two more events
-/// and acts on each with its own prologue.
-async fn drive_connection_until_shutdown<C, F>(
-    mut connection: std::pin::Pin<&mut C>,
-    shutdown: F,
-    drain: DrainPolicy,
-) where
+/// The race the non-upgrade serve path runs. The shutdown reason travels in as
+/// an argument so the race itself is written once. The upgrade-aware loop is
+/// deliberately not a caller: it races two more events and acts on each with
+/// its own prologue.
+#[cfg(not(feature = "ws"))]
+async fn drive_connection_until_shutdown<C, F>(mut connection: std::pin::Pin<&mut C>, shutdown: F)
+where
     C: HyperConnection,
     F: std::future::Future<Output = ConnectionShutdown>,
 {
     tokio::select! {
         biased;
-        mode = shutdown => shutdown_hyper_connection(mode, connection.as_mut(), drain).await,
+        mode = shutdown => shutdown_hyper_connection(mode, connection.as_mut()).await,
         result = connection.as_mut() => log_connection_result(result, ConnectionPhase::Serving),
-    }
-}
-
-/// Poll a connection through its drain under the policy that bounds it.
-async fn drain_connection<C>(connection: std::pin::Pin<&mut C>, drain: DrainPolicy)
-where
-    C: HyperConnection,
-{
-    match drain {
-        DrainPolicy::Supervised => {
-            log_connection_result(connection.await, ConnectionPhase::Draining)
-        }
-        DrainPolicy::Bounded(budget) => drain_within_budget(connection, budget).await,
-    }
-}
-
-/// Drain a connection under a budget of its own, and say so when it expires.
-async fn drain_within_budget<C>(connection: std::pin::Pin<&mut C>, budget: std::time::Duration)
-where
-    C: HyperConnection,
-{
-    match tokio::time::timeout(budget, connection).await {
-        Ok(result) => log_connection_result(result, ConnectionPhase::Draining),
-        Err(_) => tracing::debug!("connection timed out during graceful shutdown"),
     }
 }
 
@@ -1012,7 +805,7 @@ async fn shutdown_owned_connection<C>(
 {
     upgrade_transport.cancel();
     upgrade_transport.abort_pending().await;
-    shutdown_hyper_connection(mode, connection, DrainPolicy::Supervised).await;
+    shutdown_hyper_connection(mode, connection).await;
     transport.close().await;
 }
 
@@ -1091,7 +884,7 @@ where
             log_connection_result(result, ConnectionPhase::Serving)
         }
         RegistrationInterruption::Shutdown(mode) => {
-            shutdown_hyper_connection(mode, connection, DrainPolicy::Supervised).await;
+            shutdown_hyper_connection(mode, connection).await;
         }
         RegistrationInterruption::PeerClosed => {
             log_connection_result(connection.await, ConnectionPhase::Serving)
@@ -1201,7 +994,7 @@ async fn finish_upgrade_commitment<C>(
             log_connection_result(result, ConnectionPhase::Serving)
         }
         AbandonedCommitment::Shutdown(mode) => {
-            shutdown_hyper_connection(mode, connection, DrainPolicy::Supervised).await;
+            shutdown_hyper_connection(mode, connection).await;
         }
         AbandonedCommitment::PeerClosed => {
             log_connection_result(connection.await, ConnectionPhase::Serving)
@@ -1315,7 +1108,7 @@ async fn serve_request(
 }
 
 fn connection_builder(
-    keepalive_timeout: std::time::Duration,
+    header_timeout: std::time::Duration,
 ) -> hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor> {
     let mut builder =
         hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
@@ -1323,7 +1116,7 @@ fn connection_builder(
         .http1()
         .keep_alive(true)
         .timer(hyper_util::rt::TokioTimer::new())
-        .header_read_timeout(Some(keepalive_timeout));
+        .header_read_timeout(Some(header_timeout));
     builder
 }
 

@@ -21,9 +21,33 @@ where
 {
 }
 
-// 2.T6
+// 2.T6, revised by 1.T5 for the canonical builder
 #[test]
 fn additive_lifecycle_api_compiles_through_exact_public_paths() {
+    // The canonical owned server path, named exactly as documentation presents
+    // it. Every terminal is fallible, and the two owner-producing terminals
+    // hand back the same owners the free functions do.
+    let _: fn(camber::http::Router) -> camber::http::ServerBuilder = camber::http::server;
+    let _: fn(camber::http::HostRouter) -> camber::http::ServerBuilder = camber::http::server_hosts;
+    let _: fn(
+        camber::http::ServerBuilder,
+        camber::http::ServerPolicy,
+    ) -> camber::http::ServerBuilder = camber::http::ServerBuilder::policy;
+    let _: fn(camber::http::ServerBuilder, &str) -> Result<(), RuntimeError> =
+        camber::http::ServerBuilder::serve;
+    let _: fn(camber::http::ServerBuilder, camber::net::Listener) -> Result<(), RuntimeError> =
+        camber::http::ServerBuilder::serve_listener;
+    let _: fn(
+        camber::http::ServerBuilder,
+        tokio::net::TcpListener,
+    ) -> Result<camber::http::ServerHandleFuture, RuntimeError> =
+        camber::http::ServerBuilder::serve_async;
+    let _: fn(
+        camber::http::ServerBuilder,
+        tokio::net::TcpListener,
+    ) -> Result<camber::http::ServerHandle, RuntimeError> =
+        camber::http::ServerBuilder::serve_background;
+
     let _: fn(&camber::http::ServerHandle) = camber::http::ServerHandle::shutdown;
     let _: fn(camber::http::ServerHandle) -> camber::http::ServerHandleFuture =
         camber::http::ServerHandle::join;

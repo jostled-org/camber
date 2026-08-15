@@ -38,12 +38,10 @@ impl std::fmt::Debug for RuntimeBuilder {
         // says so instead of implying the struct holds only what is listed.
         f.debug_struct("RuntimeBuilder")
             .field("worker_threads", &self.config.worker_threads)
-            .field("shutdown_timeout", &self.config.shutdown_timeout)
-            .field("keepalive_timeout", &self.config.keepalive_timeout)
+            .field("server_policy", &self.config.server_policy)
             .field("tracing_enabled", &self.config.tracing_enabled)
             .field("metrics_enabled", &self.config.metrics_enabled)
             .field("health_interval", &self.config.health_interval)
-            .field("connection_limit", &self.config.connection_limit)
             .field("resource_count", &self.resources.len())
             .field("has_tls", &self.has_manual_tls())
             .finish_non_exhaustive()
@@ -53,6 +51,8 @@ impl std::fmt::Debug for RuntimeBuilder {
 /// Configure a Camber runtime before running.
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
+    /// The first refusal an infallible policy setter could not report.
+    invalid_policy: Option<crate::RuntimeError>,
     test_schedule: Option<Arc<RuntimeSchedule>>,
     resources: Vec<Box<dyn Resource>>,
     /// Written once by `tls_cert`/`tls_key` and thereafter only read, so the
@@ -73,6 +73,7 @@ impl RuntimeBuilder {
     fn new() -> Self {
         Self {
             config: RuntimeConfig::default(),
+            invalid_policy: None,
             test_schedule: None,
             resources: Vec::new(),
             tls_cert_path: None,
@@ -95,19 +96,46 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Set the graceful shutdown timeout. Minimum: 100ms. Zero values are clamped.
-    pub fn shutdown_timeout(mut self, timeout: Duration) -> Self {
-        const MIN: Duration = Duration::from_millis(100);
-        self.config.shutdown_timeout =
-            crate::time::clamp_duration(timeout, MIN, "shutdown_timeout");
+    /// Replace the complete outer service policy for every server this runtime
+    /// starts.
+    ///
+    /// A [`ServerBuilder`](crate::http::ServerBuilder) started inside the
+    /// runtime may narrow any dimension of this policy and can never widen one.
+    /// The single-field setters below write onto this same value, so the last
+    /// write to one field wins and the others keep what this policy set.
+    #[must_use]
+    pub fn server_policy(mut self, policy: crate::http::ServerPolicy) -> Self {
+        self.config.server_policy = policy;
         self
     }
 
-    /// Set the HTTP keep-alive timeout. Minimum: 100ms. Zero values are clamped.
-    pub fn keepalive_timeout(mut self, timeout: Duration) -> Self {
+    /// Set the graceful shutdown timeout. Minimum: 100ms. Zero values are clamped.
+    ///
+    /// This is the runtime's aggregate deadline: its servers, root scope, and
+    /// resources consume the same duration rather than one each.
+    pub fn shutdown_timeout(mut self, timeout: Duration) -> Self {
         const MIN: Duration = Duration::from_millis(100);
-        self.config.keepalive_timeout =
-            crate::time::clamp_duration(timeout, MIN, "keepalive_timeout");
+        self.set_policy_field(|policy| {
+            policy.shutdown_timeout(crate::time::clamp_duration(
+                timeout,
+                MIN,
+                "shutdown_timeout",
+            ))
+        });
+        self
+    }
+
+    /// Set how long Hyper may wait for a complete request head. Minimum: 100ms.
+    /// Zero values are clamped.
+    ///
+    /// This replaces the former `keepalive_timeout`, which never owned an idle
+    /// keep-alive timer: the value has always configured Hyper's header-read
+    /// boundary, and the name now says which failure it produces.
+    pub fn header_timeout(mut self, timeout: Duration) -> Self {
+        const MIN: Duration = Duration::from_millis(100);
+        self.set_policy_field(|policy| {
+            policy.header_timeout(crate::time::clamp_duration(timeout, MIN, "header_timeout"))
+        });
         self
     }
 
@@ -123,8 +151,29 @@ impl RuntimeBuilder {
     /// Existing callers that do not set a limit keep unbounded behavior.
     /// A value of 0 is rejected when the runtime starts.
     pub fn connection_limit(mut self, n: usize) -> Self {
-        self.config.connection_limit = Some(n);
+        self.set_policy_field(|policy| policy.connection_limit(n));
         self
+    }
+
+    /// Apply one validated write to the stored server policy.
+    ///
+    /// These setters are infallible by long-standing signature, so a refused
+    /// value is held until `run` can return it rather than being clamped into
+    /// something the caller did not ask for. The first refusal is kept: it is
+    /// the one the caller wrote first, and a later valid write must not erase
+    /// a rejection the runtime has yet to report.
+    fn set_policy_field(
+        &mut self,
+        write: impl FnOnce(
+            crate::http::ServerPolicy,
+        ) -> Result<crate::http::ServerPolicy, crate::RuntimeError>,
+    ) {
+        match write(self.config.server_policy) {
+            Ok(policy) => self.config.server_policy = policy,
+            Err(error) => {
+                self.invalid_policy.get_or_insert(error);
+            }
+        }
     }
 
     /// Attach a runtime-instance scheduling seam for integration tests.
@@ -229,10 +278,8 @@ impl RuntimeBuilder {
                 "worker_threads must be at least 1".into(),
             ));
         }
-        if self.config.connection_limit == Some(0) {
-            return Err(crate::RuntimeError::InvalidArgument(
-                "connection_limit must be at least 1".into(),
-            ));
+        if let Some(error) = self.invalid_policy {
+            return Err(error);
         }
 
         let mut config = self.config;
@@ -349,11 +396,22 @@ where
 /// and the per-resource health loops — while the async entry admits no
 /// background subsystem at all; a test that wants one opts in through the
 /// doc-hidden seam.
+/// The server envelope a test runtime serves under.
+///
+/// Both bounds are far shorter than production's so a test that reaches either
+/// one fails fast, and both are non-zero, so the validated setters cannot
+/// refuse them.
+fn test_server_policy() -> crate::http::ServerPolicy {
+    crate::http::ServerPolicy::default()
+        .header_timeout(Duration::from_millis(100))
+        .and_then(|policy| policy.shutdown_timeout(Duration::from_secs(1)))
+        .unwrap_or_default()
+}
+
 fn test_runtime_config() -> RuntimeConfig {
     RuntimeConfig {
         worker_threads: tokio_default_worker_threads(),
-        keepalive_timeout: Duration::from_millis(100),
-        shutdown_timeout: Duration::from_secs(1),
+        server_policy: test_server_policy(),
         ..RuntimeConfig::default()
     }
 }
@@ -821,7 +879,7 @@ fn finish_runtime<T>(
 
     // This is the detached synchronous-entry connection tasks' window, not a
     // second scope drain: the scope already drained above.
-    tokio_rt.shutdown_timeout(inner.config.shutdown_timeout);
+    tokio_rt.shutdown_timeout(inner.config.server_policy.shutdown_timeout_value());
 
     // Read BEFORE the unwind resumes: `resume_unwind` diverges, and the panic
     // slot has exactly one reader.

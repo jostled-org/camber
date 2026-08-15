@@ -22,7 +22,7 @@ const EXIT_REPORT_BOUND: Duration = Duration::from_millis(100);
 
 pub fn test_runtime() -> runtime::RuntimeBuilder {
     runtime::builder()
-        .keepalive_timeout(Duration::from_millis(100))
+        .header_timeout(Duration::from_millis(100))
         .shutdown_timeout(Duration::from_secs(1))
 }
 

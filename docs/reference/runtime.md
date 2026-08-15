@@ -105,14 +105,33 @@ Panics never cancel sibling tasks.
 Common options:
 
 - `worker_threads(n)`
+- `server_policy(policy)` — replaces the whole outer service envelope
 - `shutdown_timeout(duration)`
-- `keepalive_timeout(duration)`
+- `header_timeout(duration)`
 - `connection_limit(n)`
 - `resource(...)`
 - `health_interval(duration)`
 - `otel_endpoint(url)` with the `otel` feature
 
-`connection_limit(0)` is invalid and returns `RuntimeError::InvalidArgument` when the runtime starts.
+`header_timeout(duration)` bounds the wait for a complete request head. It replaces
+`keepalive_timeout`, which never owned an idle keep-alive timer: the value has always
+configured Hyper's header-read boundary, and the name now states the failure it produces.
+
+`connection_limit(0)` is invalid and returns `RuntimeError::InvalidArgument` when the
+runtime starts. Omitting the connection limit is unbounded — intended for development,
+tests, or a service behind an admission boundary that already enforces one. A production
+service should set a finite limit.
+
+The runtime's policy is the outer ceiling for every server started inside it. A
+`ServerBuilder` may narrow any dimension and can never widen one; under bare Tokio its
+own `ServerPolicy` is the sole authority. The single-field setters above write onto the
+one stored `ServerPolicy`, so the last write to a field wins and the others keep what
+`server_policy` set. `shutdown_timeout` is the runtime's aggregate deadline: its servers
+and its root scope consume the same duration rather than one each.
+
+That deadline bounds Camber's own waiting and escalation. It cannot preempt an async task
+that never yields, stop application code running on a blocking or OS thread, or prove that
+an abandoned synchronous callback has returned.
 
 `otel_endpoint(url)` installs the OTLP exporter as the global tracing subscriber.
 Another subscriber may already hold that slot: `camber::logging::init_logging`, or a
@@ -133,7 +152,13 @@ If you already have a Tokio runtime and want to run Camber servers inside it, us
 - `http::serve_background_hosts(...)`
 - `http::serve_background_hosts_tls(...)`
 
-Background server APIs return `ServerHandle`, which:
+All eight refuse synchronously when no Tokio executor is established:
+`serve_async*` returns `Result<ServerHandleFuture, RuntimeError>` and
+`serve_background*` returns `Result<ServerHandle, RuntimeError>`. Each is a thin
+call onto `http::server(router)` or `http::server_hosts(hosts)`, which returns a
+`ServerBuilder` that also accepts a `ServerPolicy` and a TLS configuration.
+
+`ServerHandle`:
 
 - requests graceful shutdown with `.shutdown()`
 - requests forced cancellation with `.cancel()`
@@ -149,18 +174,17 @@ polling a ready result disarms that behavior.
 
 ### Constructor Context
 
-Each `serve_background*` constructor first requires an active Tokio runtime. It
-then captures its Camber or plain-Tokio context synchronously before spawning.
-A Camber call site captures runtime shutdown, configured timeout, connection
-limit, keepalive, and observability state. A plain-Tokio call site uses
-per-server control and the standalone shutdown and keepalive defaults, with no
-Camber connection limit or task accounting.
+Every terminal requires an active Tokio runtime and captures its Camber or
+plain-Tokio context synchronously, before it returns. A Camber call site
+captures runtime shutdown, the containing `ServerPolicy`, and observability
+state; the server's own policy narrows that envelope and can never widen it. A
+plain-Tokio call site uses per-server control and its own `ServerPolicy` as the
+sole authority, with no Camber task accounting.
 
-Direct `serve_async*` functions classify context at first poll, not when their
-future is created. Moving an unpolled direct future between contexts therefore
-selects the destination polling context. Dropping a direct future aborts its
-retained children but yields no join result; callers that need completion proof
-use `ServerHandleFuture`.
+`serve_async*` returns an owned future, not an `async fn`: routing is frozen and
+the context captured before the future exists, so moving it to another executor
+changes neither. Dropping it aborts its retained children; polling it to a ready
+result is the completion proof.
 
 ### Runtime Shutdown Scope
 

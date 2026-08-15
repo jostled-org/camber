@@ -938,7 +938,8 @@ async fn tls_proxy_forwards_x_forwarded_proto_https() {
     let tls_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let tls_addr = tls_listener.local_addr().unwrap();
 
-    let _handle = http::serve_background_tls(tls_listener, main, tls_config);
+    let _handle = http::serve_background_tls(tls_listener, main, tls_config)
+        .expect("owned server requires a Tokio runtime");
 
     // Build a reqwest client that trusts the self-signed cert
     let client_config = common::tls_client_config(&[&cert_pem]);

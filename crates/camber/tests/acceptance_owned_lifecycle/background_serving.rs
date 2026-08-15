@@ -13,7 +13,8 @@ async fn serve_background_handles_request() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let handle = camber::http::serve_background(listener, router);
+    let handle = camber::http::serve_background(listener, router)
+        .expect("owned server requires a Tokio runtime");
     let response =
         tokio::time::timeout(EVENT_TIMEOUT, reqwest::get(format!("http://{addr}/ping"))).await;
     handle.shutdown();
@@ -34,7 +35,8 @@ async fn serve_background_stops_on_cancel() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let handle = camber::http::serve_background(listener, router);
+    let handle = camber::http::serve_background(listener, router)
+        .expect("owned server requires a Tokio runtime");
 
     let response =
         tokio::time::timeout(EVENT_TIMEOUT, reqwest::get(format!("http://{addr}/ping"))).await;

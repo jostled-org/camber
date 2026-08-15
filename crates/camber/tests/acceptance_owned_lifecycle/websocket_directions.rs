@@ -926,7 +926,8 @@ fn owned_bare_tokio_callback_has_no_camber_runtime() {
         let addr = listener
             .local_addr()
             .expect("the bare Tokio listener address");
-        let server = camber::http::serve_background(listener, router);
+        let server = camber::http::serve_background(listener, router)
+            .expect("owned server requires a Tokio runtime");
         let mut peer = direction_peer(addr, AUTHORITY_PATH);
 
         let mut connection = assert_callback_admits_nothing(&handoff);
@@ -950,35 +951,48 @@ fn owned_bare_tokio_callback_has_no_camber_runtime() {
 
 // 3.T3
 #[test]
-fn synchronous_detached_callback_never_inherits_camber_runtime() {
+fn synchronous_serving_carries_one_supervisor_authority() {
     let (router, handoff) =
         authority_router(carrier_router(probe_router(), CARRIER_PATH), AUTHORITY_PATH);
     // Its serve thread runs `serve_listener` inside a Camber runtime of its
-    // own, so the caller this detached connection came from does have ambient
-    // context — which is the whole question the row asks.
+    // own, and that runtime now reaches the connection tasks: synchronous
+    // serving is the same supervisor the owned entry points use, which carries
+    // the runtime it captured into every connection it spawns. The row asserts
+    // it at the capture site, so a synchronous path that stopped carrying
+    // authority turns this red rather than leaving the callback below to be
+    // read as a suppression it never proved.
     let mut server = SyncServer::start(router);
-    // That context stops at the serve thread: the synchronous path accepts
-    // through a bare spawn, so the connection task this row's callback is
-    // served from holds nothing to inherit. The row asserts it at the capture
-    // site rather than inferring it from the callback, so a synchronous path
-    // that starts carrying authority turns this red instead of leaving the
-    // refusals below to be read as suppression they never proved.
     assert_carrier(
         server.addr(),
-        CARRIER_NONE,
-        "the synchronous serving path carried Camber authority into its connection tasks",
+        CARRIER_HELD,
+        "the synchronous serving path lost the Camber authority its supervisor captured",
     );
     let mut peer = direction_peer(server.addr(), AUTHORITY_PATH);
 
-    let mut connection = assert_callback_admits_nothing(&handoff);
+    // The callback holds the same authority, because one supervisor owns both
+    // serving families and there is no detached branch left to lose it.
+    let admitted = handoff.admitted();
+    assert!(
+        handoff.first().entered(),
+        "the synchronous callback lost its runtime authority"
+    );
+    let mut connection = handoff.connection();
     // The exchange's receive is bounded, and a bound needs a clock. This server
     // owns its runtime on another thread, so the case brings a clock of its
-    // own. It serves nothing, admits nothing, and carries no Camber context —
-    // which is what the row is about.
+    // own.
     bare_executor().block_on(async { exchange_authority_frames(&mut peer, &mut connection) });
+    handoff.first().release_and_finish();
+    assert_eq!(
+        admitted.join().expect("the admitted child never completed"),
+        AUTHORITY_CHILD,
+        "the synchronous callback's admitted child did not run under the captured runtime"
+    );
 
     drop(connection);
-    expect_peer_close(&mut peer, "the detached bridge never closed its transport");
+    expect_peer_close(
+        &mut peer,
+        "the synchronous bridge never closed its transport",
+    );
     drop(handoff);
     server.assert_served();
 }

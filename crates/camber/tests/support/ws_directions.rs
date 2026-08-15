@@ -322,7 +322,10 @@ where
 {
     let (router, handoff) = returning_direction_router(DIRECTION_PATH, buffer);
     DirectionTestFixture::run(
-        |listener| camber::http::serve_background(listener, router),
+        |listener| {
+            camber::http::serve_background(listener, router)
+                .expect("owned server requires a Tokio runtime")
+        },
         |fixture| async move {
             let peer = fixture.connect(DIRECTION_PATH);
             case(fixture, peer, handoff).await;
@@ -343,7 +346,10 @@ where
 {
     let (router, mut handoff) = direction_router(DIRECTION_PATH, buffer);
     DirectionTestFixture::run(
-        |listener| camber::http::serve_background(listener, router),
+        |listener| {
+            camber::http::serve_background(listener, router)
+                .expect("owned server requires a Tokio runtime")
+        },
         |fixture| async move {
             let peer = fixture.connect_abortive(DIRECTION_PATH).await;
             let connection = handoff.connection().await;
@@ -375,7 +381,10 @@ where
 {
     let (router, handoff) = direction_router(DIRECTION_PATH, buffer);
     run_row(
-        |listener| camber::http::serve_background(listener, router),
+        |listener| {
+            camber::http::serve_background(listener, router)
+                .expect("owned server requires a Tokio runtime")
+        },
         handoff,
         &[],
         case,
@@ -398,7 +407,10 @@ pub async fn staged_direction_row<C, Fut>(
 {
     let (router, handoff) = direction_router(DIRECTION_PATH, buffer);
     run_row(
-        |listener| camber::http::serve_background(listener, router),
+        |listener| {
+            camber::http::serve_background(listener, router)
+                .expect("owned server requires a Tokio runtime")
+        },
         handoff,
         armed,
         case,
@@ -421,7 +433,10 @@ where
     hosts.set_default(router);
     let hosts = hosts.ws_buffer_size(buffer);
     run_row(
-        |listener| camber::http::serve_background_hosts(listener, hosts),
+        |listener| {
+            camber::http::serve_background_hosts(listener, hosts)
+                .expect("owned server requires a Tokio runtime")
+        },
         handoff,
         &[],
         case,

@@ -198,7 +198,7 @@ impl ReadyServer {
         timeout: Duration,
     ) -> Result<Self, FixtureError> {
         Self::started_by(listener, timeout, move |listener| {
-            http::serve_background(listener, router)
+            http::serve_background(listener, router).expect("owned server requires a Tokio runtime")
         })
     }
 
@@ -587,11 +587,16 @@ impl ObservedPort {
     }
 
     pub fn serve(self, router: Router) -> ObservedServer {
-        self.serve_with(move |listener| http::serve_background(listener, router))
+        self.serve_with(move |listener| {
+            http::serve_background(listener, router).expect("owned server requires a Tokio runtime")
+        })
     }
 
     pub fn serve_hosts(self, hosts: HostRouter) -> ObservedServer {
-        self.serve_with(move |listener| http::serve_background_hosts(listener, hosts))
+        self.serve_with(move |listener| {
+            http::serve_background_hosts(listener, hosts)
+                .expect("owned server requires a Tokio runtime")
+        })
     }
 
     /// Give the reservation up as an owned Tokio listener, its address, and its

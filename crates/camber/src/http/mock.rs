@@ -26,7 +26,15 @@ pub enum LifecycleCheckpoint {
     ConnectionPermitWaitPending,
     BeforeRuntimeWait,
     BeforeUpgradeAcknowledge,
-    KeepaliveTimeoutConfigured(std::time::Duration),
+    HeaderTimeoutConfigured(std::time::Duration),
+    /// The budgets one admitted head resolved to, after every containing layer
+    /// narrowed them. Read from the routing owner that resolves them, at the
+    /// instant it does.
+    RouteBudgetsResolved {
+        request: super::RequestBudget,
+        upload: super::TransferBudget,
+        download: super::TransferBudget,
+    },
     RequestBodyLimitConfigured(usize),
     RequestBodyLimitObserved,
     StreamingUpstreamHeadReady,

@@ -1,4 +1,4 @@
-use std::future::{Future, IntoFuture, Ready};
+use std::future::{Future, IntoFuture};
 use std::ops::ControlFlow;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -13,10 +13,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use super::BufferConfig;
 use super::mock::{LifecycleCheckpoint, LifecycleFault, LifecycleScript, SupervisorJoinProbe};
 use super::router::ServerDispatch;
-use crate::runtime_state::{
-    DEFAULT_KEEPALIVE_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT, RuntimeInner, ShutdownSignal,
-    carry_runtime,
-};
+use crate::runtime_state::{RuntimeInner, ShutdownSignal, carry_runtime};
 use crate::task::{AsyncJoinFuture, panic_to_error};
 use crate::{RuntimeError, runtime};
 
@@ -82,27 +79,51 @@ pub(super) struct ServerContextSnapshot {
     runtime: Option<Arc<RuntimeInner>>,
     buffers: BufferConfig,
     is_tls: bool,
+    policy: super::ServerPolicy,
 }
 
 impl ServerContextSnapshot {
-    pub(super) fn capture(buffers: BufferConfig, is_tls: bool) -> Self {
+    /// Capture the serving context, and resolve the policy this server serves
+    /// under, at the caller's exact instant.
+    ///
+    /// Both halves are answered here, together, because they are one decision:
+    /// the runtime that is current when a terminal `serve*` call runs is the
+    /// runtime whose policy contains this server's. Resolving either later — at
+    /// first poll of a returned future, or from a fresh lookup inside a spawned
+    /// task — would let ambient context that changed in between choose a
+    /// different authority than the caller had.
+    pub(super) fn capture(buffers: BufferConfig, policy: super::ServerPolicy) -> Self {
+        let runtime = runtime::try_current_runtime();
+        let policy = match runtime.as_ref() {
+            Some(runtime) => policy.narrowed_by(runtime.config.server_policy),
+            None => policy,
+        };
         Self {
-            runtime: runtime::try_current_runtime(),
+            runtime,
             buffers,
-            is_tls,
+            is_tls: false,
+            policy,
         }
     }
 
-    /// Whether the captured context came from a Camber runtime.
+    /// The TLS configuration the captured runtime supplies, if any.
     ///
-    /// The snapshot already resolved that question once. Asking the thread-local
-    /// again would put the same question twice and let the two answers disagree.
-    pub(super) fn is_camber(&self) -> bool {
-        self.runtime.is_some()
+    /// Read from the runtime this snapshot already captured, so the runtime
+    /// that supplies a server's policy is the runtime that supplies its
+    /// certificate.
+    pub(super) fn runtime_tls(&self) -> Option<Arc<rustls::ServerConfig>> {
+        self.runtime
+            .as_ref()
+            .and_then(|runtime| runtime.config.tls_config.clone())
     }
 
-    fn config(&self) -> Option<&crate::runtime_state::RuntimeConfig> {
-        self.runtime.as_ref().map(|runtime| &runtime.config)
+    /// Record whether this server's transport is TLS.
+    ///
+    /// Separate from capture because the answer depends on the runtime the
+    /// capture resolved: a builder without its own certificate inherits the
+    /// runtime's.
+    pub(super) fn with_tls(self, is_tls: bool) -> Self {
+        Self { is_tls, ..self }
     }
 
     fn runtime_shutdown(&self) -> Option<ShutdownSignal> {
@@ -112,24 +133,25 @@ impl ServerContextSnapshot {
     }
 
     fn shutdown_timeout(&self) -> Duration {
-        self.config()
-            .map_or(DEFAULT_SHUTDOWN_TIMEOUT, |config| config.shutdown_timeout)
+        self.policy.shutdown_timeout_value()
     }
 
-    fn keepalive_timeout(&self) -> Duration {
-        self.config()
-            .map_or(DEFAULT_KEEPALIVE_TIMEOUT, |config| config.keepalive_timeout)
+    fn header_timeout(&self) -> Duration {
+        self.policy.header_timeout_value()
     }
 
     fn connection_limit(&self) -> Option<usize> {
-        self.config().and_then(|config| config.connection_limit)
+        self.policy.connection_limit_value()
     }
 
     fn connection_context(&self) -> super::handle::ConnCtx {
         match &self.runtime {
-            Some(runtime) => {
-                super::handle::ConnCtx::from_runtime(runtime, self.buffers, self.is_tls)
-            }
+            Some(runtime) => super::handle::ConnCtx::from_runtime(
+                runtime,
+                self.buffers,
+                self.is_tls,
+                self.policy,
+            ),
             None => self.standalone_context(),
         }
     }
@@ -148,6 +170,7 @@ impl ServerContextSnapshot {
             ws_buffer_size: self.buffers.ws_buffer_size,
             health_state: None,
             is_tls: self.is_tls,
+            policy: self.policy,
         }
     }
 }
@@ -201,19 +224,6 @@ impl Clone for ConnectionLifecycle {
 }
 
 impl ConnectionLifecycle {
-    pub(super) fn synchronous(permit: Option<tokio::sync::OwnedSemaphorePermit>) -> Self {
-        Self {
-            permit: ConnectionPermit::new(permit),
-            control: None,
-            registration: None,
-            #[cfg(feature = "ws")]
-            transport_registration: None,
-            #[cfg(feature = "ws")]
-            transport_state: None,
-            script: None,
-        }
-    }
-
     fn owned(
         permit: Arc<ConnectionPermit>,
         control: tokio::sync::watch::Receiver<ServerControl>,
@@ -851,8 +861,8 @@ impl OwnedHttpTasks {
 }
 
 struct PendingAccepted {
-    stream: tokio::net::TcpStream,
-    remote_addr: std::net::SocketAddr,
+    stream: crate::net::AcceptedStream,
+    remote_addr: Option<std::net::SocketAddr>,
 }
 
 enum SupervisorEvent {
@@ -860,18 +870,18 @@ enum SupervisorEvent {
     Deadline,
     Control(ServerControl),
     Runtime(tokio::time::Instant),
-    Accept(Result<(tokio::net::TcpStream, std::net::SocketAddr), std::io::Error>),
+    Accept(Result<(crate::net::AcceptedStream, Option<std::net::SocketAddr>), std::io::Error>),
     Permit(Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError>),
     Registration(Option<UpgradeTicket>),
     Task(Option<OwnedTaskCompletion>),
 }
 
 pub(super) struct ServerSupervisor {
-    listener: Option<tokio::net::TcpListener>,
+    listener: Option<crate::net::Listener>,
     dispatch: Arc<ServerDispatch>,
     context: Arc<super::handle::ConnCtx>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-    keepalive_timeout: Duration,
+    header_timeout: Duration,
     shutdown_timeout: Duration,
     runtime_shutdown: Option<ShutdownSignal>,
     runtime: Option<Arc<RuntimeInner>>,
@@ -893,22 +903,19 @@ pub(super) struct ServerSupervisor {
 
 impl ServerSupervisor {
     pub(super) fn new(
-        listener: tokio::net::TcpListener,
+        listener: crate::net::Listener,
         dispatch: ServerDispatch,
         tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
         snapshot: ServerContextSnapshot,
     ) -> (Self, tokio::sync::watch::Sender<ServerControl>) {
-        let script = listener
-            .local_addr()
-            .ok()
-            .and_then(super::mock::lifecycle_script);
+        let script = listener.tcp_addr().and_then(super::mock::lifecycle_script);
         let (control_sender, control_receiver) =
             tokio::sync::watch::channel(ServerControl::Running);
         let owner_control = control_sender.clone();
         let (registration_sender, registration_receiver) = tokio::sync::mpsc::channel(32);
         let connection_limit = super::server::make_conn_limit(snapshot.connection_limit());
         let context = Arc::new(snapshot.connection_context());
-        let keepalive_timeout = snapshot.keepalive_timeout();
+        let header_timeout = snapshot.header_timeout();
         let shutdown_timeout = snapshot.shutdown_timeout();
         let runtime_shutdown = snapshot.runtime_shutdown();
         (
@@ -917,7 +924,7 @@ impl ServerSupervisor {
                 dispatch: Arc::new(dispatch),
                 context,
                 tls_acceptor,
-                keepalive_timeout,
+                header_timeout,
                 shutdown_timeout,
                 runtime_shutdown,
                 runtime: snapshot.runtime,
@@ -938,6 +945,11 @@ impl ServerSupervisor {
             },
             owner_control,
         )
+    }
+
+    /// Whether this server was started inside a Camber runtime.
+    pub(super) fn is_camber(&self) -> bool {
+        self.runtime.is_some()
     }
 
     pub(super) async fn run(mut self) -> Result<(), RuntimeError> {
@@ -1101,7 +1113,7 @@ impl ServerSupervisor {
 
     async fn handle_accept(
         &mut self,
-        result: Result<(tokio::net::TcpStream, std::net::SocketAddr), std::io::Error>,
+        result: Result<(crate::net::AcceptedStream, Option<std::net::SocketAddr>), std::io::Error>,
     ) {
         match result {
             Ok((stream, remote_addr)) => self.handle_accepted(stream, remote_addr).await,
@@ -1124,8 +1136,8 @@ impl ServerSupervisor {
     /// admission produced is taken then rather than carried across it.
     async fn handle_accepted(
         &mut self,
-        stream: tokio::net::TcpStream,
-        remote_addr: std::net::SocketAddr,
+        stream: crate::net::AcceptedStream,
+        remote_addr: Option<std::net::SocketAddr>,
     ) {
         LifecycleScript::pause_at(self.script.as_deref(), LifecycleCheckpoint::AfterAccept).await;
         match self.connection_limit {
@@ -1137,8 +1149,8 @@ impl ServerSupervisor {
     /// Hold an admitted socket until the connection limit has a permit for it.
     async fn park_for_permit(
         &mut self,
-        stream: tokio::net::TcpStream,
-        remote_addr: std::net::SocketAddr,
+        stream: crate::net::AcceptedStream,
+        remote_addr: Option<std::net::SocketAddr>,
     ) {
         if let Some((stream, _)) = self.admit_or_close(stream).await {
             self.pending = Some(PendingAccepted {
@@ -1161,9 +1173,9 @@ impl ServerSupervisor {
     /// down rather than dropped raw.
     async fn admit_or_close(
         &self,
-        stream: tokio::net::TcpStream,
+        stream: crate::net::AcceptedStream,
     ) -> Option<(
-        tokio::net::TcpStream,
+        crate::net::AcceptedStream,
         tokio::sync::mpsc::Sender<UpgradeTicket>,
     )> {
         let admitted = match self.admission_is_open() {
@@ -1173,7 +1185,7 @@ impl ServerSupervisor {
         match admitted {
             Some(registration) => Some((stream, registration)),
             None => {
-                close_socket(stream).await;
+                stream.close().await;
                 None
             }
         }
@@ -1188,8 +1200,8 @@ impl ServerSupervisor {
     /// checkpoint marks the same moment for both.
     async fn admit_and_spawn(
         &mut self,
-        stream: tokio::net::TcpStream,
-        remote_addr: std::net::SocketAddr,
+        stream: crate::net::AcceptedStream,
+        remote_addr: Option<std::net::SocketAddr>,
         permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
         LifecycleScript::pause_at(self.script.as_deref(), LifecycleCheckpoint::AfterPermit).await;
@@ -1216,14 +1228,14 @@ impl ServerSupervisor {
 
     async fn spawn_connection(
         &mut self,
-        stream: tokio::net::TcpStream,
-        remote_addr: std::net::SocketAddr,
+        stream: crate::net::AcceptedStream,
+        remote_addr: Option<std::net::SocketAddr>,
         permit: Option<tokio::sync::OwnedSemaphorePermit>,
         registration: tokio::sync::mpsc::Sender<UpgradeTicket>,
     ) {
         LifecycleScript::pause_at(
             self.script.as_deref(),
-            LifecycleCheckpoint::KeepaliveTimeoutConfigured(self.keepalive_timeout),
+            LifecycleCheckpoint::HeaderTimeoutConfigured(self.header_timeout),
         )
         .await;
         // One subscription is this connection's whole shutdown authority: the
@@ -1240,8 +1252,8 @@ impl ServerSupervisor {
             Arc::clone(&self.dispatch),
             Arc::clone(&self.context),
             lifecycle,
-            self.keepalive_timeout,
-            Some(remote_addr.ip()),
+            self.header_timeout,
+            remote_addr.map(|addr| addr.ip()),
         );
         let future =
             super::conn::serve_owned_connection(stream, self.tls_acceptor.clone(), state, control);
@@ -1479,7 +1491,7 @@ impl ServerSupervisor {
 
     async fn close_pending(&mut self) {
         if let Some(accepted) = self.pending.take() {
-            close_socket(accepted.stream).await;
+            accepted.stream.close().await;
         }
     }
 
@@ -1690,11 +1702,6 @@ async fn wait_for_script_wake(script: Option<&LifecycleScript>) {
 /// A refused socket is shut down rather than dropped, so the peer sees the
 /// refusal as a close it can read instead of an unexplained silence. A failed
 /// shutdown has nothing left to report to: the socket is going away either way.
-async fn close_socket(mut stream: tokio::net::TcpStream) {
-    use tokio::io::AsyncWriteExt;
-    let _ = stream.shutdown().await;
-}
-
 /// Report a refused connection permit and close the socket it was for.
 ///
 /// The semaphore closes only when the server itself is going away, so the
@@ -1703,7 +1710,7 @@ async fn close_socket(mut stream: tokio::net::TcpStream) {
 async fn refuse_permit(error: &tokio::sync::AcquireError, accepted: Option<PendingAccepted>) {
     tracing::warn!(%error, "connection permit unavailable; closing accepted socket");
     if let Some(accepted) = accepted {
-        close_socket(accepted.stream).await;
+        accepted.stream.close().await;
     }
 }
 
@@ -1831,9 +1838,9 @@ async fn wait_runtime(shutdown: Option<&ShutdownSignal>, script: Option<&Lifecyc
 }
 
 async fn accept_next(
-    listener: Option<&tokio::net::TcpListener>,
+    listener: Option<&crate::net::Listener>,
     script: Option<&LifecycleScript>,
-) -> Result<(tokio::net::TcpStream, std::net::SocketAddr), std::io::Error> {
+) -> Result<(crate::net::AcceptedStream, Option<std::net::SocketAddr>), std::io::Error> {
     if let Some(kind) = script.and_then(|script| script.take_accept_fault()) {
         return Err(std::io::Error::from(kind));
     }
@@ -1851,9 +1858,11 @@ fn join_panic_to_error(error: tokio::task::JoinError) -> RuntimeError {
 }
 
 pub(super) enum SupervisorJoin {
+    /// A supervisor driven inline by the owner's own future rather than a
+    /// spawned task. Dropping the owner drops the supervisor with it.
+    Owned(Pin<Box<dyn Future<Output = Result<(), RuntimeError>> + Send>>),
     Camber(AsyncJoinFuture<Result<(), RuntimeError>>),
     Tokio(tokio::task::JoinHandle<Result<(), RuntimeError>>),
-    Ready(Ready<Result<(), RuntimeError>>),
 }
 
 pub(super) fn poll_supervisor_join(
@@ -1863,11 +1872,11 @@ pub(super) fn poll_supervisor_join(
     match join {
         // A Camber join failure is already a `RuntimeError`, so flattening it
         // is the inner result or that error unchanged.
+        SupervisorJoin::Owned(future) => future.as_mut().poll(context),
         SupervisorJoin::Camber(future) => Pin::new(future)
             .poll(context)
             .map(|result| result.unwrap_or_else(Err)),
         SupervisorJoin::Tokio(handle) => Pin::new(handle).poll(context).map(flatten_tokio_join),
-        SupervisorJoin::Ready(future) => Pin::new(future).poll(context),
     }
 }
 

@@ -38,7 +38,7 @@ impl greeter_service::Greeter for MyGreeter {
 
 fn grpc_runtime() -> runtime::RuntimeBuilder {
     runtime_support::test_runtime()
-        .keepalive_timeout(Duration::from_millis(500))
+        .header_timeout(Duration::from_millis(500))
         .shutdown_timeout(Duration::from_secs(2))
 }
 

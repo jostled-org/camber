@@ -165,26 +165,6 @@ impl DisconnectSignal {
     }
 }
 
-/// The connection's shutdown predicate — row 3 of the cause table.
-///
-/// Two concrete sources, one predicate: the synchronous path already holds the
-/// runtime's latching shutdown flag, and the owned path already holds the
-/// server's control watch. Both are read synchronously, so a shutdown request
-/// is visible to every guard that drops after it.
-enum ShutdownPredicate {
-    Latch(Arc<AtomicBool>),
-    Control(tokio::sync::watch::Receiver<ServerControl>),
-}
-
-impl ShutdownPredicate {
-    fn is_shutting_down(&self) -> bool {
-        match self {
-            Self::Latch(flag) => flag.load(Ordering::Acquire),
-            Self::Control(control) => !matches!(*control.borrow(), ServerControl::Running),
-        }
-    }
-}
-
 /// Per-connection state the cause table reads: whether the transport is dying
 /// and whether the server is shutting down.
 ///
@@ -197,15 +177,15 @@ impl ShutdownPredicate {
 /// invariant is structural, and no caller has to remember to wrap.
 pub(super) struct ConnectionLiveness {
     terminating: AtomicBool,
-    shutdown: ShutdownPredicate,
+    /// The server's control watch — row 3 of the cause table. Read
+    /// synchronously, so a shutdown request is visible to every guard that
+    /// drops after it. Every connection now has one: one supervisor owns every
+    /// accepted transport, so there is no second shutdown source to abstract
+    /// over.
+    shutdown: tokio::sync::watch::Receiver<ServerControl>,
 }
 
 impl ConnectionLiveness {
-    /// Liveness for a connection whose shutdown source is a latching flag.
-    pub(super) fn latched(flag: Arc<AtomicBool>) -> Arc<Self> {
-        Self::with_predicate(ShutdownPredicate::Latch(flag))
-    }
-
     /// Liveness for a connection driven by an owned server's control watch.
     ///
     /// The receiver is not optional: a connection with no shutdown authority
@@ -214,13 +194,9 @@ impl ConnectionLiveness {
     /// on it as `PeerDisconnect` or `StreamReset`. The owned path resolves the
     /// receiver once per connection instead, before it serves anything.
     pub(super) fn controlled(control: tokio::sync::watch::Receiver<ServerControl>) -> Arc<Self> {
-        Self::with_predicate(ShutdownPredicate::Control(control))
-    }
-
-    fn with_predicate(shutdown: ShutdownPredicate) -> Arc<Self> {
         Arc::new(Self {
             terminating: AtomicBool::new(false),
-            shutdown,
+            shutdown: control,
         })
     }
 
@@ -278,7 +254,7 @@ impl ResponseGuard {
     /// ended early on a connection that is still live.
     fn cause(&self) -> DisconnectCause {
         match (
-            self.connection.shutdown.is_shutting_down(),
+            !matches!(*self.connection.shutdown.borrow(), ServerControl::Running),
             self.connection.terminating.load(Ordering::Acquire),
         ) {
             (true, _) => DisconnectCause::ServerShutdown,

@@ -764,12 +764,13 @@ http::serve_hosts(listener, hosts)?;
 
 ## Background Server Lifecycle
 
-The four `serve_background*` functions return `ServerHandle`, an armed owner of
-the server lifecycle. Use the owner operations according to the transition you
-need:
+The four `serve_background*` functions return `Result<ServerHandle, RuntimeError>`.
+The refusal is synchronous — a server that never started has no owner to hand
+back — and `ServerHandle` is an armed owner of the server lifecycle. Use the
+owner operations according to the transition you need:
 
 ```rust
-let handle = http::serve_background(listener, router);
+let handle = http::serve_background(listener, router)?;
 
 // Stop admission gracefully, then retain a concrete completion proof.
 let completion: camber::http::ServerHandleFuture = handle.shutdown_and_join();
@@ -929,7 +930,7 @@ Use `runtime::test()` or `common::test_runtime()` with `serve_background` or the
 #[test]
 fn grpc_responds() {
     common::test_runtime()
-        .keepalive_timeout(Duration::from_millis(500))
+        .header_timeout(Duration::from_millis(500))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let grpc = GrpcRouter::new().add_service(greeter_service::serve(MyGreeter));

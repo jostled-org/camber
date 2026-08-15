@@ -41,5 +41,7 @@ mod retry_policy;
 mod route_dispatch;
 #[path = "component_http_routing/server_requests.rs"]
 mod server_requests;
+#[path = "component_http_routing/service_budgets.rs"]
+mod service_budgets;
 #[path = "component_http_routing/streaming_multipart_route.rs"]
 mod streaming_multipart_route;

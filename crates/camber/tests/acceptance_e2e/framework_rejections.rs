@@ -1135,12 +1135,18 @@ const JOURNEY_PATH: &str = "/operator-journey";
 
 /// Serve one router on an owned listener the fixture keeps.
 fn owned_server(router: Router) -> wire::ReadyServer {
-    owned(|listener| camber::http::serve_background(listener, router))
+    owned(|listener| {
+        camber::http::serve_background(listener, router)
+            .expect("owned server requires a Tokio runtime")
+    })
 }
 
 /// Serve one router over TLS on an owned listener the fixture keeps.
 fn owned_tls_server(router: Router, config: Arc<rustls::ServerConfig>) -> wire::ReadyServer {
-    owned(|listener| camber::http::serve_background_tls(listener, router, config))
+    owned(|listener| {
+        camber::http::serve_background_tls(listener, router, config)
+            .expect("owned server requires a Tokio runtime")
+    })
 }
 
 /// Bind an ephemeral port and hand the listener to whichever server serves it.

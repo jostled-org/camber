@@ -22,6 +22,8 @@ mod framework_rejections;
 mod scope_drain;
 #[path = "acceptance_owned_lifecycle/serve_variants.rs"]
 mod serve_variants;
+#[path = "acceptance_owned_lifecycle/service_budgets.rs"]
+mod service_budgets;
 #[cfg(feature = "ws")]
 #[path = "acceptance_owned_lifecycle/shared_binary_payloads.rs"]
 mod shared_binary_payloads;

@@ -160,7 +160,10 @@ async fn serve_async_tls_accepts_https_connection() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(camber::http::serve_async_tls(listener, router, tls_config));
+    let server = tokio::spawn(
+        camber::http::serve_async_tls(listener, router, tls_config)
+            .expect("owned server requires a Tokio runtime"),
+    );
 
     let response = https_get(&connector, addr, "/tls-hello").await;
 
@@ -191,7 +194,10 @@ async fn serve_async_hosts_dispatches_by_host() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(camber::http::serve_async_hosts(listener, host_router));
+    let server = tokio::spawn(
+        camber::http::serve_async_hosts(listener, host_router)
+            .expect("owned server requires a Tokio runtime"),
+    );
 
     // Request with Host: a.test
     let response_a = http_get(addr, Some("a.test"), "/who").await;
@@ -218,7 +224,8 @@ async fn serve_background_tls_runs_in_background() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let handle = camber::http::serve_background_tls(listener, router, tls_config);
+    let handle = camber::http::serve_background_tls(listener, router, tls_config)
+        .expect("owned server requires a Tokio runtime");
 
     let response = https_get(&connector, addr, "/bg-tls").await;
 
@@ -259,7 +266,8 @@ async fn serve_background_handle_exposes_flat_error() {
     });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let handle = camber::http::serve_background(listener, router);
+    let handle = camber::http::serve_background(listener, router)
+        .expect("owned server requires a Tokio runtime");
 
     handle.cancel();
 
@@ -373,11 +381,15 @@ impl BackgroundVariants {
             "plain",
             "plain",
             retained_router("plain"),
-            camber::http::serve_background,
+            |listener, router| {
+                camber::http::serve_background(listener, router)
+                    .expect("owned server requires a Tokio runtime")
+            },
         )
         .await;
         let tls = start_variant("TLS", "tls", retained_router("tls"), |listener, router| {
             camber::http::serve_background_tls(listener, router, Arc::clone(&tls_config))
+                .expect("owned server requires a Tokio runtime")
         })
         .await;
         let host = start_variant(
@@ -386,6 +398,7 @@ impl BackgroundVariants {
             retained_router("host"),
             |listener, router| {
                 camber::http::serve_background_hosts(listener, host_dispatch(router))
+                    .expect("owned server requires a Tokio runtime")
             },
         )
         .await;
@@ -399,6 +412,7 @@ impl BackgroundVariants {
                     host_dispatch(router),
                     tls_config,
                 )
+                .expect("owned server requires a Tokio runtime")
             },
         )
         .await;

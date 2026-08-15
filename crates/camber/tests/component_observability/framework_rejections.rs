@@ -1180,7 +1180,8 @@ async fn body_deadline_refusal_reaches_the_operator_record() {
         .await
         .expect("the deadline fixture bound a listener");
     let addr = listener.local_addr().expect("the listener named its port");
-    let server = camber::http::serve_background(listener, router);
+    let server = camber::http::serve_background(listener, router)
+        .expect("owned server requires a Tokio runtime");
 
     let mut peer = tokio::net::TcpStream::connect(addr)
         .await

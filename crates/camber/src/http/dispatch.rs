@@ -6,6 +6,7 @@ use super::rejection::{
     Rejected, RejectionMapper, RejectionProtocol, RejectionScope, RequestIdentity,
 };
 use super::request::{Params as RequestParams, RequestHead};
+use super::route_budgets::RouteBudgets;
 use super::stream::StreamResponse;
 pub(super) use super::trie::Handler;
 pub(super) use super::trie::SseHandler;
@@ -137,6 +138,12 @@ pub(super) struct Classified<'a> {
     /// could not parse never leaves here as `None` — it leaves as
     /// [`RouteClass::Refused`], answered from the head.
     pub(super) router: Option<&'a FrozenRouter>,
+    /// The budgets this head resolved to, narrowed outer-to-inner exactly once.
+    ///
+    /// Resolved here because this is where host and route authority is
+    /// selected: every later owner reads the answer rather than re-deriving it
+    /// from a layer it happens to hold.
+    pub(super) budgets: RouteBudgets,
 }
 
 /// What a request head asks the connection to become.
@@ -241,6 +248,8 @@ fn upstream_unhealthy(healthy: &Option<Arc<AtomicBool>>) -> bool {
 /// Immutable trie-based router. Created from Router::freeze().
 pub(super) struct FrozenRouter {
     pub(super) root: FrozenNode,
+    /// The budgets this router was configured with, frozen with it.
+    pub(super) budgets: RouteBudgets,
     pub(super) middleware: Box<[MiddlewareFn]>,
     pub(super) skip_middleware_for_internal: bool,
     /// The rejection policy this router was configured with, frozen with it.
@@ -815,7 +824,9 @@ impl ServerDispatch {
         &'a self,
         head: &RequestHead<'_>,
         upgrade: HeadUpgrade,
+        policy: super::ServerPolicy,
     ) -> Classified<'a> {
+        let outer = self.outer_budgets(policy);
         match self.resolve_from_head(head) {
             Ok(Some(router)) => {
                 let (class, established) =
@@ -827,12 +838,14 @@ impl ServerDispatch {
                         established,
                     },
                     router: Some(router),
+                    budgets: router.budgets.narrowed_by(outer),
                 }
             }
             Ok(None) => Classified {
                 class: RouteClass::Terminal,
                 scope: PreBodyScope::unrouted(self.select_mapper(None)),
                 router: None,
+                budgets: outer,
             },
             // Carried, not folded into the terminal above. An authority Camber
             // could not parse is answered from the head: reading it as "no
@@ -843,6 +856,7 @@ impl ServerDispatch {
                 class: RouteClass::Refused(rejected),
                 scope: PreBodyScope::unrouted(self.select_mapper(None)),
                 router: None,
+                budgets: outer,
             },
         }
     }
@@ -852,6 +866,18 @@ impl ServerDispatch {
     /// `None` for a single router: nothing contains it, so its own configured
     /// ceiling is the whole answer. A host router's ceiling applies to every
     /// child, and a child that configured one can only narrow it.
+    /// The budgets that contain every route here.
+    ///
+    /// The server's policy is the outermost layer either dispatch shape starts
+    /// from; a host router adds its own between that policy and its children.
+    fn outer_budgets(&self, policy: super::ServerPolicy) -> RouteBudgets {
+        let server = RouteBudgets::from_policy(policy);
+        match self {
+            Self::Single(_) => server,
+            Self::Host(hosts) => hosts.budgets().narrowed_by(server),
+        }
+    }
+
     fn outer_ceiling(&self) -> Option<ConfiguredCeiling> {
         match self {
             Self::Single(_) => None,

@@ -6,7 +6,7 @@ mod tls_stream;
 mod udp;
 
 pub use forward::forward;
-pub(crate) use listener::ListenerInner;
+pub(crate) use listener::{AcceptedStream, ListenerInner};
 pub use listener::{Listener, ListenerAddr, listen};
 pub use tcp::{TcpStream, serve_tcp, serve_tcp_listener, serve_tcp_tls, serve_tcp_tls_listener};
 pub use tls_stream::TlsStream;
