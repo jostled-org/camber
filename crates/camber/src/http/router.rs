@@ -492,12 +492,13 @@ impl Router {
     ///
     /// # Runtime authority
     ///
-    /// Only a handler served by an owned server that was started inside a Camber
-    /// runtime may admit work with [`camber::spawn`](crate::spawn); that child
-    /// belongs to runtime completion, and a spawn issued after root admission
-    /// closes is refused with [`RuntimeError::ScopeClosed`]. A bare-Tokio owned
-    /// server and the synchronous detached serving path both refuse with
-    /// [`RuntimeError::NoRuntime`], and a refused closure never runs. The
+    /// A handler served under a Camber runtime may admit work with
+    /// [`camber::spawn`](crate::spawn); that child belongs to runtime
+    /// completion, and a spawn issued after root admission closes is refused
+    /// with [`RuntimeError::ScopeClosed`]. Synchronous serving is such a path —
+    /// it carries the runtime its terminal call captured — as is an owned server
+    /// started inside a Camber runtime. Only a bare-Tokio owned server refuses
+    /// with [`RuntimeError::NoRuntime`], and a refused closure never runs. The
     /// handler itself is never a root-scope child, and server completion makes
     /// no claim that it has returned.
     #[cfg(feature = "ws")]

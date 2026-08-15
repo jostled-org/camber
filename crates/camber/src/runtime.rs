@@ -856,9 +856,11 @@ pub(crate) fn admit_signal_watcher(inner: &Arc<RuntimeInner>) -> Result<(), crat
     })
 }
 
-/// Close out a drained runtime: release the thread's context, give the
-/// detached synchronous-entry connection tasks their shutdown window, and let
-/// a runtime-level failure displace the closure's value.
+/// Close out a drained runtime: release the thread's context, give whatever
+/// Tokio still carries past the scope drain — a server handle the caller
+/// dropped without joining, and the connection tasks its supervisor was still
+/// ending — its shutdown window, and let a runtime-level failure displace the
+/// closure's value.
 ///
 /// Both runtime-establishing entry points end here, so the closing order — and
 /// which failure wins — is written once rather than kept in step by hand.
@@ -877,8 +879,10 @@ fn finish_runtime<T>(
     teardown_runtime(inner);
     drop(runtime_guard);
 
-    // This is the detached synchronous-entry connection tasks' window, not a
-    // second scope drain: the scope already drained above.
+    // This is the window for whatever Tokio still carries once the scope has
+    // drained and resources have shut down — a server handle the caller dropped
+    // without joining, and the connection tasks its supervisor was still
+    // ending. Not a second scope drain: the scope already drained above.
     tokio_rt.shutdown_timeout(inner.config.server_policy.shutdown_timeout_value());
 
     // Read BEFORE the unwind resumes: `resume_unwind` diverges, and the panic

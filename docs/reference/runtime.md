@@ -228,8 +228,9 @@ cannot be stopped — the drain reports it and proceeds instead of waiting.
 
 Resource shutdown then runs unbounded — `shutdown_timeout` does not apply to it.
 The final Tokio shutdown is bounded by a second, full `shutdown_timeout`: that
-window belongs to the detached synchronous-entry connection tasks, which the
-scope drain never covered. Worst-case return is therefore roughly
+window belongs to whatever Tokio still carries once the scope has drained — a
+server handle you dropped without joining, and the connection tasks its
+supervisor was still ending. Worst-case return is therefore roughly
 `2 × shutdown_timeout` plus however long resource shutdown takes.
 
 A per-resource health task is a root-scope child, and `Resource::health_check`

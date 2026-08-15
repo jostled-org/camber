@@ -237,7 +237,7 @@ router.get("/report", |req| {
 });
 ```
 
-**The cleanup task needs a Camber runtime context.** `spawn_async` admits its future to the current runtime's root scope, so the connection task that calls it must carry that context. A `serve_background*` server started **inside** a Camber runtime propagates it: the supervisor is admitted to that runtime's root scope and runs under it, and each connection task it spawns captures that context and carries it in. The `serve_async*` entry points behave the same way: they capture the ambient context when the supervisor is built, and carry it into every connection task, so a `serve_async` server awaited inside a Camber runtime propagates it too. Started on a bare Tokio runtime, the supervisor is a plain `tokio::spawn` with nothing to capture, so its connection tasks run without a Camber context — the same position as the synchronous `http::serve` entry, whose connection tasks are detached and carry no Camber runtime context by contract.
+**The cleanup task needs a Camber runtime context.** `spawn_async` admits its future to the current runtime's root scope, so the connection task that calls it must carry that context. A `serve_background*` server started **inside** a Camber runtime propagates it: the supervisor is admitted to that runtime's root scope and runs under it, and each connection task it spawns captures that context and carries it in. The `serve_async*` entry points behave the same way: they capture the ambient context when the supervisor is built, and carry it into every connection task, so a `serve_async` server awaited inside a Camber runtime propagates it too. Started on a bare Tokio runtime, the supervisor is a plain `tokio::spawn` with nothing to capture, so its connection tasks run without a Camber context. The synchronous entry points are never in that position: `serve_listener` refuses without a runtime context and `serve` establishes one, so the same supervisor carries a Camber runtime into every connection task it spawns.
 
 With no context `spawn_async` refuses with `RuntimeError::NoRuntime`, drops the cleanup future unrun, and reports the refusal only on the returned handle. The example above discards that handle, so on those paths it cleans up nothing and says nothing.
 
@@ -697,7 +697,7 @@ The callback runs on the blocking pool. What it may admit through
 |---|---|
 | Owned server started inside a Camber runtime | admitted to that runtime's root scope, or refused with `ScopeClosed` once admission has closed |
 | Owned server started on bare Tokio | refused with `NoRuntime` |
-| Synchronous detached serving | refused with `NoRuntime`, even when its caller had ambient Camber context |
+| Synchronous serving (`serve`, `serve_listener`) | admitted to the runtime the terminal call captured, which `serve` establishes when none is ambient |
 
 A refused spawn never runs its closure, so a receiver captured by that closure is
 dropped and the connection ends with `ReceiverDropped`.

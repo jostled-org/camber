@@ -46,9 +46,10 @@ impl BridgeAttachment {
     /// The runtime authority a callback served under this attachment inherits.
     ///
     /// Read from the attachment rather than looked up where the callback runs,
-    /// which is the whole of the contract's suppression rule: the detached path
-    /// has no attachment, so it has nowhere to inherit authority from and
-    /// cannot pick up its caller's ambient context by accident.
+    /// which is the whole of the contract's suppression rule: the capture
+    /// happened on the connection task, so a server with no Camber runtime over
+    /// it — bare-Tokio serving — carries `None` here, and its callback cannot
+    /// pick up a blocking worker's leftover context by accident.
     pub(super) fn callback_runtime(
         attachment: &Option<Self>,
     ) -> Option<Arc<crate::runtime_state::RuntimeInner>> {
@@ -119,12 +120,14 @@ where
     complete_upgrade_registration(registrar, handle, gate, response, handoff).await
 }
 
-/// Launch a synchronous-entry WebSocket bridge detached.
+/// Launch a WebSocket bridge with no registrar to hand it to.
 ///
-/// The synchronous connection path carries no Camber runtime context by
-/// contract — the connection task that owns this upgrade is itself detached —
-/// so there is no root scope for the bridge to be admitted into. It inherits
-/// that connection's contract rather than becoming an orphaned scope child.
+/// A lifecycle that bound no upgrade transport has no root scope for the bridge
+/// to be admitted into, so the bridge inherits that connection's lifetime rather
+/// than becoming an orphaned scope child. Since 2026-08-15 no serving entry
+/// point produces such a lifecycle: `serve_owned_connection` binds the upgrade
+/// transport on every connection the supervisor spawns, synchronous terminals
+/// included. This arm is what the type still admits, not a path callers reach.
 ///
 /// `own_upgrade_bridge` is its only caller. It stays a named function because
 /// `docs/scripts/check_no_orphan_spawns.sh` allowlists spawns by

@@ -64,8 +64,8 @@ pub(in crate::http) async fn handle_ws_upgrade(
         handoff,
         ..
     } = prepared;
-    // Present only on the owned path, which is the same path that produces a
-    // registrar: a synchronous lifecycle carries neither.
+    // Present when a controller is registered for this server's address, which
+    // every serving entry point now carries alike.
     let script = lifecycle.script();
     own_upgrade_bridge(lifecycle, response, &handoff, move |attachment| {
         bridge_ws_handler(

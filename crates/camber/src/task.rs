@@ -590,8 +590,8 @@ fn record_subsystem_refusal(subsystem: &str, error: &RuntimeError) {
 
 /// Run one Camber-internal blocking producer, admitted to the root scope when
 /// a runtime context is established, and detached on Tokio's blocking pool
-/// otherwise — the synchronous-entry path carries no context by contract, and
-/// absence is dispositioned here rather than filled with a minted runtime.
+/// otherwise — bare-Tokio serving carries no context to admit into, and absence
+/// is dispositioned here rather than filled with a minted runtime.
 ///
 /// A refusal is reported against the response that lost its producer: the
 /// response was already produced, so the refusal has no caller left to return
@@ -618,11 +618,13 @@ where
 /// Run one unadmitted producer detached on the ambient Tokio pool, or report
 /// that there is nowhere left to run it.
 ///
-/// The synchronous-entry connection path carries no Camber runtime context by
-/// contract, so there is no scope to admit into and no refusal to report — the
-/// producer inherits that connection's detached lifetime. It still runs through
-/// `run_producer`: a panic here reaches no handle, so the structured record is
-/// the only report there is.
+/// A connection served under no Camber runtime — bare-Tokio serving — carries
+/// no context to admit into, so there is no scope here and no refusal to report;
+/// the producer inherits that connection's lifetime instead. Since 2026-08-15
+/// the synchronous entry points are NOT that case: they spawn through the same
+/// supervisor and carry the same captured runtime the owned terminals do. It
+/// still runs through `run_producer`: a panic here reaches no handle, so the
+/// structured record is the only report there is.
 ///
 /// The ambient pool is NAMED rather than reached through a free
 /// `spawn_blocking`, for the reason `launch_on_admitting_executor` states: the

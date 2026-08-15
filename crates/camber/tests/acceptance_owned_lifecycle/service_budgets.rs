@@ -2,6 +2,8 @@
 //! connection permit covers.
 
 use camber::RuntimeError;
+#[cfg(feature = "grpc")]
+use camber::http::GrpcRouter;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, lifecycle};
 use camber::http::{Request, Response, Router, ServerPolicy, SseWriter};
 use std::sync::Arc;
@@ -272,12 +274,24 @@ fn assert_blocking_serve_establishes_a_runtime() {
 }
 
 /// 1.T4
+///
+/// Owns the omitted, zero, plain-TCP, SSE, gRPC, and bare-Tokio rows of the
+/// connection-limit matrix. The TLS-handshake, HTTP keep-alive, direct
+/// WebSocket, and proxied WebSocket rows are owned by
+/// `component_websocket::connection_limits`, which holds them on the same
+/// production checkpoint.
 #[camber::test]
 async fn connection_limit_matrix_holds_one_permit_for_the_transport_lifetime() {
     assert_zero_is_refused_before_any_accept();
     assert_omitted_limit_admits_concurrent_transports().await;
     assert_one_permit_covers_each_http_transport().await;
     assert_one_permit_covers_an_sse_response().await;
+    #[cfg(feature = "grpc")]
+    assert_one_permit_covers_a_grpc_transport().await;
+    unmanaged(
+        "bare-Tokio limit",
+        assert_bare_tokio_serving_holds_one_permit,
+    );
 }
 
 /// Zero never reaches a listener: the policy constructor refuses it, so no
@@ -471,4 +485,216 @@ async fn assert_one_permit_covers_an_sse_response() {
         matches!(ended, Err(RuntimeError::Cancelled) | Ok(())),
         "unexpected SSE server outcome: {ended:?}"
     );
+}
+
+#[cfg(feature = "grpc")]
+mod grpc_proto {
+    tonic::include_proto!("greeter");
+}
+
+/// A greeter that reports it was entered, then parks until the test releases it.
+///
+/// Parking is what makes the row discriminating: while the handler waits, tonic
+/// has produced no frame and no trailer, so the permit the blocked peer waits on
+/// is being held across an RPC that has produced nothing.
+#[cfg(feature = "grpc")]
+struct ParkedGreeter {
+    entered: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(feature = "grpc")]
+#[tonic::async_trait]
+impl grpc_proto::greeter_service::Greeter for ParkedGreeter {
+    async fn say_hello(
+        &self,
+        request: tonic::Request<grpc_proto::HelloRequest>,
+    ) -> Result<tonic::Response<grpc_proto::HelloReply>, tonic::Status> {
+        self.entered
+            .send(())
+            .expect("report that the parked RPC was entered");
+        let permit = self
+            .release
+            .acquire()
+            .await
+            .expect("the parked RPC's release gate closed");
+        drop(permit);
+        let name = request.into_inner().name;
+        Ok(tonic::Response::new(grpc_proto::HelloReply {
+            message: format!("Hello, {name}!"),
+        }))
+    }
+}
+
+/// One permit covers a gRPC transport for the transport's life, not the RPC's.
+///
+/// Read twice on purpose. First while the RPC is parked, which proves the permit
+/// is held across work tonic has not begun to answer. Then after the RPC has
+/// returned its reply: an HTTP/2 channel outlives the call it carried, so a
+/// permit released at the end of the RPC — rather than the end of the connection
+/// — would let the waiting peer in here. Only closing the channel returns it.
+#[cfg(feature = "grpc")]
+async fn assert_one_permit_covers_a_grpc_transport() {
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (entered, mut entries) = tokio::sync::mpsc::unbounded_channel();
+    let mut router = Router::new();
+    router.get("/ping", |_req: &Request| async {
+        Response::text(200, "ping")
+    });
+    router.grpc(
+        GrpcRouter::new().add_service(grpc_proto::greeter_service::serve(ParkedGreeter {
+            entered,
+            release: Arc::clone(&release),
+        })),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the gRPC listener");
+    let addr = listener.local_addr().expect("gRPC address");
+    let controller = lifecycle(addr).expect("register the gRPC observer");
+    let handle = camber::http::server(router)
+        .policy(
+            ServerPolicy::default()
+                .connection_limit(1)
+                .expect("one concurrent transport"),
+        )
+        .serve_background(listener)
+        .expect("owned server requires a Tokio runtime");
+
+    let channel = tokio::time::timeout(
+        EVENT_TIMEOUT,
+        tonic::transport::Channel::from_shared(format!("http://{addr}"))
+            .expect("build the gRPC endpoint")
+            .connect(),
+    )
+    .await
+    .expect("the gRPC channel never connected")
+    .expect("the gRPC channel failed to connect");
+    let mut caller = grpc_proto::greeter_client::GreeterClient::new(channel);
+    // The client is returned rather than dropped inside the task: the transport
+    // must stay open after the RPC ends, because that gap is what this row reads.
+    let call = tokio::spawn(async move {
+        let reply = caller
+            .say_hello(tonic::Request::new(grpc_proto::HelloRequest {
+                name: "Camber".into(),
+            }))
+            .await
+            .expect("the gRPC call failed")
+            .into_inner()
+            .message;
+        (caller, reply)
+    });
+
+    tokio::time::timeout(EVENT_TIMEOUT, entries.recv())
+        .await
+        .expect("the parked RPC was never entered")
+        .expect("the parked RPC's entry channel closed");
+
+    controller
+        .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+        .expect("arm the gRPC permit wait");
+    let mut blocked = connect(addr).await;
+    send_get(&mut blocked, "/ping").await;
+    wait_paused(
+        &controller,
+        LifecycleCheckpoint::ConnectionPermitWaitPending,
+        "gRPC blocked",
+    )
+    .await;
+    controller
+        .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+        .expect("release the gRPC permit wait");
+    assert_unanswered(&mut blocked, "gRPC blocked while the RPC is parked").await;
+
+    release.add_permits(1);
+    let (client, reply) = tokio::time::timeout(EVENT_TIMEOUT, call)
+        .await
+        .expect("the released RPC never returned")
+        .expect("the gRPC call task panicked");
+    assert_eq!(
+        reply.as_str(),
+        "Hello, Camber!",
+        "the parked RPC did not complete through tonic"
+    );
+
+    assert_unanswered(&mut blocked, "gRPC blocked after the RPC completed").await;
+
+    drop(client);
+    assert_answered(&mut blocked, "gRPC blocked").await;
+
+    handle.shutdown();
+    tokio::time::timeout(EVENT_TIMEOUT, handle.join())
+        .await
+        .expect("the gRPC server joined")
+        .expect("the gRPC server ended cleanly");
+}
+
+/// The limit is the server's own authority, not the Camber runtime's.
+///
+/// This row serves from a bare Tokio executor, which takes the other production
+/// join branch: `serve_background` spawns onto Tokio rather than onto Camber.
+/// The `serve_listener` refusal that opens it is the proof that no Camber
+/// runtime is established here — the policy under test came from nowhere else.
+fn assert_bare_tokio_serving_holds_one_permit() {
+    let executor = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build the bare executor");
+    executor.block_on(assert_bare_tokio_limit_holds());
+}
+
+async fn assert_bare_tokio_limit_holds() {
+    let probe = camber::net::listen("127.0.0.1:0").expect("bind the bare-Tokio probe listener");
+    match camber::http::server(Router::new()).serve_listener(probe) {
+        Err(RuntimeError::NoRuntime) => {}
+        other => panic!("the bare-Tokio row is not bare: serve_listener returned {other:?}"),
+    }
+
+    let held = held_router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the bare-Tokio listener");
+    let addr = listener.local_addr().expect("bare-Tokio address");
+    let controller = lifecycle(addr).expect("register the bare-Tokio observer");
+    let handle = camber::http::server(held.router)
+        .policy(
+            ServerPolicy::default()
+                .connection_limit(1)
+                .expect("one concurrent transport"),
+        )
+        .serve_background(listener)
+        .expect("a bare Tokio executor is all a background server needs");
+
+    controller
+        .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+        .expect("arm the bare-Tokio permit wait");
+
+    let mut first = connect(addr).await;
+    send_get(&mut first, "/held").await;
+    let mut second = connect(addr).await;
+    send_get(&mut second, "/held").await;
+
+    wait_paused(
+        &controller,
+        LifecycleCheckpoint::ConnectionPermitWaitPending,
+        "bare-Tokio second",
+    )
+    .await;
+    controller
+        .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+        .expect("release the bare-Tokio permit wait");
+    assert_unanswered(&mut second, "bare-Tokio second").await;
+
+    held.release.add_permits(1);
+    assert_answered(&mut first, "bare-Tokio first").await;
+
+    held.release.add_permits(1);
+    assert_answered(&mut second, "bare-Tokio second").await;
+
+    handle.shutdown();
+    tokio::time::timeout(EVENT_TIMEOUT, handle.join())
+        .await
+        .expect("the bare-Tokio server joined")
+        .expect("the bare-Tokio server ended cleanly");
 }

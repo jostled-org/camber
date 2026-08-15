@@ -104,7 +104,7 @@ application acts on, and a channel result flattens six answers into one:
 The same two refusals answer a `camber::spawn` issued from inside the callback,
 and they keep their ordinary meanings. `ScopeClosed` says the callback's own
 Camber runtime has stopped admitting; `NoRuntime` says the serving path never
-carried one, which is every bare-Tokio and synchronous detached connection.
+carried one, which is every bare-Tokio connection.
 Neither refusal runs its closure, so a receiver captured by that closure is
 dropped and the connection ends with `ReceiverDropped`.
 
