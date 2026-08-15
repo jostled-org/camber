@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/jostled-org/camber/compare/camber-cli-v0.6.0...camber-cli-v0.7.0) - 2026-08-15
+
+### Added
+
+- [**breaking**] implement independent-websocket-directions
+
 ## [0.6.0](https://github.com/jostled-org/camber/compare/camber-cli-v0.5.2...camber-cli-v0.6.0) - 2026-08-14
 
 ### Added
