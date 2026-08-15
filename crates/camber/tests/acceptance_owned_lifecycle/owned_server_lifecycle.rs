@@ -635,7 +635,11 @@ async fn dropping_controller_releases_waiter_and_allows_address_reuse() {
     handle.cancel();
     assert_cancelled(handle.await);
     drop(client);
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    // The shared bounded rebind, because this peer is closing as the address is
+    // asked for: a single ask reports its teardown as an address still held.
+    let listener = rebind_within(addr, SETTLE_BOUND)
+        .await
+        .expect("the cancelled server's address was never bindable again");
     let replacement = lifecycle(listener.local_addr().unwrap()).unwrap();
     drop(replacement);
 }

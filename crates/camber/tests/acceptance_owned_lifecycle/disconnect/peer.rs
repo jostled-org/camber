@@ -153,11 +153,13 @@ pub(super) fn abandon_after_entry(
 /// prior read timeout and reports a failed restore as a read failure, and macOS
 /// refuses `setsockopt` on a fully closed socket, so a clean end of stream
 /// comes back as `EINVAL` — exactly the observation this window is here to
-/// make.
+/// make. Arming the window is refused the same way for the same reason, which
+/// is why it goes through the shared tolerance rather than being asserted on:
+/// a server that closed before the window opened is this window's zero, not a
+/// socket the case failed to configure.
 fn response_bytes_within_quiet(client: &mut std::net::TcpStream) -> usize {
     use std::io::Read;
-    client
-        .set_read_timeout(Some(QUIET))
+    crate::common::tolerate_dead_socket(client.set_read_timeout(Some(QUIET)))
         .expect("the peer rejected its quiet-window read bound");
     let mut buffer = [0_u8; 4096];
     match client.read(&mut buffer) {

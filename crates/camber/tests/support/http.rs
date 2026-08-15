@@ -470,6 +470,39 @@ pub fn refusing_body_admission(
 /// observation arrives, and fails the case when it never does.
 pub const SETTLE_BOUND: Duration = Duration::from_secs(5);
 
+/// Bind `addr` again, asking until it answers or `bound` expires.
+///
+/// The one thing about a completed server an out-of-process observer can check
+/// without asking Camber: the port it served on is free again. A single ask
+/// answers a wider question than that. A peer whose transport is still being
+/// torn down holds the address for a few milliseconds after the server let it
+/// go, and the kernel refuses the bind for exactly that window — the port
+/// carries nothing by the time it answers. A listener a server kept is never
+/// bindable, so the bound keeps the claim and drops only the window.
+///
+/// The refusal that expires the bound is the one returned, because it is the
+/// state the address was actually left in.
+pub async fn rebind_within(
+    addr: SocketAddr,
+    bound: Duration,
+) -> io::Result<tokio::net::TcpListener> {
+    /// What a refused bind waits before asking again. Long enough that a
+    /// closing transport is gone by the next ask, short enough that the usual
+    /// answer costs one of them.
+    const RETRY: Duration = Duration::from_millis(10);
+    let deadline = tokio::time::Instant::now() + bound;
+    loop {
+        let refusal = match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(refusal) => refusal,
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return Err(refusal);
+        }
+        tokio::time::sleep(RETRY).await;
+    }
+}
+
 /// A body-admission permit whose release is the only thing it records.
 ///
 /// The permit a policy hands over is dropped by the owner the runtime gave it

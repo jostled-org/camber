@@ -516,6 +516,13 @@ impl LifecycleScript {
         result
     }
 
+    /// Wait until production reports reaching `checkpoint`.
+    ///
+    /// Registration precedes the second read of the phase, and both precede the
+    /// wait. [`CheckpointState::pause`] wakes through `notify_waiters`, which
+    /// stores no permit: a pause landing after an unregistered waiter read
+    /// `Armed` is a wake that never happened, and the observer holds for its
+    /// caller's whole bound on a checkpoint production already reached.
     async fn wait_until_paused(&self, checkpoint: LifecycleCheckpoint) -> Result<(), RuntimeError> {
         loop {
             let reached = {
@@ -536,6 +543,7 @@ impl LifecycleScript {
             };
             let notified = reached.notified();
             tokio::pin!(notified);
+            notified.as_mut().enable();
             let already_paused = {
                 let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
                 state.closed

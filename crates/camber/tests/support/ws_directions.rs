@@ -968,6 +968,10 @@ impl DirectionTestFixture {
     /// completion, and the bind is the one of the three an out-of-process
     /// observer can check without asking Camber.
     ///
+    /// The bind is the shared bounded one, for the reason stated there: a row's
+    /// own peers are still being torn down when its server completes, and a
+    /// single ask reports that window as a listener still held.
+    ///
     /// The registration is the half only Camber can answer. The registry is
     /// keyed by address and refuses a second controller for one, so a fixture
     /// that published this port as free while still holding its entry would fail
@@ -975,10 +979,13 @@ impl DirectionTestFixture {
     /// what makes [`Self::release_observer`] falsifiable: the failure lands on
     /// the fixture that leaked the entry rather than on whoever inherited it.
     async fn prove_address_reuse(addr: SocketAddr) {
-        assert!(
-            tokio::net::TcpListener::bind(addr).await.is_ok(),
-            "the direction listener's address {addr} was still held after completion"
-        );
+        match super::http::rebind_within(addr, DIRECTION_DEADLINE).await {
+            Ok(listener) => drop(listener),
+            Err(error) => panic!(
+                "the direction listener's address {addr} was still held \
+                 {DIRECTION_DEADLINE:?} after completion: {error}"
+            ),
+        }
         drop(lifecycle(addr).unwrap_or_else(|error| {
             panic!("the direction listener's observer for {addr} outlived its fixture: {error}")
         }));
