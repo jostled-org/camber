@@ -1,4 +1,4 @@
-//! 1.T2: runtime, server, host, and child policies narrow, and never widen.
+//! 2.T1: runtime, server, host, and child policies narrow, and never widen.
 
 use crate::http as http_support;
 
@@ -11,8 +11,11 @@ use std::time::Duration;
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The header boundary the runtime envelope carries into every server below.
+/// The header boundary the runtime envelope carries, which only a server naming
+/// a shorter one replaces.
 const RUNTIME_HEADER_TIMEOUT: Duration = Duration::from_millis(100);
+/// The header boundary one server names beneath the runtime's own.
+const SERVER_HEADER_TIMEOUT: Duration = Duration::from_millis(50);
 /// The request deadlines the runtime envelope carries, which no row narrows away.
 const RUNTIME_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The deadline the runtime's own teardown shares with its servers.
@@ -140,6 +143,35 @@ async fn assert_server_inherits_the_runtime() {
                 RUNTIME_REQUEST_TIMEOUT,
             )
             .expect("the runtime's default request budget"),
+            expected_upload: TransferBudget::unbounded(),
+            expected_download: TransferBudget::unbounded(),
+        },
+        None,
+    )
+    .await;
+}
+
+/// A server that names a header boundary shorter than the runtime's wins that
+/// dimension, and wins only that dimension.
+///
+/// This is the header row the other direction: every other row leaves the
+/// runtime holding the shorter value, so a resolver that read the outer header
+/// boundary and discarded the server's would pass them all. Here the server's
+/// fifty milliseconds is the only value that can reach the connection owner,
+/// while the request budget beside it must still be the runtime's.
+async fn assert_the_server_header_narrows_the_runtime() {
+    assert_row(
+        PolicyRow {
+            name: "server header narrows the runtime",
+            policy: ServerPolicy::default()
+                .header_timeout(SERVER_HEADER_TIMEOUT)
+                .expect("a header timeout narrower than the runtime's"),
+            expected_header: SERVER_HEADER_TIMEOUT,
+            expected_request: RequestBudget::bounded(
+                RUNTIME_REQUEST_TIMEOUT,
+                RUNTIME_REQUEST_TIMEOUT,
+            )
+            .expect("the runtime's request budget stands beside the narrowed header"),
             expected_upload: TransferBudget::unbounded(),
             expected_download: TransferBudget::unbounded(),
         },
@@ -337,7 +369,7 @@ fn assert_a_later_field_writes_onto_the_whole_policy() {
         .expect("the writing-order runtime ran");
 }
 
-/// 1.T2
+/// 2.T1
 ///
 /// The runtime layer enters through `RuntimeBuilder`, so the outer envelope
 /// every row narrows is the one a caller of the public API would have.
@@ -348,6 +380,7 @@ fn nested_policies_only_narrow_outer_finite_limits() {
         .run(|| {
             camber::runtime::block_on(async {
                 assert_server_inherits_the_runtime().await;
+                assert_the_server_header_narrows_the_runtime().await;
                 assert_server_narrows_the_runtime().await;
                 assert_host_and_child_narrow_the_server().await;
             });
