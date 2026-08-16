@@ -21,7 +21,7 @@ where
 {
 }
 
-// 2.T6, revised by 1.T5 for the canonical builder
+// 3.T2: the canonical builder and every fallible terminal
 #[test]
 fn additive_lifecycle_api_compiles_through_exact_public_paths() {
     // The canonical owned server path, named exactly as documentation presents

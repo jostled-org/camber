@@ -90,7 +90,7 @@ async fn wait_paused(controller: &LifecycleController, checkpoint: LifecycleChec
         .unwrap_or_else(|error| panic!("{at}: waiting for {checkpoint:?} failed: {error}"));
 }
 
-/// 1.T3
+/// 3.T1
 #[camber::test]
 async fn server_builder_freezes_context_and_policy_at_terminal_call() {
     // The rows that must observe an ABSENT runtime run on threads of their own:
