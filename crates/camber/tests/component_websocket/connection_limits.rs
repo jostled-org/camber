@@ -275,10 +275,21 @@ fn arm_pending_permit_checkpoint(controller: &LifecycleController) {
         .expect("arm pending connection-permit checkpoint");
 }
 
+/// Wait for the second peer to park at the production permit checkpoint.
+///
+/// Bounded on purpose. A permit that came back before its transport ended
+/// admits that peer straight away, so the checkpoint is never reached — and an
+/// unbounded wait would report that as a hang instead of as the limit failing
+/// to hold.
 fn wait_for_pending_permit(controller: &LifecycleController) {
-    common::block_on(
-        controller.wait_until_paused(LifecycleCheckpoint::ConnectionPermitWaitPending),
-    )
+    common::block_on(async {
+        tokio::time::timeout(
+            EVENT_TIMEOUT,
+            controller.wait_until_paused(LifecycleCheckpoint::ConnectionPermitWaitPending),
+        )
+        .await
+        .expect("ConnectionPermitWaitPending was never reached")
+    })
     .expect("production connection-permit acquisition returned Pending");
 }
 
