@@ -43,13 +43,12 @@ impl Acceptor for tokio::net::UnixListener {
 /// unset, so a loop watching shutdown alone would still be parked at the
 /// escalation boundary and turn a clean exit into a scope drain timeout.
 ///
-/// When `conn_limit` is `Some`, the semaphore bounds the number of concurrent
-/// connections. The accept loop waits for a permit before spawning a task;
-/// the permit is released when the connection task completes.
+/// This loop serves raw transports, which carry no connection limit: the one
+/// listener semaphore belongs to the HTTP supervisor, which owns its permit for
+/// the accepted transport's whole lifetime.
 pub(crate) async fn accept_loop<L, F, Fut>(
     listener: &L,
     signals: &crate::runtime_state::LifecycleSignals,
-    conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
     on_accept: F,
 ) -> Result<(), RuntimeError>
 where
@@ -61,7 +60,7 @@ where
     // are sticky, so a wait that has not resolved is still the same wait next
     // time round; constructing it inside the loop would register and deregister
     // a `Notify` waiter — an internal mutex and an intrusive-list edit — on
-    // every accepted connection, and again on every permit wait.
+    // every accepted connection.
     let stop = signals.wait();
     tokio::pin!(stop);
     let mut handlers = tokio::task::JoinSet::new();
@@ -101,20 +100,7 @@ where
                 return Err(error.into());
             }
         };
-        match spawn_with_limit(
-            conn_limit,
-            stop.as_mut(),
-            &mut handlers,
-            on_accept(connection),
-        )
-        .await
-        {
-            true => {
-                stop_handlers(&mut handlers).await;
-                return Ok(());
-            }
-            false => {}
-        }
+        handlers.spawn(on_accept(connection));
     }
 }
 
@@ -157,49 +143,6 @@ pub(crate) async fn acquire_connection_permit(
         }
         (None, None) => future.await,
     }
-}
-
-/// Spawn a connection task, optionally gated by a semaphore permit.
-///
-/// When `conn_limit` is `None`, spawns immediately. When `Some`, acquires a
-/// permit first. The permit is held for the lifetime of the spawned task,
-/// so it is released when the connection closes. Closed semaphores (runtime
-/// shutdown) are treated as a no-op — the connection is dropped silently.
-///
-/// `stop` is the loop's own hoisted wait, borrowed rather than re-derived: the
-/// caller already holds one registration for the whole listener, and deriving a
-/// second one here would restore the per-connection cost the hoist removed.
-/// Generic over the future so the caller decides which signals it races.
-async fn spawn_with_limit<Stop, Fut>(
-    conn_limit: Option<&Arc<tokio::sync::Semaphore>>,
-    stop: Pin<&mut Stop>,
-    handlers: &mut tokio::task::JoinSet<()>,
-    fut: Fut,
-) -> bool
-where
-    Stop: Future<Output = ()>,
-    Fut: Future<Output = ()> + Send + 'static,
-{
-    let permit = match conn_limit {
-        None => {
-            handlers.spawn(fut);
-            return false;
-        }
-        Some(sem) => tokio::select! {
-            biased;
-            () = stop => {
-                return true;
-            }
-            permit = Arc::clone(sem).acquire_owned() => permit,
-        },
-    };
-    if let Ok(permit) = permit {
-        handlers.spawn(async move {
-            fut.await;
-            drop(permit);
-        });
-    }
-    false
 }
 
 /// Report one user handler's outcome against the transport that dispatched to

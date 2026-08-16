@@ -147,7 +147,7 @@ where
     let signals = LifecycleSignals::current();
     let handler = Arc::new(handler);
 
-    super::accept::accept_loop(tcp, &signals, None, |(stream, _)| {
+    super::accept::accept_loop(tcp, &signals, |(stream, _)| {
         let h = Arc::clone(&handler);
         async move { handle_connection(stream, h).await }
     })
@@ -209,7 +209,7 @@ where
     let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
     let handler = Arc::new(handler);
 
-    super::accept::accept_loop(tcp, &signals, None, |(stream, _)| {
+    super::accept::accept_loop(tcp, &signals, |(stream, _)| {
         let a = acceptor.clone();
         let h = Arc::clone(&handler);
         async move { handle_tls_connection(stream, a, h).await }
