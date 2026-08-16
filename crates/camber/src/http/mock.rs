@@ -936,6 +936,92 @@ pub(crate) fn lifecycle_script(addr: std::net::SocketAddr) -> Option<Arc<Lifecyc
         .and_then(|entry| entry.script.upgrade())
 }
 
+/// One checkpoint's reach and its first look, held apart.
+///
+/// A served checkpoint does both inside one poll — [`LifecycleScript::pause`]
+/// takes the gate back from `reach` and polls it in the same call — so no case
+/// outside this crate can tell which of the two moments
+/// [`LifecycleController::wait_until_paused`] ends on. This holds the same
+/// `CheckpointState` and `ReleaseGate` a listener's script owns, reaches the
+/// checkpoint the way production reaches it, and leaves the look to its caller.
+///
+/// Its script is registered to no address, so [`lifecycle_script`] never
+/// resolves it and no served connection, upgrade, or bridge can observe it. It
+/// orders one gate it armed itself and reports what that gate has recorded. It
+/// selects no policy, handshake result, terminal cause, cleanup outcome, or
+/// permit release, and it reaches no checkpoint on any listener's behalf.
+#[doc(hidden)]
+pub struct CheckpointWaitProbe {
+    script: LifecycleScript,
+    checkpoint: LifecycleCheckpoint,
+    /// The gate the reached checkpoint waits on, once it has been reached.
+    gate: Option<Arc<ReleaseGate>>,
+}
+
+impl CheckpointWaitProbe {
+    /// Reach the probed checkpoint, and stop before the first look.
+    ///
+    /// This is exactly what a production `pause_at` does first. What it does
+    /// next — look for the release — is [`Self::look`], so the two moments are
+    /// separate calls here and one call everywhere else.
+    pub fn reach(&mut self) -> Result<(), RuntimeError> {
+        match self.script.reach(self.checkpoint) {
+            Some(gate) => {
+                self.gate = Some(gate);
+                Ok(())
+            }
+            None => Err(LifecycleScript::invalid(
+                "lifecycle checkpoint is not armed",
+            )),
+        }
+    }
+
+    /// Take one turn of the future held at the checkpoint, and answer what that
+    /// turn found: the release recorded, or not yet.
+    ///
+    /// The turn is the production poll's, not a copy of it: it goes through the
+    /// same [`ReleaseGate::poll_release`] the held future calls, so it counts
+    /// itself and publishes a first look the same way.
+    pub fn look(&self) -> Result<bool, RuntimeError> {
+        let gate = self
+            .gate
+            .as_ref()
+            .ok_or_else(|| LifecycleScript::invalid("lifecycle checkpoint has not been reached"))?;
+        let context = std::task::Context::from_waker(std::task::Waker::noop());
+        Ok(gate.poll_release(&context).is_ready())
+    }
+
+    /// The wait a case takes on a checkpoint it armed.
+    pub async fn wait_until_paused(&self) -> Result<(), RuntimeError> {
+        self.script.wait_until_paused(self.checkpoint).await
+    }
+
+    /// How many turns the future held at the checkpoint has taken.
+    pub fn polls(&self) -> Result<usize, RuntimeError> {
+        self.script.checkpoint_polls(self.checkpoint)
+    }
+
+    /// Record the release without waking what waits at it, as
+    /// [`LifecycleController::stage_release`] does.
+    pub fn stage_release(&self) -> Result<(), RuntimeError> {
+        self.script.record_release(self.checkpoint).map(drop)
+    }
+}
+
+/// Arm one checkpoint on a script no listener resolves.
+#[doc(hidden)]
+pub fn checkpoint_wait_probe(
+    checkpoint: LifecycleCheckpoint,
+) -> Result<CheckpointWaitProbe, RuntimeError> {
+    let script = LifecycleScript::new();
+    script.arm(checkpoint)?;
+    Ok(CheckpointWaitProbe {
+        script,
+        checkpoint,
+        gate: None,
+    })
+}
+
 #[doc(hidden)]
 pub fn supervisor_join_probe(probe: SupervisorJoinProbe) -> super::server::ServerHandleFuture {
     super::server_lifecycle::supervisor_join_probe(probe)

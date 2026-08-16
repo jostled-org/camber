@@ -31,6 +31,11 @@ const SYNCHRONOUS_ISOLATION_MODE: &str = "synchronous-lifecycle-isolation";
 
 const SYNCHRONOUS_ISOLATION_MARKER: &str = "synchronous-lifecycle-isolation-complete";
 
+/// The channel capacity an unconfigured router hands its SSE and WebSocket
+/// queues, which is the payload the buffer checkpoints carry.
+#[cfg(feature = "ws")]
+const SUPERVISED_BUFFER: usize = 32;
+
 #[test]
 fn connection_limit_zero_rejected() {
     let err = camber::runtime::builder()
@@ -323,11 +328,89 @@ fn assert_supervisor_checkpoint_reached(
     controller: &LifecycleController,
     checkpoint: LifecycleCheckpoint,
 ) {
-    common::block_on(controller.wait_until_paused(checkpoint))
-        .expect("synchronous serving never reached the supervisor checkpoint");
+    common::block_on(async {
+        tokio::time::timeout(EVENT_TIMEOUT, controller.wait_until_paused(checkpoint))
+            .await
+            .unwrap_or_else(|_| {
+                panic!("synchronous serving never reached {checkpoint:?} within {EVENT_TIMEOUT:?}")
+            })
+    })
+    .expect("synchronous serving never reached the supervisor checkpoint");
     controller
         .release(checkpoint)
         .expect("release the supervisor checkpoint");
+}
+
+/// Arm every checkpoint the synchronous path under test must reach.
+#[cfg(feature = "ws")]
+fn arm_checkpoints(controller: &LifecycleController, checkpoints: &[LifecycleCheckpoint]) {
+    for checkpoint in checkpoints {
+        controller
+            .pause_once(*checkpoint)
+            .expect("arm the shared supervisor checkpoint");
+    }
+}
+
+/// Require synchronous serving to reach each checkpoint in production order,
+/// releasing every one it is held at.
+///
+/// Order is the whole contract of the sequence: a wait for a later checkpoint
+/// taken while an earlier one still holds the connection would report the
+/// earlier hold as a failure to reach the later one.
+#[cfg(feature = "ws")]
+fn assert_supervisor_checkpoints_reached(
+    controller: &LifecycleController,
+    checkpoints: &[LifecycleCheckpoint],
+) {
+    for checkpoint in checkpoints {
+        assert_supervisor_checkpoint_reached(controller, *checkpoint);
+    }
+}
+
+/// The checkpoints one synchronously served SSE response reaches, in order.
+///
+/// `AfterPermit` is the shared admission moment every family passes through;
+/// `SseBufferConfigured` is the streaming owner's own, and it carries the
+/// capacity the router resolved, so a case naming a capacity the router never
+/// configured would wait at a checkpoint production never reaches.
+#[cfg(feature = "ws")]
+fn synchronous_sse_checkpoints() -> [LifecycleCheckpoint; 2] {
+    [
+        LifecycleCheckpoint::AfterPermit,
+        LifecycleCheckpoint::SseBufferConfigured(SUPERVISED_BUFFER),
+    ]
+}
+
+/// The checkpoints one synchronously served direct WebSocket reaches, in order.
+///
+/// The upgrade pair is the supervisor's registrar — the connection submits its
+/// ticket, the supervisor acknowledges it — and the buffer pair belongs to the
+/// direct bridge the admitted registration releases.
+#[cfg(feature = "ws")]
+fn synchronous_direct_websocket_checkpoints() -> [LifecycleCheckpoint; 5] {
+    [
+        LifecycleCheckpoint::AfterPermit,
+        LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
+        LifecycleCheckpoint::BeforeUpgradeAcknowledge,
+        LifecycleCheckpoint::WebSocketOutgoingBufferConfigured(SUPERVISED_BUFFER),
+        LifecycleCheckpoint::WebSocketIncomingBufferConfigured(SUPERVISED_BUFFER),
+    ]
+}
+
+/// The checkpoints one synchronously proxied WebSocket reaches, in order.
+///
+/// The same admission and registrar checkpoints as the direct bridge, because
+/// every upgrade kind routes through one registration owner. The buffer pair is
+/// not among them: a proxied upgrade bridges two transports and builds no
+/// application queue on this listener, so naming those checkpoints here would
+/// claim reachability the proxy path does not have.
+#[cfg(feature = "ws")]
+fn synchronous_proxy_websocket_checkpoints() -> [LifecycleCheckpoint; 3] {
+    [
+        LifecycleCheckpoint::AfterPermit,
+        LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
+        LifecycleCheckpoint::BeforeUpgradeAcknowledge,
+    ]
 }
 
 #[test]
@@ -564,6 +647,69 @@ fn synchronous_serve_shutdown_cancels_pending_connection_permit() {
     );
 }
 
+/// Prove a checkpoint wait ends on the held future's first look, not on the
+/// phase flip that reached the checkpoint.
+///
+/// Every row above waits through `wait_until_paused`, so what that wait ends on
+/// decides whether the release a case records next lands on a turn production
+/// has already spent. A served checkpoint reaches and looks inside one poll —
+/// nothing can stand between them — which is why the two moments are driven
+/// apart here through the probe's own script rather than through a listener.
+/// The gate, the counter, the wait, and the recorded release are all the
+/// production ones.
+#[test]
+fn checkpoint_wait_ends_on_the_first_look_not_the_phase_flip() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let checkpoint = synchronous_connection_checkpoint();
+    let mut probe =
+        camber::http::mock::checkpoint_wait_probe(checkpoint).expect("arm the probed checkpoint");
+    probe.reach().expect("reach the probed checkpoint");
+    assert_eq!(
+        probe.polls().expect("count turns before the first look"),
+        0,
+        "reaching a checkpoint is not a turn the held future took"
+    );
+
+    let wait = probe.wait_until_paused();
+    let mut wait = std::pin::pin!(wait);
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(
+        wait.as_mut().poll(&mut context).is_pending(),
+        "the wait ended on the phase flip, before the held future looked for its release"
+    );
+
+    assert!(
+        !probe.look().expect("take the held future's first turn"),
+        "the first look found a release nothing had recorded"
+    );
+    assert_eq!(
+        probe.polls().expect("count turns after the first look"),
+        1,
+        "the first look is the held future's first turn"
+    );
+    assert!(
+        matches!(wait.as_mut().poll(&mut context), Poll::Ready(Ok(()))),
+        "the wait did not end on the first look"
+    );
+
+    // What the case does next: the release it records has to land on a turn
+    // that has not started, which is the whole reason the wait ends here.
+    probe
+        .stage_release()
+        .expect("record the release the case takes next");
+    assert_eq!(
+        probe.polls().expect("count turns after the staged release"),
+        1,
+        "the staged release landed on a turn the held future had already spent"
+    );
+    assert!(
+        probe.look().expect("take the held future's next turn"),
+        "the turn after the staged release did not observe it"
+    );
+}
+
 #[test]
 fn synchronous_serve_reaches_the_shared_supervisor_checkpoints() {
     const TEST_NAME: &str =
@@ -654,6 +800,8 @@ fn synchronous_sse_serves_under_the_shared_supervisor() {
                 .tcp()
                 .expect("TCP listener address");
             let controller = lifecycle(addr).expect("register synchronous SSE listener address");
+            let checkpoints = synchronous_sse_checkpoints();
+            arm_checkpoints(&controller, &checkpoints);
 
             let mut router = Router::new();
             router.get_sse("/events", |_req: &Request, writer| {
@@ -661,12 +809,21 @@ fn synchronous_sse_serves_under_the_shared_supervisor() {
             });
             let server = camber::spawn(move || camber::http::serve_listener(listener, router));
 
-            let mut client = plain_stream(addr);
-            send_request(&mut client, "/events");
-            let mut response = String::new();
-            client
-                .read_to_string(&mut response)
-                .expect("read synchronous SSE response");
+            // The client runs on its own thread, because each armed checkpoint
+            // holds this connection until this thread releases it.
+            let client = std::thread::spawn(move || {
+                let mut client = plain_stream(addr);
+                send_request(&mut client, "/events");
+                let mut response = String::new();
+                client
+                    .read_to_string(&mut response)
+                    .expect("read synchronous SSE response");
+                response
+            });
+            assert_supervisor_checkpoints_reached(&controller, &checkpoints);
+            let response = client
+                .join()
+                .expect("the synchronous SSE client thread joined");
             assert!(response.starts_with("HTTP/1.1 200"), "{response}");
             assert!(response.contains("text/event-stream"), "{response}");
             assert!(response.contains("data: synchronous"), "{response}");
@@ -698,14 +855,25 @@ fn synchronous_direct_websocket_serves_under_the_shared_supervisor() {
                 .expect("TCP listener address");
             let controller =
                 lifecycle(addr).expect("register synchronous direct WebSocket listener address");
+            let checkpoints = synchronous_direct_websocket_checkpoints();
+            arm_checkpoints(&controller, &checkpoints);
             let (dispatched, _) = dispatch_channel();
             let server = camber::spawn(move || {
                 camber::http::serve_listener(listener, direct_ws_router(dispatched))
             });
 
-            let mut websocket = upgrade_websocket(plain_stream(addr), "/ws", "localhost");
-            assert_ws_echo(&mut websocket);
-            complete_client_initiated_close(&mut websocket);
+            // The client runs on its own thread: the handshake is committed
+            // only once the registrar checkpoints are released, and the bridge
+            // that echoes is held at the buffer checkpoints until then.
+            let client = std::thread::spawn(move || {
+                let mut websocket = upgrade_websocket(plain_stream(addr), "/ws", "localhost");
+                assert_ws_echo(&mut websocket);
+                complete_client_initiated_close(&mut websocket);
+            });
+            assert_supervisor_checkpoints_reached(&controller, &checkpoints);
+            client
+                .join()
+                .expect("the synchronous direct WebSocket client thread joined");
             drop(controller);
 
             camber::runtime::request_shutdown();
@@ -738,14 +906,25 @@ fn synchronous_proxy_websocket_serves_under_the_shared_supervisor() {
                 .expect("TCP listener address");
             let controller =
                 lifecycle(addr).expect("register synchronous proxy WebSocket listener address");
+            let checkpoints = synchronous_proxy_websocket_checkpoints();
+            arm_checkpoints(&controller, &checkpoints);
             let (dispatched, _) = dispatch_channel();
             let server = camber::spawn(move || {
                 camber::http::serve_listener(listener, proxy_ws_router(backend_addr, dispatched))
             });
 
-            let mut websocket = upgrade_websocket(plain_stream(addr), "/ws/echo", "localhost");
-            assert_ws_echo(&mut websocket);
-            complete_client_initiated_close(&mut websocket);
+            // The client runs on its own thread: the proxied handshake is
+            // committed only once this thread releases the registrar
+            // checkpoints the front listener is held at.
+            let client = std::thread::spawn(move || {
+                let mut websocket = upgrade_websocket(plain_stream(addr), "/ws/echo", "localhost");
+                assert_ws_echo(&mut websocket);
+                complete_client_initiated_close(&mut websocket);
+            });
+            assert_supervisor_checkpoints_reached(&controller, &checkpoints);
+            client
+                .join()
+                .expect("the synchronous proxy WebSocket client thread joined");
             drop(controller);
 
             camber::runtime::request_shutdown();

@@ -669,7 +669,7 @@ fn assert_settled_itself(fixture: &DirectionTestFixture) {
     );
 }
 
-// 2.T7
+// 4: retained equal-ready precedence proof, re-harnessed by Step 4
 // The cancellation rows deliberately hold the coordinator after asking the
 // server to abort. Its forced-abort deadline must stay beyond the fixture's
 // observation bound, or runner load can take the bridge away before the proof
@@ -966,7 +966,7 @@ fn owned_bare_tokio_callback_has_no_camber_runtime() {
     });
 }
 
-// 3.T3
+// 4.T1
 #[test]
 fn synchronous_serving_carries_one_supervisor_authority() {
     let (router, handoff) =
