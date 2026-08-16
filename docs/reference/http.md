@@ -303,7 +303,8 @@ answers with the same status stay distinct.
 | `BodyLimit` | `413` | `request body too large` | The body exceeds the effective limit, or a streaming multipart field exceeds `max_field_bytes` |
 | `BodyAdmission` | `503` | `service unavailable` | A route's body-admission policy declined the work |
 | `BodyUnreadable` | `400` | `request body could not be read` | The body stopped arriving for a reason that is not the limit |
-| `BodyTimeout` | `408` | `request body timed out` | The body missed its collection deadline |
+| `BodyTimeout` | `408` | `request body timed out` | The body left a longer quiet interval between data frames than the effective `RequestBudget` allows |
+| `RequestTimeout` | `408` | `request timed out` | The admitted request outlived its `RequestBudget` total before a response head committed |
 | `MalformedBody` | `400` | `malformed request body` | `Request::json` could not parse the body, or the request framed its body under a transfer coding Camber does not undo |
 | `Multipart` | `400` | `invalid multipart body` | `Request::multipart` could not parse the body, or a `Router::multipart` session hit a grammar, count, header, boundary, nesting, buffer, truncation, or abandonment failure |
 | `InvalidHeader` | `500` | `internal server error` | A response cannot be put on the wire |
@@ -315,6 +316,36 @@ answers with the same status stay distinct.
 
 A mid-body transport failure or a peer reset is not an admission refusal: it is
 `BodyUnreadable`.
+
+### Request deadlines
+
+An admitted request carries two independent deadlines from the effective
+`RequestBudget`, and neither is derived from the other.
+
+- `body_idle` is the longest quiet interval allowed between request body data
+  frames. Only a frame that delivered payload restarts it: trailers and empty
+  frames renew nothing, so a peer cannot hold a body open with them.
+- `total` is the lifetime from the admitted head to the committed response head.
+  It covers body collection, handler execution, response production, a streaming
+  proxy's upload and upstream head, and a streaming multipart session. It ends at
+  the committed head — response-body time belongs to the selected download
+  `TransferBudget`, not to the request.
+
+Both are pre-commit, so each may invoke the selected rejection mapper at most
+once, and each leaves the peer's unread payload behind: the HTTP/1 connection
+closes because nothing establishes where the next request would begin, and the
+HTTP/2 failure stays on its own stream while the connection carries others.
+
+The header boundary is not one of these. `ServerPolicy::header_timeout` bounds
+Hyper's wait for a complete HTTP/1 request head, before any request exists. A
+head that never arrives closes its transport and claims no request ID, no route
+policy, no mapper call, and no completion record.
+
+Route-aware body admission stays the only authority over request payload bytes
+and permit lifetime. A deadline ends the read; it never re-counts bytes, never
+re-classifies the route, and never releases the permit a second time. When a
+byte maximum and a deadline both come ready in one scheduling turn, the byte
+maximum wins, because it names the smaller bound the peer actually crossed.
 
 ### What a mapper is given
 

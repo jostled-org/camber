@@ -251,6 +251,15 @@ impl ConnectionLifecycle {
         self.script.clone()
     }
 
+    /// This connection's shutdown and forced-cancellation authority.
+    ///
+    /// `None` is a connection with no supervisor to hear from, which is what an
+    /// operation carrying it reads as "neither terminal can be observed" rather
+    /// than as "the server is running".
+    pub(super) fn control(&self) -> Option<tokio::sync::watch::Receiver<ServerControl>> {
+        self.control.clone()
+    }
+
     #[cfg(feature = "ws")]
     pub(super) fn upgrade_registrar(&self) -> Option<UpgradeRegistrar> {
         let sender = self.registration.as_ref()?;

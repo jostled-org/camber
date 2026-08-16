@@ -1,7 +1,8 @@
 use super::Method;
 use super::Response;
+pub use super::operation::{InboundTerminal, OperationStage};
 use super::response::HeaderPair;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::RuntimeError;
@@ -35,6 +36,14 @@ pub enum LifecycleCheckpoint {
         upload: super::TransferBudget,
         download: super::TransferBudget,
     },
+    /// One admitted request's inbound coordinator is about to weigh a whole
+    /// scheduling turn's ready sources against the declared precedence.
+    ///
+    /// Held here, a case stages every source it wants weighed together and the
+    /// selection that follows sees all of them in the one turn.
+    BeforeInboundTerminalSelection,
+    /// The terminal one admitted request's inbound coordinator selected.
+    InboundTerminalSelected(InboundTerminal),
     RequestBodyLimitConfigured(usize),
     RequestBodyLimitObserved,
     StreamingUpstreamHeadReady,
@@ -281,6 +290,84 @@ struct BodyObservations {
     permit_owners_dropped: AtomicUsize,
 }
 
+/// What one listener's admitted operations published about their envelopes.
+///
+/// Written by the production owner that mints an envelope and by each owner
+/// that reads one, and by nothing else. Nothing here mints an identity,
+/// selects a policy, or decides which owner runs.
+#[derive(Default)]
+struct OperationObservations {
+    /// Envelopes this listener's admitted heads minted.
+    admitted: AtomicUsize,
+    /// The identity most recently read, from any owner.
+    identity: AtomicU64,
+    /// How many distinct identities every owner between them has read.
+    ///
+    /// The count, not the set: one identity read by four owners is what the
+    /// carry claim needs, and a second envelope reaching any owner shows up
+    /// here as two whichever owner saw it.
+    distinct_identities: AtomicUsize,
+    /// The request-total deadline the mint computed, as its offset from
+    /// admission, in nanoseconds. `u64::MAX` is an unbounded total.
+    total_from_admission: AtomicU64,
+    /// How many distinct totals this listener's envelopes carried.
+    distinct_totals: AtomicUsize,
+    dispatch: AtomicUsize,
+    middleware: AtomicUsize,
+    body: AtomicUsize,
+    response_head: AtomicUsize,
+}
+
+/// Record one value, and count it when it differs from the last one recorded.
+///
+/// A last-value cell beside a change count. Four owners reading one identity
+/// leave the count at one, and a second envelope reaching any owner leaves it
+/// at two whichever owner saw it. The claim it supports is per admitted
+/// request, so a case that wants it drives one request at a time against its
+/// own listener.
+fn count_distinct(last: &AtomicU64, distinct: &AtomicUsize, value: u64) {
+    match last.swap(value, Ordering::AcqRel) {
+        previous if previous == value => {}
+        _ => {
+            distinct.fetch_add(1, Ordering::Release);
+        }
+    }
+}
+
+/// The nanosecond spelling of an unbounded request total.
+///
+/// A real total is validated below the thirty-year policy ceiling, which is
+/// under 10^18 nanoseconds, so the sentinel names no configurable value.
+const UNBOUNDED_TOTAL_NANOS: u64 = u64::MAX;
+
+/// What one listener's admitted operations have published so far.
+///
+/// Read-only. Every field is written by the production owner it names: the
+/// mint that creates an envelope, and each pre-head owner that reads one.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OperationObservation {
+    /// How many envelopes this listener's admitted heads minted.
+    pub admitted: usize,
+    /// The identity most recently read by any owner, or `None` if none has.
+    pub identity: Option<u64>,
+    /// How many distinct identities every owner between them read.
+    pub distinct_identities: usize,
+    /// The request-total deadline, as the offset from admission it was computed
+    /// at. `None` is an unbounded total.
+    pub total_from_admission: Option<std::time::Duration>,
+    /// How many distinct request totals this listener's envelopes carried.
+    pub distinct_totals: usize,
+    /// How many times the classified-route owner read an identity.
+    pub dispatch: usize,
+    /// How many times the middleware owner read an identity.
+    pub middleware: usize,
+    /// How many times the payload owner read an identity.
+    pub body: usize,
+    /// How many times the response-head handoff read an identity.
+    pub response_head: usize,
+}
+
 /// What one listener's direct WebSocket bridges reported about their two
 /// application queues.
 ///
@@ -349,6 +436,9 @@ pub(crate) struct LifecycleScript {
     state: Mutex<ScriptState>,
     supervisor_wake: tokio::sync::Notify,
     body: BodyObservations,
+    /// What this listener's admitted operations published about their one
+    /// envelope each.
+    operation: OperationObservations,
     /// What this listener's direct WebSocket bridges published.
     #[cfg(feature = "ws")]
     websocket: WebSocketDirectionObservations,
@@ -370,6 +460,7 @@ impl LifecycleScript {
             }),
             supervisor_wake: tokio::sync::Notify::new(),
             body: BodyObservations::default(),
+            operation: OperationObservations::default(),
             #[cfg(feature = "ws")]
             websocket: WebSocketDirectionObservations::default(),
             multipart: super::multipart::SessionMetrics::default(),
@@ -391,6 +482,64 @@ impl LifecycleScript {
             Some(script) => apply(project(script)),
             None => {}
         }
+    }
+
+    /// Record one envelope an admitted head minted, and the total it computed.
+    ///
+    /// Inert with no controller registered, exactly like [`Self::pause_at`].
+    pub(in crate::http) fn observe_operation_admitted(
+        script: Option<&Self>,
+        id: super::operation::OperationId,
+        total: Option<std::time::Duration>,
+    ) {
+        let nanos = total.map_or(UNBOUNDED_TOTAL_NANOS, |total| {
+            u64::try_from(total.as_nanos()).unwrap_or(UNBOUNDED_TOTAL_NANOS)
+        });
+        Self::observe(
+            script,
+            |script| &script.operation,
+            |operation| {
+                operation.admitted.fetch_add(1, Ordering::Release);
+                count_distinct(
+                    &operation.total_from_admission,
+                    &operation.distinct_totals,
+                    nanos,
+                );
+                count_distinct(
+                    &operation.identity,
+                    &operation.distinct_identities,
+                    id.value(),
+                );
+            },
+        );
+    }
+
+    /// Record that the owner at `stage` read one operation's identity.
+    ///
+    /// Inert with no controller registered.
+    pub(in crate::http) fn observe_operation(
+        script: Option<&Self>,
+        id: super::operation::OperationId,
+        stage: OperationStage,
+    ) {
+        Self::observe(
+            script,
+            |script| &script.operation,
+            |operation| {
+                let reads = match stage {
+                    OperationStage::Dispatch => &operation.dispatch,
+                    OperationStage::Middleware => &operation.middleware,
+                    OperationStage::Body => &operation.body,
+                    OperationStage::ResponseHead => &operation.response_head,
+                };
+                reads.fetch_add(1, Ordering::Release);
+                count_distinct(
+                    &operation.identity,
+                    &operation.distinct_identities,
+                    id.value(),
+                );
+            },
+        );
     }
 
     /// Write one direct-WebSocket observation.
@@ -851,6 +1000,32 @@ impl LifecycleController {
             .body
             .permit_owners_dropped
             .load(Ordering::Acquire)
+    }
+
+    /// What this listener's admitted operations have published so far.
+    ///
+    /// Read-only. Every value is written by the production owner it names: the
+    /// mint an admitted head runs, and each pre-head owner that reads the one
+    /// envelope it produced. Nothing here mints an identity, chooses a policy,
+    /// or decides which owner runs.
+    pub fn operations_observed(&self) -> OperationObservation {
+        let operation = &self.script.operation;
+        let identity = operation.identity.load(Ordering::Acquire);
+        let total = operation.total_from_admission.load(Ordering::Acquire);
+        OperationObservation {
+            admitted: operation.admitted.load(Ordering::Acquire),
+            identity: (identity > 0).then_some(identity),
+            distinct_identities: operation.distinct_identities.load(Ordering::Acquire),
+            // Zero is "nothing recorded yet", not a configured total: every
+            // finite total is validated above zero before a policy can hold it.
+            total_from_admission: (total != UNBOUNDED_TOTAL_NANOS && total > 0)
+                .then(|| std::time::Duration::from_nanos(total)),
+            distinct_totals: operation.distinct_totals.load(Ordering::Acquire),
+            dispatch: operation.dispatch.load(Ordering::Acquire),
+            middleware: operation.middleware.load(Ordering::Acquire),
+            body: operation.body.load(Ordering::Acquire),
+            response_head: operation.response_head.load(Ordering::Acquire),
+        }
     }
 
     /// What this listener's direct WebSocket bridges have published so far.

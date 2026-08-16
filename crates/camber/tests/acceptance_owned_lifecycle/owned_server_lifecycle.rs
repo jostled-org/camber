@@ -75,6 +75,39 @@ fn dispatch_drop_router(dropped: tokio::sync::oneshot::Sender<()>) -> Router {
     router
 }
 
+/// The policy every fixture that holds a request open serves under.
+///
+/// The request budget is explicitly unbounded because these rows are about the
+/// supervisor's own deadline: a held request that its own request total ended
+/// would settle the claim before the boundary under test could reach it. Under
+/// paused time that is not a remote possibility — the clock advances to the
+/// next timer whenever the runtime idles, which is exactly while these fixtures
+/// wait on the socket I/O their observations are built on.
+fn held_request_policy() -> camber::http::ServerPolicy {
+    camber::http::ServerPolicy::default().request_budget(camber::http::RequestBudget::unbounded())
+}
+
+/// Serve a held-request fixture in the background under that policy.
+fn serve_held(listener: tokio::net::TcpListener, router: Router) -> ServerHandle {
+    camber::http::server(router)
+        .policy(held_request_policy())
+        .serve_background(listener)
+        .expect("owned server requires a Tokio runtime")
+}
+
+/// The same, over TLS.
+fn serve_held_tls(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    tls: Arc<rustls::ServerConfig>,
+) -> ServerHandle {
+    camber::http::server(router)
+        .policy(held_request_policy())
+        .tls(tls)
+        .serve_background(listener)
+        .expect("owned server requires a Tokio runtime")
+}
+
 fn held_router(
     entered: tokio::sync::oneshot::Sender<()>,
     release: Arc<tokio::sync::Semaphore>,
@@ -778,11 +811,10 @@ async fn admitted_plain_transport_keeps_owner_pending_until_release() {
     let dropped = Arc::new(AtomicBool::new(false));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let handle = camber::http::serve_background(
+    let handle = serve_held(
         listener,
         held_router(entered_tx, Arc::clone(&release), Arc::clone(&dropped)),
-    )
-    .expect("owned server requires a Tokio runtime");
+    );
     let mut client = connect_request(addr).await;
     await_handler_entry(
         entered_rx,
@@ -807,12 +839,11 @@ async fn admitted_tls_transport_keeps_owner_pending_until_release() {
     let dropped = Arc::new(AtomicBool::new(false));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let handle = camber::http::serve_background_tls(
+    let handle = serve_held_tls(
         listener,
         held_router(entered_tx, Arc::clone(&release), Arc::clone(&dropped)),
         tls_config,
-    )
-    .expect("owned server requires a Tokio runtime");
+    );
     let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let mut client = connector.connect(server_name, tcp).await.unwrap();
@@ -984,7 +1015,7 @@ async fn enter_default_grace_deadline(
 // 1.T5
 #[tokio::test(start_paused = true)]
 async fn default_grace_deadline_aborts_joins_and_releases_direct_transport() {
-    let _context = runtime_test_support::install_runtime_context();
+    let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let dropped = Arc::new(AtomicBool::new(false));
@@ -992,11 +1023,10 @@ async fn default_grace_deadline_aborts_joins_and_releases_direct_transport() {
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
     let server = tokio::spawn(
-        camber::http::serve_async(
-            listener,
-            held_router(entered_tx, release, Arc::clone(&dropped)),
-        )
-        .expect("owned server requires a Tokio runtime"),
+        camber::http::server(held_router(entered_tx, release, Arc::clone(&dropped)))
+            .policy(held_request_policy())
+            .serve_async(listener)
+            .expect("owned server requires a Tokio runtime"),
     );
     let client = connect_request(addr).await;
     await_handler_entry(
@@ -1064,15 +1094,14 @@ fn configured_grace_deadline_is_used_by_background_owner() {
                 let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let handle = camber::http::serve_background(
+                let handle = serve_held(
                     listener,
                     held_router(
                         entered_tx,
                         Arc::new(tokio::sync::Semaphore::new(0)),
                         Arc::clone(&observed),
                     ),
-                )
-                .expect("owned server requires a Tokio runtime");
+                );
                 let mut client = connect_request(addr).await;
                 await_handler_entry(
                     entered_rx,
@@ -1231,8 +1260,7 @@ async fn serve_with_held_request(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, router)
-        .expect("owned server requires a Tokio runtime");
+    let handle = serve_held(listener, router);
     let client = hold_request(addr, path, entered, context).await;
     (controller, addr, handle, client)
 }
@@ -1503,7 +1531,7 @@ async fn pause_after_fatal_accept_starts_grace(controller: &LifecycleController)
 // 1.T11, 1.T12
 #[tokio::test(start_paused = true)]
 async fn fatal_outcome_is_replaced_by_timeout_after_peer_drain_escalation() {
-    let _context = runtime_test_support::install_runtime_context();
+    let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
     let (controller, _addr, handle, peer, _release) = retained_server().await;
     pause_after_fatal_accept_starts_grace(&controller).await;
     tokio::time::advance(Duration::from_secs(30)).await;
@@ -1871,7 +1899,7 @@ async fn unexpected_owned_task_cancellation_while_running_is_fatal() {
 // 1.T12: runtime graceful starts one deadline; repeated graceful does not restart it.
 #[tokio::test(start_paused = true)]
 async fn runtime_graceful_and_repeated_graceful_share_one_deadline() {
-    let _context = runtime_test_support::install_runtime_context();
+    let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
     let (controller, _addr, handle, peer, _release) = retained_server().await;
     controller
         .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
@@ -2136,7 +2164,7 @@ fn control_branch_wins_over_ready_permit() {
 // 1.T12: an already-fixed timeout is immutable when cancel is equal-ready.
 #[tokio::test(start_paused = true)]
 async fn deadline_branch_wins_over_cancel_and_remains_timeout() {
-    let _context = runtime_test_support::install_runtime_context();
+    let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
     let (controller, _addr, handle, peer, _release) = retained_server().await;
     controller
         .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
@@ -2236,7 +2264,7 @@ async fn release_deadline_and_wait_for_drained_result(controller: &LifecycleCont
 // 1.T12: deadline beats newly-ready captured runtime shutdown.
 #[tokio::test(start_paused = true)]
 async fn deadline_branch_wins_over_runtime() {
-    let _context = runtime_test_support::install_runtime_context();
+    let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
     let (controller, _addr, handle, peer, _release) = pause_after_owned_panic_starts_grace().await;
     tokio::time::advance(Duration::from_secs(30)).await;
     runtime::request_shutdown();
@@ -2252,7 +2280,7 @@ async fn deadline_branch_wins_over_runtime() {
 // 1.T12: deadline beats a real successful accept waiting in the listener.
 #[tokio::test(start_paused = true)]
 async fn deadline_branch_wins_over_accept_success() {
-    let _context = runtime_test_support::install_runtime_context();
+    let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
     let (controller, addr, handle, peer, _release) = retained_server().await;
     prepare_faulted_task(&controller, addr, LifecycleFault::PanicNextOwnedTask).await;
     select_next(
@@ -2282,7 +2310,7 @@ async fn deadline_branch_wins_over_accept_success() {
 // 1.T12: deadline beats an injected accept error, which remains unobserved.
 #[tokio::test(start_paused = true)]
 async fn deadline_branch_wins_over_accept_error() {
-    let _context = runtime_test_support::install_runtime_context();
+    let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
     let (controller, _addr, handle, peer, _release) = pause_after_owned_panic_starts_grace().await;
     controller
         .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
@@ -2300,7 +2328,7 @@ async fn deadline_branch_wins_over_accept_error() {
 // 1.T12: deadline beats a completed owned task and that handle is reaped next.
 #[tokio::test(start_paused = true)]
 async fn deadline_branch_wins_over_completed_task_then_reaps_it() {
-    let _context = runtime_test_support::install_runtime_context();
+    let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
     let (controller, _addr, handle, mut peer, release) =
         pause_after_owned_panic_starts_grace().await;
     release_and_drain_peer(&release, &mut peer, b"released").await;
@@ -2323,15 +2351,14 @@ fn deadline_branch_wins_over_pending_permit_becoming_ready() {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
                 let controller = lifecycle(addr).unwrap();
-                let handle = camber::http::serve_background(
+                let handle = serve_held(
                     listener,
                     held_router(
                         entered_tx,
                         Arc::clone(&release),
                         Arc::new(AtomicBool::new(false)),
                     ),
-                )
-                .expect("owned server requires a Tokio runtime");
+                );
                 let mut first = connect_request(addr).await;
                 await_handler_entry(entered_rx, "first request did not enter the handler").await;
                 controller
@@ -2386,7 +2413,7 @@ fn deadline_branch_wins_over_pending_permit_becoming_ready() {
 #[cfg(feature = "ws")]
 #[tokio::test(start_paused = true)]
 async fn deadline_branch_wins_over_submitted_registration_and_joins_it() {
-    let _context = runtime_test_support::install_runtime_context();
+    let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
@@ -2821,8 +2848,7 @@ async fn permit_registration_fixture() -> PermitRegistrationFixture {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(listener, router)
-        .expect("owned server requires a Tokio runtime");
+    let handle = serve_held(listener, router);
     let mut ordinary =
         tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
             .await
@@ -3125,7 +3151,7 @@ fn background_constructor_checks_tokio_before_stale_camber_marker() {
         .unwrap();
     // The stale Camber marker: a context established on this thread that
     // outlives the Tokio runtime it was established under.
-    let _context = runtime_test_support::install_runtime_context();
+    let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
     let listener =
         tokio_runtime.block_on(async { tokio::net::TcpListener::from_std(std_listener).unwrap() });
     drop(tokio_runtime);
@@ -3192,8 +3218,7 @@ async fn standalone_background_ignores_unrelated_camber_shutdown_and_uses_defaul
     router.get("/second", |_req: &Request| async {
         Response::text(200, "second")
     });
-    let handle = camber::http::serve_background(listener, router)
-        .expect("owned server requires a Tokio runtime");
+    let handle = serve_held(listener, router);
     let _first = connect_request(addr).await;
     await_handler_entry(
         entered_rx,
@@ -4633,15 +4658,14 @@ fn owner_graceful_wins_over_ready_permit() {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
                 let controller = lifecycle(addr).unwrap();
-                let handle = camber::http::serve_background(
+                let handle = serve_held(
                     listener,
                     held_router(
                         entered_tx,
                         Arc::clone(&release),
                         Arc::new(AtomicBool::new(false)),
                     ),
-                )
-                .expect("owned server requires a Tokio runtime");
+                );
                 let mut first = tokio::net::TcpStream::connect(addr).await.unwrap();
                 first.write_all(CLOSE_REQUEST).await.unwrap();
                 await_handler_entry(entered_rx, "owner permit request did not enter the handler")
@@ -4742,7 +4766,7 @@ async fn owner_graceful_wins_over_submitted_registration() {
 // 2.T2: repeated runtime graceful does not restart the owner deadline.
 #[tokio::test(start_paused = true)]
 async fn owner_graceful_and_runtime_graceful_share_one_deadline() {
-    let _context = runtime_test_support::install_runtime_context();
+    let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
     let (controller, _addr, handle, peer, _release) = retained_server().await;
     let mut future = Box::pin(handle.join());
     controller
@@ -5103,7 +5127,7 @@ async fn graceful_http1_finishes_current_response_then_closes_admission() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(
+    let handle = serve_held(
         listener,
         named_held_router(
             entered_tx,
@@ -5111,8 +5135,7 @@ async fn graceful_http1_finishes_current_response_then_closes_admission() {
             Arc::clone(&dropped),
             Arc::clone(&next_requests),
         ),
-    )
-    .expect("owned server requires a Tokio runtime");
+    );
     let mut client = connect_request_path(addr, "/active").await;
     await_handler_entry(
         entered_rx,

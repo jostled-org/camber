@@ -24,6 +24,7 @@ use super::multipart::{
     MultipartCompletion, MultipartRevocation, MultipartSessionDriver, MultipartTerminal,
     SessionObserver, open, request_boundary,
 };
+use super::operation::OperationStage;
 use super::rejection::{
     HANDLER, MULTIPART_SESSION, ProducerKinds, Rejected, RejectionScope, RequestIdentity,
 };
@@ -61,6 +62,7 @@ pub(super) async fn dispatch_streaming_multipart(
         origin,
         lifecycle,
         start,
+        operation,
         ..
     } = request_dispatch;
     let StreamingMultipartTarget {
@@ -83,6 +85,7 @@ pub(super) async fn dispatch_streaming_multipart(
         Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, start)),
     };
     let request = RequestHead::from_hyper_request(&hyper_req, origin).to_request(Some(params));
+    operation.observe(observer.as_deref(), OperationStage::Middleware);
     if let Some(blocked) = gated(&request, router, &scope).await {
         // Closing, because the payload this request declared was never read: the
         // next request on an HTTP/1 connection would otherwise be framed out of
@@ -105,7 +108,8 @@ pub(super) async fn dispatch_streaming_multipart(
         limits,
         observer.clone(),
     );
-    let settled = Session {
+    operation.observe(observer.as_deref(), OperationStage::Body);
+    let session = Session {
         // Entered against a borrow that ends here. The future it hands back is
         // `'static`, so nothing this session holds borrows from the request, and
         // the request goes on owning this response's lifetime signal for as long
@@ -113,10 +117,17 @@ pub(super) async fn dispatch_streaming_multipart(
         handler: registration.enter(&request, stream),
         driver,
         revocation,
-        observer,
+        observer: observer.clone(),
     }
-    .run()
-    .await;
+    .run();
+    // The session reads this operation's request payload and produces its
+    // response head, so the whole of it spends the one request total the
+    // admitted head minted.
+    let settled = match super::handle::within_total(session, operation).await {
+        Ok(settled) => settled,
+        Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, start)),
+    };
+    operation.observe(observer.as_deref(), OperationStage::ResponseHead);
     Ok(answer(ctx, settled.respond(&scope), start, &scope))
 }
 

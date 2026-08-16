@@ -51,6 +51,8 @@ pub mod host_routing_and_outbound_proxy;
 pub mod mixed_content_and_websocket_proxy;
 #[path = "acceptance_e2e/routing_and_outbound_calls.rs"]
 pub mod routing_and_outbound_calls;
+#[path = "acceptance_e2e/service_deadlines.rs"]
+pub mod service_deadlines;
 #[path = "acceptance_e2e/streaming_multipart.rs"]
 pub mod streaming_multipart;
 #[path = "acceptance_e2e/unified_rest_sse_websocket.rs"]

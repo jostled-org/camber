@@ -152,6 +152,16 @@ impl DisconnectSignal {
         self.state.cancelled().await
     }
 
+    /// The terminal cause, if this lifetime has already ended.
+    ///
+    /// The synchronous read the inbound coordinator collects a whole scheduling
+    /// turn with. Awaiting instead would decide the turn on the first source
+    /// that resolved, which is exactly the poll-order dependence the declared
+    /// precedence exists to remove.
+    pub(super) fn observed(&self) -> Option<DisconnectCause> {
+        self.state.cause.get().copied()
+    }
+
     /// Establish `Completed` from a handoff Camber cannot observe the body of.
     ///
     /// Two handoffs are that case. tonic owns a gRPC response body, so its

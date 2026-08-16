@@ -41,6 +41,39 @@ pub enum DeadlineBoundary {
     AggregateShutdown,
 }
 
+impl DeadlineBoundary {
+    /// The bounded name this deadline is reported and counted under.
+    ///
+    /// A closed vocabulary of static text. An operator's error message and, in
+    /// time, an operator's metric label both read it, so it can never become a
+    /// value derived from a request.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Header => "header",
+            Self::RequestBodyIdle => "request_body_idle",
+            Self::RequestTotal => "request_total",
+            Self::TransferIdle => "transfer_idle",
+            Self::TransferTotal => "transfer_total",
+            Self::ProxyConnect => "proxy_connect",
+            Self::ProxyRequest => "proxy_request",
+            Self::ProxyUpstreamIdle => "proxy_upstream_idle",
+            Self::ClientConnect => "client_connect",
+            Self::ClientRequest => "client_request",
+            Self::ClientResponseIdle => "client_response_idle",
+            Self::ResourceStartupHealth => "resource_startup_health",
+            Self::ResourcePeriodicHealth => "resource_periodic_health",
+            Self::ResourceShutdown => "resource_shutdown",
+            Self::AggregateShutdown => "aggregate_shutdown",
+        }
+    }
+}
+
+impl std::fmt::Display for DeadlineBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// The configured byte maximum a service operation crossed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ByteBoundary {

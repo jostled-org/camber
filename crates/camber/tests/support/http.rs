@@ -8,6 +8,7 @@ use camber::RuntimeError;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, lifecycle};
 use camber::http::{
     self, BodyAdmission, BodyAdmissionContext, HostRouter, Request, Response, Router, ServerHandle,
+    ServerPolicy,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -622,6 +623,21 @@ impl ObservedPort {
     pub fn serve(self, router: Router) -> ObservedServer {
         self.serve_with(move |listener| {
             http::serve_background(listener, router).expect("owned server requires a Tokio runtime")
+        })
+    }
+
+    /// Serve this reservation under the policy the case names.
+    ///
+    /// [`ObservedPort::serve`] takes the server's own defaults, which no
+    /// deadline row can use: the bound it drives is the one it configured, and
+    /// a fixture that could not name it would have to reach for a whole runtime
+    /// to say so.
+    pub fn serve_with_policy(self, router: Router, policy: ServerPolicy) -> ObservedServer {
+        self.serve_with(move |listener| {
+            http::server(router)
+                .policy(policy)
+                .serve_background(listener)
+                .expect("owned server requires a Tokio runtime")
         })
     }
 

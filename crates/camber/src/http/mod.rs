@@ -134,6 +134,7 @@ mod middleware;
 pub mod mock;
 mod multipart;
 mod multipart_route;
+mod operation;
 #[cfg(feature = "otel")]
 /// OpenTelemetry request propagation and tracing hooks.
 pub mod otel;

@@ -36,6 +36,16 @@ pub enum RuntimeError {
     #[error("operation timed out")]
     Timeout,
 
+    /// A service operation crossed one of its configured deadlines.
+    ///
+    /// Held apart from [`RuntimeError::Timeout`] because the bound is what an
+    /// operator acts on: a slow request body, a request that outlived its total,
+    /// and a stalled upstream are three different answers, and one untyped
+    /// "timed out" flattens them into one. The boundary is the same closed
+    /// vocabulary the policy that configured it is written in.
+    #[error("deadline exceeded: {0}")]
+    DeadlineExceeded(crate::http::DeadlineBoundary),
+
     /// Cooperative cancellation was requested.
     #[error("operation cancelled")]
     Cancelled,

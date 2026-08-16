@@ -13,6 +13,7 @@
 //! below that is private to the crate.
 
 use super::async_proxy::ProxyFailure;
+use super::boundary::DeadlineBoundary;
 use super::method::RequestMethod;
 use super::request::Request;
 use super::response::{
@@ -218,6 +219,14 @@ pub enum RejectionKind {
     BodyUnreadable,
     /// The body collection deadline expired.
     BodyTimeout,
+    /// The admitted request outlived its total deadline before a response head.
+    ///
+    /// Held apart from [`RejectionKind::BodyTimeout`] because the two name
+    /// different configured bounds: a body that stopped arriving is the peer's
+    /// upload, while a request that ran out of total time may have had no body
+    /// at all. Answering both as one told an operator to widen the wrong
+    /// deadline.
+    RequestTimeout,
     /// A request body could not be parsed as its declared representation.
     MalformedBody,
     /// A `multipart/form-data` body could not be parsed.
@@ -252,13 +261,14 @@ impl RejectionKind {
     /// sits against the variants it names, so adding one is a single edit in a
     /// single place.
     #[doc(hidden)]
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Routing,
         Self::MethodSelection,
         Self::BodyLimit,
         Self::BodyAdmission,
         Self::BodyUnreadable,
         Self::BodyTimeout,
+        Self::RequestTimeout,
         Self::MalformedBody,
         Self::Multipart,
         Self::InvalidHeader,
@@ -281,6 +291,7 @@ impl RejectionKind {
             Self::BodyAdmission => "body_admission",
             Self::BodyUnreadable => "body_unreadable",
             Self::BodyTimeout => "body_timeout",
+            Self::RequestTimeout => "request_timeout",
             Self::MalformedBody => "malformed_body",
             Self::Multipart => "multipart",
             Self::InvalidHeader => "invalid_header",
@@ -674,6 +685,40 @@ impl RefusalDetail {
     }
 }
 
+/// The operator's account of one crossed service deadline.
+///
+/// It names the closed boundary the policy configured and the value configured
+/// for it, so an operator reads which bound to widen rather than that
+/// "something timed out". Its source is the typed
+/// [`RuntimeError::DeadlineExceeded`] naming the same boundary, so a caller
+/// walking the chain reaches the vocabulary rather than the sentence.
+#[derive(Debug)]
+struct CrossedDeadline {
+    cause: RuntimeError,
+    configured: std::time::Duration,
+}
+
+impl CrossedDeadline {
+    fn new(boundary: DeadlineBoundary, configured: std::time::Duration) -> Self {
+        Self {
+            cause: RuntimeError::DeadlineExceeded(boundary),
+            configured,
+        }
+    }
+}
+
+impl fmt::Display for CrossedDeadline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} after {:?}", self.cause, self.configured)
+    }
+}
+
+impl Error for CrossedDeadline {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
 impl fmt::Display for RefusalDetail {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -905,14 +950,46 @@ impl Rejected {
         Self::plain_closing(Rejection::body_unreadable(), Arc::from(error))
     }
 
-    /// The body did not finish arriving inside its collection deadline.
+    /// The body stayed quiet longer than its configured idle interval.
     ///
     /// Forces close for the same reason a body limit does: what the peer still
     /// owed is unread, so the connection can frame nothing after it.
-    pub(super) fn body_timeout(deadline: std::time::Duration) -> Self {
-        Self::closing(
+    pub(super) fn body_timeout(idle: std::time::Duration) -> Self {
+        Self::crossed_deadline(
             Rejection::raw(RejectionKind::BodyTimeout, 408, "request body timed out"),
-            format!("body did not arrive within {deadline:?}"),
+            DeadlineBoundary::RequestBodyIdle,
+            idle,
+        )
+    }
+
+    /// The admitted request outlived its total before a response head committed.
+    ///
+    /// Forces close for the same reason: the peer may still owe payload this
+    /// request will never read, so nothing establishes where a next request
+    /// framed on this connection would begin.
+    pub(super) fn request_timeout(total: std::time::Duration) -> Self {
+        Self::crossed_deadline(
+            Rejection::raw(RejectionKind::RequestTimeout, 408, "request timed out"),
+            DeadlineBoundary::RequestTotal,
+            total,
+        )
+    }
+
+    /// One refusal a configured deadline produced, under the boundary it names.
+    ///
+    /// The operator's account is the typed error itself rather than a sentence
+    /// restating it: an operator filtering on a crossed bound reads the same
+    /// closed [`DeadlineBoundary`] the policy that configured it is written in,
+    /// and the client-safe projection still says only that the request timed
+    /// out.
+    fn crossed_deadline(
+        rejection: Rejection,
+        boundary: DeadlineBoundary,
+        configured: std::time::Duration,
+    ) -> Self {
+        Self::plain_closing(
+            rejection,
+            Arc::new(CrossedDeadline::new(boundary, configured)),
         )
     }
 

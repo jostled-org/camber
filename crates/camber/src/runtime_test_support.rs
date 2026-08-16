@@ -350,9 +350,34 @@ pub use crate::runtime_state::TestRuntimeContext;
 #[doc(hidden)]
 #[must_use = "the context is uninstalled as soon as the guard is dropped"]
 pub fn install_runtime_context() -> TestRuntimeContext {
+    install_configured_runtime_context(RuntimeConfig::default())
+}
+
+/// Install a test runtime context that bounds no admitted request's own time.
+///
+/// A fixture that holds one request open for the whole of its claim needs that
+/// request's deadlines to decide nothing. Under paused time that is not a
+/// remote possibility: the clock advances to the next timer whenever the
+/// runtime idles, which is exactly while such a fixture waits on the socket I/O
+/// its observation is built on.
+///
+/// It has to be set here rather than on the server, because the runtime is the
+/// outer authority: an inner unbounded server policy inherits the outer bound
+/// instead of erasing it, which is the precedence rule working as designed.
+#[doc(hidden)]
+pub fn install_runtime_context_without_request_deadlines() -> TestRuntimeContext {
+    let mut config = RuntimeConfig::default();
+    config.server_policy = config
+        .server_policy
+        .request_budget(crate::http::RequestBudget::unbounded());
+    install_configured_runtime_context(config)
+}
+
+/// Establish one test runtime context from the configuration it is given.
+fn install_configured_runtime_context(config: RuntimeConfig) -> TestRuntimeContext {
     let (inner, context) = crate::runtime::establish_runtime(
         tokio::runtime::Handle::try_current().ok(),
-        RuntimeConfig::default(),
+        config,
         None,
         None,
         None,

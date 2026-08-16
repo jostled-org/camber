@@ -10,6 +10,7 @@ propagation without converting between framework-specific error types.
 The variants cluster into a few stable buckets:
 
 - runtime and coordination: `Io`, `Timeout`, `Cancelled`, `TaskPanicked`, channel errors
+- configured service deadlines: `DeadlineExceeded(DeadlineBoundary)`
 - runtime context and task lifecycle: `NoRuntime`, `ScopeClosed`, `ScopeDrainTimeout`
 - request and API misuse: `BadRequest`, `InvalidArgument`
 - unparseable request payloads: `MalformedBody`, `Multipart`
@@ -118,6 +119,7 @@ report a closed connection as `Io` with `BrokenPipe`.
 As a rule:
 
 - use `InvalidArgument` for programmer-facing API misuse
+- leave `DeadlineExceeded` to Camber's own deadline owners; it names the closed `DeadlineBoundary` a configured policy set, which `Timeout` cannot
 - use `BadRequest` for caller-supplied HTTP input problems
 - leave `MalformedBody` and `Multipart` to `req.json()` and `req.multipart()`, which raise them for you
 - leave `RequestBodyLimit` and `RequestBodyUnreadable` to Camber's own body reading; they name a payload the framework stopped taking, not one your code found wrong
@@ -147,3 +149,30 @@ answers `200` is still answered with the refusal: the session recorded it, and
 the session outranks the handler. A handler error keeps its own category whether
 or not the body was read to its end. Only a handler that returns success over an
 incomplete body is overridden, and it is answered with `Multipart`.
+
+## Configured Service Deadlines
+
+`DeadlineExceeded` carries a `DeadlineBoundary`: the closed name of the bound a
+policy configured. `Timeout` says only that something ran long, which tells an
+operator nothing about which value to change. The boundary is the same
+vocabulary `RequestBudget`, `TransferBudget`, `ProxyPolicy`, `ServerPolicy`, and
+`ResourceBudget` are written in, and it is what a crossed deadline reports
+through the operator diagnostic behind a refusal.
+
+Two request boundaries reach a served peer today:
+
+- `RequestBodyIdle` — the request body left a longer quiet interval between data
+  frames than the effective `RequestBudget` allows. Classified as `BodyTimeout`,
+  answered `408`. What the peer still owed is unread, so the HTTP/1 connection
+  closes and the HTTP/2 failure stays on its own stream.
+- `RequestTotal` — the admitted request outlived its total before a response
+  head committed. It covers body collection, handler execution, and response
+  production, and it ends at the committed head: response-body time belongs to
+  the selected download `TransferBudget`, not to the request. Classified as
+  `RequestTimeout`, answered `408`, with the same unread-payload disposition.
+
+A request that ends because the server was cancelled, because its aggregate
+shutdown deadline expired, or because the peer had already gone invokes no
+rejection mapper at all. There is no refusal to shape: the work was stopped
+rather than refused, and on two of those three rows there is no peer left to
+read one.

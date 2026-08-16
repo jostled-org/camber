@@ -9,6 +9,9 @@ use super::internal_routes::match_profiling_route;
 use super::internal_routes::{
     build_internal_handler, invoke_internal_route, match_internal_route_from_path,
 };
+use super::operation::{
+    InboundFailure, InboundGuard, InboundReady, InboundTerminal, OperationEnvelope, OperationStage,
+};
 use super::record::{count_rejection, record_scoped};
 use super::rejection::{
     HANDLER, Rejected, RejectionProtocol, RejectionScope, RequestId, RequestIdentity,
@@ -25,9 +28,6 @@ use super::{BufferConfig, Request, Response};
 use crate::resource::HealthState;
 use crate::runtime_state::RuntimeInner;
 use std::sync::Arc;
-use std::time::Duration;
-
-const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(feature = "grpc")]
 use super::grpc_support::is_grpc_request;
@@ -79,7 +79,7 @@ impl ConnCtx {
 /// body could drive a server to shed all of its traffic while
 /// `http_requests_total` and `http_request_duration_seconds` stayed flat.
 struct Refused {
-    rejected: Rejected,
+    failure: InboundFailure,
     method: hyper::Method,
     uri: hyper::Uri,
 }
@@ -101,6 +101,7 @@ type Building = Result<DispatchInput, Box<Refused>>;
 async fn collect_body_limited(
     hyper_req: hyper::Request<hyper::body::Incoming>,
     buffered: BufferedRead,
+    operation: &OperationEnvelope,
     origin: RequestOrigin<'_>,
     lifecycle_script: Option<&super::mock::LifecycleScript>,
 ) -> Result<Request, Box<Refused>> {
@@ -110,11 +111,11 @@ async fn collect_body_limited(
         budget,
         permit,
     } = buffered;
-    let body_bytes = match collect_body(body, budget, lifecycle_script).await {
+    let body_bytes = match retain_within_budget(body, budget, operation, lifecycle_script).await {
         Ok(bytes) => bytes,
-        Err(rejected) => {
+        Err(failure) => {
             return Err(Box::new(Refused {
-                rejected,
+                failure,
                 method: parts.method,
                 uri: parts.uri,
             }));
@@ -126,28 +127,16 @@ async fn collect_body_limited(
     ))
 }
 
-/// Read a request body under the bound its admission resolved.
+/// Retain one admitted body's data frames under every bound its operation
+/// carries.
 ///
-/// The deadline is this function's alone. It covers the whole read rather than
-/// one frame of it, so a peer dribbling frames cannot renew its budget by
-/// sending another one.
-async fn collect_body(
-    body: hyper::body::Incoming,
-    budget: BodyBudget,
-    lifecycle_script: Option<&super::mock::LifecycleScript>,
-) -> Result<bytes::Bytes, Rejected> {
-    match tokio::time::timeout(
-        REQUEST_BODY_TIMEOUT,
-        retain_within_budget(body, budget, lifecycle_script),
-    )
-    .await
-    {
-        Ok(collected) => collected,
-        Err(_) => Err(Rejected::body_timeout(REQUEST_BODY_TIMEOUT)),
-    }
-}
-
-/// Retain one admitted body's data frames, each measured before it is kept.
+/// One turn of this loop weighs every inbound source together — the shutdown
+/// and cancellation authority the envelope carries, the two request deadlines,
+/// the peer's own response lifetime, and whatever the wire produced — and the
+/// declared precedence then names the single terminal. Two sources that became
+/// ready in the same turn are resolved by that contract rather than by which
+/// future the executor happened to poll first, and nothing is polled after a
+/// terminal is selected.
 ///
 /// Every frame is accounted through the shared bound first and appended second,
 /// so a frame that would carry this request past its limit is dropped while it
@@ -158,30 +147,119 @@ async fn collect_body(
 /// bound's running sum only ever names a total it already admitted, so a case
 /// asking what this request held would be shown the arithmetic restating itself
 /// rather than the bytes.
-///
-/// The three failures stay apart. A limit is the bound's own answer, a
-/// transport fault is the wire's, and the deadline is the caller's; collapsing
-/// them told a peer to shrink a request that was the right size.
 async fn retain_within_budget(
     mut body: hyper::body::Incoming,
-    mut budget: BodyBudget,
-    lifecycle_script: Option<&super::mock::LifecycleScript>,
-) -> Result<bytes::Bytes, Rejected> {
-    use http_body_util::BodyExt;
+    budget: BodyBudget,
+    operation: &OperationEnvelope,
+    script: Option<&super::mock::LifecycleScript>,
+) -> Result<bytes::Bytes, InboundFailure> {
+    operation.observe(script, OperationStage::Body);
+    let mut guard = operation.inbound();
+    let mut budget = budget;
     let mut retained = bytes::BytesMut::new();
-    while let Some(frame) = body.frame().await {
-        let data = match frame {
-            Ok(frame) => frame.into_data(),
-            Err(error) => return Err(Rejected::body_unreadable(Box::new(error))),
+    let mut read = InboundRead {
+        budget: &mut budget,
+        retained: &mut retained,
+        guard: &mut guard,
+        script,
+    };
+    loop {
+        super::mock::LifecycleScript::pause_at(
+            script,
+            super::mock::LifecycleCheckpoint::BeforeInboundTerminalSelection,
+        )
+        .await;
+        let (ready, wire) = advance(&mut body, &mut read).await;
+        let Some(terminal) = ready.select() else {
+            continue;
         };
-        // Trailers carry no payload, so they are neither counted nor measured.
-        let Ok(data) = data else { continue };
-        super::mock::LifecycleScript::count_body_frame(lifecycle_script);
-        budget.admit_frame(data.len())?;
-        retained.extend_from_slice(&data);
-        super::mock::LifecycleScript::observe_body_retained(lifecycle_script, retained.len());
+        super::mock::LifecycleScript::pause_at(
+            script,
+            super::mock::LifecycleCheckpoint::InboundTerminalSelected(terminal),
+        )
+        .await;
+        return match terminal {
+            InboundTerminal::ResponseHead => Ok(std::mem::take(read.retained).freeze()),
+            ended => Err(InboundFailure::of(ended, operation.budget(), wire)),
+        };
     }
-    Ok(retained.freeze())
+}
+
+/// The state one inbound turn reads and writes.
+///
+/// Bundled because the turn is one decision over all of it: the bound that
+/// admits a frame, the buffer that keeps it, the authority that can end the
+/// read, and the observer that records what happened move together or not at
+/// all.
+struct InboundRead<'a> {
+    budget: &'a mut BodyBudget,
+    retained: &'a mut bytes::BytesMut,
+    guard: &'a mut InboundGuard,
+    script: Option<&'a super::mock::LifecycleScript>,
+}
+
+/// Advance one inbound turn, and re-collect every source it ended with.
+///
+/// The carried sources are read again after the wait rather than before it: a
+/// deadline that expired while a frame was in flight belongs to the same turn
+/// as the frame, and weighing it against a stale reading would let poll order
+/// decide what the precedence table already decides.
+async fn advance(
+    body: &mut hyper::body::Incoming,
+    read: &mut InboundRead<'_>,
+) -> (InboundReady, Option<Rejected>) {
+    use http_body_util::BodyExt;
+    // The wire is offered first, so a frame already waiting is read into the
+    // same turn as the deadlines beside it. Deciding on the deadlines alone
+    // would let a body that already crossed its route's byte maximum be
+    // reported as an idle expiry, which the declared precedence ranks below it.
+    let frame = tokio::select! {
+        biased;
+        frame = body.frame() => Some(frame),
+        () = read.guard.quiet() => None,
+    };
+    let carried = read.guard.observed();
+    match frame {
+        None => (carried, None),
+        Some(frame) => fold(frame, read, carried),
+    }
+}
+
+/// Fold one wire read into the turn's ready set.
+///
+/// The three wire outcomes stay apart. A limit is the bound's own answer, a
+/// transport fault is the wire's, and the payload's end is neither; collapsing
+/// them told a peer to shrink a request that was the right size.
+fn fold(
+    frame: Option<Result<hyper::body::Frame<bytes::Bytes>, hyper::Error>>,
+    read: &mut InboundRead<'_>,
+    carried: InboundReady,
+) -> (InboundReady, Option<Rejected>) {
+    let frame = match frame {
+        None => return (carried.with_response_head(), None),
+        Some(Ok(frame)) => frame,
+        Some(Err(error)) => {
+            return (
+                carried.with_source_failure(),
+                Some(Rejected::body_unreadable(Box::new(error))),
+            );
+        }
+    };
+    // Trailers carry no payload, so they are neither counted nor measured, and
+    // they renew no quiet interval.
+    let Ok(data) = frame.into_data() else {
+        return (carried, None);
+    };
+    super::mock::LifecycleScript::count_body_frame(read.script);
+    match read.budget.admit_frame(data.len()) {
+        Err(rejected) => (carried.with_route_body_limit(), Some(rejected)),
+        Ok(_) => {
+            read.retained.extend_from_slice(&data);
+            super::mock::LifecycleScript::observe_body_retained(read.script, read.retained.len());
+            read.guard.frame_delivered(data.len());
+            (carried, None)
+        }
+    }
 }
 
 /// What dispatch is given once the head has decided how to read the wire.
@@ -223,12 +301,13 @@ fn build_head_only_request(
 async fn collect_request(
     hyper_req: hyper::Request<hyper::body::Incoming>,
     buffered: BufferedRead,
+    operation: &OperationEnvelope,
     origin: RequestOrigin<'_>,
     lifecycle_script: Option<&super::mock::LifecycleScript>,
 ) -> Building {
     let mut r = hyper_req;
     let ws_upgrade = ws_proxy::extract_ws_upgrade(&mut r);
-    let req = collect_body_limited(r, buffered, origin, lifecycle_script).await?;
+    let req = collect_body_limited(r, buffered, operation, origin, lifecycle_script).await?;
     Ok((req, ws_upgrade))
 }
 
@@ -237,10 +316,11 @@ async fn collect_request(
 async fn collect_request(
     hyper_req: hyper::Request<hyper::body::Incoming>,
     buffered: BufferedRead,
+    operation: &OperationEnvelope,
     origin: RequestOrigin<'_>,
     lifecycle_script: Option<&super::mock::LifecycleScript>,
 ) -> Building {
-    collect_body_limited(hyper_req, buffered, origin, lifecycle_script).await
+    collect_body_limited(hyper_req, buffered, operation, origin, lifecycle_script).await
 }
 
 /// How the wire is read for one classified request.
@@ -273,13 +353,21 @@ async fn build_dispatch_input(
     hyper_req: hyper::Request<hyper::body::Incoming>,
     origin: RequestOrigin<'_>,
     lifecycle: &ConnectionLifecycle,
+    operation: &OperationEnvelope,
     read: WireRead,
 ) -> Building {
     match read {
         WireRead::HeadOnly => Ok(build_head_only_request(hyper_req, origin)),
         WireRead::Body(buffered) => {
             let lifecycle_script = lifecycle.script();
-            collect_request(hyper_req, buffered, origin, lifecycle_script.as_deref()).await
+            collect_request(
+                hyper_req,
+                buffered,
+                operation,
+                origin,
+                lifecycle_script.as_deref(),
+            )
+            .await
         }
     }
 }
@@ -415,6 +503,34 @@ pub(super) fn answer_rejected(
     answer(ctx, response, start, scope)
 }
 
+/// The per-connection facts every classified head shares, before an operation
+/// exists.
+///
+/// Held apart from [`RequestDispatch`] because the difference is the contract:
+/// a head answered from here has no envelope, and a head answered from there
+/// always has exactly one.
+pub(super) struct ConnDispatch<'a> {
+    dispatch: &'a ServerDispatch,
+    ctx: &'a ConnCtx,
+    origin: RequestOrigin<'a>,
+    lifecycle: &'a ConnectionLifecycle,
+    start: std::time::Instant,
+}
+
+impl<'a> ConnDispatch<'a> {
+    /// This connection's facts, under the one envelope an admitted head minted.
+    fn admitted(&self, operation: &'a OperationEnvelope) -> RequestDispatch<'a> {
+        RequestDispatch {
+            dispatch: self.dispatch,
+            ctx: self.ctx,
+            origin: self.origin,
+            lifecycle: self.lifecycle,
+            start: self.start,
+            operation,
+        }
+    }
+}
+
 /// Shared facts needed after a request head has selected a dispatch route.
 pub(super) struct RequestDispatch<'a> {
     dispatch: &'a ServerDispatch,
@@ -422,6 +538,13 @@ pub(super) struct RequestDispatch<'a> {
     pub(super) origin: RequestOrigin<'a>,
     pub(super) lifecycle: &'a ConnectionLifecycle,
     pub(super) start: std::time::Instant,
+    /// The one envelope this admitted head minted.
+    ///
+    /// Borrowed rather than owned, because the envelope is not cloneable and
+    /// this value is read by every owner the request reaches. A head that
+    /// resolved no route authority never reaches here: it is answered before an
+    /// operation exists.
+    pub(super) operation: &'a OperationEnvelope,
 }
 
 /// How the wire must be read for a class that reaches dispatch.
@@ -473,19 +596,23 @@ async fn admitted_read(
     }))
 }
 
-/// Dispatch a classified route without losing its body-collection contract.
+/// Answer a classified route, minting the one operation an admitted head owns.
+///
+/// The refusal arm answers first, and it answers before any envelope exists: a
+/// head that resolved no route authority has no policy to run under, so there is
+/// nothing for an operation to carry and no identity for one to be named by.
 async fn dispatch_classified_route<'a>(
     hyper_req: hyper::Request<hyper::body::Incoming>,
     classified: Classified<'a>,
-    request_dispatch: &RequestDispatch<'a>,
+    conn: &'a ConnDispatch<'a>,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    let &RequestDispatch {
+    let &ConnDispatch {
         ctx,
         origin,
         lifecycle,
         start,
         ..
-    } = request_dispatch;
+    } = conn;
 
     let Classified {
         class,
@@ -506,12 +633,55 @@ async fn dispatch_classified_route<'a>(
         },
     )
     .await;
-    // The wire contract is asked for only by the classes that go on to read the
-    // wire. The two arms below answer without reading one, so deriving it for
-    // them was work every proxied stream and every head refusal paid to drop.
+    let class = match class {
+        RouteClass::Refused(rejected) => {
+            return Ok(refuse_from_head(
+                ctx, origin, &scope, &hyper_req, rejected, start,
+            ));
+        }
+        admitted @ (RouteClass::StreamingProxy(_)
+        | RouteClass::StreamingMultipart(_)
+        | RouteClass::HeadOnly
+        | RouteClass::Terminal
+        | RouteClass::Buffered { .. }) => admitted,
+    };
+    // One envelope per admitted head, minted from the policy the classifier
+    // just resolved and carried from here to the response-head boundary.
+    let operation = OperationEnvelope::admit(
+        budgets.request(),
+        lifecycle.control(),
+        origin.disconnect,
+        ctx.policy.shutdown_timeout_value(),
+        script.as_deref(),
+    );
+    operation.observe(script.as_deref(), OperationStage::Dispatch);
+    let request_dispatch = conn.admitted(&operation);
+    dispatch_admitted_route(hyper_req, class, router, &scope, &request_dispatch).await
+}
+
+/// Answer one admitted class under the operation its head already minted.
+///
+/// The wire contract is asked for only by the classes that go on to read the
+/// wire. The two arms below answer without reading one, so deriving it for them
+/// was work every proxied stream paid to drop.
+async fn dispatch_admitted_route<'a>(
+    hyper_req: hyper::Request<hyper::body::Incoming>,
+    class: RouteClass,
+    router: Option<&'a FrozenRouter>,
+    scope: &PreBodyScope,
+    request_dispatch: &RequestDispatch<'a>,
+) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    let &RequestDispatch {
+        ctx,
+        origin,
+        lifecycle,
+        start,
+        operation,
+        ..
+    } = request_dispatch;
     let class = match class {
         RouteClass::StreamingProxy(target) => {
-            return dispatch_streaming_proxy(hyper_req, target, router, &scope, request_dispatch)
+            return dispatch_streaming_proxy(hyper_req, target, router, scope, request_dispatch)
                 .await;
         }
         RouteClass::StreamingMultipart(target) => {
@@ -519,33 +689,36 @@ async fn dispatch_classified_route<'a>(
                 hyper_req,
                 target,
                 router,
-                &scope,
+                scope,
                 request_dispatch,
             )
             .await;
         }
-        RouteClass::Refused(rejected) => {
-            return Ok(refuse_from_head(
-                ctx, origin, &scope, &hyper_req, rejected, start,
-            ));
-        }
         read_from_wire @ (RouteClass::HeadOnly
         | RouteClass::Terminal
         | RouteClass::Buffered { .. }) => read_from_wire,
+        // Answered before this function was reached, and named rather than
+        // wildcarded so a class that gains a refusal cannot fall through into
+        // body collection.
+        RouteClass::Refused(rejected) => {
+            return Ok(refuse_from_head(
+                ctx, origin, scope, &hyper_req, rejected, start,
+            ));
+        }
     };
 
     let read = match wire_read(class, origin, &hyper_req, lifecycle).await {
         Ok(read) => read,
         Err(rejected) => {
             return Ok(refuse_from_head(
-                ctx, origin, &scope, &hyper_req, rejected, start,
+                ctx, origin, scope, &hyper_req, rejected, start,
             ));
         }
     };
-    let input = match build_dispatch_input(hyper_req, origin, lifecycle, read).await {
+    let input = match build_dispatch_input(hyper_req, origin, lifecycle, operation, read).await {
         Ok(input) => input,
         Err(refused) => {
-            return Ok(refuse_body(ctx, origin, &scope, *refused, start));
+            return Ok(refuse_body(ctx, origin, scope, *refused, start));
         }
     };
     dispatch_built_request(input, router, request_dispatch).await
@@ -585,12 +758,51 @@ fn refuse_body(
     start: std::time::Instant,
 ) -> hyper::Response<HyperResponseBody> {
     let Refused {
-        rejected,
+        failure,
         method,
         uri,
     } = refused;
     let scope = pre_body.scope(RequestIdentity::from_head(&origin, &method, &uri));
-    answer_rejected(ctx, &scope, rejected, start)
+    match failure {
+        InboundFailure::Mapped(rejected) => answer_rejected(ctx, &scope, rejected, start),
+        InboundFailure::Silent(terminal) => end_without_mapping(ctx, &scope, terminal, start),
+    }
+}
+
+/// End one admitted request that the declared precedence gives no mapper.
+///
+/// The shutdown deadline, an explicit cancellation, and a peer whose response
+/// lifetime already ended stop the work rather than refusing it. There is no
+/// refusal for a route's mapper to shape and, on two of the three rows, no peer
+/// left to read one. The transport closes, the status an operator sees is
+/// recorded under the same scope every other exit records under, and no
+/// rejection category is counted for a request nothing categorised.
+fn end_without_mapping(
+    ctx: &ConnCtx,
+    scope: &RejectionScope,
+    terminal: InboundTerminal,
+    start: std::time::Instant,
+) -> hyper::Response<HyperResponseBody> {
+    let status = match terminal {
+        InboundTerminal::Disconnect => hyper::StatusCode::REQUEST_TIMEOUT,
+        InboundTerminal::ShutdownDeadline
+        | InboundTerminal::ForcedCancellation
+        | InboundTerminal::RouteBodyLimit
+        | InboundTerminal::BodyIdle
+        | InboundTerminal::RequestTotal
+        | InboundTerminal::SourceFailure
+        | InboundTerminal::ResponseHead => hyper::StatusCode::SERVICE_UNAVAILABLE,
+    };
+    record_scoped(ctx, scope, status.as_u16(), start);
+    let mut response = hyper::Response::new(HyperResponseBody::Full(http_body_util::Full::new(
+        bytes::Bytes::new(),
+    )));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        hyper::header::CONNECTION,
+        hyper::header::HeaderValue::from_static("close"),
+    );
+    response
 }
 
 /// Run middleware gates and finish a request whose wire representation is built.
@@ -608,8 +820,10 @@ async fn dispatch_built_request<'a>(
         ctx,
         lifecycle,
         start,
+        operation,
         ..
     } = request_dispatch;
+    let script = lifecycle.script();
     #[cfg(feature = "ws")]
     let (req, ws_upgrade) = input;
     #[cfg(not(feature = "ws"))]
@@ -631,6 +845,7 @@ async fn dispatch_built_request<'a>(
     // Built in its own statement: `DispatchResult` is not `Sync`, so the borrow
     // this takes must end before the check is awaited.
     let gate = pending_middleware_gate(&result, router, &scope);
+    operation.observe(script.as_deref(), OperationStage::Middleware);
     let gate_blocked = gate_outcome(gate).await;
     if let Some(blocked) = gate_blocked {
         return Ok(answer(ctx, blocked, start, &scope));
@@ -645,15 +860,10 @@ async fn dispatch_built_request<'a>(
         return Ok(answer_rejected(ctx, &scope, rejected, start));
     }
 
+    operation.observe(script.as_deref(), OperationStage::ResponseHead);
     match result {
         DispatchResult::Async(fut, held_request) => {
-            let answered = finish_async(ctx, fut.await, start, &scope);
-            // Released here, not at the start of this arm: the request owns
-            // this response's lifetime signal, and the buffered future is
-            // `'static`, so nothing else keeps that signal alive while the
-            // handler runs.
-            drop(held_request);
-            answered
+            finish_buffered(fut, held_request, ctx, &scope, start, operation).await
         }
         DispatchResult::Stream(fut, req) => {
             handle_stream_response(fut.await, req, ctx, &scope, start)
@@ -680,6 +890,24 @@ async fn dispatch_built_request<'a>(
             handle_proxy_stream_response(req, &backend, &prefix, ctx, &scope, start).await
         }
     }
+}
+
+/// Produce one response head inside the request total its operation carries.
+///
+/// The total ends at the committed head, so this is the last owner that can
+/// enforce it: response-body time belongs to the selected download budget, not
+/// to the request. An unbounded total awaits the producer directly rather than
+/// arming a timer no configured value backs.
+pub(super) async fn within_total<T>(
+    producing: impl std::future::Future<Output = T>,
+    operation: &OperationEnvelope,
+) -> Result<T, Rejected> {
+    let Some(remaining) = operation.remaining_total() else {
+        return Ok(producing.await);
+    };
+    tokio::time::timeout(remaining, producing)
+        .await
+        .map_err(|_| Rejected::request_timeout(operation.budget().total().unwrap_or(remaining)))
 }
 
 /// Route a request and dispatch to the appropriate handler.
@@ -728,14 +956,38 @@ pub(super) async fn handle_request(
         }
         PreBodyRoute::Class(classified) => classified,
     };
-    let request_dispatch = RequestDispatch {
+    let conn = ConnDispatch {
         dispatch,
         ctx,
         origin,
         lifecycle,
         start,
     };
-    dispatch_classified_route(hyper_req, classified, &request_dispatch).await
+    dispatch_classified_route(hyper_req, classified, &conn).await
+}
+
+/// Produce one buffered answer inside the request total its operation carries.
+///
+/// The total covers handler execution and response production and ends at the
+/// committed head, so a handler that never returns holds this operation no
+/// longer than the policy its route resolved to allows.
+async fn finish_buffered(
+    producing: super::middleware::ResponseFuture,
+    held_request: Request,
+    ctx: &ConnCtx,
+    scope: &RejectionScope,
+    start: std::time::Instant,
+    operation: &OperationEnvelope,
+) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    let answered = match within_total(producing, operation).await {
+        Ok(response) => finish_async(ctx, response, start, scope),
+        Err(rejected) => Ok(answer_rejected(ctx, scope, rejected, start)),
+    };
+    // Released here, not at the start of this arm: the request owns this
+    // response's lifetime signal, and the buffered future is `'static`, so
+    // nothing else keeps that signal alive while the handler runs.
+    drop(held_request);
+    answered
 }
 
 /// Finish a buffered dispatch against the request that produced it.

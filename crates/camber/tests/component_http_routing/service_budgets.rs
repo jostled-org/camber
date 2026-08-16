@@ -391,3 +391,346 @@ fn nested_policies_only_narrow_outer_finite_limits() {
     assert_a_whole_policy_replaces_an_earlier_field();
     assert_a_later_field_writes_onto_the_whole_policy();
 }
+
+// ── 6.T3 and 6.T5 ──────────────────────────────────────────────────
+
+use camber::http::mock::{InboundTerminal, OperationObservation};
+use camber::http::{BodyAdmission, BodyAdmissionContext, Rejection, RejectionContext};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// The request deadlines every envelope row is admitted under.
+const CARRIED_BODY_IDLE: Duration = Duration::from_millis(400);
+const CARRIED_TOTAL: Duration = Duration::from_millis(800);
+/// The quiet interval and total a precedence row stages equal-ready.
+const STAGED_IDLE: Duration = Duration::from_millis(120);
+const STAGED_TOTAL: Duration = Duration::from_millis(120);
+/// The byte ceiling a precedence row crosses.
+const STAGED_CEILING: usize = 8;
+
+/// The policy every envelope and precedence row serves under.
+fn carried_policy(budget: RequestBudget) -> ServerPolicy {
+    ServerPolicy::default()
+        .header_timeout(Duration::from_secs(30))
+        .expect("a header boundary no carried row reaches")
+        .request_budget(budget)
+        .shutdown_timeout(SHUTDOWN_TIMEOUT)
+        .expect("the carried row's shutdown deadline")
+}
+
+/// The routes the envelope rows are driven through.
+fn carried_routes(middleware_runs: &Arc<AtomicUsize>) -> Router {
+    let runs = Arc::clone(middleware_runs);
+    let mut router = Router::new();
+    router.post("/buffered", |_req: &Request| async {
+        Response::text(200, "buffered")
+    });
+    router.get("/head-only", |_req: &Request| async {
+        Response::text(200, "head-only")
+    });
+    router.use_middleware(move |req: &Request, next| {
+        runs.fetch_add(1, Ordering::SeqCst);
+        next.call(req)
+    });
+    router
+}
+
+/// One admitted row's envelope reading, taken from the production owners.
+fn observed_envelope(controller: &LifecycleController) -> OperationObservation {
+    controller.operations_observed()
+}
+
+/// Drive one admitted request and read what its envelope reached.
+async fn assert_one_envelope(method: &str, path: &str, body: &[u8], row: &str) {
+    let port = http_support::reserve_observed();
+    let controller = port.controller();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let server = port.serve_with_policy(
+        carried_routes(&runs),
+        carried_policy(
+            RequestBudget::bounded(CARRIED_BODY_IDLE, CARRIED_TOTAL)
+                .expect("the carried request budget"),
+        ),
+    );
+    let addr = server.addr();
+    let method: Box<str> = method.into();
+    let path: Box<str> = path.into();
+    let body: Box<[u8]> = body.into();
+    let answered = tokio::task::spawn_blocking(move || {
+        http_support::request(addr, &method, &path, &[], &body, EVENT_TIMEOUT)
+    })
+    .await
+    .unwrap_or_else(|error| panic!("{row}: the peer task failed: {error}"))
+    .unwrap_or_else(|error| panic!("{row}: the request failed: {error}"));
+    assert_eq!(answered.status, 200, "{row}: {}", answered.text());
+
+    let observed = observed_envelope(&controller);
+    assert_eq!(
+        observed.admitted, 1,
+        "{row}: one admitted head, one envelope"
+    );
+    assert_eq!(
+        observed.distinct_identities, 1,
+        "{row}: every owner must read the one identity the mint published",
+    );
+    assert_eq!(
+        observed.distinct_totals, 1,
+        "{row}: every owner must read one request-total identity",
+    );
+    assert_eq!(
+        observed.total_from_admission,
+        Some(CARRIED_TOTAL),
+        "{row}: the carried total is the policy's, computed once at admission",
+    );
+    assert!(observed.dispatch >= 1, "{row}: dispatch read no identity");
+    assert_eq!(
+        observed.middleware, 1,
+        "{row}: exactly one middleware owner per admitted request",
+    );
+    assert_eq!(
+        observed.response_head, 1,
+        "{row}: exactly one response-head handoff per admitted request",
+    );
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "{row}: exactly one middleware execution per admitted request",
+    );
+
+    server
+        .shutdown_bounded(SHUTDOWN_TIMEOUT)
+        .unwrap_or_else(|error| panic!("{row}: teardown failed: {error}"));
+}
+
+/// A refusal decided before route authority exists mints no envelope.
+///
+/// Served through a host table, because that is the shape whose authority can
+/// fail to resolve at all: a single router claims every authority, so a head it
+/// cannot match is still a head it selected a policy for.
+async fn assert_negative_control(head: &[u8], row: &str) {
+    let port = http_support::reserve_observed();
+    let controller = port.controller();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut hosts = HostRouter::new();
+    hosts.set_default(carried_routes(&runs));
+    let server = port.serve_hosts(hosts);
+    let addr = server.addr();
+    let head: Box<[u8]> = head.into();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let mut peer = http_support::connect(addr).expect("the control peer connected");
+        peer.write_all(&head).expect("write the refused head");
+        peer.flush().expect("flush the refused head");
+        let _answered = http_support::read_http_response_bounded(&mut peer);
+    })
+    .await
+    .unwrap_or_else(|error| panic!("{row}: the control peer failed: {error}"));
+
+    let observed = observed_envelope(&controller);
+    assert_eq!(
+        observed.admitted, 0,
+        "{row}: a head that resolved no route authority must expose no operation",
+    );
+    assert_eq!(
+        observed.identity, None,
+        "{row}: no owner may read an identity for a head that minted none",
+    );
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        0,
+        "{row}: a refused head runs no middleware",
+    );
+
+    server
+        .shutdown_bounded(SHUTDOWN_TIMEOUT)
+        .unwrap_or_else(|error| panic!("{row}: teardown failed: {error}"));
+}
+
+/// 6.T3
+///
+/// Each admitted head mints exactly one envelope, and dispatch, middleware, the
+/// payload owner, and the response-head handoff all read that same identity and
+/// the same request-total value. Two deterministic negative controls sit beside
+/// the admitted rows: a head Hyper never resolved a route for exposes no
+/// operation at all, and neither does one whose authority Camber cannot parse.
+#[test]
+fn admitted_operation_carries_one_envelope_to_each_prehead_owner() {
+    camber::runtime::builder()
+        .run(|| {
+            camber::runtime::block_on(async {
+                assert_one_envelope("POST", "/buffered", b"payload", "ordinary buffered").await;
+                assert_one_envelope("GET", "/head-only", b"", "head-only").await;
+                // Hyper refuses this head before a request exists at all.
+                assert_negative_control(
+                    b"GET /buffered HTTP/1.1\r\nHost: localhost\r\nBad Header\r\n\r\n",
+                    "hyper pre-head refusal",
+                )
+                .await;
+                // Classification refuses this one: no route authority resolves,
+                // so nothing selects a policy an operation could carry.
+                // Classification refuses this one: the authority Camber cannot
+                // parse resolves no router, so nothing selects a policy an
+                // operation could carry.
+                assert_negative_control(
+                    b"GET /buffered HTTP/1.1\r\nHost: bad host\r\nConnection: close\r\n\r\n",
+                    "unresolved route",
+                )
+                .await;
+            });
+        })
+        .expect("the carried-envelope runtime ran");
+}
+
+/// The route a precedence row stages its terminals on.
+fn staged_routes(released: &Arc<AtomicUsize>, log: &Arc<AtomicUsize>) -> Router {
+    let released = Arc::clone(released);
+    let log = Arc::clone(log);
+    let mut router = Router::new();
+    router.post("/staged", |_req: &Request| async {
+        Response::text(200, "staged")
+    });
+    router
+        .body_admission(move |_context: &BodyAdmissionContext<'_>| {
+            Ok(BodyAdmission::with_permit(
+                STAGED_CEILING,
+                http_support::permit_probe(&released),
+            ))
+        })
+        .rejection_mapper(move |rejection: &Rejection, _: &RejectionContext| {
+            log.fetch_add(1, Ordering::SeqCst);
+            Response::text(rejection.status(), rejection.message())
+        })
+}
+
+/// Stage one turn's ready sources through the production checkpoint, and read
+/// back the terminal the declared precedence selected.
+///
+/// The coordinator is held at its own pre-selection checkpoint, so everything
+/// this row makes ready while it waits is weighed by the same turn. Nothing
+/// here chooses the terminal: the release is the only thing staged, and the
+/// selection checkpoint the row waits on is production's own.
+///
+/// The body is chunked, so route admission has no declaration to refuse and the
+/// byte maximum is decided by the frames the coordinator actually reads.
+async fn assert_precedence_row(
+    crossing: Option<Box<[u8]>>,
+    expected: InboundTerminal,
+    answers: u16,
+) {
+    let row = format!("{expected:?}");
+    let port = http_support::reserve_observed();
+    let controller = port.controller();
+    let released = Arc::new(AtomicUsize::new(0));
+    let mapper_calls = Arc::new(AtomicUsize::new(0));
+    let server = port.serve_with_policy(
+        staged_routes(&released, &mapper_calls),
+        carried_policy(
+            RequestBudget::bounded(STAGED_IDLE, STAGED_TOTAL).expect("the staged request budget"),
+        ),
+    );
+    let addr = server.addr();
+
+    controller
+        .pause_once(LifecycleCheckpoint::BeforeInboundTerminalSelection)
+        .expect("arm the pre-selection checkpoint");
+    controller
+        .pause_once(LifecycleCheckpoint::InboundTerminalSelected(expected))
+        .expect("arm the selected-terminal observation");
+
+    let peer = tokio::task::spawn_blocking(move || staged_peer(addr, crossing));
+
+    wait_paused(
+        &controller,
+        LifecycleCheckpoint::BeforeInboundTerminalSelection,
+        &row,
+    )
+    .await;
+    // Staged while the coordinator is held: every source this row wants weighed
+    // is ready before the turn that weighs them begins.
+    tokio::time::sleep(STAGED_IDLE * 2).await;
+    controller
+        .release(LifecycleCheckpoint::BeforeInboundTerminalSelection)
+        .expect("release the pre-selection checkpoint");
+
+    let selected = LifecycleCheckpoint::InboundTerminalSelected(expected);
+    wait_paused(&controller, selected, &row).await;
+    let polled = controller.body_frames_polled();
+    controller
+        .release(selected)
+        .expect("release the selected-terminal observation");
+
+    let answered = tokio::time::timeout(EVENT_TIMEOUT, peer)
+        .await
+        .unwrap_or_else(|_| panic!("{row}: the staged peer never settled"))
+        .unwrap_or_else(|error| panic!("{row}: the staged peer task failed: {error}"));
+    assert_eq!(
+        answered, answers,
+        "{row}: the staged terminal answered {answered}"
+    );
+    assert_eq!(
+        controller.body_frames_polled(),
+        polled,
+        "{row}: no frame may be polled after a terminal is selected",
+    );
+    assert_eq!(
+        mapper_calls.load(Ordering::SeqCst),
+        1,
+        "{row}: a pre-commit failure invokes the selected mapper exactly once",
+    );
+    http_support::assert_released(&released, 1, &row);
+
+    server
+        .shutdown_bounded(SHUTDOWN_TIMEOUT)
+        .unwrap_or_else(|error| panic!("{row}: teardown failed: {error}"));
+}
+
+/// Drive one staged peer: a chunked head, an optional crossing frame, then the
+/// status the server answered with.
+fn staged_peer(addr: std::net::SocketAddr, crossing: Option<Box<[u8]>>) -> u16 {
+    let mut peer = http_support::connect(addr).expect("the staged peer connected");
+    http_support::write_chunked_head(&mut peer, "close", "POST", "/staged", "localhost")
+        .expect("write the staged chunked head");
+    match crossing.as_deref() {
+        Some(frame) => {
+            http_support::write_chunk(&mut peer, frame).expect("write the crossing frame")
+        }
+        None => {}
+    }
+    http_support::read_http_response_bounded(&mut peer)
+        .expect("the staged request was answered")
+        .status
+}
+
+/// 6.T5
+///
+/// Sources that become ready in one scheduling turn are resolved by the one
+/// declared precedence table, not by poll order. Each row holds the production
+/// coordinator at its pre-selection checkpoint, makes every source it wants
+/// weighed ready while it waits, and then reads back the terminal production
+/// selected.
+///
+/// The rows are the pairs this step's own sources can reach. A crossing frame
+/// arriving after the quiet interval expired ties the route byte maximum
+/// against the body-idle deadline, and a withheld body ties body idle against
+/// the request total. Step 11 extends the same selector with its transfer
+/// sources once their adapters exist.
+#[test]
+fn equal_ready_inbound_events_follow_the_declared_precedence() {
+    camber::runtime::builder()
+        .run(|| {
+            camber::runtime::block_on(async {
+                // The crossing frame is already on the wire when the turn runs,
+                // and the quiet interval expired while the turn was held.
+                assert_precedence_row(
+                    Some(vec![b'x'; STAGED_CEILING * 4].into_boxed_slice()),
+                    InboundTerminal::RouteBodyLimit,
+                    413,
+                )
+                .await;
+                // Nothing is on the wire, so the two carried deadlines are the
+                // whole of the turn's ready set and idle outranks total.
+                assert_precedence_row(None, InboundTerminal::BodyIdle, 408).await;
+            });
+        })
+        .expect("the precedence runtime ran");
+}

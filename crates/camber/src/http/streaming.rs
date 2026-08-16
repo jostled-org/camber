@@ -2,6 +2,7 @@ use super::Request;
 use super::async_proxy::UploadDisposition;
 use super::body::{HyperResponseBody, StreamBody};
 use super::handle::{ConnCtx, answer, answer_rejected, run_head_gate};
+use super::operation::OperationStage;
 use super::record::record_scoped;
 use super::rejection::{Rejected, RejectionScope, RequestIdentity};
 use super::request::{RequestHead, RequestOrigin};
@@ -329,6 +330,7 @@ pub(super) async fn dispatch_streaming_proxy(
         origin,
         lifecycle,
         start,
+        operation,
         ..
     } = request_dispatch;
     let super::dispatch::StreamingProxyTarget {
@@ -365,6 +367,7 @@ pub(super) async fn dispatch_streaming_proxy(
     // a `500`, and recording it before that conversion named a status the peer
     // never saw, so it goes out through the same answering path every other
     // refusal on this path takes.
+    operation.observe(script.as_deref(), OperationStage::Middleware);
     if let Some(blocked) = run_head_gate(&head, router, Some(params), &scope).await {
         // Answered under the scope built above, not a rebuilt built-in one: a
         // gate response the wire cannot carry recovers through this route's own
@@ -374,14 +377,22 @@ pub(super) async fn dispatch_streaming_proxy(
         return Ok(answer(ctx, scope.closing(blocked), start, &scope));
     }
     let (proxy_parts, body) = outbound_parts(hyper_req, method, &origin);
-    let forwarded = super::async_proxy::forward_incoming_streaming(
+    // The upload this route forwards is this operation's request payload, and
+    // acquiring a usable upstream head is still pre-commit work, so both spend
+    // the one request total the admitted head minted.
+    operation.observe(script.as_deref(), OperationStage::Body);
+    let forwarding = super::async_proxy::forward_incoming_streaming(
         proxy_parts,
         body,
         admitted,
         &backend,
         &prefix,
         script.as_ref(),
-    )
-    .await;
+    );
+    let forwarded = match super::handle::within_total(forwarding, operation).await {
+        Ok(forwarded) => forwarded,
+        Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, start)),
+    };
+    operation.observe(script.as_deref(), OperationStage::ResponseHead);
     Ok(finish_upstream_stream(forwarded, ctx, &scope, start))
 }
