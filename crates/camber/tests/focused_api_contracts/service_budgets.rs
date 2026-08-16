@@ -214,6 +214,41 @@ fn assert_proxy_policy_contract() {
         default.buffered_response_limit(0),
         "buffered_response_limit",
     );
+
+    // The two streaming budgets are dimensions of their own. Both default to
+    // unbounded, each writes only its own direction, and neither is the
+    // buffered ceiling — a proxy that streams is bounded by these, not by it.
+    let finite = TransferBudget::unbounded()
+        .with_max_bytes(4096)
+        .expect("a finite transfer maximum");
+    let uploading = default.upload_budget(finite);
+    let downloading = default.download_budget(finite);
+    assert_ne!(default, uploading);
+    assert_ne!(default, downloading);
+    assert_ne!(uploading, downloading);
+    assert_eq!(
+        uploading.download_budget(finite),
+        downloading.upload_budget(finite),
+    );
+    assert_eq!(
+        default.upload_budget(TransferBudget::unbounded()),
+        default,
+        "an explicitly unbounded upload budget is the documented default",
+    );
+    assert_eq!(
+        default.download_budget(TransferBudget::unbounded()),
+        default,
+        "an explicitly unbounded download budget is the documented default",
+    );
+    assert_eq!(
+        uploading
+            .buffered_response_limit(1024)
+            .expect("a finite buffered ceiling"),
+        default
+            .buffered_response_limit(1024)
+            .expect("a finite buffered ceiling")
+            .upload_budget(finite),
+    );
 }
 
 /// 1.T1

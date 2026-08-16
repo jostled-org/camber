@@ -275,9 +275,9 @@ fn assert_blocking_serve_establishes_a_runtime() {
 
 /// 1.T4
 ///
-/// Owns the omitted, zero, plain-TCP, SSE, gRPC, and bare-Tokio rows of the
-/// connection-limit matrix. The TLS-handshake, HTTP keep-alive, direct
-/// WebSocket, and proxied WebSocket rows are owned by
+/// Owns the omitted, zero, plain-TCP, SSE, gRPC, bare-Tokio, and
+/// two-positive-layer rows of the connection-limit matrix. The TLS-handshake,
+/// HTTP keep-alive, direct WebSocket, and proxied WebSocket rows are owned by
 /// `component_websocket::connection_limits`, which holds them on the same
 /// production checkpoint.
 #[camber::test]
@@ -291,6 +291,12 @@ async fn connection_limit_matrix_holds_one_permit_for_the_transport_lifetime() {
     unmanaged(
         "bare-Tokio limit",
         assert_bare_tokio_serving_holds_one_permit,
+    );
+    // Both layers positive needs a runtime of its own, which no case body
+    // running inside this one may establish.
+    unmanaged(
+        "two positive limits",
+        assert_two_positive_limits_resolve_to_the_smaller,
     );
 }
 
@@ -343,10 +349,20 @@ struct LimitedServer {
 
 /// Serve `router` in the background under a one-transport connection limit.
 ///
-/// Every permit row needs the same three things — a bound address, an observer
-/// registered against it, and a server frozen at `connection_limit(1)` — so they
-/// are assembled once here and the rows differ only in what they then do.
+/// The limit most rows want, named once so they read as what they prove.
 async fn serve_one_transport(router: Router, label: &str) -> LimitedServer {
+    serve_under_limit(router, 1, label).await
+}
+
+/// Serve `router` in the background under the server-level limit given.
+///
+/// Every permit row needs the same three things — a bound address, an observer
+/// registered against it, and a server frozen at a connection limit — so they
+/// are assembled once here and the rows differ only in what they then do. The
+/// limit is a parameter because the narrowing rows freeze a server value that
+/// is not the one they expect enforced: what the listener admits is the smaller
+/// of this and the runtime's.
+async fn serve_under_limit(router: Router, limit: usize, label: &str) -> LimitedServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .unwrap_or_else(|_| panic!("bind the {label} listener"));
@@ -357,8 +373,8 @@ async fn serve_one_transport(router: Router, label: &str) -> LimitedServer {
     let handle = camber::http::server(router)
         .policy(
             ServerPolicy::default()
-                .connection_limit(1)
-                .expect("one concurrent transport"),
+                .connection_limit(limit)
+                .unwrap_or_else(|_| panic!("the {label} server's connection limit")),
         )
         .serve_background(listener)
         .unwrap_or_else(|_| panic!("the {label} server needs a Tokio executor"));
@@ -398,42 +414,98 @@ async fn assert_blocked_on_permit(
     assert_unanswered(blocked, label).await;
 }
 
+/// The shape every one-transport row shares: the first peer holds the only
+/// permit, the second parks on it, and releasing the first admits the second.
+///
+/// The held route's gate is what ends a request, so the row decides when a
+/// transport — and with it a permit — ends.
+async fn assert_one_transport_at_a_time(
+    server: &LimitedServer,
+    release: &tokio::sync::Semaphore,
+    label: &str,
+) {
+    arm_permit_wait(&server.controller, label);
+
+    let mut first = connect(server.addr).await;
+    send_get(&mut first, "/held").await;
+    let mut second = connect(server.addr).await;
+    send_get(&mut second, "/held").await;
+
+    // The second transport is accepted and then parked: the permit its
+    // predecessor holds is what it waits on.
+    assert_blocked_on_permit(&server.controller, &mut second, label).await;
+
+    // Releasing the first request ends its transport, which returns its permit.
+    release.add_permits(1);
+    assert_answered(&mut first, label).await;
+
+    // Exactly one permit came back, so the waiting peer is the one that enters.
+    release.add_permits(1);
+    assert_answered(&mut second, label).await;
+}
+
+/// Stop a limited server and require it to end cleanly within the suite bound.
+async fn shutdown_limited(server: LimitedServer, label: &str) {
+    tokio::time::timeout(EVENT_TIMEOUT, server.handle.shutdown_and_join())
+        .await
+        .unwrap_or_else(|_| panic!("the {label} server never joined"))
+        .unwrap_or_else(|error| panic!("the {label} server ended with {error:?}"));
+}
+
 /// A positive limit holds one permit for a whole HTTP transport, and returns
 /// exactly one when that transport ends.
 async fn assert_one_permit_covers_each_http_transport() {
     let held = held_router();
     let server = serve_one_transport(held.router, "limited").await;
-    let addr = server.addr;
-    arm_permit_wait(&server.controller, "limited");
+    assert_one_transport_at_a_time(&server, &held.release, "limited").await;
 
-    let mut first = connect(addr).await;
-    send_get(&mut first, "/held").await;
-    let mut second = connect(addr).await;
-    send_get(&mut second, "/held").await;
-
-    // The second transport is accepted and then parked: the permit its
-    // predecessor holds is what it waits on.
-    assert_blocked_on_permit(&server.controller, &mut second, "limited second").await;
-
-    // Releasing the first request ends its transport, which returns its permit.
-    held.release.add_permits(1);
-    assert_answered(&mut first, "limited first").await;
-
-    // Exactly one permit came back: the second is served, and a third that
-    // arrives while the second holds the limit is still refused entry.
-    held.release.add_permits(1);
-    assert_answered(&mut second, "limited second").await;
-
-    let mut third = connect(addr).await;
+    // One permit per transport, every time: a third peer arriving after the
+    // second finished is served in its turn.
+    let mut third = connect(server.addr).await;
     send_get(&mut third, "/held").await;
     held.release.add_permits(1);
     assert_answered(&mut third, "limited third").await;
 
-    server.handle.shutdown();
-    tokio::time::timeout(EVENT_TIMEOUT, server.handle.join())
-        .await
-        .expect("the limited server joined")
-        .expect("the limited server ended cleanly");
+    shutdown_limited(server, "limited").await;
+}
+
+/// Two positive limits resolve to the smaller one, per listener.
+///
+/// A server may narrow the runtime's ceiling and can never widen it, so both
+/// orders are run: the server below the runtime, and the server above it. Each
+/// row admits exactly one transport at a time — the smaller of the pair — and
+/// the wider value is inert.
+fn assert_two_positive_limits_resolve_to_the_smaller() {
+    assert_narrowed_limit_admits_one_transport(2, 1, "server narrows the runtime");
+    assert_narrowed_limit_admits_one_transport(1, 100, "server cannot widen the runtime");
+}
+
+/// Serve under a runtime limit and a server limit that both bind, and require
+/// the smaller of the two to be what the listener admits.
+///
+/// The runtime layer enters through `RuntimeBuilder::connection_limit`, so the
+/// outer value is the one a caller of the public API would have set. If the
+/// resolution took the outer value, the maximum, or the server's own, the
+/// second peer would be admitted straight away, `ConnectionPermitWaitPending`
+/// would never pause, and the bounded wait reports that as the failure it is.
+fn assert_narrowed_limit_admits_one_transport(
+    runtime_limit: usize,
+    server_limit: usize,
+    label: &'static str,
+) {
+    camber::runtime::builder()
+        .connection_limit(runtime_limit)
+        .header_timeout(RUNTIME_HEADER_TIMEOUT)
+        .shutdown_timeout(Duration::from_secs(1))
+        .run(|| {
+            camber::runtime::block_on(async move {
+                let held = held_router();
+                let server = serve_under_limit(held.router, server_limit, label).await;
+                assert_one_transport_at_a_time(&server, &held.release, label).await;
+                shutdown_limited(server, label).await;
+            });
+        })
+        .unwrap_or_else(|error| panic!("the {label} runtime failed: {error:?}"));
 }
 
 /// An SSE response holds its permit for the response's lifetime, not just the
@@ -600,11 +672,7 @@ async fn assert_one_permit_covers_a_grpc_transport() {
     drop(client);
     assert_answered(&mut blocked, "gRPC blocked").await;
 
-    server.handle.shutdown();
-    tokio::time::timeout(EVENT_TIMEOUT, server.handle.join())
-        .await
-        .expect("the gRPC server joined")
-        .expect("the gRPC server ended cleanly");
+    shutdown_limited(server, "gRPC").await;
 }
 
 /// Start the RPC that parks inside `ParkedGreeter` and hand back its join.
@@ -665,25 +733,6 @@ async fn assert_bare_tokio_limit_holds() {
 
     let held = held_router();
     let server = serve_one_transport(held.router, "bare-Tokio").await;
-    let addr = server.addr;
-    arm_permit_wait(&server.controller, "bare-Tokio");
-
-    let mut first = connect(addr).await;
-    send_get(&mut first, "/held").await;
-    let mut second = connect(addr).await;
-    send_get(&mut second, "/held").await;
-
-    assert_blocked_on_permit(&server.controller, &mut second, "bare-Tokio second").await;
-
-    held.release.add_permits(1);
-    assert_answered(&mut first, "bare-Tokio first").await;
-
-    held.release.add_permits(1);
-    assert_answered(&mut second, "bare-Tokio second").await;
-
-    server.handle.shutdown();
-    tokio::time::timeout(EVENT_TIMEOUT, server.handle.join())
-        .await
-        .expect("the bare-Tokio server joined")
-        .expect("the bare-Tokio server ended cleanly");
+    assert_one_transport_at_a_time(&server, &held.release, "bare-Tokio").await;
+    shutdown_limited(server, "bare-Tokio").await;
 }

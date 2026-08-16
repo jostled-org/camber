@@ -11,10 +11,21 @@ use std::time::Duration;
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The runtime `#[camber::test]` establishes bounds every server below.
+/// The header boundary the runtime envelope carries into every server below.
 const RUNTIME_HEADER_TIMEOUT: Duration = Duration::from_millis(100);
-/// The runtime's default request budget, which no test row configures away.
+/// The request deadlines the runtime envelope carries, which no row narrows away.
 const RUNTIME_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The deadline the runtime's own teardown shares with its servers.
+const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The header boundary an ordering row writes as a single field.
+const FIELD_HEADER_TIMEOUT: Duration = Duration::from_millis(250);
+/// The header boundary an ordering row writes as part of a whole policy.
+const WHOLESALE_HEADER_TIMEOUT: Duration = Duration::from_millis(400);
+/// The body-idle deadline only the wholesale policy carries.
+const WHOLESALE_BODY_IDLE: Duration = Duration::from_secs(3);
+/// The request-total deadline only the wholesale policy carries.
+const WHOLESALE_TOTAL: Duration = Duration::from_secs(4);
 
 /// One row of the precedence table: what was configured, and what must reach
 /// the production owners that resolve it.
@@ -237,10 +248,113 @@ async fn assert_host_and_child_narrow_the_server() {
     .await;
 }
 
+/// The outer envelope every table row serves under.
+///
+/// Written as one whole policy so the runtime layer of this table enters
+/// through `RuntimeBuilder::server_policy` — the setter this step publishes —
+/// rather than through a test-only config the public API never reaches.
+fn runtime_envelope() -> ServerPolicy {
+    ServerPolicy::default()
+        .header_timeout(RUNTIME_HEADER_TIMEOUT)
+        .expect("the runtime's header boundary")
+        .request_budget(
+            RequestBudget::bounded(RUNTIME_REQUEST_TIMEOUT, RUNTIME_REQUEST_TIMEOUT)
+                .expect("the runtime's request budget"),
+        )
+        .shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT)
+        .expect("the runtime's shutdown deadline")
+}
+
+/// The whole policy both ordering rows write, and never the value a single-field
+/// setter writes.
+///
+/// Its request budget is what makes the second row discriminating: only a
+/// `header_timeout` that wrote onto this stored value — rather than replacing it
+/// — leaves these deadlines standing.
+fn ordering_envelope() -> ServerPolicy {
+    ServerPolicy::default()
+        .header_timeout(WHOLESALE_HEADER_TIMEOUT)
+        .expect("the wholesale header boundary")
+        .request_budget(
+            RequestBudget::bounded(WHOLESALE_BODY_IDLE, WHOLESALE_TOTAL)
+                .expect("the wholesale request budget"),
+        )
+        .shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT)
+        .expect("the ordering runtime's shutdown deadline")
+}
+
+/// The row both ordering cases serve: a server that names nothing, so every
+/// value it resolves came from the runtime.
+fn ordering_row(name: &'static str, expected_header: Duration) -> PolicyRow {
+    PolicyRow {
+        name,
+        policy: ServerPolicy::default(),
+        expected_header,
+        expected_request: RequestBudget::bounded(WHOLESALE_BODY_IDLE, WHOLESALE_TOTAL)
+            .expect("the wholesale request budget reaches the server"),
+        expected_upload: TransferBudget::unbounded(),
+        expected_download: TransferBudget::unbounded(),
+    }
+}
+
+/// `server_policy` replaces the whole envelope, so a field written before it is
+/// a field it overwrites.
+///
+/// A `server_policy` that never reached the stored config would leave the
+/// single field in place, so the observation armed on the whole policy's
+/// boundary would never be reached and the bounded wait would report it.
+fn assert_a_whole_policy_replaces_an_earlier_field() {
+    camber::runtime::builder()
+        .header_timeout(FIELD_HEADER_TIMEOUT)
+        .server_policy(ordering_envelope())
+        .run(|| {
+            camber::runtime::block_on(assert_row(
+                ordering_row(
+                    "whole policy replaces an earlier field",
+                    WHOLESALE_HEADER_TIMEOUT,
+                ),
+                None,
+            ));
+        })
+        .expect("the replacing-order runtime ran");
+}
+
+/// A single-field setter after it writes onto that same value: its own field
+/// wins, and every other dimension the whole policy set still stands.
+fn assert_a_later_field_writes_onto_the_whole_policy() {
+    camber::runtime::builder()
+        .server_policy(ordering_envelope())
+        .header_timeout(FIELD_HEADER_TIMEOUT)
+        .run(|| {
+            camber::runtime::block_on(assert_row(
+                ordering_row(
+                    "later field writes onto the whole policy",
+                    FIELD_HEADER_TIMEOUT,
+                ),
+                None,
+            ));
+        })
+        .expect("the writing-order runtime ran");
+}
+
 /// 1.T2
-#[camber::test]
-async fn nested_policies_only_narrow_outer_finite_limits() {
-    assert_server_inherits_the_runtime().await;
-    assert_server_narrows_the_runtime().await;
-    assert_host_and_child_narrow_the_server().await;
+///
+/// The runtime layer enters through `RuntimeBuilder`, so the outer envelope
+/// every row narrows is the one a caller of the public API would have.
+#[test]
+fn nested_policies_only_narrow_outer_finite_limits() {
+    camber::runtime::builder()
+        .server_policy(runtime_envelope())
+        .run(|| {
+            camber::runtime::block_on(async {
+                assert_server_inherits_the_runtime().await;
+                assert_server_narrows_the_runtime().await;
+                assert_host_and_child_narrow_the_server().await;
+            });
+        })
+        .expect("the precedence runtime ran");
+
+    // Call order decides which write survives, so each order is its own runtime.
+    assert_a_whole_policy_replaces_an_earlier_field();
+    assert_a_later_field_writes_onto_the_whole_policy();
 }

@@ -452,11 +452,24 @@ fn proxy_stream_crossing_frame_is_not_forwarded_and_maps_body_limit_once() {
                 STREAM_HOST,
             )
             .expect("the upload head reached the proxy");
-            common::tolerate_dead_socket(
-                common::write_chunk(&mut peer, &admitted)
-                    .and_then(|()| common::write_chunk(&mut peer, &crossing)),
-            )
-            .expect("the paced frames reached the proxy");
+            common::tolerate_dead_socket(common::write_chunk(&mut peer, &admitted))
+                .expect("the admitted frame reached the proxy");
+            // Read the admitted frame off the upstream before the crossing one
+            // is written, rather than both at the end. The outbound leg buffers
+            // a forwarded frame and flushes it when the next poll finds nothing
+            // ready, so a crossing frame the proxy can reach in that same poll
+            // aborts the request with the admitted bytes still in the client's
+            // write buffer — the upstream then holds neither frame, and the
+            // claim below reads a positive control that the peer's own pacing,
+            // not the proxy, decided.
+            let admitted_forwarded =
+                common::poll_until(Duration::from_secs(5), || upstream.forwarded(&admitted));
+            assert!(
+                admitted_forwarded,
+                "every frame inside the bound reached the upstream"
+            );
+            common::tolerate_dead_socket(common::write_chunk(&mut peer, &crossing))
+                .expect("the crossing frame reached the proxy");
 
             let refused = common::read_http_response_bounded(&mut peer)
                 .expect("the crossing frame was answered");
@@ -469,10 +482,6 @@ fn proxy_stream_crossing_frame_is_not_forwarded_and_maps_body_limit_once() {
             assert!(
                 upstream_settled,
                 "the refused upstream leg closed before its byte record was read"
-            );
-            assert!(
-                upstream.forwarded(&admitted),
-                "every frame inside the bound reached the upstream"
             );
             assert!(
                 !upstream.forwarded(&crossing),
