@@ -224,19 +224,53 @@ impl ConnectionLiveness {
         }
     }
 
+    /// Whether this connection's transport has reached EOF or failed.
+    ///
+    /// The stream wrapper sets the flag before Hyper observes the same read or
+    /// write result. An admitted operation can therefore prefer peer
+    /// disconnect over the source error Hyper derives from that result.
+    pub(super) fn is_terminating(&self) -> bool {
+        self.terminating.load(Ordering::Acquire)
+    }
+
     /// Create one request's signal and its armed guard.
     ///
-    /// It consumes the per-request handle the service closure already cloned,
-    /// so arming a response costs one allocation — the shared terminal state —
-    /// and no refcount traffic beyond it. The guard reads the cause table
-    /// through this handle rather than through per-field clones of it.
-    pub(super) fn begin_response(self: Arc<Self>) -> (DisconnectSignal, ResponseGuard) {
+    /// It consumes the per-request handle the service closure already cloned.
+    /// One additional connection refcount lets the request operation observe
+    /// transport death while the response guard retains the same cause table;
+    /// the response signal itself still costs one shared-state allocation.
+    pub(super) fn begin_response(self: Arc<Self>) -> (ResponseLifetime, ResponseGuard) {
         let state = DisconnectState::new();
         let guard = ResponseGuard {
             state: Arc::clone(&state),
+            connection: Arc::clone(&self),
+        };
+        let lifetime = ResponseLifetime {
+            signal: DisconnectSignal { state },
             connection: self,
         };
-        (DisconnectSignal { state }, guard)
+        (lifetime, guard)
+    }
+}
+
+/// The two observations an admitted response carries from its connection.
+///
+/// The public signal resolves when the response guard drops. The connection
+/// handle records transport death earlier, before Hyper turns the same event
+/// into a body-source failure. Keeping them together prevents request dispatch
+/// from pairing one response's signal with another connection's liveness.
+pub(super) struct ResponseLifetime {
+    signal: DisconnectSignal,
+    connection: Arc<ConnectionLiveness>,
+}
+
+impl ResponseLifetime {
+    pub(super) const fn signal(&self) -> &DisconnectSignal {
+        &self.signal
+    }
+
+    pub(super) const fn connection(&self) -> &Arc<ConnectionLiveness> {
+        &self.connection
     }
 }
 
@@ -265,7 +299,7 @@ impl ResponseGuard {
     fn cause(&self) -> DisconnectCause {
         match (
             !matches!(*self.connection.shutdown.borrow(), ServerControl::Running),
-            self.connection.terminating.load(Ordering::Acquire),
+            self.connection.is_terminating(),
         ) {
             (true, _) => DisconnectCause::ServerShutdown,
             (false, true) => DisconnectCause::PeerDisconnect,

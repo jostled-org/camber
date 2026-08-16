@@ -509,6 +509,7 @@ fn request_deadlines_retain_route_body_byte_and_permit_authority() {
                 assert_byte_terminal_keeps_route_authority().await;
                 assert_idle_terminal_releases_one_permit().await;
                 assert_multipart_terminal_releases_one_permit().await;
+                assert_peer_disconnect_releases_one_permit_without_mapping().await;
                 assert_shutdown_terminal_releases_one_permit().await;
                 assert_streaming_proxy_terminal_keeps_route_authority().await;
             });
@@ -629,6 +630,47 @@ async fn assert_multipart_terminal_releases_one_permit() {
     server
         .shutdown_bounded(SHUTDOWN_BOUND)
         .expect("the multipart-terminal fixture tore down");
+}
+
+/// A peer that leaves while its admitted body is incomplete reaches the
+/// connection-owned disconnect terminal before the body source can map its EOF.
+/// No response remains possible, but the route's permit still releases once.
+async fn assert_peer_disconnect_releases_one_permit_without_mapping() {
+    let row = "a disconnected admitted body";
+    let released = Arc::new(AtomicUsize::new(0));
+    let port = http_support::reserve_observed();
+    let controller = port.controller();
+    let (router, log) = counted_mapper(admitting_routes(&released));
+    let server = port.serve_with_policy(router, deadline_policy());
+    let addr = server.addr();
+    let selected = LifecycleCheckpoint::InboundTerminalSelected(InboundTerminal::Disconnect);
+    controller
+        .pause_once(selected)
+        .expect("arm the disconnect-terminal observation");
+
+    let peer = tokio::task::spawn_blocking(move || {
+        let mut peer = http_support::connect(addr).expect("the disconnecting peer connected");
+        http_support::write_stalled_body(&mut peer, None, "POST", "/admitted")
+            .expect("write the incomplete admitted body");
+    });
+
+    peer.await.expect("the disconnecting peer settled");
+    http_support::wait_until_paused_bounded(&controller, selected, row).await;
+    controller
+        .release(selected)
+        .expect("release the disconnect-terminal observation");
+
+    assert_eq!(
+        log.calls(),
+        0,
+        "a peer that cannot receive a response must not invoke the mapper",
+    );
+    http_support::assert_released(&released, 1, row);
+    http_support::assert_owners_released(&controller, 1, row);
+
+    server
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the disconnect-terminal fixture tore down");
 }
 
 /// The aggregate shutdown deadline is a terminal the admitted body reaches like

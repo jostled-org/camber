@@ -1,6 +1,6 @@
 use super::body::HyperResponseBody;
 use super::body_admission::{BodyBudget, BodyPermit, ResolvedBodyPlan};
-use super::disconnect::DisconnectSignal;
+use super::disconnect::{ConnectionLiveness, ResponseLifetime};
 use super::dispatch::{
     AsyncDispatch, Classified, FrozenRouter, HeadUpgrade, PreBodyScope, RouteClass, Routed,
 };
@@ -514,6 +514,7 @@ pub(super) struct ConnDispatch<'a> {
     ctx: &'a ConnCtx,
     origin: RequestOrigin<'a>,
     lifecycle: &'a ConnectionLifecycle,
+    connection: &'a Arc<ConnectionLiveness>,
     start: std::time::Instant,
 }
 
@@ -610,6 +611,7 @@ async fn dispatch_classified_route<'a>(
         ctx,
         origin,
         lifecycle,
+        connection,
         start,
         ..
     } = conn;
@@ -650,6 +652,7 @@ async fn dispatch_classified_route<'a>(
     let operation = OperationEnvelope::admit(
         budgets.request(),
         lifecycle.control(),
+        connection,
         origin.disconnect,
         ctx.policy.shutdown_timeout_value(),
         script.as_deref(),
@@ -923,7 +926,7 @@ pub(super) async fn handle_request(
     ctx: &ConnCtx,
     remote_addr: Option<std::net::IpAddr>,
     lifecycle: &ConnectionLifecycle,
-    disconnect: DisconnectSignal,
+    lifetime: ResponseLifetime,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let start = std::time::Instant::now();
     // Built once and copied down every dispatch path, so no path can pair this
@@ -936,7 +939,7 @@ pub(super) async fn handle_request(
         is_tls: ctx.is_tls,
         request_id: RequestId::generate(),
         version: hyper_req.version(),
-        disconnect: &disconnect,
+        disconnect: lifetime.signal(),
     };
 
     // gRPC bodies are streaming — skip body collection and dispatch directly to tonic.
@@ -961,6 +964,7 @@ pub(super) async fn handle_request(
         ctx,
         origin,
         lifecycle,
+        connection: lifetime.connection(),
         start,
     };
     dispatch_classified_route(hyper_req, classified, &conn).await

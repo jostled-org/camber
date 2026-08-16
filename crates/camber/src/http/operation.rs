@@ -11,11 +11,12 @@
 //! nothing: there is no policy to run them under, so there is no operation to
 //! name.
 
-use super::disconnect::DisconnectSignal;
+use super::disconnect::{ConnectionLiveness, DisconnectSignal};
 use super::mock::LifecycleScript;
 use super::rejection::Rejected;
 use super::request_budget::RequestBudget;
 use super::server_lifecycle::ServerControl;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -196,6 +197,7 @@ pub(super) struct OperationEnvelope {
     /// detached synchronous callback case. It never observes either terminal.
     control: Option<tokio::sync::watch::Receiver<ServerControl>>,
     shutdown_timeout: Duration,
+    connection: Arc<ConnectionLiveness>,
     disconnect: DisconnectSignal,
 }
 
@@ -204,6 +206,7 @@ impl OperationEnvelope {
     pub(super) fn admit(
         budget: RequestBudget,
         control: Option<tokio::sync::watch::Receiver<ServerControl>>,
+        connection: &Arc<ConnectionLiveness>,
         disconnect: &DisconnectSignal,
         shutdown_timeout: Duration,
         script: Option<&LifecycleScript>,
@@ -215,6 +218,7 @@ impl OperationEnvelope {
             total: budget.total().map(|total| admitted_at + total),
             control,
             shutdown_timeout,
+            connection: Arc::clone(connection),
             disconnect: disconnect.clone(),
         };
         LifecycleScript::observe_operation_admitted(script, envelope.id, budget.total());
@@ -243,6 +247,7 @@ impl OperationEnvelope {
             control: self.control.clone(),
             shutdown_timeout: self.shutdown_timeout,
             shutdown_deadline: None,
+            connection: Arc::clone(&self.connection),
             disconnect: self.disconnect.clone(),
             quiet_since: Instant::now(),
         }
@@ -272,6 +277,7 @@ pub(super) struct InboundGuard {
     /// The instant a graceful shutdown's deadline expires at, minted at the
     /// first turn that observed the transition and never re-minted.
     shutdown_deadline: Option<Instant>,
+    connection: Arc<ConnectionLiveness>,
     disconnect: DisconnectSignal,
     /// When the quiet interval this owner measures last restarted.
     quiet_since: Instant,
@@ -308,7 +314,7 @@ impl InboundGuard {
                 .idle
                 .is_some_and(|idle| now.saturating_duration_since(self.quiet_since) >= idle),
             request_total: self.total.is_some_and(|total| now >= total),
-            disconnect: self.disconnect.observed().is_some(),
+            disconnect: self.connection.is_terminating() || self.disconnect.observed().is_some(),
             source_failure: false,
             response_head: false,
         }

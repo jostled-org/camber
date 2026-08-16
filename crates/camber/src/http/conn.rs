@@ -1102,8 +1102,8 @@ async fn serve_request(
     liveness: Arc<ConnectionLiveness>,
 ) -> Result<hyper::Response<GuardedBody>, std::convert::Infallible> {
     let bodyless_request = request.method() == hyper::Method::HEAD;
-    let (signal, guard) = liveness.begin_response();
-    let response = handle_request(request, router, ctx, remote_addr, lifecycle, signal).await?;
+    let (lifetime, guard) = liveness.begin_response();
+    let response = handle_request(request, router, ctx, remote_addr, lifecycle, lifetime).await?;
     Ok(GuardedBody::attach(response, guard, bodyless_request))
 }
 
