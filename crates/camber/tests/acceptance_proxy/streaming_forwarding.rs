@@ -428,6 +428,24 @@ fn streaming_limit_hosts(
     hosts
 }
 
+fn write_paced_crossing_upload(
+    peer: &mut TcpStream,
+    upstream: &common::RawUpstream,
+    admitted: &[u8],
+    crossing: &[u8],
+) {
+    common::tolerate_dead_socket(common::write_chunk(peer, admitted))
+        .expect("the admitted frame reached the proxy");
+    let admitted_forwarded =
+        common::poll_until(Duration::from_secs(5), || upstream.forwarded(admitted));
+    assert!(
+        admitted_forwarded,
+        "every frame inside the bound reached the upstream"
+    );
+    common::tolerate_dead_socket(common::write_chunk(peer, crossing))
+        .expect("the crossing frame reached the proxy");
+}
+
 #[test]
 fn proxy_stream_crossing_frame_is_not_forwarded_and_maps_body_limit_once() {
     common::test_runtime()
@@ -452,24 +470,7 @@ fn proxy_stream_crossing_frame_is_not_forwarded_and_maps_body_limit_once() {
                 STREAM_HOST,
             )
             .expect("the upload head reached the proxy");
-            common::tolerate_dead_socket(common::write_chunk(&mut peer, &admitted))
-                .expect("the admitted frame reached the proxy");
-            // Read the admitted frame off the upstream before the crossing one
-            // is written, rather than both at the end. The outbound leg buffers
-            // a forwarded frame and flushes it when the next poll finds nothing
-            // ready, so a crossing frame the proxy can reach in that same poll
-            // aborts the request with the admitted bytes still in the client's
-            // write buffer — the upstream then holds neither frame, and the
-            // claim below reads a positive control that the peer's own pacing,
-            // not the proxy, decided.
-            let admitted_forwarded =
-                common::poll_until(Duration::from_secs(5), || upstream.forwarded(&admitted));
-            assert!(
-                admitted_forwarded,
-                "every frame inside the bound reached the upstream"
-            );
-            common::tolerate_dead_socket(common::write_chunk(&mut peer, &crossing))
-                .expect("the crossing frame reached the proxy");
+            write_paced_crossing_upload(&mut peer, &upstream, &admitted, &crossing);
 
             let refused = common::read_http_response_bounded(&mut peer)
                 .expect("the crossing frame was answered");

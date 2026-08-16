@@ -113,9 +113,11 @@ Common options:
 - `health_interval(duration)`
 - `otel_endpoint(url)` with the `otel` feature
 
-`header_timeout(duration)` bounds the wait for a complete request head. It replaces
-`keepalive_timeout`, which never owned an idle keep-alive timer: the value has always
-configured Hyper's header-read boundary, and the name now states the failure it produces.
+`header_timeout(duration)` bounds Hyper's wait for a complete HTTP/1 request head. It
+replaces `keepalive_timeout`, which never owned an idle keep-alive timer: the value has
+always configured Hyper's HTTP/1 header-read boundary, and the name now states the
+failure it produces. Hyper exposes no equivalent HTTP/2 per-stream partial-HEADERS
+timer. Camber's HTTP/2 request deadlines begin after Hyper delivers a complete head.
 
 `connection_limit(0)` is invalid and returns `RuntimeError::InvalidArgument` when the
 runtime starts. Omitting the connection limit is unbounded — intended for development,

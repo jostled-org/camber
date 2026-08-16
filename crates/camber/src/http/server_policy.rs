@@ -88,12 +88,14 @@ impl Default for ServerPolicy {
 }
 
 impl ServerPolicy {
-    /// Set how long Hyper may wait for a complete request head.
+    /// Set how long Hyper may wait for a complete HTTP/1 request head.
     ///
     /// This is a pre-head bound and nothing else. It is independent of request
     /// body idle time, request total time, connection admission, and shutdown:
     /// a peer that never finishes its head has no request, no request ID, and
-    /// no mapped rejection — its transport is closed.
+    /// no mapped rejection — its transport is closed. Hyper exposes no
+    /// equivalent HTTP/2 per-stream partial-HEADERS timer; HTTP/2 request
+    /// budgets begin after Hyper delivers a complete head.
     ///
     /// # Errors
     ///

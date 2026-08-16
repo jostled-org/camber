@@ -125,12 +125,13 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Set how long Hyper may wait for a complete request head. Minimum: 100ms.
-    /// Zero values are clamped.
+    /// Set how long Hyper may wait for a complete HTTP/1 request head.
+    /// Minimum: 100ms. Zero values are clamped.
     ///
     /// This replaces the former `keepalive_timeout`, which never owned an idle
-    /// keep-alive timer: the value has always configured Hyper's header-read
-    /// boundary, and the name now says which failure it produces.
+    /// keep-alive timer: the value has always configured Hyper's HTTP/1
+    /// header-read boundary, and the name now says which failure it produces.
+    /// Hyper exposes no equivalent HTTP/2 per-stream partial-HEADERS timer.
     pub fn header_timeout(mut self, timeout: Duration) -> Self {
         const MIN: Duration = Duration::from_millis(100);
         self.set_policy_field(|policy| {
