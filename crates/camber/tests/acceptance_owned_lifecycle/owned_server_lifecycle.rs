@@ -21,6 +21,8 @@ const HTTP_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
 const CLOSE_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 const PROBE_PANIC: &str = "supervisor join probe panic";
 const OWNED_TASK_PANIC: &str = "injected owned HTTP task panic";
+const OPAQUE_PANIC_PATH: &str = "/opaque-panic";
+const OPAQUE_PANIC_PAYLOAD: usize = 7;
 #[cfg(feature = "ws")]
 const SUPERVISOR_PANIC: &str = "injected server supervisor panic";
 // Every observation in this file carries this bound, so an event production
@@ -95,6 +97,41 @@ fn held_router(
         }
     });
     router
+}
+
+/// Add a held route whose release unwinds the request that entered it.
+///
+/// The unwind carries out through the connection future, so the supervisor
+/// joins exactly what an opaque owned-task fault gives it: a panic whose
+/// payload no reader can name. Unlike that fault, which is spent when the task
+/// is spawned, this one happens when the holder of the release says so.
+fn add_opaque_panic_route(
+    router: &mut Router,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: Arc<tokio::sync::Semaphore>,
+) {
+    let entered = Arc::new(Mutex::new(Some(entered)));
+    router.get(OPAQUE_PANIC_PATH, move |_req: &Request| {
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        async move {
+            if let Some(sender) = entered.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = sender.send(());
+            }
+            let permit = release.acquire().await;
+            drop(permit);
+            opaque_handler_panic()
+        }
+    });
+}
+
+/// Unwind one held request with a payload that is neither `&str` nor `String`.
+///
+/// `resume_unwind` rather than `panic!`, for the same reason production's
+/// injected faults use it: it runs no panic hook, so a case that expects the
+/// unwind does not print one.
+fn opaque_handler_panic() -> Result<Response, RuntimeError> {
+    std::panic::resume_unwind(Box::new(OPAQUE_PANIC_PAYLOAD))
 }
 
 fn named_held_router(
@@ -1175,6 +1212,47 @@ async fn shutdown_joins_incomplete_tls_handshake() {
     assert_eof(&mut client).await;
 }
 
+/// Serve `router` in the background and hold one request inside its handler.
+///
+/// The retained fixtures differ only in the router they serve and the path they
+/// hold, so binding, registering the controller, connecting, and waiting for
+/// handler entry are written here once.
+async fn serve_with_held_request(
+    router: Router,
+    path: &str,
+    entered: tokio::sync::oneshot::Receiver<()>,
+    context: &str,
+) -> (
+    LifecycleController,
+    SocketAddr,
+    ServerHandle,
+    tokio::net::TcpStream,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let controller = lifecycle(addr).unwrap();
+    let handle = camber::http::serve_background(listener, router)
+        .expect("owned server requires a Tokio runtime");
+    let client = hold_request(addr, path, entered, context).await;
+    (controller, addr, handle, client)
+}
+
+/// Offer one request to a served fixture and wait until its handler holds it.
+///
+/// Admission is deterministic here because nothing else the supervisor selects
+/// is ready: it waits on the listener for as long as the kernel takes to finish
+/// the handshake, rather than racing it against work already in hand.
+async fn hold_request(
+    addr: SocketAddr,
+    path: &str,
+    entered: tokio::sync::oneshot::Receiver<()>,
+    context: &str,
+) -> tokio::net::TcpStream {
+    let client = connect_request_path(addr, path).await;
+    await_handler_entry(entered, context).await;
+    client
+}
+
 async fn retained_server() -> (
     LifecycleController,
     SocketAddr,
@@ -1184,25 +1262,80 @@ async fn retained_server() -> (
 ) {
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let release = Arc::new(tokio::sync::Semaphore::new(0));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(
-        listener,
-        held_router(
-            entered_tx,
-            Arc::clone(&release),
-            Arc::new(AtomicBool::new(false)),
-        ),
-    )
-    .expect("owned server requires a Tokio runtime");
-    let client = connect_request(addr).await;
-    await_handler_entry(
+    let router = held_router(
+        entered_tx,
+        Arc::clone(&release),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (controller, addr, handle, client) = serve_with_held_request(
+        router,
+        "/",
         entered_rx,
         "retained fixture request did not enter the handler",
     )
     .await;
     (controller, addr, handle, client, release)
+}
+
+/// A retained server that also holds a request whose release is an opaque
+/// panic.
+///
+/// A second owned-task panic cannot come from a second faulted connection.
+/// Reaping the first panic closes admission, so a connection offered after that
+/// reap is refused. Offering it before leaves the accept racing a completion
+/// the supervisor already holds, and the kernel decides that race: a peer whose
+/// connect has returned is not yet certain to be on the listener's queue, and a
+/// select that answers the completion first takes the listener away for good.
+/// A request admitted while nothing else is ready and released after the first
+/// reap settles both. Its task exists before that reap and panics after it.
+struct RetainedPanicServer {
+    controller: LifecycleController,
+    addr: SocketAddr,
+    handle: ServerHandle,
+    peer: tokio::net::TcpStream,
+    release: Arc<tokio::sync::Semaphore>,
+    panicking_peer: tokio::net::TcpStream,
+    panicking_release: Arc<tokio::sync::Semaphore>,
+}
+
+async fn retained_panic_server() -> RetainedPanicServer {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (panic_entered_tx, panic_entered_rx) = tokio::sync::oneshot::channel();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let panicking_release = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut router = held_router(
+        entered_tx,
+        Arc::clone(&release),
+        Arc::new(AtomicBool::new(false)),
+    );
+    add_opaque_panic_route(
+        &mut router,
+        panic_entered_tx,
+        Arc::clone(&panicking_release),
+    );
+    let (controller, addr, handle, peer) = serve_with_held_request(
+        router,
+        "/",
+        entered_rx,
+        "retained fixture request did not enter the handler",
+    )
+    .await;
+    let panicking_peer = hold_request(
+        addr,
+        OPAQUE_PANIC_PATH,
+        panic_entered_rx,
+        "retained panic request did not enter the handler",
+    )
+    .await;
+    RetainedPanicServer {
+        controller,
+        addr,
+        handle,
+        peer,
+        release,
+        panicking_peer,
+        panicking_release,
+    }
 }
 
 async fn retained_owner_server() -> (
@@ -1216,21 +1349,15 @@ async fn retained_owner_server() -> (
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let dropped = Arc::new(AtomicBool::new(false));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
-    let handle = camber::http::serve_background(
-        listener,
-        named_held_router(
-            entered_tx,
-            Arc::clone(&release),
-            Arc::clone(&dropped),
-            Arc::new(AtomicUsize::new(0)),
-        ),
-    )
-    .expect("owned server requires a Tokio runtime");
-    let client = connect_request_path(addr, "/active").await;
-    await_handler_entry(
+    let router = named_held_router(
+        entered_tx,
+        Arc::clone(&release),
+        Arc::clone(&dropped),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let (controller, addr, handle, client) = serve_with_held_request(
+        router,
+        "/active",
         entered_rx,
         "retained owner fixture request did not enter the handler",
     )
@@ -1673,47 +1800,61 @@ async fn owned_task_panic_then_graceful_retains_panic() {
 // 1.T12: one owned-task panic then another retains the first payload.
 #[camber::test]
 async fn owned_task_panic_then_opaque_panic_retains_first_payload() {
-    let (controller, addr, handle, mut peer, release) = retained_server().await;
+    let RetainedPanicServer {
+        controller,
+        addr,
+        handle,
+        mut peer,
+        release,
+        mut panicking_peer,
+        panicking_release,
+    } = retained_panic_server().await;
     prepare_faulted_task(&controller, addr, LifecycleFault::PanicNextOwnedTask).await;
-    controller
-        .inject_once(LifecycleFault::PanicNextOwnedTaskOpaque)
-        .unwrap();
-    let mut second = connect_request(addr).await;
     select_next(
         &controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
-        "second faulted accept selection timed out",
+        LifecycleCheckpoint::SupervisorSelectedTask,
+        "faulted task selection timed out",
     )
     .await;
     apply_selected(
         &controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
-        "second faulted accept boundary timed out",
+        LifecycleCheckpoint::SupervisorSelectedTask,
+        "faulted task reap boundary timed out",
     )
     .await;
-    assert_connection_closed(&mut second).await;
-    for index in 0..2 {
-        select_next(
-            &controller,
-            LifecycleCheckpoint::SupervisorSelectedTask,
-            "faulted task selection timed out",
-        )
-        .await;
-        match index {
-            0 => {
-                apply_selected(
-                    &controller,
-                    LifecycleCheckpoint::SupervisorSelectedTask,
-                    "faulted task reap boundary timed out",
-                )
-                .await;
-            }
-            _ => controller
-                .release(LifecycleCheckpoint::SupervisorSelectedTask)
-                .unwrap(),
-        }
-    }
-    release_and_drain_peer(&release, &mut peer, b"released").await;
+    // What proves the second completion was a panic. A connection future that
+    // returned instead of unwinding would answer its peer and reach the
+    // terminal boundary armed here. Either one leaves the supervisor no second
+    // candidate to keep out, and the retention below would pass on nothing.
+    controller
+        .pause_once(LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted)
+        .unwrap();
+    panicking_release.add_permits(1);
+    assert_connection_closed(&mut panicking_peer).await;
+    select_next(
+        &controller,
+        LifecycleCheckpoint::SupervisorSelectedTask,
+        "held panic task selection timed out",
+    )
+    .await;
+    assert_eq!(
+        controller
+            .checkpoint_polls(LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted)
+            .unwrap(),
+        0,
+        "the panicking handler's connection future reached its terminal boundary"
+    );
+    controller
+        .release(LifecycleCheckpoint::SupervisorSelectedTask)
+        .unwrap();
+    release.add_permits(1);
+    wait_and_release_bounded(
+        &controller,
+        LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted,
+        "retained peer terminal boundary timed out",
+    )
+    .await;
+    drain_peer(&mut peer, b"released").await;
     assert_task_panicked(handle.await, OWNED_TASK_PANIC);
 }
 

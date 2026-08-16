@@ -50,9 +50,10 @@ impl TransferBudget {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::InvalidArgument`] when `max_bytes` is zero or
-    /// either duration is zero. A route that accepts no payload is a body-mode
-    /// decision, not a zero transfer maximum.
+    /// Returns [`RuntimeError::InvalidArgument`] when `max_bytes` is zero, or
+    /// when either duration is zero or longer than the thirty-year ceiling
+    /// every Camber deadline shares. A route that accepts no payload is a
+    /// body-mode decision, not a zero transfer maximum.
     pub fn bounded(
         max_bytes: usize,
         idle: Duration,
@@ -105,7 +106,8 @@ impl TransferBudget {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero.
+    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero or
+    /// longer than the thirty-year ceiling every Camber deadline shares.
     pub fn with_idle(self, timeout: Duration) -> Result<Self, RuntimeError> {
         Ok(Self {
             idle: Some(finite_duration(timeout, "transfer idle")?),
@@ -123,7 +125,8 @@ impl TransferBudget {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero.
+    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero or
+    /// longer than the thirty-year ceiling every Camber deadline shares.
     pub fn with_total(self, timeout: Duration) -> Result<Self, RuntimeError> {
         Ok(Self {
             total: Some(finite_duration(timeout, "transfer total")?),

@@ -153,6 +153,12 @@ impl Drop for ServerHandleFuture {
     }
 }
 
+/// The largest connection limit the admission semaphore below can hold.
+///
+/// The ceiling belongs to the owner that enforces it, so the policy setter
+/// that validates a limit and the semaphore that carries it read one value.
+pub(super) const MAX_CONNECTION_LIMIT: usize = tokio::sync::Semaphore::MAX_PERMITS;
+
 /// Build a semaphore from an optional connection limit.
 ///
 /// Every listener-wide limit — synchronous and owned alike — is turned into a

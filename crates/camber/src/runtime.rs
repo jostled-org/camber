@@ -113,6 +113,9 @@ impl RuntimeBuilder {
     ///
     /// This is the runtime's aggregate deadline: its servers, root scope, and
     /// resources consume the same duration rather than one each.
+    ///
+    /// The clamp only raises the low end. A deadline past the policy ceiling is
+    /// refused, and `run` returns that error naming this dimension.
     pub fn shutdown_timeout(mut self, timeout: Duration) -> Self {
         const MIN: Duration = Duration::from_millis(100);
         self.set_policy_field(|policy| {
@@ -132,6 +135,9 @@ impl RuntimeBuilder {
     /// keep-alive timer: the value has always configured Hyper's HTTP/1
     /// header-read boundary, and the name now says which failure it produces.
     /// Hyper exposes no equivalent HTTP/2 per-stream partial-HEADERS timer.
+    ///
+    /// The clamp only raises the low end. A deadline past the policy ceiling is
+    /// refused, and `run` returns that error naming this dimension.
     pub fn header_timeout(mut self, timeout: Duration) -> Self {
         const MIN: Duration = Duration::from_millis(100);
         self.set_policy_field(|policy| {

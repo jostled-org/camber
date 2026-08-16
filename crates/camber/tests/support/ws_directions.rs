@@ -675,11 +675,15 @@ impl DirectionTestFixture {
     }
 
     /// Wait until production reaches an armed checkpoint.
+    ///
+    /// The context names the checkpoint. A row here waits at several of them in
+    /// sequence, and one shared wording turns every expiry into the same
+    /// sentence — which says a pause never arrived without saying which.
     pub async fn wait_paused(&self, checkpoint: LifecycleCheckpoint) {
         wait_until_paused_bounded(
             &self.controller(),
             checkpoint,
-            "production reaching its direction checkpoint",
+            &format!("production reaching direction checkpoint {checkpoint:?}"),
         )
         .await;
     }

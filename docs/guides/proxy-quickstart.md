@@ -144,7 +144,7 @@ host = "app.example.com"
 proxy = "http://localhost:3000"
 ```
 
-Omit the field for unbounded behavior (the default). `connection_limit = 0` is invalid and fails at startup with `RuntimeError::InvalidArgument` — use `1` or more, or omit it entirely.
+Omit the field for unbounded behavior (the default). `connection_limit = 0` is invalid and fails at startup with `RuntimeError::InvalidArgument`. So is a limit larger than the admission semaphore can hold; that failure names the ceiling. Use a finite limit at or under it, or omit the field entirely.
 
 ## Proxy + Static File Overlay
 

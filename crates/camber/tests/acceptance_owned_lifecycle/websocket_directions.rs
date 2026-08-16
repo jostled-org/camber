@@ -78,16 +78,31 @@ const UNREACHED_SHUTDOWN: Duration = Duration::from_secs(30);
 /// The shutdown bound belongs to the row and not to the file: a row that waits
 /// for a deadline to expire and a row that must never reach one need opposite
 /// values, and only a runtime of their own can carry them.
+///
+/// The executor is sized the way `#[camber::test]` sizes its own, which is what
+/// every other row in this file runs on. `runtime::builder` defaults to the
+/// server shape — four workers per core — and a test entry is exactly what that
+/// default is documented not to be for: a row here serves one connection at a
+/// time, while nine other cases in this binary hold runtimes of their own. The
+/// surplus workers buy the rows nothing and cost every checkpoint rendezvous
+/// they wait on, because each one is a task wake that has to reach a core.
 fn direction_runtime<R, Fut>(shutdown: Duration, row: R)
 where
     R: FnOnce() -> Fut,
     Fut: Future<Output = ()>,
 {
     runtime::builder()
+        .worker_threads(test_worker_threads())
         .connection_limit(1)
         .shutdown_timeout(shutdown)
         .run(|| runtime::block_on(row()))
         .expect("the direction runtime completed");
+}
+
+/// The worker count a test-shaped executor takes: one per core, as Tokio's own
+/// default would, and as `#[camber::test]` does.
+fn test_worker_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |cores| cores.get())
 }
 
 // 2.T1

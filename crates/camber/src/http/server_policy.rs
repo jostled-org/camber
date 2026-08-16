@@ -1,7 +1,10 @@
 //! The complete operating envelope one HTTP server serves under.
 
-use super::policy_value::{finite_duration, narrow, positive_limit};
+#[cfg(feature = "profiling")]
+use super::policy_value::positive_limit;
+use super::policy_value::{finite_duration, limit_within, narrow};
 use super::request_budget::RequestBudget;
+use super::server::MAX_CONNECTION_LIMIT;
 use super::transfer_budget::TransferBudget;
 use crate::RuntimeError;
 use std::time::Duration;
@@ -99,7 +102,8 @@ impl ServerPolicy {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero.
+    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero or
+    /// longer than the thirty-year ceiling every Camber deadline shares.
     pub fn header_timeout(self, timeout: Duration) -> Result<Self, RuntimeError> {
         Ok(Self {
             header_timeout: finite_duration(timeout, "header_timeout")?,
@@ -142,7 +146,10 @@ impl ServerPolicy {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero.
+    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero or
+    /// longer than the thirty-year ceiling every Camber deadline shares. The
+    /// first graceful transition adds this value to the clock, which panics on
+    /// a deadline it cannot represent rather than saturating.
     pub fn shutdown_timeout(self, timeout: Duration) -> Result<Self, RuntimeError> {
         Ok(Self {
             shutdown_timeout: finite_duration(timeout, "shutdown_timeout")?,
@@ -161,10 +168,18 @@ impl ServerPolicy {
     /// # Errors
     ///
     /// Returns [`RuntimeError::InvalidArgument`] when `limit` is zero, which
-    /// would admit nothing at all.
+    /// would admit nothing at all, or when it exceeds the largest limit the
+    /// admission semaphore can hold. The refusal names that ceiling, so it is
+    /// read from the semaphore rather than restated here. A limit that large
+    /// bounds nothing a listener can reach; unbounded admission is spelled by
+    /// omitting the limit.
     pub fn connection_limit(self, limit: usize) -> Result<Self, RuntimeError> {
         Ok(Self {
-            connection_limit: Some(positive_limit(limit, "connection_limit")?),
+            connection_limit: Some(limit_within(
+                limit,
+                MAX_CONNECTION_LIMIT,
+                "connection_limit",
+            )?),
             ..self
         })
     }

@@ -37,7 +37,8 @@ Each site needs at least one of:
 - `proxy`
 - `root`
 
-`connection_limit = 0` is invalid.
+`connection_limit = 0` is invalid. So is a limit larger than the admission semaphore can
+hold: the server refuses it at start and names that ceiling.
 
 ## `camber context`
 

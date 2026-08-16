@@ -50,7 +50,8 @@ impl RequestBudget {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::InvalidArgument`] when either duration is zero.
+    /// Returns [`RuntimeError::InvalidArgument`] when either duration is zero
+    /// or longer than the thirty-year ceiling every Camber deadline shares.
     /// Zero is not a spelling of "unbounded" — [`unbounded`](Self::unbounded)
     /// is.
     pub fn bounded(body_idle: Duration, total: Duration) -> Result<Self, RuntimeError> {
@@ -78,7 +79,8 @@ impl RequestBudget {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero.
+    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero or
+    /// longer than the thirty-year ceiling every Camber deadline shares.
     pub fn with_body_idle(self, timeout: Duration) -> Result<Self, RuntimeError> {
         Ok(Self {
             body_idle: Some(finite_duration(timeout, "request body_idle")?),
@@ -99,7 +101,8 @@ impl RequestBudget {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero.
+    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero or
+    /// longer than the thirty-year ceiling every Camber deadline shares.
     pub fn with_total(self, timeout: Duration) -> Result<Self, RuntimeError> {
         Ok(Self {
             total: Some(finite_duration(timeout, "request total")?),

@@ -4,7 +4,14 @@ use camber::RuntimeError;
 use camber::http::{
     ByteBoundary, DeadlineBoundary, ProxyPolicy, RequestBudget, ServerPolicy, TransferBudget,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// The largest connection limit a listener's admission semaphore can hold.
+const MAX_SERVABLE_CONNECTIONS: usize = tokio::sync::Semaphore::MAX_PERMITS;
+
+/// The longest deadline a policy owner's clock can carry: thirty years, the
+/// horizon Tokio's own timer stops at.
+const MAX_SERVABLE_DEADLINE: Duration = Duration::from_secs(86_400 * 365 * 30);
 
 const ZERO: Duration = Duration::ZERO;
 const SHORT: Duration = Duration::from_secs(5);
@@ -119,6 +126,95 @@ fn assert_transfer_budget_contract() {
     expect_invalid(bounded.with_total(ZERO), "total");
 }
 
+/// Every finite connection limit a listener can serve, and every one it cannot.
+///
+/// An omitted limit is unbounded, and unbounded is not zero. No finite limit
+/// spells it, not the smallest and not the largest servable one. A limit above
+/// what the admission semaphore holds is refused by the policy setter, not by
+/// the listener that would panic on it.
+fn assert_connection_limit_contract(default: ServerPolicy) {
+    assert_ne!(
+        default,
+        default.connection_limit(1).expect("positive limit")
+    );
+    assert_ne!(
+        default,
+        default
+            .connection_limit(MAX_SERVABLE_CONNECTIONS)
+            .expect("largest servable limit"),
+    );
+    assert_ne!(
+        default.connection_limit(1).expect("positive limit"),
+        default
+            .connection_limit(MAX_SERVABLE_CONNECTIONS)
+            .expect("largest servable limit"),
+    );
+    expect_invalid(default.connection_limit(0), "connection_limit");
+    expect_invalid(
+        default.connection_limit(MAX_SERVABLE_CONNECTIONS + 1),
+        "connection_limit",
+    );
+    expect_invalid(default.connection_limit(usize::MAX), "connection_limit");
+
+    // The accepted ceiling is the admission owner's own: the semaphore every
+    // listener builds from a finite limit holds exactly this many permits and
+    // panics on more.
+    assert_eq!(
+        tokio::sync::Semaphore::new(MAX_SERVABLE_CONNECTIONS).available_permits(),
+        MAX_SERVABLE_CONNECTIONS,
+        "the largest accepted limit must be one the admission semaphore holds",
+    );
+}
+
+/// Every deadline a policy owner's clock can carry, and every one it cannot.
+///
+/// A finite deadline becomes `Instant::now() + value` at the owner enforcing
+/// it, and that addition panics rather than saturating on a sum the platform
+/// cannot represent. Every dimension shares one ceiling because every dimension
+/// ends at that same addition, and the setter refuses what the clock cannot
+/// reach — not the supervisor that would panic on it.
+fn assert_deadline_ceiling_contract() {
+    let server = ServerPolicy::default();
+    let proxy = ProxyPolicy::default();
+    let over = MAX_SERVABLE_DEADLINE + Duration::from_secs(1);
+
+    assert_ne!(
+        server,
+        server
+            .header_timeout(MAX_SERVABLE_DEADLINE)
+            .expect("the longest carried deadline"),
+    );
+    assert_ne!(
+        server,
+        server
+            .shutdown_timeout(MAX_SERVABLE_DEADLINE)
+            .expect("the longest carried deadline"),
+    );
+
+    expect_invalid(server.header_timeout(over), "header_timeout");
+    expect_invalid(server.shutdown_timeout(over), "shutdown_timeout");
+    expect_invalid(server.shutdown_timeout(Duration::MAX), "shutdown_timeout");
+    expect_invalid(RequestBudget::bounded(over, LONG), "body_idle");
+    expect_invalid(RequestBudget::bounded(SHORT, Duration::MAX), "total");
+    expect_invalid(TransferBudget::bounded(1024, over, LONG), "idle");
+    expect_invalid(TransferBudget::bounded(1024, SHORT, Duration::MAX), "total");
+    expect_invalid(proxy.connect_timeout(over), "connect_timeout");
+    expect_invalid(proxy.request_timeout(Duration::MAX), "request_timeout");
+    expect_invalid(proxy.upstream_idle_timeout(over), "upstream_idle_timeout");
+
+    // The accepted ceiling is the enforcing clock's own. `tokio::time::Instant`
+    // adds through the `std` instant below, so this is the addition every
+    // deadline owner performs.
+    assert!(
+        Instant::now().checked_add(MAX_SERVABLE_DEADLINE).is_some(),
+        "the longest accepted deadline must be one the clock can reach",
+    );
+    assert!(
+        Instant::now().checked_add(Duration::MAX).is_none(),
+        "a refused deadline must be one the clock cannot reach",
+    );
+}
+
 fn assert_server_policy_contract() {
     let default = ServerPolicy::default();
 
@@ -138,16 +234,7 @@ fn assert_server_policy_contract() {
             .download_budget(TransferBudget::unbounded()),
     );
 
-    // An omitted connection limit is unbounded, and unbounded is not zero.
-    assert_eq!(
-        default.connection_limit(1).expect("positive limit"),
-        default.connection_limit(1).expect("positive limit"),
-    );
-    assert_ne!(
-        default,
-        default.connection_limit(1).expect("positive limit")
-    );
-    expect_invalid(default.connection_limit(0), "connection_limit");
+    assert_connection_limit_contract(default);
     expect_invalid(default.header_timeout(ZERO), "header_timeout");
     expect_invalid(default.shutdown_timeout(ZERO), "shutdown_timeout");
 
@@ -168,7 +255,18 @@ fn assert_server_policy_contract() {
 
     #[cfg(feature = "profiling")]
     {
-        expect_invalid(default.profiling_response_limit(0), "profiling");
+        // The published eight-MiB ceiling, read back through the setter that
+        // writes it.
+        assert_eq!(
+            default,
+            default
+                .profiling_response_limit(8 * 1024 * 1024)
+                .expect("default profiling response limit"),
+        );
+        expect_invalid(
+            default.profiling_response_limit(0),
+            "profiling_response_limit",
+        );
         assert_ne!(
             default,
             default
@@ -258,6 +356,7 @@ fn budget_constructors_validate_every_finite_value_and_explicit_unbounded_choice
     assert_transfer_budget_contract();
     assert_server_policy_contract();
     assert_proxy_policy_contract();
+    assert_deadline_ceiling_contract();
 
     // Small immutable policy values are copied, not shared.
     assert_policy_value::<RequestBudget>();

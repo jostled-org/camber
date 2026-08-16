@@ -3,23 +3,43 @@
 //! One owner for two rules the whole policy vocabulary depends on. A finite
 //! duration or byte maximum is validated once, here, before any policy value
 //! can hold it — zero is never a stand-in for "unbounded", which every type
-//! spells with its own named constructor. And an inner layer narrows an outer
-//! one through [`narrow`] alone, so runtime, server, host, and router
-//! precedence cannot drift apart per dimension.
+//! spells with its own named constructor, and neither is a bound the owner
+//! enforcing it could not carry. And an inner layer narrows an outer one
+//! through [`narrow`] alone, so runtime, server, host, and router precedence
+//! cannot drift apart per dimension.
 
 use crate::RuntimeError;
 use std::time::Duration;
 
-/// Accept a duration a policy may enforce, or refuse zero.
+/// The longest deadline any policy dimension may carry.
+///
+/// Every finite deadline becomes `Instant::now() + value` at the owner that
+/// enforces it, and that addition panics rather than saturating once the sum
+/// leaves the clock's range. Tokio's timer picks the same thirty years and
+/// calls it the far future, for the reason its own source records: a century
+/// overflows on FreeBSD and a millennium on macOS. A deadline at this ceiling
+/// outlives any process that could reach it, and the timers underneath Camber
+/// saturate there anyway, so nothing longer can behave differently.
+const MAX_POLICY_DEADLINE: Duration = Duration::from_secs(86_400 * 365 * 30);
+
+/// Accept a duration a policy may enforce, or refuse zero and the unreachable.
 ///
 /// The name reaches the caller because the argument alone does not say which
-/// bound was rejected when a builder chain sets several.
+/// bound was rejected when a builder chain sets several. Both refusals arrive
+/// here, before the value reaches a clock that would panic on it.
 pub(super) fn finite_duration(value: Duration, name: &str) -> Result<Duration, RuntimeError> {
-    match value.is_zero() {
-        true => Err(RuntimeError::InvalidArgument(
+    match value {
+        deadline if deadline.is_zero() => Err(RuntimeError::InvalidArgument(
             format!("{name} must be greater than zero").into_boxed_str(),
         )),
-        false => Ok(value),
+        deadline if deadline > MAX_POLICY_DEADLINE => Err(RuntimeError::InvalidArgument(
+            format!(
+                "{name} must be at most {} seconds",
+                MAX_POLICY_DEADLINE.as_secs()
+            )
+            .into_boxed_str(),
+        )),
+        deadline => Ok(deadline),
     }
 }
 
@@ -31,6 +51,24 @@ pub(super) fn positive_limit(value: usize, name: &str) -> Result<usize, RuntimeE
     match value {
         0 => Err(RuntimeError::InvalidArgument(
             format!("{name} must be at least 1").into_boxed_str(),
+        )),
+        limit => Ok(limit),
+    }
+}
+
+/// Accept a whole-unit maximum the owner enforcing it can hold.
+///
+/// Zero admits nothing, and a value above the enforcing primitive's own
+/// ceiling is a bound no owner can carry. Both refusals name the dimension and
+/// the ceiling here, before the value reaches an owner that would panic on it.
+pub(super) fn limit_within(
+    value: usize,
+    ceiling: usize,
+    name: &str,
+) -> Result<usize, RuntimeError> {
+    match positive_limit(value, name)? {
+        limit if limit > ceiling => Err(RuntimeError::InvalidArgument(
+            format!("{name} must be at most {ceiling}").into_boxed_str(),
         )),
         limit => Ok(limit),
     }

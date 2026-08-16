@@ -63,7 +63,8 @@ impl ProxyPolicy {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero.
+    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero or
+    /// longer than the thirty-year ceiling every Camber deadline shares.
     pub fn connect_timeout(self, timeout: Duration) -> Result<Self, RuntimeError> {
         Ok(Self {
             connect: finite_duration(timeout, "proxy connect_timeout")?,
@@ -75,7 +76,8 @@ impl ProxyPolicy {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero.
+    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero or
+    /// longer than the thirty-year ceiling every Camber deadline shares.
     pub fn request_timeout(self, timeout: Duration) -> Result<Self, RuntimeError> {
         Ok(Self {
             request: finite_duration(timeout, "proxy request_timeout")?,
@@ -87,7 +89,8 @@ impl ProxyPolicy {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero.
+    /// Returns [`RuntimeError::InvalidArgument`] when the duration is zero or
+    /// longer than the thirty-year ceiling every Camber deadline shares.
     pub fn upstream_idle_timeout(self, timeout: Duration) -> Result<Self, RuntimeError> {
         Ok(Self {
             upstream_idle: finite_duration(timeout, "proxy upstream_idle_timeout")?,

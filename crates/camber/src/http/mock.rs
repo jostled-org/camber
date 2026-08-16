@@ -92,16 +92,19 @@ enum CheckpointPhase {
 struct CheckpointState {
     checkpoint: LifecycleCheckpoint,
     phase: CheckpointPhase,
-    reached: Arc<tokio::sync::Notify>,
     released: Arc<ReleaseGate>,
 }
 
 impl CheckpointState {
-    /// Record that production reached this checkpoint, and wake whoever waited
-    /// to hear it.
+    /// Record that production reached this checkpoint.
+    ///
+    /// Nothing is woken here. Reaching a checkpoint and being held at it are two
+    /// moments, not one: the future this returns the gate to has not looked for
+    /// its release yet, and [`ReleaseGate::poll_release`] owns the wake that says
+    /// it has. See the gate's `looked` for what a case that was woken any earlier
+    /// could do to the production poll it is standing in the middle of.
     fn pause(&mut self) -> Arc<ReleaseGate> {
         self.phase = CheckpointPhase::Paused;
-        self.reached.notify_waiters();
         Arc::clone(&self.released)
     }
 }
@@ -124,6 +127,18 @@ struct ReleaseGate {
     /// spent from one still to come.
     polls: AtomicUsize,
     waiting: Mutex<Option<std::task::Waker>>,
+    /// Woken when the held future takes its first look here.
+    ///
+    /// This, rather than the phase flip, is what an observer waits for. A case
+    /// woken at the flip is standing inside the production poll that reached the
+    /// checkpoint, and the two calls it makes next — arm the checkpoint it wants
+    /// held, release the one it is holding — both land before that poll has
+    /// looked here. The look then finds the release already recorded, the held
+    /// future runs on within the same poll, and the checkpoint the case armed is
+    /// never reached, because the poll that would have reached it is the one
+    /// already running. Waiting for the first look puts the case's release on a
+    /// poll that has not started.
+    looked: tokio::sync::Notify,
 }
 
 impl ReleaseGate {
@@ -144,6 +159,11 @@ impl ReleaseGate {
     /// How many turns whatever waits here has taken.
     fn polls(&self) -> usize {
         self.polls.load(Ordering::Acquire)
+    }
+
+    /// Whether the held future has looked here at least once.
+    fn has_looked(&self) -> bool {
+        self.polls() > 0
     }
 
     /// Wake whatever waits here.
@@ -169,19 +189,30 @@ impl ReleaseGate {
     /// The registration happens under the same lock [`Self::wake`] takes, so a
     /// release recorded between the check and the registration still finds the
     /// waker it has to wake.
+    ///
+    /// The first look publishes itself whatever the answer was, because what an
+    /// observer waits for is that the look happened and not what it found. It is
+    /// published after the lock is given back, so the observer it frees — which
+    /// may release this gate immediately — never contends with the call that
+    /// freed it.
     fn poll_release(&self, cx: &std::task::Context<'_>) -> std::task::Poll<()> {
-        self.polls.fetch_add(1, Ordering::Release);
+        let first = self.polls.fetch_add(1, Ordering::Release) == 0;
         let mut waiting = self
             .waiting
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        match self.released.load(Ordering::Acquire) {
+        let ready = match self.released.load(Ordering::Acquire) {
             true => std::task::Poll::Ready(()),
             false => {
                 *waiting = Some(cx.waker().clone());
                 std::task::Poll::Pending
             }
+        };
+        drop(waiting);
+        if first {
+            self.looked.notify_waiters();
         }
+        ready
     }
 }
 
@@ -503,7 +534,6 @@ impl LifecycleScript {
                 state.checkpoints.push(CheckpointState {
                     checkpoint,
                     phase: CheckpointPhase::Armed,
-                    reached: Arc::new(tokio::sync::Notify::new()),
                     released: Arc::new(ReleaseGate::default()),
                 });
                 Ok(())
@@ -516,16 +546,22 @@ impl LifecycleScript {
         result
     }
 
-    /// Wait until production reports reaching `checkpoint`.
+    /// Wait until production is held at `checkpoint`.
     ///
-    /// Registration precedes the second read of the phase, and both precede the
-    /// wait. [`CheckpointState::pause`] wakes through `notify_waiters`, which
-    /// stores no permit: a pause landing after an unregistered waiter read
-    /// `Armed` is a wake that never happened, and the observer holds for its
-    /// caller's whole bound on a checkpoint production already reached.
+    /// Held, rather than merely reached: the wait ends once the paused future has
+    /// looked for its release, which is the first moment a caller can arm another
+    /// checkpoint and release this one without both landing inside the production
+    /// poll it is standing in. `ReleaseGate::looked` states what that costs a
+    /// caller woken any earlier.
+    ///
+    /// Registration precedes the second read of the state, and both precede the
+    /// wait. `notify_waiters` stores no permit: a look landing after an
+    /// unregistered waiter read `Armed` is a wake that never happened, and the
+    /// observer holds for its caller's whole bound on a checkpoint production is
+    /// already held at.
     async fn wait_until_paused(&self, checkpoint: LifecycleCheckpoint) -> Result<(), RuntimeError> {
         loop {
-            let reached = {
+            let gate = {
                 let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
                 let entry = state
                     .checkpoints
@@ -534,24 +570,28 @@ impl LifecycleScript {
                     .ok_or_else(|| Self::invalid("lifecycle checkpoint is not armed"))?;
                 match (state.closed, entry.phase) {
                     (true, _) => return Err(Self::invalid("lifecycle controller is closed")),
-                    (false, CheckpointPhase::Paused) => return Ok(()),
+                    (false, CheckpointPhase::Paused) if entry.released.has_looked() => {
+                        return Ok(());
+                    }
                     (false, CheckpointPhase::Released) => {
                         return Err(Self::invalid("lifecycle checkpoint was already released"));
                     }
-                    (false, CheckpointPhase::Armed) => Arc::clone(&entry.reached),
+                    (false, _) => Arc::clone(&entry.released),
                 }
             };
-            let notified = reached.notified();
+            let notified = gate.looked.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let already_paused = {
+            let already_held = {
                 let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
                 state.closed
                     || state.checkpoints.iter().any(|entry| {
-                        entry.checkpoint == checkpoint && entry.phase == CheckpointPhase::Paused
+                        entry.checkpoint == checkpoint
+                            && entry.phase == CheckpointPhase::Paused
+                            && entry.released.has_looked()
                     })
             };
-            match already_paused {
+            match already_held {
                 true => continue,
                 false => notified.await,
             }
@@ -711,7 +751,7 @@ impl LifecycleScript {
             state
                 .checkpoints
                 .iter()
-                .map(|entry| (Arc::clone(&entry.reached), Arc::clone(&entry.released)))
+                .map(|entry| Arc::clone(&entry.released))
                 .collect::<Vec<_>>()
         };
         held.into_iter().for_each(let_go);
@@ -721,12 +761,13 @@ impl LifecycleScript {
 /// Let go of one checkpoint outright.
 ///
 /// A closing controller owes both halves to every checkpoint it still holds:
-/// whoever waits to hear it was reached, and whatever is held at its release.
-/// Production parked at a checkpoint resumes rather than waiting on a controller
-/// that no longer exists.
-fn let_go(held: (Arc<tokio::sync::Notify>, Arc<ReleaseGate>)) {
-    let (reached, released) = held;
-    reached.notify_waiters();
+/// whoever waits to hear production is held at it, and whatever is held at its
+/// release. The observer is woken whether or not the look it waits for ever
+/// happened, because on a closed controller it never will. Production parked at
+/// a checkpoint resumes rather than waiting on a controller that no longer
+/// exists.
+fn let_go(released: Arc<ReleaseGate>) {
+    released.looked.notify_waiters();
     released.record();
     released.wake();
 }

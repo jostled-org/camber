@@ -120,9 +120,23 @@ failure it produces. Hyper exposes no equivalent HTTP/2 per-stream partial-HEADE
 timer. Camber's HTTP/2 request deadlines begin after Hyper delivers a complete head.
 
 `connection_limit(0)` is invalid and returns `RuntimeError::InvalidArgument` when the
-runtime starts. Omitting the connection limit is unbounded — intended for development,
+runtime starts. So is a limit larger than the admission semaphore can hold; the error
+names that ceiling. Omitting the connection limit is unbounded — intended for development,
 tests, or a service behind an admission boundary that already enforces one. A production
 service should set a finite limit.
+
+`ServerPolicy` refuses every deadline that is zero or longer than thirty years, and the
+request, transfer, and proxy budgets refuse the same two. Thirty years is the horizon
+Tokio's own timer stops at. Past it Camber would hand the clock a deadline the platform
+cannot represent. Spell "no deadline" with the unbounded constructor the dimension names,
+never with a very large duration.
+
+The builder's `shutdown_timeout(duration)` and `header_timeout(duration)` differ at the
+low end. Each raises a duration under 100 ms to 100 ms and logs a warning. Zero through
+the builder therefore starts the runtime with a 100 ms deadline instead of failing it.
+Past thirty years both refuse like the policy setters, and `run` returns
+`RuntimeError::InvalidArgument` naming the dimension. Set the deadline on a `ServerPolicy`
+when you want zero refused rather than raised.
 
 The runtime's policy is the outer ceiling for every server started inside it. A
 `ServerBuilder` may narrow any dimension and can never widen one; under bare Tokio its
