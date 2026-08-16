@@ -460,7 +460,14 @@ where
 /// a `#[camber::test]` builds a whole runtime per test case and many run at
 /// once, so the server-shaped 4× oversubscription would be paid hundreds of
 /// times over for tests that spawn a handful of tasks.
-fn tokio_default_worker_threads() -> usize {
+///
+/// Hidden and semver-unsupported rather than private, because an integration
+/// test that must build its own runtime on the test shape — rather than the
+/// server shape `builder()` defaults to — has to reach the one count that
+/// decides it. A copy in a test file would read a retune here as no change at
+/// all, and nothing would assert the drift.
+#[doc(hidden)]
+pub fn tokio_default_worker_threads() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
