@@ -9,9 +9,11 @@
 use crate::common;
 use crate::http as http_support;
 
+use camber::http::mock::{InboundTerminal, LifecycleCheckpoint};
 use camber::http::{
     BodyAdmission, BodyAdmissionContext, Method, MultipartLimits, MultipartStream, Rejection,
     RejectionContext, RejectionKind, Request, RequestBudget, Response, Router, ServerPolicy,
+    StreamResponse,
 };
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -98,8 +100,28 @@ fn deadline_routes() -> Router {
         tokio::time::sleep(UNREACHED).await;
         Response::text(200, "never")
     });
+    // A response whose head commits at once and whose body then outlives the
+    // request total several times over. The total ends at the committed head,
+    // so the time this body spends belongs to the download and not to the
+    // request; a total that kept running would cut it off.
+    router.get_stream("/slow-stream", |_req: &Request| {
+        Box::pin(async move {
+            let (streamed, sender) = StreamResponse::new(200);
+            tokio::spawn(async move {
+                let _committed = sender.send(COMMITTED_CHUNK).await;
+                tokio::time::sleep(REQUEST_TOTAL * 3).await;
+                let _outlived = sender.send(OUTLIVING_CHUNK).await;
+            });
+            streamed
+        })
+    });
     router
 }
+
+/// The frame the streamed row commits its head with.
+const COMMITTED_CHUNK: &str = "committed";
+/// The frame it produces long after its request total would have expired.
+const OUTLIVING_CHUNK: &str = "outlived";
 
 /// The policy every admitted-deadline row serves under.
 fn deadline_policy() -> ServerPolicy {
@@ -270,6 +292,7 @@ fn body_idle_and_request_total_map_once_and_apply_protocol_transport_disposition
                 assert_http1_body_idle_closes_and_maps_once().await;
                 assert_http1_paced_body_renews_its_quiet_interval().await;
                 assert_bodyless_handler_spends_the_request_total().await;
+                assert_response_body_outlives_the_request_total().await;
                 assert_http2_stalled_body_is_stream_local().await;
             });
         })
@@ -398,6 +421,44 @@ async fn assert_bodyless_handler_spends_the_request_total() {
         .expect("the stalled-handler fixture tore down");
 }
 
+/// The request total ends where the response head commits, so a response body
+/// that goes on producing frames long after the total would have expired still
+/// completes, and nothing refuses it.
+///
+/// It is the boundary the two expiry rows above cannot state. Both of them end
+/// before a head exists, so a total that never stopped running would answer them
+/// exactly the same way; only a body produced past the total can tell a total
+/// that ended at commitment from one that outlived it.
+async fn assert_response_body_outlives_the_request_total() {
+    let port = http_support::reserve_observed();
+    let (router, log) = counted_mapper(deadline_routes());
+    let server = port.serve_with_policy(router, deadline_policy());
+    let addr = server.addr();
+
+    let answered = tokio::task::spawn_blocking(move || {
+        http_support::request(addr, "GET", "/slow-stream", &[], b"", CLOSE_BOUND)
+    })
+    .await
+    .expect("the streamed peer settled")
+    .expect("the streamed response was read to its end");
+
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    assert_eq!(
+        answered.text().as_ref(),
+        format!("{COMMITTED_CHUNK}{OUTLIVING_CHUNK}"),
+        "a committed head's body must be delivered whole, however long it takes",
+    );
+    assert_eq!(
+        log.calls(),
+        0,
+        "response-body duration cannot spend a total that ended at the head",
+    );
+
+    server
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the outliving-body fixture tore down");
+}
+
 /// An HTTP/2 stream whose body stalls is ended on its own stream, and the
 /// connection under it still carries another request.
 async fn assert_http2_stalled_body_is_stream_local() {
@@ -448,6 +509,8 @@ fn request_deadlines_retain_route_body_byte_and_permit_authority() {
                 assert_byte_terminal_keeps_route_authority().await;
                 assert_idle_terminal_releases_one_permit().await;
                 assert_multipart_terminal_releases_one_permit().await;
+                assert_shutdown_terminal_releases_one_permit().await;
+                assert_streaming_proxy_terminal_keeps_route_authority().await;
             });
         })
         .expect("the byte-and-permit runtime ran");
@@ -566,6 +629,213 @@ async fn assert_multipart_terminal_releases_one_permit() {
     server
         .shutdown_bounded(SHUTDOWN_BOUND)
         .expect("the multipart-terminal fixture tore down");
+}
+
+/// The aggregate shutdown deadline is a terminal the admitted body reaches like
+/// any other, and it changes nothing about who owns the request's bytes: the
+/// route's permit is released exactly once, the route is not reclassified, and
+/// the deadline that has no refusal to give calls no mapper at all.
+///
+/// The supervisor is held at the control transition it selected, so the abort it
+/// would otherwise apply at the same deadline cannot take this connection's task
+/// away before the body's own owner has answered. Holding it stages nothing
+/// about the terminal: the deadline the coordinator weighs is the one production
+/// minted from the policy this listener serves under.
+async fn assert_shutdown_terminal_releases_one_permit() {
+    let row = "a shutdown deadline";
+    let released = Arc::new(AtomicUsize::new(0));
+    let port = http_support::reserve_observed();
+    let (listener, addr, controller) = port.into_owned_parts();
+    let (router, log) = counted_mapper(admitting_routes(&released));
+    let handle = camber::http::server(router)
+        .policy(shutdown_policy())
+        .serve_background(listener)
+        .expect("owned serving requires a Tokio runtime");
+
+    let supervisor = LifecycleCheckpoint::SupervisorSelectedControl;
+    let held = LifecycleCheckpoint::BeforeInboundTerminalSelection;
+    let selected = LifecycleCheckpoint::InboundTerminalSelected(InboundTerminal::ShutdownDeadline);
+    controller
+        .pause_once(supervisor)
+        .expect("arm the supervisor's control observation");
+    controller
+        .pause_once(held)
+        .expect("arm the pre-selection checkpoint");
+    controller
+        .pause_once(selected)
+        .expect("arm the selected-terminal observation");
+
+    let peer = tokio::task::spawn_blocking(move || {
+        let mut peer = http_support::connect(addr).expect("the shutdown peer connected");
+        http_support::write_stalled_body(&mut peer, None, "POST", "/admitted")
+            .expect("write a head whose admitted payload never finishes");
+        http_support::read_http_response_bounded(&mut peer)
+            .expect("the shutdown terminal was answered")
+    });
+
+    // Published while the coordinator is held, so the deadline it mints is
+    // minted in the turn this release begins.
+    http_support::wait_until_paused_bounded(&controller, held, row).await;
+    handle.shutdown();
+    http_support::wait_until_paused_bounded(&controller, supervisor, row).await;
+    controller
+        .release(held)
+        .expect("release the pre-selection checkpoint");
+    http_support::wait_until_paused_bounded(&controller, selected, row).await;
+    controller
+        .release(selected)
+        .expect("release the selected-terminal observation");
+
+    let answered = peer.await.expect("the shutdown peer settled");
+    assert_eq!(answered.status, 503, "{}", answered.text());
+    assert_eq!(
+        log.calls(),
+        0,
+        "a shutdown deadline has no refusal for a route's mapper to shape",
+    );
+    assert_eq!(
+        log.body_limits.load(Ordering::SeqCst),
+        0,
+        "a shutdown deadline is not an oversized body",
+    );
+    http_support::assert_released(&released, 1, row);
+    http_support::assert_owners_released(&controller, 1, row);
+
+    controller
+        .release(supervisor)
+        .expect("release the supervisor's control observation");
+    http_support::ReadyServer::adopt(addr, handle)
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the shutdown-terminal fixture tore down");
+}
+
+/// The policy the shutdown-terminal row serves under.
+///
+/// Its request deadlines are two orders of magnitude longer than its aggregate
+/// shutdown deadline, so the shutdown deadline is the only source that can end
+/// the admitted body and the terminal the row reads cannot be another one
+/// wearing its name.
+fn shutdown_policy() -> ServerPolicy {
+    ServerPolicy::default()
+        .header_timeout(UNREACHED)
+        .expect("a header boundary the shutdown row does not reach")
+        .request_budget(
+            RequestBudget::bounded(UNREACHED, UNREACHED)
+                .expect("request deadlines the shutdown row does not reach"),
+        )
+        .shutdown_timeout(SHUTDOWN_DEADLINE)
+        .expect("the aggregate deadline the shutdown row ends on")
+}
+
+/// The aggregate shutdown deadline the shutdown-terminal row carries.
+const SHUTDOWN_DEADLINE: Duration = Duration::from_millis(200);
+
+/// A streaming-proxy consumer answers to the same route-aware admission every
+/// buffered one does, and the frame that crosses its ceiling reaches no upstream.
+///
+/// The admitted control is what makes the zero mean anything. A leg that was
+/// never dialled and a leg that dropped its crossing frame both leave an
+/// upstream with nothing, so the row forwards a payload inside the ceiling first
+/// and reads it back out of the upstream's own counter.
+async fn assert_streaming_proxy_terminal_keeps_route_authority() {
+    let row = "a proxied oversized body";
+    let forwarded = Arc::new(AtomicUsize::new(0));
+    let upstream = recording_upstream(&forwarded);
+    let backend = format!("http://{}", upstream.local_addr());
+    let released = Arc::new(AtomicUsize::new(0));
+    let port = http_support::reserve_observed();
+    let controller = port.controller();
+    let (router, log) = counted_mapper(proxying_routes(&released, &backend));
+    let server = port.serve_with_policy(router, deadline_policy());
+    let addr = server.addr();
+
+    let admitted = proxied_upload(addr, &ADMITTED_PAYLOAD.to_vec(), "the admitted proxy leg").await;
+    assert_eq!(admitted, 200, "an admitted upload must reach its upstream");
+    assert_eq!(
+        forwarded.load(Ordering::SeqCst),
+        ADMITTED_PAYLOAD.len(),
+        "the upstream must be given every byte the route admitted",
+    );
+
+    let oversized = vec![b'x'; ADMITTED_CEILING * 4];
+    let refused = proxied_upload(addr, &oversized, "the oversized proxy leg").await;
+    assert_eq!(
+        refused, 413,
+        "the route's own byte ceiling refuses the upload"
+    );
+    assert_eq!(
+        log.body_limits.load(Ordering::SeqCst),
+        1,
+        "a proxied upload is refused under the ceiling's category, once",
+    );
+    assert_eq!(
+        forwarded.load(Ordering::SeqCst),
+        ADMITTED_PAYLOAD.len(),
+        "the crossing frame must reach no upstream",
+    );
+    assert!(
+        controller.body_peak_retained_bytes() <= ADMITTED_CEILING,
+        "a forwarded upload retains nothing past the ceiling: peak {}",
+        controller.body_peak_retained_bytes(),
+    );
+    http_support::assert_released(&released, 2, row);
+
+    server
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the streaming-proxy fixture tore down");
+    upstream
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the streaming-proxy upstream tore down");
+}
+
+/// The payload the proxy row's admitted control forwards.
+const ADMITTED_PAYLOAD: &[u8] = b"forwarded";
+
+/// Forward one chunked upload through the proxy route and report its status.
+async fn proxied_upload(addr: std::net::SocketAddr, payload: &[u8], leg: &str) -> u16 {
+    let payload: Box<[u8]> = payload.into();
+    let leg: Box<str> = leg.into();
+    tokio::task::spawn_blocking(move || {
+        http_support::send_chunked(
+            addr,
+            "close",
+            "POST",
+            "/proxied/sink",
+            "localhost",
+            &[payload.as_ref()],
+        )
+        .unwrap_or_else(|error| panic!("{leg} did not complete: {error}"))
+        .0
+        .status
+    })
+    .await
+    .expect("the proxy peer settled")
+}
+
+/// A streaming-proxy route whose admission grants one counted permit under the
+/// same finite ceiling the buffered rows are registered with.
+fn proxying_routes(released: &Arc<AtomicUsize>, upstream: &str) -> Router {
+    let released = Arc::clone(released);
+    let mut router = Router::new();
+    router.proxy_stream("/proxied", upstream);
+    router.body_admission(move |_context: &BodyAdmissionContext<'_>| {
+        Ok(BodyAdmission::with_permit(
+            ADMITTED_CEILING,
+            http_support::permit_probe(&released),
+        ))
+    })
+}
+
+/// An upstream that counts every payload byte it was actually given.
+fn recording_upstream(received: &Arc<AtomicUsize>) -> http_support::ReadyServer {
+    let received = Arc::clone(received);
+    let mut upstream = Router::new();
+    upstream.post("/sink", move |req: &Request| {
+        received.fetch_add(req.body().len(), Ordering::SeqCst);
+        async move { Response::text(200, "sunk") }
+    });
+    http_support::spawn_server_ready(upstream, CLOSE_BOUND)
+        .expect("the proxy row's upstream answered")
 }
 
 /// A well-formed multipart head whose chunked payload never arrives.

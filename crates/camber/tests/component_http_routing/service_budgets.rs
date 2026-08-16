@@ -391,35 +391,65 @@ fn nested_policies_only_narrow_outer_finite_limits() {
     assert_a_whole_policy_replaces_an_earlier_field();
     assert_a_later_field_writes_onto_the_whole_policy();
 }
-
 // ── 6.T3 and 6.T5 ──────────────────────────────────────────────────
 
+use crate::streaming_multipart::{BOUNDARY, Field, content_type, multipart_body};
 use camber::http::mock::{InboundTerminal, OperationObservation};
-use camber::http::{BodyAdmission, BodyAdmissionContext, Rejection, RejectionContext};
+use camber::http::{
+    BodyAdmission, BodyAdmissionContext, Method, MultipartLimits, MultipartStream, Rejection,
+    RejectionContext, ServerHandle,
+};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The request deadlines every envelope row is admitted under.
-const CARRIED_BODY_IDLE: Duration = Duration::from_millis(400);
-const CARRIED_TOTAL: Duration = Duration::from_millis(800);
+const CARRIED_BODY_IDLE: Duration = Duration::from_secs(2);
+const CARRIED_TOTAL: Duration = Duration::from_secs(4);
+/// The request total the host layer of the nested row names.
+const HOST_TOTAL: Duration = Duration::from_secs(2);
+/// The request total the child router beneath it names, which is the one the
+/// admitted envelope must carry.
+const CHILD_TOTAL: Duration = Duration::from_secs(1);
 /// The quiet interval and total a precedence row stages equal-ready.
 const STAGED_IDLE: Duration = Duration::from_millis(120);
 const STAGED_TOTAL: Duration = Duration::from_millis(120);
+/// A deadline a precedence row carries so nothing except the source it stages
+/// can end the request.
+const STAGED_UNREACHED: Duration = Duration::from_secs(30);
+/// The aggregate shutdown deadline the silent rows carry.
+const STAGED_SHUTDOWN: Duration = Duration::from_secs(1);
+/// How long a staged row leaves production to read a transition of its own
+/// before the row stages the next one.
+const STAGED_SETTLE: Duration = Duration::from_millis(250);
 /// The byte ceiling a precedence row crosses.
 const STAGED_CEILING: usize = 8;
 
+/// The backend the two negative controls register and never dial.
+///
+/// Both are refused before any route authority resolves, so the proxy route in
+/// the table they serve is never selected. Port nine is the discard service, so
+/// a control that did dial it would fail rather than quietly succeed.
+const UNDIALLED_UPSTREAM: &str = "http://127.0.0.1:9";
+
 /// The policy every envelope and precedence row serves under.
-fn carried_policy(budget: RequestBudget) -> ServerPolicy {
+fn carried_policy(budget: RequestBudget, shutdown: Duration) -> ServerPolicy {
     ServerPolicy::default()
         .header_timeout(Duration::from_secs(30))
         .expect("a header boundary no carried row reaches")
         .request_budget(budget)
-        .shutdown_timeout(SHUTDOWN_TIMEOUT)
+        .shutdown_timeout(shutdown)
         .expect("the carried row's shutdown deadline")
 }
 
 /// The routes the envelope rows are driven through.
-fn carried_routes(middleware_runs: &Arc<AtomicUsize>) -> Router {
+///
+/// Every admitted class this step wires is registered here, because each reads
+/// the envelope from call sites of its own: buffered collection, the streaming
+/// multipart session, and the streaming proxy each observe their own payload
+/// owner and their own response-head handoff. One table is what lets a row about
+/// carry name the class it drove.
+fn carried_routes(middleware_runs: &Arc<AtomicUsize>, upstream: &str) -> Router {
     let runs = Arc::clone(middleware_runs);
     let mut router = Router::new();
     router.post("/buffered", |_req: &Request| async {
@@ -428,6 +458,21 @@ fn carried_routes(middleware_runs: &Arc<AtomicUsize>) -> Router {
     router.get("/head-only", |_req: &Request| async {
         Response::text(200, "head-only")
     });
+    router.multipart(
+        Method::Post,
+        "/upload",
+        MultipartLimits::builder()
+            .build()
+            .expect("the multipart row's limits"),
+        |_req: &Request, fields: MultipartStream| async move {
+            let mut fields = fields;
+            while let Some(field) = fields.next_field().await? {
+                field.discard().await?;
+            }
+            Response::text(200, "uploaded")
+        },
+    );
+    router.proxy_stream("/proxied", upstream);
     router.use_middleware(move |req: &Request, next| {
         runs.fetch_add(1, Ordering::SeqCst);
         next.call(req)
@@ -435,36 +480,48 @@ fn carried_routes(middleware_runs: &Arc<AtomicUsize>) -> Router {
     router
 }
 
+/// The upstream the served table's streaming-proxy route forwards to.
+fn carried_upstream() -> http_support::ReadyServer {
+    let mut upstream = Router::new();
+    upstream.post("/echo", |req: &Request| {
+        let len = req.body().len();
+        async move { Response::text(200, &format!("echoed {len}")) }
+    });
+    http_support::spawn_server_ready(upstream, EVENT_TIMEOUT)
+        .expect("the carried row's upstream answered")
+}
+
 /// One admitted row's envelope reading, taken from the production owners.
 fn observed_envelope(controller: &LifecycleController) -> OperationObservation {
     controller.operations_observed()
 }
 
-/// Drive one admitted request and read what its envelope reached.
-async fn assert_one_envelope(method: &str, path: &str, body: &[u8], row: &str) {
-    let port = http_support::reserve_observed();
-    let controller = port.controller();
-    let runs = Arc::new(AtomicUsize::new(0));
-    let server = port.serve_with_policy(
-        carried_routes(&runs),
-        carried_policy(
-            RequestBudget::bounded(CARRIED_BODY_IDLE, CARRIED_TOTAL)
-                .expect("the carried request budget"),
-        ),
-    );
-    let addr = server.addr();
-    let method: Box<str> = method.into();
-    let path: Box<str> = path.into();
-    let body: Box<[u8]> = body.into();
-    let answered = tokio::task::spawn_blocking(move || {
-        http_support::request(addr, &method, &path, &[], &body, EVENT_TIMEOUT)
-    })
-    .await
-    .unwrap_or_else(|error| panic!("{row}: the peer task failed: {error}"))
-    .unwrap_or_else(|error| panic!("{row}: the request failed: {error}"));
-    assert_eq!(answered.status, 200, "{row}: {}", answered.text());
+/// What one admitted row must be able to say about the envelope its head minted.
+#[derive(Clone, Copy)]
+struct CarriedClaim<'a> {
+    row: &'a str,
+    /// The request total the whole policy chain resolved to for this row.
+    total: Duration,
+    /// How many times the payload owner read the envelope.
+    ///
+    /// Named per row rather than fixed: the payload owner is the one pre-head
+    /// owner a request can reach zero times, so a shared count could not tell an
+    /// owner that read from one that never ran.
+    body_reads: usize,
+}
 
-    let observed = observed_envelope(&controller);
+/// Read the one envelope back from every production owner that carried it.
+fn assert_carried_envelope(
+    controller: &LifecycleController,
+    runs: &Arc<AtomicUsize>,
+    claim: CarriedClaim<'_>,
+) {
+    let CarriedClaim {
+        row,
+        total,
+        body_reads,
+    } = claim;
+    let observed = observed_envelope(controller);
     assert_eq!(
         observed.admitted, 1,
         "{row}: one admitted head, one envelope"
@@ -479,13 +536,17 @@ async fn assert_one_envelope(method: &str, path: &str, body: &[u8], row: &str) {
     );
     assert_eq!(
         observed.total_from_admission,
-        Some(CARRIED_TOTAL),
-        "{row}: the carried total is the policy's, computed once at admission",
+        Some(total),
+        "{row}: the carried total is the resolved policy's, computed once at admission",
     );
     assert!(observed.dispatch >= 1, "{row}: dispatch read no identity");
     assert_eq!(
         observed.middleware, 1,
         "{row}: exactly one middleware owner per admitted request",
+    );
+    assert_eq!(
+        observed.body, body_reads,
+        "{row}: the payload owner must read the same envelope every other owner did",
     );
     assert_eq!(
         observed.response_head, 1,
@@ -496,10 +557,127 @@ async fn assert_one_envelope(method: &str, path: &str, body: &[u8], row: &str) {
         1,
         "{row}: exactly one middleware execution per admitted request",
     );
+}
+
+/// One admitted request an envelope row drives through the served table.
+struct AdmittedRequest<'a> {
+    method: &'a str,
+    path: &'a str,
+    headers: &'a [(&'a str, &'a str)],
+    body: &'a [u8],
+}
+
+/// Send one admitted request from a peer of its own, and assert it was answered.
+async fn answer_admitted(addr: SocketAddr, request: &AdmittedRequest<'_>, row: &str) {
+    let method: Box<str> = request.method.into();
+    let path: Box<str> = request.path.into();
+    let headers: Box<[(Box<str>, Box<str>)]> = request
+        .headers
+        .iter()
+        .map(|(name, value)| ((*name).into(), (*value).into()))
+        .collect();
+    let body: Box<[u8]> = request.body.into();
+    let answered = tokio::task::spawn_blocking(move || {
+        let sent: Box<[(&str, &str)]> = headers
+            .iter()
+            .map(|(name, value)| (name.as_ref(), value.as_ref()))
+            .collect();
+        http_support::request(addr, &method, &path, &sent, &body, EVENT_TIMEOUT)
+    })
+    .await
+    .unwrap_or_else(|error| panic!("{row}: the peer task failed: {error}"))
+    .unwrap_or_else(|error| panic!("{row}: the request failed: {error}"));
+    assert_eq!(answered.status, 200, "{row}: {}", answered.text());
+}
+
+/// Drive one admitted request through a served router and read what its
+/// envelope reached.
+async fn assert_one_envelope(request: AdmittedRequest<'_>, body_reads: usize, row: &str) {
+    let upstream = carried_upstream();
+    let backend = format!("http://{}", upstream.local_addr());
+    let port = http_support::reserve_observed();
+    let controller = port.controller();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let server = port.serve_with_policy(
+        carried_routes(&runs, &backend),
+        carried_policy(
+            RequestBudget::bounded(CARRIED_BODY_IDLE, CARRIED_TOTAL)
+                .expect("the carried request budget"),
+            SHUTDOWN_TIMEOUT,
+        ),
+    );
+    answer_admitted(server.addr(), &request, row).await;
+    assert_carried_envelope(
+        &controller,
+        &runs,
+        CarriedClaim {
+            row,
+            total: CARRIED_TOTAL,
+            body_reads,
+        },
+    );
 
     server
         .shutdown_bounded(SHUTDOWN_TIMEOUT)
         .unwrap_or_else(|error| panic!("{row}: teardown failed: {error}"));
+    upstream
+        .shutdown_bounded(SHUTDOWN_TIMEOUT)
+        .unwrap_or_else(|error| panic!("{row}: upstream teardown failed: {error}"));
+}
+
+/// An admitted head that resolved through a host table and a child router
+/// carries the narrowed authority, not the one its server named.
+///
+/// The child's total is the smallest in the chain, so it is the only value the
+/// envelope can be carrying: a mint that read the server's policy, or the host's,
+/// reports a different total to every owner that reads it.
+async fn assert_host_child_envelope() {
+    let row = "host and child policy";
+    let upstream = carried_upstream();
+    let backend = format!("http://{}", upstream.local_addr());
+    let port = http_support::reserve_observed();
+    let controller = port.controller();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let child = carried_routes(&runs, &backend).request_budget(
+        RequestBudget::unbounded()
+            .with_total(CHILD_TOTAL)
+            .expect("the child's request total"),
+    );
+    let mut hosts = HostRouter::new();
+    hosts.set_default(child);
+    let hosts = hosts.request_budget(
+        RequestBudget::unbounded()
+            .with_total(HOST_TOTAL)
+            .expect("the host's request total"),
+    );
+    let server = port.serve_hosts(hosts);
+    answer_admitted(
+        server.addr(),
+        &AdmittedRequest {
+            method: "POST",
+            path: "/buffered",
+            headers: &[],
+            body: b"payload",
+        },
+        row,
+    )
+    .await;
+    assert_carried_envelope(
+        &controller,
+        &runs,
+        CarriedClaim {
+            row,
+            total: CHILD_TOTAL,
+            body_reads: 1,
+        },
+    );
+
+    server
+        .shutdown_bounded(SHUTDOWN_TIMEOUT)
+        .unwrap_or_else(|error| panic!("{row}: teardown failed: {error}"));
+    upstream
+        .shutdown_bounded(SHUTDOWN_TIMEOUT)
+        .unwrap_or_else(|error| panic!("{row}: upstream teardown failed: {error}"));
 }
 
 /// A refusal decided before route authority exists mints no envelope.
@@ -512,7 +690,7 @@ async fn assert_negative_control(head: &[u8], row: &str) {
     let controller = port.controller();
     let runs = Arc::new(AtomicUsize::new(0));
     let mut hosts = HostRouter::new();
-    hosts.set_default(carried_routes(&runs));
+    hosts.set_default(carried_routes(&runs, UNDIALLED_UPSTREAM));
     let server = port.serve_hosts(hosts);
     let addr = server.addr();
     let head: Box<[u8]> = head.into();
@@ -550,24 +728,71 @@ async fn assert_negative_control(head: &[u8], row: &str) {
 ///
 /// Each admitted head mints exactly one envelope, and dispatch, middleware, the
 /// payload owner, and the response-head handoff all read that same identity and
-/// the same request-total value. Two deterministic negative controls sit beside
-/// the admitted rows: a head Hyper never resolved a route for exposes no
-/// operation at all, and neither does one whose authority Camber cannot parse.
+/// the same request-total value. The four admitted shapes this step wires are
+/// driven in turn — ordinary buffered, bodyless, streaming multipart, and
+/// streaming proxy — and a fifth row resolves its authority through a host table
+/// and a child router, so what the envelope carries is the narrowed value. Two
+/// deterministic negative controls sit beside them: a head Hyper never resolved
+/// a route for exposes no operation at all, and neither does one whose authority
+/// Camber cannot parse.
 #[test]
 fn admitted_operation_carries_one_envelope_to_each_prehead_owner() {
     camber::runtime::builder()
         .run(|| {
             camber::runtime::block_on(async {
-                assert_one_envelope("POST", "/buffered", b"payload", "ordinary buffered").await;
-                assert_one_envelope("GET", "/head-only", b"", "head-only").await;
+                assert_one_envelope(
+                    AdmittedRequest {
+                        method: "POST",
+                        path: "/buffered",
+                        headers: &[],
+                        body: b"payload",
+                    },
+                    1,
+                    "ordinary buffered",
+                )
+                .await;
+                assert_one_envelope(
+                    AdmittedRequest {
+                        method: "GET",
+                        path: "/head-only",
+                        headers: &[],
+                        body: b"",
+                    },
+                    1,
+                    "head-only",
+                )
+                .await;
+                let declared = content_type(BOUNDARY);
+                let framed = multipart_body(BOUNDARY, &[Field::text("carried", "payload")]);
+                assert_one_envelope(
+                    AdmittedRequest {
+                        method: "POST",
+                        path: "/upload",
+                        headers: &[("Content-Type", declared.as_ref())],
+                        body: &framed,
+                    },
+                    1,
+                    "streaming multipart",
+                )
+                .await;
+                assert_one_envelope(
+                    AdmittedRequest {
+                        method: "POST",
+                        path: "/proxied/echo",
+                        headers: &[],
+                        body: b"forwarded",
+                    },
+                    1,
+                    "streaming proxy",
+                )
+                .await;
+                assert_host_child_envelope().await;
                 // Hyper refuses this head before a request exists at all.
                 assert_negative_control(
                     b"GET /buffered HTTP/1.1\r\nHost: localhost\r\nBad Header\r\n\r\n",
                     "hyper pre-head refusal",
                 )
                 .await;
-                // Classification refuses this one: no route authority resolves,
-                // so nothing selects a policy an operation could carry.
                 // Classification refuses this one: the authority Camber cannot
                 // parse resolves no router, so nothing selects a policy an
                 // operation could carry.
@@ -602,134 +827,441 @@ fn staged_routes(released: &Arc<AtomicUsize>, log: &Arc<AtomicUsize>) -> Router 
         })
 }
 
-/// Stage one turn's ready sources through the production checkpoint, and read
-/// back the terminal the declared precedence selected.
+/// What one staged peer puts on the wire after its request head.
 ///
-/// The coordinator is held at its own pre-selection checkpoint, so everything
-/// this row makes ready while it waits is weighed by the same turn. Nothing
-/// here chooses the terminal: the release is the only thing staged, and the
-/// selection checkpoint the row waits on is production's own.
-///
-/// The body is chunked, so route admission has no declaration to refuse and the
-/// byte maximum is decided by the frames the coordinator actually reads.
-async fn assert_precedence_row(
-    crossing: Option<Box<[u8]>>,
-    expected: InboundTerminal,
-    answers: u16,
-) {
-    let row = format!("{expected:?}");
-    let port = http_support::reserve_observed();
-    let controller = port.controller();
-    let released = Arc::new(AtomicUsize::new(0));
-    let mapper_calls = Arc::new(AtomicUsize::new(0));
-    let server = port.serve_with_policy(
-        staged_routes(&released, &mapper_calls),
-        carried_policy(
-            RequestBudget::bounded(STAGED_IDLE, STAGED_TOTAL).expect("the staged request budget"),
-        ),
-    );
-    let addr = server.addr();
-
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeInboundTerminalSelection)
-        .expect("arm the pre-selection checkpoint");
-    controller
-        .pause_once(LifecycleCheckpoint::InboundTerminalSelected(expected))
-        .expect("arm the selected-terminal observation");
-
-    let peer = tokio::task::spawn_blocking(move || staged_peer(addr, crossing));
-
-    wait_paused(
-        &controller,
-        LifecycleCheckpoint::BeforeInboundTerminalSelection,
-        &row,
-    )
-    .await;
-    // Staged while the coordinator is held: every source this row wants weighed
-    // is ready before the turn that weighs them begins.
-    tokio::time::sleep(STAGED_IDLE * 2).await;
-    controller
-        .release(LifecycleCheckpoint::BeforeInboundTerminalSelection)
-        .expect("release the pre-selection checkpoint");
-
-    let selected = LifecycleCheckpoint::InboundTerminalSelected(expected);
-    wait_paused(&controller, selected, &row).await;
-    let polled = controller.body_frames_polled();
-    controller
-        .release(selected)
-        .expect("release the selected-terminal observation");
-
-    let answered = tokio::time::timeout(EVENT_TIMEOUT, peer)
-        .await
-        .unwrap_or_else(|_| panic!("{row}: the staged peer never settled"))
-        .unwrap_or_else(|error| panic!("{row}: the staged peer task failed: {error}"));
-    assert_eq!(
-        answered, answers,
-        "{row}: the staged terminal answered {answered}"
-    );
-    assert_eq!(
-        controller.body_frames_polled(),
-        polled,
-        "{row}: no frame may be polled after a terminal is selected",
-    );
-    assert_eq!(
-        mapper_calls.load(Ordering::SeqCst),
-        1,
-        "{row}: a pre-commit failure invokes the selected mapper exactly once",
-    );
-    http_support::assert_released(&released, 1, &row);
-
-    server
-        .shutdown_bounded(SHUTDOWN_TIMEOUT)
-        .unwrap_or_else(|error| panic!("{row}: teardown failed: {error}"));
+/// The bodies are chunked, so route admission has no declaration to refuse and
+/// the byte maximum is decided by the frames the coordinator actually reads.
+enum StagedWire {
+    /// Nothing at all: the row's carried deadlines are its whole ready set.
+    Withheld,
+    /// One data frame the route's byte ceiling must refuse.
+    Crossing,
+    /// A body that ends cleanly, so the payload is complete.
+    Complete,
+    /// A body with no data frame at all, so the only thing the wire can answer
+    /// with in the staged turn is its end.
+    Ended,
+    /// Framing the transport cannot parse, which is the source's own failure.
+    Broken,
+    /// One data frame, written when the row says so.
+    ///
+    /// The only way to put a turn boundary where a row needs one: a source the
+    /// coordinator reads on its own decides when its turns happen, so a row that
+    /// stages what a later turn must weigh has to own that moment.
+    Gated(std::sync::mpsc::Receiver<()>),
 }
 
-/// Drive one staged peer: a chunked head, an optional crossing frame, then the
-/// status the server answered with.
-fn staged_peer(addr: std::net::SocketAddr, crossing: Option<Box<[u8]>>) -> u16 {
-    let mut peer = http_support::connect(addr).expect("the staged peer connected");
-    http_support::write_chunked_head(&mut peer, "close", "POST", "/staged", "localhost")
-        .expect("write the staged chunked head");
-    match crossing.as_deref() {
-        Some(frame) => {
-            http_support::write_chunk(&mut peer, frame).expect("write the crossing frame")
+/// Write the head this row's wire is framed by.
+fn write_staged_head(peer: &mut TcpStream, wire: &StagedWire) {
+    match wire {
+        // Its own head: the framing this row breaks is declared by the same
+        // helper every unreadable-body row in the tree sends.
+        StagedWire::Broken => {
+            http_support::write_unreadable_body(peer, "close", "POST", "/staged", "text/plain")
+                .expect("write framing the transport cannot parse");
         }
-        None => {}
+        StagedWire::Withheld
+        | StagedWire::Crossing
+        | StagedWire::Complete
+        | StagedWire::Ended
+        | StagedWire::Gated(_) => {
+            http_support::write_chunked_head(peer, "close", "POST", "/staged", "localhost")
+                .expect("write the staged chunked head");
+        }
     }
+}
+
+/// Write whatever this row puts on the wire after its head.
+fn write_staged_body(peer: &mut TcpStream, wire: StagedWire) {
+    match wire {
+        StagedWire::Withheld | StagedWire::Broken => {}
+        StagedWire::Crossing => {
+            http_support::write_chunk(peer, &vec![b'x'; STAGED_CEILING * 4])
+                .expect("write the crossing frame");
+        }
+        StagedWire::Complete => {
+            http_support::write_chunk(peer, b"staged").expect("write the completed frame");
+            http_support::write_chunked_end(peer).expect("end the staged body");
+        }
+        StagedWire::Ended => {
+            http_support::write_chunked_end(peer).expect("end the staged body");
+        }
+        StagedWire::Gated(gate) => {
+            gate.recv().expect("the row released its staged frame");
+            http_support::write_chunk(peer, b"staged").expect("write the staged frame");
+        }
+    }
+}
+
+/// Drive one staged peer, and hand back the status the server answered with.
+fn staged_peer(addr: SocketAddr, wire: StagedWire) -> u16 {
+    let mut peer = http_support::connect(addr).expect("the staged peer connected");
+    write_staged_head(&mut peer, &wire);
+    write_staged_body(&mut peer, wire);
     http_support::read_http_response_bounded(&mut peer)
         .expect("the staged request was answered")
         .status
+}
+
+/// What one precedence row expects the declared order to have decided.
+#[derive(Clone, Copy)]
+struct PrecedenceExpectation {
+    terminal: InboundTerminal,
+    /// The status the peer must read.
+    answers: u16,
+    /// How many times this terminal's disposition lets the route's own mapper
+    /// run: once for a mapped cause, never for a silent one.
+    mapper_calls: usize,
+    /// How many data frames the coordinator had polled when it selected.
+    ///
+    /// It is what makes a row's pair exact rather than merely its winner: a turn
+    /// that selected having polled no data frame read the payload's end, and one
+    /// that polled the crossing frame weighed the route's own refusal.
+    frames_polled: usize,
+}
+
+/// One staged row's served table, the observer registered for its listener, and
+/// the counters production writes into.
+///
+/// The raw handle is kept rather than guarded, because two rows publish a
+/// shutdown transition while their request is in flight, and that authority is
+/// the handle's alone.
+struct StagedServer {
+    controller: Arc<LifecycleController>,
+    handle: ServerHandle,
+    addr: SocketAddr,
+    released: Arc<AtomicUsize>,
+    mapper_calls: Arc<AtomicUsize>,
+}
+
+/// Serve one staged row's table under the budget and shutdown deadline it names.
+fn stage_server(budget: RequestBudget, shutdown: Duration) -> StagedServer {
+    let port = http_support::reserve_observed();
+    let (listener, addr, controller) = port.into_owned_parts();
+    let released = Arc::new(AtomicUsize::new(0));
+    let mapper_calls = Arc::new(AtomicUsize::new(0));
+    let handle = camber::http::server(staged_routes(&released, &mapper_calls))
+        .policy(carried_policy(budget, shutdown))
+        .serve_background(listener)
+        .expect("owned serving requires a Tokio runtime");
+    StagedServer {
+        controller,
+        handle,
+        addr,
+        released,
+        mapper_calls,
+    }
+}
+
+impl StagedServer {
+    /// Spawn this row's peer against the served table.
+    fn peer(&self, wire: StagedWire) -> tokio::task::JoinHandle<u16> {
+        let addr = self.addr;
+        tokio::task::spawn_blocking(move || staged_peer(addr, wire))
+    }
+
+    /// Arm one checkpoint this row stages against.
+    fn arm(&self, checkpoint: LifecycleCheckpoint, row: &str) {
+        self.controller
+            .pause_once(checkpoint)
+            .unwrap_or_else(|error| panic!("{row}: arming {checkpoint:?} failed: {error}"));
+    }
+
+    /// Let go of one checkpoint this row was holding.
+    fn release(&self, checkpoint: LifecycleCheckpoint, row: &str) {
+        self.controller
+            .release(checkpoint)
+            .unwrap_or_else(|error| panic!("{row}: releasing {checkpoint:?} failed: {error}"));
+    }
+
+    /// Read back the terminal production selected, and take the fixture down.
+    ///
+    /// Nothing here chooses the terminal. The row waits at production's own
+    /// selection checkpoint, reads the frame counter production keeps while it
+    /// is held there, and only then lets it go.
+    async fn settle(
+        self,
+        peer: tokio::task::JoinHandle<u16>,
+        expect: PrecedenceExpectation,
+        row: &str,
+    ) {
+        let selected = LifecycleCheckpoint::InboundTerminalSelected(expect.terminal);
+        wait_paused(&self.controller, selected, row).await;
+        let polled = self.controller.body_frames_polled();
+        self.release(selected, row);
+
+        let answered = tokio::time::timeout(EVENT_TIMEOUT, peer)
+            .await
+            .unwrap_or_else(|_| panic!("{row}: the staged peer never settled"))
+            .unwrap_or_else(|error| panic!("{row}: the staged peer task failed: {error}"));
+        assert_eq!(
+            answered, expect.answers,
+            "{row}: the staged terminal answered {answered}"
+        );
+        assert_eq!(
+            polled, expect.frames_polled,
+            "{row}: the turn that selected had polled {polled} data frames",
+        );
+        assert_eq!(
+            self.controller.body_frames_polled(),
+            polled,
+            "{row}: no frame may be polled after a terminal is selected",
+        );
+        assert_eq!(
+            self.mapper_calls.load(Ordering::SeqCst),
+            expect.mapper_calls,
+            "{row}: this terminal's declared disposition allows {} mapper call(s)",
+            expect.mapper_calls,
+        );
+        http_support::assert_released(&self.released, 1, row);
+
+        http_support::ReadyServer::adopt(self.addr, self.handle)
+            .shutdown_bounded(SHUTDOWN_TIMEOUT)
+            .unwrap_or_else(|error| panic!("{row}: teardown failed: {error}"));
+    }
+}
+
+/// A row whose source becomes ready without anything being held.
+///
+/// The wire is what decides these: a payload that ends, and framing that cannot
+/// be parsed, are answers the coordinator reads in the turn it reads them, and
+/// holding it would only postpone the same turn.
+async fn assert_live_row(budget: RequestBudget, wire: StagedWire, expect: PrecedenceExpectation) {
+    let row = format!("{:?}", expect.terminal);
+    let server = stage_server(budget, SHUTDOWN_TIMEOUT);
+    server.arm(
+        LifecycleCheckpoint::InboundTerminalSelected(expect.terminal),
+        &row,
+    );
+    let peer = server.peer(wire);
+    server.settle(peer, expect, &row).await;
+}
+
+/// A row that holds the coordinator at its own pre-selection checkpoint and
+/// makes every source it wants weighed ready while it waits.
+async fn assert_held_row(budget: RequestBudget, wire: StagedWire, expect: PrecedenceExpectation) {
+    let row = format!("{:?}", expect.terminal);
+    let held = LifecycleCheckpoint::BeforeInboundTerminalSelection;
+    let server = stage_server(budget, SHUTDOWN_TIMEOUT);
+    server.arm(held, &row);
+    server.arm(
+        LifecycleCheckpoint::InboundTerminalSelected(expect.terminal),
+        &row,
+    );
+    let peer = server.peer(wire);
+
+    wait_paused(&server.controller, held, &row).await;
+    // Staged while the coordinator is held: every source this row wants weighed
+    // is ready before the turn that weighs them begins.
+    tokio::time::sleep(STAGED_IDLE * 2).await;
+    server.release(held, &row);
+
+    server.settle(peer, expect, &row).await;
+}
+
+/// Forced cancellation outranks both carried deadlines that expired beside it.
+///
+/// The supervisor is held at the control transition it selected, so the abort it
+/// is about to apply cannot take this connection's task away before the
+/// coordinator has weighed the cancellation its server published. What is staged
+/// is the transition and the waiting; the terminal is production's.
+async fn assert_forced_cancellation_row() {
+    let expect = PrecedenceExpectation {
+        terminal: InboundTerminal::ForcedCancellation,
+        answers: 503,
+        mapper_calls: 0,
+        frames_polled: 0,
+    };
+    let row = format!("{:?}", expect.terminal);
+    let supervisor = LifecycleCheckpoint::SupervisorSelectedControl;
+    let held = LifecycleCheckpoint::BeforeInboundTerminalSelection;
+    let server = stage_server(
+        RequestBudget::bounded(STAGED_IDLE, STAGED_TOTAL).expect("the staged request budget"),
+        STAGED_SHUTDOWN,
+    );
+    server.arm(supervisor, &row);
+    server.arm(held, &row);
+    server.arm(
+        LifecycleCheckpoint::InboundTerminalSelected(expect.terminal),
+        &row,
+    );
+    let peer = server.peer(StagedWire::Withheld);
+
+    wait_paused(&server.controller, held, &row).await;
+    server.handle.cancel();
+    wait_paused(&server.controller, supervisor, &row).await;
+    tokio::time::sleep(STAGED_IDLE * 2).await;
+    server.release(held, &row);
+
+    wait_paused(
+        &server.controller,
+        LifecycleCheckpoint::InboundTerminalSelected(expect.terminal),
+        &row,
+    )
+    .await;
+    server.release(supervisor, &row);
+    server.settle(peer, expect, &row).await;
+}
+
+/// The aggregate shutdown deadline outranks the forced cancellation that became
+/// ready in the same turn.
+///
+/// Three moments have to fall in this order for the pair to exist at all, and
+/// each is anchored on production rather than on timing. The graceful transition
+/// is published while the coordinator is held, so the deadline it mints is minted
+/// in the turn this row releases. The peer's one frame is what opens the turn
+/// held next, and it is written only after the coordinator has had that
+/// transition. The cancellation is published last, while that turn is held and
+/// after the minted deadline has passed.
+async fn assert_shutdown_deadline_row() {
+    let expect = PrecedenceExpectation {
+        terminal: InboundTerminal::ShutdownDeadline,
+        answers: 503,
+        mapper_calls: 0,
+        frames_polled: 1,
+    };
+    let row = format!("{:?}", expect.terminal);
+    let supervisor = LifecycleCheckpoint::SupervisorSelectedControl;
+    let held = LifecycleCheckpoint::BeforeInboundTerminalSelection;
+    let server = stage_server(
+        RequestBudget::bounded(STAGED_UNREACHED, STAGED_UNREACHED)
+            .expect("deadlines the shutdown row must not reach"),
+        STAGED_SHUTDOWN,
+    );
+    server.arm(supervisor, &row);
+    server.arm(held, &row);
+    server.arm(
+        LifecycleCheckpoint::InboundTerminalSelected(expect.terminal),
+        &row,
+    );
+    let (gate, staged) = std::sync::mpsc::channel();
+    let peer = server.peer(StagedWire::Gated(staged));
+
+    wait_paused(&server.controller, held, &row).await;
+    server.handle.shutdown();
+    wait_paused(&server.controller, supervisor, &row).await;
+    server.release(held, &row);
+    tokio::time::sleep(STAGED_SETTLE).await;
+
+    // The frame opens the next turn, and that turn is the one held while the
+    // minted deadline expires and the cancellation is published beside it.
+    server.arm(held, &row);
+    gate.send(()).expect("release the staged frame");
+    wait_paused(&server.controller, held, &row).await;
+    tokio::time::sleep(STAGED_SHUTDOWN + STAGED_SETTLE).await;
+    server.handle.cancel();
+    server.release(held, &row);
+
+    wait_paused(
+        &server.controller,
+        LifecycleCheckpoint::InboundTerminalSelected(expect.terminal),
+        &row,
+    )
+    .await;
+    server.release(supervisor, &row);
+    server.settle(peer, expect, &row).await;
+}
+
+/// The three rows whose ready sources are the route's own ceiling and the
+/// deadlines the envelope carries.
+///
+/// Each holds the coordinator, makes what it wants weighed ready while it waits,
+/// and reads back which of them the declared order named.
+async fn assert_carried_deadline_rows() {
+    // The crossing frame is already on the wire when the turn runs, and the
+    // quiet interval expired while the turn was held.
+    assert_held_row(
+        RequestBudget::bounded(STAGED_IDLE, STAGED_TOTAL).expect("the staged request budget"),
+        StagedWire::Crossing,
+        PrecedenceExpectation {
+            terminal: InboundTerminal::RouteBodyLimit,
+            answers: 413,
+            mapper_calls: 1,
+            frames_polled: 1,
+        },
+    )
+    .await;
+    // Nothing is on the wire, so the two carried deadlines are the whole of the
+    // turn's ready set and idle outranks total.
+    assert_held_row(
+        RequestBudget::bounded(STAGED_IDLE, STAGED_TOTAL).expect("the staged request budget"),
+        StagedWire::Withheld,
+        PrecedenceExpectation {
+            terminal: InboundTerminal::BodyIdle,
+            answers: 408,
+            mapper_calls: 1,
+            frames_polled: 0,
+        },
+    )
+    .await;
+    // The payload ended in the same turn the total expired, and no data frame
+    // was polled to reach that end: the total outranks the response head it was
+    // weighed against.
+    assert_held_row(
+        RequestBudget::unbounded()
+            .with_total(STAGED_TOTAL)
+            .expect("the staged request total"),
+        StagedWire::Ended,
+        PrecedenceExpectation {
+            terminal: InboundTerminal::RequestTotal,
+            answers: 408,
+            mapper_calls: 1,
+            frames_polled: 0,
+        },
+    )
+    .await;
+}
+
+/// The two rows the wire decides on its own, and the two dispositions that
+/// separate them: a payload's end refuses nothing, and framing that cannot be
+/// parsed is mapped under the refusal the wire itself minted.
+async fn assert_wire_answer_rows() {
+    assert_live_row(
+        RequestBudget::bounded(STAGED_UNREACHED, STAGED_UNREACHED)
+            .expect("deadlines the completed row must not reach"),
+        StagedWire::Complete,
+        PrecedenceExpectation {
+            terminal: InboundTerminal::ResponseHead,
+            answers: 200,
+            mapper_calls: 0,
+            frames_polled: 1,
+        },
+    )
+    .await;
+    assert_live_row(
+        RequestBudget::bounded(STAGED_UNREACHED, STAGED_UNREACHED)
+            .expect("deadlines the unreadable row must not reach"),
+        StagedWire::Broken,
+        PrecedenceExpectation {
+            terminal: InboundTerminal::SourceFailure,
+            answers: 400,
+            mapper_calls: 1,
+            frames_polled: 0,
+        },
+    )
+    .await;
 }
 
 /// 6.T5
 ///
 /// Sources that become ready in one scheduling turn are resolved by the one
 /// declared precedence table, not by poll order. Each row holds the production
-/// coordinator at its pre-selection checkpoint, makes every source it wants
-/// weighed ready while it waits, and then reads back the terminal production
-/// selected.
+/// coordinator at its pre-selection checkpoint, or lets the wire open the turn
+/// itself, and then reads back the terminal production selected together with the
+/// disposition that terminal declares: a mapped cause owes the peer one mapper
+/// call, and a silent cause owes it none.
 ///
-/// The rows are the pairs this step's own sources can reach. A crossing frame
-/// arriving after the quiet interval expired ties the route byte maximum
-/// against the body-idle deadline, and a withheld body ties body idle against
-/// the request total. Step 11 extends the same selector with its transfer
-/// sources once their adapters exist.
+/// The rows are the pairs this step's own sources can reach. Step 11 extends the
+/// same selector with its transfer sources once their adapters exist.
 #[test]
 fn equal_ready_inbound_events_follow_the_declared_precedence() {
     camber::runtime::builder()
         .run(|| {
             camber::runtime::block_on(async {
-                // The crossing frame is already on the wire when the turn runs,
-                // and the quiet interval expired while the turn was held.
-                assert_precedence_row(
-                    Some(vec![b'x'; STAGED_CEILING * 4].into_boxed_slice()),
-                    InboundTerminal::RouteBodyLimit,
-                    413,
-                )
-                .await;
-                // Nothing is on the wire, so the two carried deadlines are the
-                // whole of the turn's ready set and idle outranks total.
-                assert_precedence_row(None, InboundTerminal::BodyIdle, 408).await;
+                assert_carried_deadline_rows().await;
+                assert_wire_answer_rows().await;
+                assert_forced_cancellation_row().await;
+                assert_shutdown_deadline_row().await;
             });
         })
         .expect("the precedence runtime ran");
