@@ -1,4 +1,4 @@
-//! 1.T3 and 1.T4: what a terminal `serve*` call captures, and what one
+//! 3.T1 and 5.T1: what a terminal `serve*` call captures, and what one
 //! connection permit covers.
 
 use camber::RuntimeError;
@@ -237,7 +237,32 @@ async fn assert_moved_future_keeps_its_captured_policy() {
 /// not created a runtime would refuse before ever listening — the refusal
 /// `assert_listener_terminal_requires_a_camber_runtime` reads — and one that
 /// created none for its handlers would never see the request.
+///
+/// `serve` takes an address string, so this row has to name a port before the
+/// terminal binds it, and another process can take that port in between. A lost
+/// port is the one outcome that says nothing about the claim, so it is retried
+/// on a fresh port instead of being reported as this row failing. Every other
+/// outcome — including any other `Io` error — still fails it.
 fn assert_blocking_serve_establishes_a_runtime() {
+    for attempt in 1..=RESERVATION_ATTEMPTS {
+        if serve_on_a_reserved_port() {
+            return;
+        }
+        assert!(
+            attempt < RESERVATION_ATTEMPTS,
+            "every reserved port was taken before the blocking terminal bound it"
+        );
+    }
+}
+
+/// How many reserved ports the blocking row will lose before it gives up.
+const RESERVATION_ATTEMPTS: u32 = 5;
+
+/// How long a bind is given to fail before the row treats the server as up.
+const BIND_BOUND: Duration = Duration::from_millis(500);
+
+/// Run the blocking row once. `false` means the reserved port was taken.
+fn serve_on_a_reserved_port() -> bool {
     let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
     let addr = probe.local_addr().expect("reserved address");
     drop(probe);
@@ -259,6 +284,20 @@ fn assert_blocking_serve_establishes_a_runtime() {
         let _ = report.send(result);
     });
 
+    // A terminal that returns this early never served. Only a lost port is
+    // retried; every other early return is this row's failure to report.
+    match reported.recv_timeout(BIND_BOUND) {
+        Ok(Err(RuntimeError::Io(error))) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            serving.join().expect("the serving thread joined");
+            return false;
+        }
+        Ok(outcome) => panic!("the blocking terminal returned before it served: {outcome:?}"),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the blocking terminal dropped its reporter without returning")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+    }
+
     crate::common::wait_for_http_response(addr, EVENT_TIMEOUT)
         .expect("the blocking server answered its readiness probe");
 
@@ -271,9 +310,10 @@ fn assert_blocking_serve_establishes_a_runtime() {
         .expect("the blocking terminal never returned, so it established no runtime to stop");
     outcome.expect("the blocking terminal ended with an error");
     serving.join().expect("the serving thread joined");
+    true
 }
 
-/// 1.T4
+/// 5.T1
 ///
 /// Owns the omitted, zero, plain-TCP, SSE, gRPC, bare-Tokio, and
 /// two-positive-layer rows of the connection-limit matrix. The TLS-handshake,
