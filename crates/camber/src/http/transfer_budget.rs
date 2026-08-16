@@ -1,6 +1,6 @@
 //! The three independent bounds one streaming transfer runs under.
 
-use super::policy_value::{finite_duration, narrow, positive_bytes};
+use super::policy_value::{finite_duration, narrow, positive_limit};
 use crate::RuntimeError;
 use std::time::Duration;
 
@@ -59,7 +59,7 @@ impl TransferBudget {
         total: Duration,
     ) -> Result<Self, RuntimeError> {
         Ok(Self {
-            max_bytes: Some(positive_bytes(max_bytes, "transfer max_bytes")?),
+            max_bytes: Some(positive_limit(max_bytes, "transfer max_bytes")?),
             idle: Some(finite_duration(idle, "transfer idle")?),
             total: Some(finite_duration(total, "transfer total")?),
         })
@@ -87,7 +87,7 @@ impl TransferBudget {
     /// Returns [`RuntimeError::InvalidArgument`] when `max_bytes` is zero.
     pub fn with_max_bytes(self, max_bytes: usize) -> Result<Self, RuntimeError> {
         Ok(Self {
-            max_bytes: Some(positive_bytes(max_bytes, "transfer max_bytes")?),
+            max_bytes: Some(positive_limit(max_bytes, "transfer max_bytes")?),
             ..self
         })
     }

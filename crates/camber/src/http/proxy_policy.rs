@@ -1,6 +1,6 @@
 //! The bounds one proxy route applies to its upstream.
 
-use super::policy_value::{finite_duration, positive_bytes};
+use super::policy_value::{finite_duration, positive_limit};
 use super::transfer_budget::TransferBudget;
 use crate::RuntimeError;
 use std::time::Duration;
@@ -102,7 +102,7 @@ impl ProxyPolicy {
     /// Returns [`RuntimeError::InvalidArgument`] when `max_bytes` is zero.
     pub fn buffered_response_limit(self, max_bytes: usize) -> Result<Self, RuntimeError> {
         Ok(Self {
-            buffered_response: Some(positive_bytes(max_bytes, "proxy buffered_response_limit")?),
+            buffered_response: Some(positive_limit(max_bytes, "proxy buffered_response_limit")?),
             ..self
         })
     }

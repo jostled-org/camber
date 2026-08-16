@@ -23,13 +23,16 @@ pub(super) fn finite_duration(value: Duration, name: &str) -> Result<Duration, R
     }
 }
 
-/// Accept a byte maximum a policy may enforce, or refuse zero.
-pub(super) fn positive_bytes(value: usize, name: &str) -> Result<usize, RuntimeError> {
+/// Accept a whole-unit maximum a policy may enforce, or refuse zero.
+///
+/// Bytes and connections are both counted this way: a maximum of zero admits
+/// nothing, which is never what a caller configuring a limit meant.
+pub(super) fn positive_limit(value: usize, name: &str) -> Result<usize, RuntimeError> {
     match value {
         0 => Err(RuntimeError::InvalidArgument(
             format!("{name} must be at least 1").into_boxed_str(),
         )),
-        bytes => Ok(bytes),
+        limit => Ok(limit),
     }
 }
 

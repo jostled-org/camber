@@ -1,6 +1,6 @@
 //! The complete operating envelope one HTTP server serves under.
 
-use super::policy_value::{finite_duration, narrow, positive_bytes};
+use super::policy_value::{finite_duration, narrow, positive_limit};
 use super::request_budget::RequestBudget;
 use super::transfer_budget::TransferBudget;
 use crate::RuntimeError;
@@ -164,7 +164,7 @@ impl ServerPolicy {
     /// would admit nothing at all.
     pub fn connection_limit(self, limit: usize) -> Result<Self, RuntimeError> {
         Ok(Self {
-            connection_limit: Some(positive_bytes(limit, "connection_limit")?),
+            connection_limit: Some(positive_limit(limit, "connection_limit")?),
             ..self
         })
     }
@@ -177,7 +177,7 @@ impl ServerPolicy {
     #[cfg(feature = "profiling")]
     pub fn profiling_response_limit(self, max_bytes: usize) -> Result<Self, RuntimeError> {
         Ok(Self {
-            profiling_response_limit: positive_bytes(max_bytes, "profiling_response_limit")?,
+            profiling_response_limit: positive_limit(max_bytes, "profiling_response_limit")?,
             ..self
         })
     }
