@@ -689,9 +689,11 @@ impl LifecycleScript {
         });
     }
 
-    /// Record what one collection holds after keeping a chunk.
+    /// Record what one collection holds once a chunk has been accounted for.
     ///
-    /// The high-water mark, for the reason [`Self::observe_body_retained`]
+    /// Written after every accounting decision, kept or refused, so a crossing
+    /// chunk that was retained anyway is reported rather than skipped with the
+    /// refusal. The high-water mark, for the reason [`Self::observe_body_retained`]
     /// keeps one: the claim is the most a single collection ever held at once,
     /// and a sum would report every answer this peer gave instead.
     pub(in crate::http) fn observe_collected_retained(script: Option<&Self>, retained: usize) {

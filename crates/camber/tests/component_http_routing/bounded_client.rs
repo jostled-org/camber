@@ -245,10 +245,14 @@ async fn crossing_frame_is_dropped_and_ends_the_read() {
         observed.collected_chunks_polled() > 0,
         "{row}: the crossing frame must have been read before it was refused",
     );
-    assert!(
-        observed.collected_peak_retained_bytes() <= CEILING,
-        "{row}: retained {} bytes above the {CEILING} ceiling",
+    // The production collector publishes what it holds after every accounting
+    // decision, refusals included, so this reads the buffer rather than the
+    // total the collector was permitted. A collector that appended the
+    // crossing frame and only then refused would report those bytes here.
+    assert_eq!(
         observed.collected_peak_retained_bytes(),
+        CEILING,
+        "{row}: the admitted frame must be kept whole and the crossing frame must add nothing",
     );
     upstream.finish(row).await;
 }
@@ -317,6 +321,66 @@ async fn trailers_add_no_retained_bytes() {
     upstream.finish(row).await;
 }
 
+/// The bytes a body carries past [`CEILING`], which only the named opt-out
+/// admits.
+const ABOVE_CEILING: &[u8] = b"0123456789abcdef and eight more";
+
+/// A head declaring nine MiB: one above the eight-MiB default a caller who
+/// wrote no ceiling of their own collects under. The peer never sends them.
+const ABOVE_DEFAULT_HEAD: &str =
+    "HTTP/1.1 200 OK\r\nContent-Length: 9437184\r\nConnection: close\r\n\r\n";
+
+/// The named opt-out removes the ceiling and nothing else.
+async fn named_opt_out_admits_a_body_above_the_ceiling() {
+    let row = "named opt-out";
+    let upstream = ScriptedUpstream::start(
+        CHUNKED_HEAD,
+        vec![chunk_frame(ABOVE_CEILING), CHUNKED_END.into()].into_boxed_slice(),
+        false,
+    )
+    .await;
+    let observed = watch(upstream.addr);
+
+    let response = within_bound(
+        row,
+        bounded_client()
+            .unbounded_response()
+            .get(&format!("http://{}/opt-out", upstream.addr)),
+    )
+    .await
+    .expect("the named opt-out admits a body above the configured ceiling");
+
+    assert_eq!(
+        response.body().as_bytes(),
+        ABOVE_CEILING,
+        "{row}: the opted-out body must arrive whole",
+    );
+    assert_eq!(
+        observed.collected_peak_retained_bytes(),
+        ABOVE_CEILING.len(),
+        "{row}: the opted-out collection retains everything it was sent",
+    );
+    upstream.finish(row).await;
+}
+
+/// The free functions collect under the documented default, with no builder in
+/// sight to have written one.
+async fn default_ceiling_refuses_a_declaration_on_the_free_path() {
+    let row = "free-function default";
+    let upstream = ScriptedUpstream::start(ABOVE_DEFAULT_HEAD, Box::default(), true).await;
+    let observed = watch(upstream.addr);
+
+    let result = within_bound(row, http::get(&format!("http://{}/default", upstream.addr))).await;
+
+    assert_client_limit(row, result);
+    assert_eq!(
+        observed.collected_chunks_polled(),
+        0,
+        "{row}: the default ceiling must refuse the declaration before any frame is read",
+    );
+    upstream.finish(row).await;
+}
+
 /// The checked addition every retained frame passes through, including the
 /// total that cannot be represented at all.
 fn checked_addition_refuses_an_overflowing_total() {
@@ -348,6 +412,8 @@ async fn checked_collectors_drop_the_crossing_frame_without_excess_retention() {
     crossing_frame_is_dropped_and_ends_the_read().await;
     exact_boundary_frame_is_retained_whole().await;
     trailers_add_no_retained_bytes().await;
+    named_opt_out_admits_a_body_above_the_ceiling().await;
+    default_ceiling_refuses_a_declaration_on_the_free_path().await;
     checked_addition_refuses_an_overflowing_total();
 }
 
@@ -450,6 +516,118 @@ async fn stored_total_bounds_one_live_attempt(addr: SocketAddr) {
     assert_eq!(admitted.body(), "paced");
 }
 
+/// The quiet interval one live row measures, short enough that a peer which
+/// stops sending is refused long before any total in this file.
+const QUIET_IDLE: Duration = Duration::from_millis(60);
+
+/// The longest a call bounded by [`QUIET_IDLE`] may take. Far below every
+/// request total written beside it, so a call ended by a total instead of the
+/// quiet interval fails here rather than passing late.
+const IDLE_PROOF_BOUND: Duration = Duration::from_secs(1);
+
+/// The request total the reverse-order quiet row is bounded by.
+const QUIET_WHOLESALE_TOTAL: Duration = Duration::from_millis(300);
+
+/// The quiet interval that row's wholesale policy carries, long enough that
+/// only the total can end a call against a silent peer.
+const QUIET_WHOLESALE_IDLE: Duration = Duration::from_secs(5);
+
+/// The shortest that row may take if the wholesale policy replaced
+/// [`QUIET_IDLE`]. Between the two deadlines, so either one ending the call
+/// names itself.
+const QUIET_ORDER_FLOOR: Duration = Duration::from_millis(150);
+
+/// One upstream that answers with a partial body and then stops sending.
+///
+/// The head and one admitted frame arrive, the payload is never terminated,
+/// and the connection stays open: the peer is quiet, not gone, which is the
+/// only condition the quiet interval owns.
+async fn quiet_upstream() -> ScriptedUpstream {
+    ScriptedUpstream::start(
+        CHUNKED_HEAD,
+        vec![chunk_frame(ADMITTED)].into_boxed_slice(),
+        true,
+    )
+    .await
+}
+
+/// The one typed cause a crossed client deadline reports.
+fn assert_client_timeout(row: &str, result: Result<Response, RuntimeError>) {
+    match result {
+        Err(RuntimeError::Timeout) => {}
+        Err(other) => panic!("{row}: expected a client deadline, got {other:?}"),
+        Ok(response) => panic!(
+            "{row}: expected a refusal, got {} bytes",
+            response.body().len()
+        ),
+    }
+}
+
+/// The stored quiet interval is what a silent peer is measured against.
+///
+/// The single-field write lands after the whole policy, so its short interval
+/// is the stored one. The total it is written beside is twelve seconds: a
+/// client that never handed the interval to its transport would sit on this
+/// upstream until the row bound expired.
+async fn stored_idle_bounds_one_quiet_peer() {
+    let row = "quiet peer";
+    let upstream = quiet_upstream().await;
+    let quiet = format!("http://{}/quiet", upstream.addr);
+
+    let started = Instant::now();
+    let refused = within_bound(
+        row,
+        http::client()
+            .response_budget(wholesale_policy())
+            .response_idle_timeout(QUIET_IDLE)
+            .get(&quiet),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert_client_timeout(row, refused);
+    assert!(
+        elapsed < IDLE_PROOF_BOUND,
+        "{row}: the quiet interval must end the call in under {IDLE_PROOF_BOUND:?}, took {elapsed:?}",
+    );
+    upstream.finish(row).await;
+}
+
+/// The whole policy written last replaces the quiet interval a setter wrote.
+///
+/// The same silent peer, and a wholesale policy whose interval outlasts this
+/// row and whose total does not. A client still holding the replaced sixty
+/// milliseconds would refuse far earlier than its total.
+async fn wholesale_idle_replaces_the_field_write() {
+    let row = "quiet peer, wholesale last";
+    let upstream = quiet_upstream().await;
+    let quiet = format!("http://{}/quiet-replaced", upstream.addr);
+    let replaced = TransferBudget::bounded(
+        WHOLESALE_CEILING,
+        QUIET_WHOLESALE_IDLE,
+        QUIET_WHOLESALE_TOTAL,
+    )
+    .expect("a finite wholesale policy with a short total");
+
+    let started = Instant::now();
+    let refused = within_bound(
+        row,
+        http::client()
+            .response_idle_timeout(QUIET_IDLE)
+            .response_budget(replaced)
+            .get(&quiet),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert_client_timeout(row, refused);
+    assert!(
+        elapsed >= QUIET_ORDER_FLOOR,
+        "{row}: the replaced quiet interval must not end the call, took {elapsed:?}",
+    );
+    upstream.finish(row).await;
+}
+
 /// Retry eligibility, count, and backoff are unchanged by the response policy.
 async fn retry_policy_survives_the_response_writes(addr: SocketAddr, attempts: &Arc<AtomicU32>) {
     let transient = format!("http://{addr}/transient");
@@ -511,6 +689,9 @@ async fn retry_policy_survives_the_response_writes(addr: SocketAddr, attempts: &
 #[camber::test]
 async fn client_transfer_policy_writes_follow_authoritative_call_order() {
     call_order_decides_each_stored_dimension();
+
+    stored_idle_bounds_one_quiet_peer().await;
+    wholesale_idle_replaces_the_field_write().await;
 
     let attempts = Arc::new(AtomicU32::new(0));
     let addr = crate::runtime_support::spawn_server(timing_routes(&attempts));

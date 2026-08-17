@@ -102,14 +102,19 @@ impl CheckedCollector {
     /// the addition that would prove otherwise overflows.
     pub(super) fn retain(&mut self, chunk: Bytes) -> Result<(), RuntimeError> {
         LifecycleScript::count_collected_chunk(self.observer.as_deref());
-        let Some(total) =
-            checked_body_frame_total(self.retained.len(), chunk.len(), self.ceiling())
-        else {
-            return Err(self.crossed());
-        };
-        self.retained.extend_from_slice(&chunk);
-        LifecycleScript::observe_collected_retained(self.observer.as_deref(), total);
-        Ok(())
+        let admitted =
+            checked_body_frame_total(self.retained.len(), chunk.len(), self.ceiling()).is_some();
+        if admitted {
+            self.retained.extend_from_slice(&chunk);
+        }
+        // Read from the buffer, after the decision, on both paths: a collector
+        // that kept a crossing chunk before refusing it would report the bytes
+        // it is holding, where a total it was permitted would hide them.
+        LifecycleScript::observe_collected_retained(self.observer.as_deref(), self.retained.len());
+        match admitted {
+            true => Ok(()),
+            false => Err(self.crossed()),
+        }
     }
 
     /// Freeze what was retained into the shared buffer its owner receives.
