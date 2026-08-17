@@ -459,7 +459,8 @@ async fn forwarded_stream(
     // forced cancellation, a peer whose lifetime ended, and an expired request
     // total are all local causes that must win over an upstream head this
     // service has not committed.
-    let forwarded = match super::handle::pre_commit(forwarding, operation).await {
+    let forwarded = match super::handle::pre_commit(forwarding, operation, script.as_deref()).await
+    {
         Ok(forwarded) => forwarded,
         Err(failure) => return super::handle::answer_inbound_failure(ctx, scope, failure, start),
     };

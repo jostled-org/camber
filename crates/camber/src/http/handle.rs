@@ -981,9 +981,10 @@ pub(super) async fn within_total<T>(
 pub(super) async fn pre_commit<T>(
     producing: impl std::future::Future<Output = T>,
     operation: &OperationEnvelope,
+    observer: Option<&super::mock::LifecycleScript>,
 ) -> Result<T, InboundFailure> {
     operation
-        .pre_commit(producing)
+        .pre_commit(producing, observer)
         .await
         .map_err(|terminal| InboundFailure::of(terminal, operation.budget(), None))
 }

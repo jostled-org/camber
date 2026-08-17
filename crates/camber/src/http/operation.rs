@@ -343,7 +343,34 @@ impl OperationEnvelope {
     /// The quiet interval is deliberately absent: the payload owner accounts for
     /// data frames, and a second guard that never sees one would report a
     /// healthy upload as an idle body.
+    ///
+    /// The selected local cause is published to `observer` before the caller is
+    /// answered with it, at the one owner that chose it. It is the same
+    /// checkpoint the buffered coordinator publishes, so a case reads which
+    /// local source beat an uncommitted upstream head instead of inferring it
+    /// from a status — and the rows whose peer is gone, or whose server is,
+    /// have an observable at all.
     pub(super) async fn pre_commit<T>(
+        &self,
+        producing: impl Future<Output = T>,
+        observer: Option<&LifecycleScript>,
+    ) -> Result<T, InboundTerminal> {
+        let selected = self.select_pre_commit(producing).await;
+        match &selected {
+            Ok(_) => {}
+            Err(terminal) => {
+                LifecycleScript::pause_at(
+                    observer,
+                    super::mock::LifecycleCheckpoint::InboundTerminalSelected(*terminal),
+                )
+                .await;
+            }
+        }
+        selected
+    }
+
+    /// Weigh this operation's carried sources against one pre-commit producer.
+    async fn select_pre_commit<T>(
         &self,
         producing: impl Future<Output = T>,
     ) -> Result<T, InboundTerminal> {
@@ -558,17 +585,23 @@ fn weighed(
 /// same guard and answers the same question one poll at a time: which sources
 /// are ready now, and wake me when one of them can change that.
 ///
-/// What it arms a wake for is the deadlines and the peer's response lifetime.
-/// The supervisor's control state is read synchronously instead, every turn,
-/// because a graceful transition does not end an admitted operation — the
-/// deadline it mints does, and minting that deadline is what arms the wake that
-/// ends the work. A forced cancellation takes the connection's task with it, so
-/// the transfer's own release runs through its drop.
+/// What it arms a wake for is the deadlines, the peer's response lifetime, and
+/// the supervisor's next control transition. The transition is a wake and not
+/// only a synchronous read because an owner whose other wakes are a deadline
+/// far away, or a producer that is a single future, would otherwise stay parked
+/// through the stop that ends it: a graceful transition mints the aggregate
+/// deadline as it is read, and nothing would bring the owner back to read it.
 pub(super) struct InboundWatch {
     guard: InboundGuard,
     /// The peer's response lifetime, awaited through one future built once. The
     /// signal resolves once, so nothing ever rebuilds it.
     lifetime: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>,
+    /// The supervisor's next control transition, awaited through one future.
+    ///
+    /// Rebuilt after each transition, because a graceful stop escalates to a
+    /// cancellation and both are transitions this owner must observe. `None` is
+    /// an owner with no supervisor to answer to.
+    transition: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>>,
     /// The deadline wake in flight, and the instant it was armed for.
     ///
     /// Kept across polls rather than rebuilt per frame: a wake armed for an
@@ -584,11 +617,13 @@ impl InboundWatch {
     /// Wrap one inbound handle for an owner that reads it from a poll.
     pub(super) fn over(guard: InboundGuard) -> Self {
         let signal = guard.disconnect.clone();
+        let transition = transition_wake(guard.control.as_ref());
         Self {
             guard,
             lifetime: Box::pin(async move {
                 signal.cancelled().await;
             }),
+            transition,
             sleep: None,
             armed: None,
         }
@@ -600,17 +635,23 @@ impl InboundWatch {
     /// interval or lifetime — so one wake covers both families rather than each
     /// owner arming a timer of its own.
     ///
-    /// Interest is registered before the sources are read, which is what makes
-    /// a source that becomes ready between the two visible to this turn instead
-    /// of parking the owner behind it.
+    /// The sources are read before the deadline wake is armed, because reading
+    /// them is what mints the aggregate shutdown deadline: armed first, the wake
+    /// would cover every deadline except the one that turn just created, and the
+    /// owner would park on a stop it had already observed.
     pub(super) fn observed(
         &mut self,
         cx: &mut std::task::Context<'_>,
         extra: Option<Instant>,
     ) -> InboundReady {
         let _ = self.lifetime.as_mut().poll(cx);
+        let _ = self
+            .transition
+            .as_mut()
+            .map(|transition| transition.as_mut().poll(cx));
+        let ready = self.guard.observed();
         self.arm(cx, extra);
-        self.guard.observed()
+        ready
     }
 
     /// Arm the wake for the earliest deadline this turn can be changed by.
@@ -636,10 +677,44 @@ impl InboundWatch {
             return;
         }
         let mut sleep = Box::pin(tokio::time::sleep_until(wanted));
-        let _ = sleep.as_mut().poll(cx);
+        match sleep.as_mut().poll(cx) {
+            // Already passed, which an elapsed sleep registers no waker for. The
+            // turn that reads it has to be asked for, or this owner parks on a
+            // deadline it has just learned it is already past.
+            std::task::Poll::Ready(()) => cx.waker().wake_by_ref(),
+            std::task::Poll::Pending => {}
+        }
         self.sleep = Some(sleep);
         self.armed = Some(wanted);
     }
+}
+
+/// One wake for every state the supervisor publishes, if there is a supervisor.
+///
+/// It never completes, which is what lets one future cover every transition: an
+/// owner that replaced a resolved wake would have to rebuild it inside its own
+/// poll, and a rebuilt wake over a closed channel resolves on every poll. The
+/// clone marks the value in hand as seen, so the first wake is the next
+/// transition and not the one this owner has already read.
+fn transition_wake(
+    control: Option<&tokio::sync::watch::Receiver<ServerControl>>,
+) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>> {
+    let mut control = control.cloned()?;
+    Some(Box::pin(async move {
+        loop {
+            match control.changed().await {
+                // One turn per published transition. The owner re-reads every
+                // source in that turn, and this wait resumes for the next one,
+                // so a graceful stop and the cancellation behind it are both
+                // observed through the one future.
+                Ok(()) => tokio::task::yield_now().await,
+                // A closed sender is the supervisor gone. It publishes nothing
+                // more, so this wake goes quiet rather than waking an owner
+                // whose remaining sources still have to decide the request.
+                Err(_closed) => std::future::pending().await,
+            }
+        }
+    }))
 }
 
 /// How one admitted request's inbound work ended when it did not complete.

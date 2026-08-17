@@ -798,8 +798,10 @@ fn collected_failure(error: RuntimeError) -> ProxyFailure {
 /// are the same ones a route registered with [`Router::proxy`] freezes. This
 /// entry point takes no policy — it is handed a backend and a prefix and nothing
 /// else — so the defaults are the only bounds it can name, and a caller who
-/// needs others registers the route instead. Its client is frozen here, with
-/// this call, and shared with nothing.
+/// needs others registers the route instead. Because those defaults are the
+/// only bounds reachable here, one owner is the whole population: every call in
+/// a process shares one default-policy client and the connection pool under it.
+/// A route's own owner is frozen with its graph and is never this one.
 ///
 /// [`ProxyPolicy`]: super::ProxyPolicy
 /// [`Router::proxy`]: super::Router::proxy

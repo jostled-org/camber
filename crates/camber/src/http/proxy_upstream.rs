@@ -6,10 +6,12 @@
 //! registered under equal policies on one router share that owner; two routes
 //! under different policies never do, and no router shares one with another.
 //!
-//! There is no process-wide client, which is the whole point: one shared client
-//! gave every proxy route in a process the same connect and request timeouts,
-//! so a route that configured its own could not have them. Ownership frozen
-//! with the graph is what makes a route's phase deadlines the route's.
+//! No registered route reaches a process-wide client, which is the whole point:
+//! one shared client gave every proxy route in a process the same connect and
+//! request timeouts, so a route that configured its own could not have them.
+//! Ownership frozen with the graph is what makes a route's phase deadlines the
+//! route's. The one owner that is still process-wide belongs to the policy-free
+//! entry point below, which can carry no bounds but the documented defaults.
 
 use super::proxy_policy::ProxyPolicy;
 use super::transfer_budget::TransferBudget;
@@ -36,13 +38,14 @@ pub(super) struct ProxyUpstream {
 /// The owner the policy-free forwarding entry point reaches its upstream
 /// through.
 ///
-/// Not the process-wide client this module exists to remove. That one served
-/// every route whatever policy the route configured, so a route could not have
-/// its own bounds. This one is reachable only from
+/// Process-wide, and deliberately so — but not the client this module exists to
+/// remove. That one served every route whatever policy the route configured, so
+/// a route could not have its own bounds. This one is reachable only from
 /// [`proxy_forward`](super::proxy_forward), which takes a backend and a prefix
 /// and no policy at all: the documented defaults are the only bounds it can
 /// ever carry, so one owner for it is the whole population rather than a cache
-/// two configurations share.
+/// two configurations share. Every `proxy_forward` call in a process shares it
+/// and the connection pool under it.
 static DEFAULT_UPSTREAM: std::sync::LazyLock<ProxyUpstream> =
     std::sync::LazyLock::new(|| ProxyUpstream::frozen(ProxyPolicy::default()));
 

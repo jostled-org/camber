@@ -877,7 +877,12 @@ maximum narrows what the route admits and never widens it.
 Each registration freezes the client it forwards through, so a route's connect
 deadline is the route's. Two routes registered under equal policies on one
 router share that client; two routes under different policies never do, and no
-router shares one with another. There is no process-wide proxy client.
+router shares one with another.
+
+One owner is process-wide, and only one: `proxy_forward(...)` takes a backend
+and a prefix and no policy, so the documented defaults are the only bounds it
+can carry. Every `proxy_forward` call in a process shares that default-policy
+client and its connection pool. Register a route to name your own bounds.
 
 ## Host Routing
 
