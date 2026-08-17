@@ -1,7 +1,7 @@
 use super::Request;
 use super::async_proxy::UploadDisposition;
 use super::body::{HyperResponseBody, StreamBody};
-use super::handle::{ConnCtx, answer, answer_rejected, run_head_gate};
+use super::handle::{ConnCtx, answer_rejected, run_head_gate};
 use super::operation::OperationStage;
 use super::record::record_scoped;
 use super::rejection::{Rejected, RejectionScope, RequestIdentity};
@@ -368,13 +368,17 @@ pub(super) async fn dispatch_streaming_proxy(
     // never saw, so it goes out through the same answering path every other
     // refusal on this path takes.
     operation.observe(script.as_deref(), OperationStage::Middleware);
-    if let Some(blocked) = run_head_gate(&head, router, Some(params), &scope).await {
-        // Answered under the scope built above, not a rebuilt built-in one: a
-        // gate response the wire cannot carry recovers through this route's own
-        // mapper, the same one the host and upstream refusals reach. Closing,
-        // because the payload this request declared was never read: the next
-        // request on an HTTP/1 connection would otherwise be framed out of it.
-        return Ok(answer(ctx, scope.closing(blocked), start, &scope));
+    // Answered under the scope built above, not a rebuilt built-in one: a gate
+    // response the wire cannot carry recovers through this route's own mapper,
+    // the same one the host and upstream refusals reach. Closing, because the
+    // payload this request declared was never read: the next request on an
+    // HTTP/1 connection would otherwise be framed out of it.
+    let gate = run_head_gate(&head, router, Some(params), &scope);
+    let answering = super::handle::gate_within_total(gate, request_dispatch, &scope, |blocked| {
+        scope.closing(blocked)
+    });
+    if let Some(answered) = answering.await {
+        return Ok(answered);
     }
     let (proxy_parts, body) = outbound_parts(hyper_req, method, &origin);
     // The upload this route forwards is this operation's request payload, and

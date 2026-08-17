@@ -326,10 +326,15 @@ An admitted request carries two independent deadlines from the effective
   frames. Only a frame that delivered payload restarts it: trailers and empty
   frames renew nothing, so a peer cannot hold a body open with them.
 - `total` is the lifetime from the admitted head to the committed response head.
-  It covers body collection, handler execution, response production, a streaming
-  proxy's upload and upstream head, and a streaming multipart session. It ends at
-  the committed head — response-body time belongs to the selected download
-  `TransferBudget`, not to the request.
+  It covers middleware, body collection, handler execution, response production,
+  a streaming proxy's upload and upstream head, and a streaming multipart
+  session. Every route class spends it the same way: a chain that stalls holds a
+  `get_stream`, `sse`, `ws`, proxied, or `multipart` request no longer than it
+  holds a buffered one. It ends at the committed head — response-body time
+  belongs to the selected download `TransferBudget`, not to the request. A
+  WebSocket route ends its total at the successful handoff instead: a direct or
+  proxied upgrade that never reaches its `101` is refused on the total like any
+  other request, and the session behind a committed `101` spends none of it.
 
 Both are pre-commit, so each may invoke the selected rejection mapper at most
 once, and each leaves the peer's unread payload behind: the HTTP/1 connection

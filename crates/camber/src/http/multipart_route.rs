@@ -86,11 +86,14 @@ pub(super) async fn dispatch_streaming_multipart(
     };
     let request = RequestHead::from_hyper_request(&hyper_req, origin).to_request(Some(params));
     operation.observe(observer.as_deref(), OperationStage::Middleware);
-    if let Some(blocked) = gated(&request, router, &scope).await {
-        // Closing, because the payload this request declared was never read: the
-        // next request on an HTTP/1 connection would otherwise be framed out of
-        // it.
-        return Ok(answer(ctx, scope.closing(blocked), start, &scope));
+    // Closing, because the payload this request declared was never read: the
+    // next request on an HTTP/1 connection would otherwise be framed out of it.
+    let gate = gated(&request, router, &scope);
+    let answering = super::handle::gate_within_total(gate, request_dispatch, &scope, |blocked| {
+        scope.closing(blocked)
+    });
+    if let Some(answered) = answering.await {
+        return Ok(answered);
     }
     let boundary =
         match request_boundary(request.header("content-type"), limits.max_boundary_bytes()) {

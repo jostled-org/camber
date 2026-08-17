@@ -115,6 +115,17 @@ fn deadline_routes() -> Router {
             streamed
         })
     });
+    // The shape no other row has: a handler that stalls while producing its
+    // head rather than while producing a buffered response. Nothing about this
+    // request's body can end it — a GET carries none — so the only deadline
+    // that can answer it is the total, applied to head production on the
+    // streaming arm.
+    router.get_stream("/stalled-stream", |_req: &Request| {
+        Box::pin(async move {
+            tokio::time::sleep(UNREACHED).await;
+            StreamResponse::new(200).0
+        })
+    });
     router
 }
 
@@ -292,6 +303,19 @@ fn body_idle_and_request_total_map_once_and_apply_protocol_transport_disposition
                 assert_http1_body_idle_closes_and_maps_once().await;
                 assert_http1_paced_body_renews_its_quiet_interval().await;
                 assert_bodyless_handler_spends_the_request_total().await;
+                assert_http1_stalled_response_head_closes_and_maps_once().await;
+                assert_http2_stalled_response_head_is_stream_local().await;
+                #[cfg(feature = "ws")]
+                {
+                    assert_websocket_handoff_spends_the_request_total("/ws", "the direct upgrade")
+                        .await;
+                    assert_websocket_handoff_spends_the_request_total(
+                        "/ws-proxy/session",
+                        "the proxied upgrade",
+                    )
+                    .await;
+                }
+                assert_middleware_gate_spends_the_request_total().await;
                 assert_response_body_outlives_the_request_total().await;
                 assert_http2_stalled_body_is_stream_local().await;
             });
@@ -419,6 +443,405 @@ async fn assert_bodyless_handler_spends_the_request_total() {
     server
         .shutdown_bounded(SHUTDOWN_BOUND)
         .expect("the stalled-handler fixture tore down");
+}
+
+/// A streaming route's head is produced under the same total a buffered one
+/// spends, and the HTTP/1 connection that never received it cannot frame
+/// another request.
+///
+/// The row the two rows above cannot state. Both of theirs end while the total
+/// is still collecting a body or running a buffered handler, so a total wired to
+/// body collection alone answers them exactly the same way. This one carries no
+/// body at all and stalls after dispatch has chosen the streaming arm, so only a
+/// total applied to head production can end it.
+async fn assert_http1_stalled_response_head_closes_and_maps_once() {
+    let port = http_support::reserve_observed();
+    let controller = port.controller();
+    let (router, log) = counted_mapper(deadline_routes());
+    let server = port.serve_with_policy(router, deadline_policy());
+    let addr = server.addr();
+
+    let answered = tokio::task::spawn_blocking(move || {
+        let mut peer = http_support::connect(addr).expect("the stalled-head peer connected");
+        // Keep-alive, so the close below is the framework's disposition and not
+        // the preference this peer asked for.
+        http_support::write_request_with_connection(
+            &mut peer,
+            "keep-alive",
+            "GET",
+            "/stalled-stream",
+            &[],
+            b"",
+        )
+        .expect("write the stalled-head request");
+        let answered =
+            http_support::read_http_response_bounded(&mut peer).expect("the stall was answered");
+        http_support::assert_connection_closed(&mut peer, "a refused response head");
+        answered
+    })
+    .await
+    .expect("the stalled-head peer settled");
+
+    assert_eq!(answered.status, 408, "{}", answered.text());
+    assert_eq!(
+        answered.header("connection"),
+        Some("close"),
+        "an HTTP/1 refusal must state the disposition it enacts",
+    );
+    assert_eq!(
+        log.request_timeouts.load(Ordering::SeqCst),
+        1,
+        "a head that outlives its total is a request-total expiry, not a body one",
+    );
+    assert_eq!(
+        log.calls(),
+        1,
+        "exactly one mapper call per refused request"
+    );
+    assert_eq!(
+        controller.operations_observed().admitted,
+        1,
+        "one admitted head mints one envelope",
+    );
+
+    server
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the stalled-head fixture tore down");
+}
+
+/// The same stalled head over HTTP/2 is ended on its own stream, and the
+/// connection under it still carries another request.
+async fn assert_http2_stalled_response_head_is_stream_local() {
+    let port = http_support::reserve_observed();
+    let (router, log) = counted_mapper(deadline_routes());
+    let server = port.serve_with_policy(router, deadline_policy());
+    let addr = server.addr();
+
+    let mut client = common::PersistentH2Client::connect(addr, CLOSE_BOUND).await;
+    let refused = client
+        .send_complete("GET", "/stalled-stream", "localhost", &[], b"")
+        .await;
+    assert_eq!(refused.status, 408, "{}", refused.text());
+    assert_eq!(
+        refused.header("connection"),
+        None,
+        "an HTTP/2 refusal carries no connection-specific header",
+    );
+    assert_eq!(
+        log.request_timeouts.load(Ordering::SeqCst),
+        1,
+        "a stalled HTTP/2 head is the same total expiry HTTP/1 reports",
+    );
+
+    let reused = client
+        .send_complete("GET", "/quick", "localhost", &[], b"")
+        .await;
+    assert_eq!(
+        reused.status,
+        200,
+        "an HTTP/2 failure must stay on its own stream: {}",
+        reused.text()
+    );
+    assert_eq!(log.calls(), 1, "the reused stream is refused by nothing");
+    client.close().await;
+
+    server
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the HTTP/2 stalled-head fixture tore down");
+}
+
+/// The request total ends at a successful WebSocket handoff, so an upgrade the
+/// handoff never completes is refused on it like any other admitted request.
+///
+/// Held at the production checkpoint the handoff itself pauses at — after the
+/// registrar has the bridge and before the `101` is committed — so the deadline
+/// is weighed against the one await the upgrade arms make. Nothing is released
+/// before the total expires: the peer is answered with a refusal rather than the
+/// handshake it asked for, and the session that would have followed a `101`
+/// never starts.
+///
+/// Both upgrade kinds run here. A direct upgrade and a proxied one reach the
+/// same handoff through different dispatch arms, and a total wired to one arm
+/// alone would leave the other unbounded.
+#[cfg(feature = "ws")]
+async fn assert_websocket_handoff_spends_the_request_total(path: &str, upgrade: &str) {
+    let port = http_support::reserve_observed();
+    let controller = port.controller();
+    let (router, log) = counted_mapper(upgrade_routes());
+    let server = port.serve_with_policy(router, upgrade_policy());
+    let addr = server.addr();
+
+    controller
+        .pause_once(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+        .expect("the upgrade handoff was armed");
+    let requested = path.to_owned();
+    // Both rows read through the same helper, so the row is named in what a
+    // failure prints: an unbounded arm and a bounded one are told apart by
+    // which upgrade never answered.
+    let named = upgrade.to_owned();
+    let answered = tokio::task::spawn_blocking(move || {
+        let mut peer = common::start_upgrade(addr, &requested);
+        let answered = http_support::read_http_response_bounded(&mut peer)
+            .unwrap_or_else(|error| panic!("{named} was never answered: {error}"));
+        http_support::assert_connection_closed(&mut peer, &format!("{named}, refused"));
+        answered
+    });
+    // Proves the refusal below is the handoff's and not the handshake's: the
+    // ticket reached the registrar, so negotiation had already succeeded.
+    http_support::wait_until_paused_bounded(
+        &controller,
+        LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
+        upgrade,
+    )
+    .await;
+    let answered = answered.await.expect("the upgrading peer settled");
+
+    assert_eq!(answered.status, 408, "{upgrade}: {}", answered.text());
+    assert_eq!(
+        log.request_timeouts.load(Ordering::SeqCst),
+        1,
+        "{upgrade} outlived its total, so the total is what must answer it",
+    );
+    assert_eq!(log.calls(), 1, "{upgrade} was mapped exactly once");
+    assert_eq!(
+        controller.operations_observed().admitted,
+        1,
+        "{upgrade} minted one envelope",
+    );
+    controller
+        .release(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+        .expect("the held handoff was released");
+
+    // The refusal drops the registrar's future while the supervisor already
+    // holds the ticket, so the bridge that owns this connection's permit is
+    // reaped by the cancellation the supervisor answers with — a terminal no
+    // other row reaches. Under `connection_limit(1)` a permit that outlived the
+    // refusal leaves nothing here that can be accepted, and the probe runs
+    // against a live listener, where teardown cannot mask it.
+    let served = tokio::task::spawn_blocking(move || {
+        http_support::wait_for_http_response(addr, CLOSE_BOUND)
+            .expect("no connection was accepted after the refused upgrade closed");
+        http_support::request(addr, "GET", "/quick", &[], b"", CLOSE_BOUND)
+            .expect("the request after the refused upgrade was answered")
+    })
+    .await
+    .expect("the permit probe settled");
+    assert_eq!(
+        served.status,
+        200,
+        "{upgrade} must hand back the one connection permit it held: {}",
+        served.text()
+    );
+    assert_eq!(
+        log.calls(),
+        1,
+        "{upgrade}: the permit probe is refused by nothing",
+    );
+
+    server
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the upgrade-handoff fixture tore down");
+}
+
+/// The policy the upgrade-handoff rows serve under.
+///
+/// One connection at a time, so the permit the cancelled bridge held is
+/// something the row can read: a refusal that left the slot taken leaves the
+/// probe after it with nothing the listener can accept.
+#[cfg(feature = "ws")]
+fn upgrade_policy() -> ServerPolicy {
+    deadline_policy()
+        .connection_limit(1)
+        .expect("the upgrade row's connection limit")
+}
+
+/// The routes the handoff rows are served through: both upgrade kinds, and the
+/// ordinary route the permit probe reads back.
+///
+/// The proxied route's upstream is never dialled: the bridge that would reach it
+/// is spawned behind a gate the handoff opens, and no row here opens it. It
+/// exists so the route dispatches as a proxied upgrade rather than a direct one.
+#[cfg(feature = "ws")]
+fn upgrade_routes() -> Router {
+    let mut router = Router::new();
+    router.ws("/ws", |_req: &Request, mut conn: camber::http::WsConn| {
+        while let Some(message) = conn.recv() {
+            if conn.send(&message).is_err() {
+                break;
+            }
+        }
+        Ok(())
+    });
+    router.proxy("/ws-proxy", UNDIALLED_UPSTREAM);
+    router.get("/quick", |_req: &Request| async {
+        Response::text(200, "quick")
+    });
+    router
+}
+
+/// The upstream the proxied rows name and no row reaches.
+///
+/// The proxied upgrade's bridge is spawned behind a gate the handoff opens, and
+/// the stalled-gate proxy row never returns from its chain, so neither leg is
+/// ever dialled.
+const UNDIALLED_UPSTREAM: &str = "http://127.0.0.1:1";
+
+/// A middleware chain is admitted work under the request total, whatever class
+/// runs it.
+///
+/// The buffered arm cannot state this. Dispatch builds its chain into the very
+/// future the buffered producer is wrapped in, so a total applied to producers
+/// alone answers a stalled buffered chain exactly the same way it answers a
+/// bounded one. Every class here runs its chain at a gate of its own instead —
+/// the streaming and upgrade classes at the shared dispatch gate, multipart and
+/// the streaming proxy at theirs — and only a total that covers the gate can end
+/// them.
+///
+/// One fixture per class, because the claim is per gate: a shared mapper counter
+/// would let one bounded gate cover for another that is not.
+async fn assert_middleware_gate_spends_the_request_total() {
+    assert_gated_class_spends_the_total("a streaming route's chain", |addr| {
+        let mut peer = http_support::connect(addr).expect("the stalled-gate stream peer connected");
+        // Keep-alive, so the close below is the framework's disposition and not
+        // the preference this peer asked for.
+        http_support::write_request_with_connection(
+            &mut peer,
+            "keep-alive",
+            "GET",
+            "/gated-stream",
+            &[],
+            b"",
+        )
+        .expect("write the stalled-gate stream request");
+        let answered = http_support::read_http_response_bounded(&mut peer)
+            .expect("the stalled stream gate was answered");
+        http_support::assert_connection_closed(&mut peer, "a stream refused in middleware");
+        answered
+    })
+    .await;
+
+    #[cfg(feature = "ws")]
+    assert_gated_class_spends_the_total("an upgrade's chain", |addr| {
+        let mut peer = common::start_upgrade(addr, "/gated-ws");
+        http_support::read_http_response_bounded(&mut peer)
+            .expect("the stalled upgrade gate was answered")
+    })
+    .await;
+
+    assert_gated_class_spends_the_total("a multipart session's chain", |addr| {
+        let mut peer =
+            http_support::connect(addr).expect("the stalled-gate multipart peer connected");
+        peer.write_all(MULTIPART_HEAD.as_bytes())
+            .expect("write a multipart head whose chain never returns");
+        peer.flush().expect("flush the stalled-gate multipart head");
+        http_support::read_http_response_bounded(&mut peer)
+            .expect("the stalled multipart gate was answered")
+    })
+    .await;
+
+    assert_gated_class_spends_the_total("a streaming proxy's chain", |addr| {
+        let mut peer = http_support::connect(addr).expect("the stalled-gate proxy peer connected");
+        http_support::write_stalled_body(&mut peer, None, "POST", "/gated-proxy/sink")
+            .expect("write a proxied head whose chain never returns");
+        http_support::read_http_response_bounded(&mut peer)
+            .expect("the stalled proxy gate was answered")
+    })
+    .await;
+}
+
+/// Drive one gated class through the stalling chain and assert its total is what
+/// answered it.
+///
+/// The peer routine is the caller's because each class asks for its own head —
+/// an upgrade handshake, a multipart boundary declaration, a chunked upload —
+/// and what every one of them shares is that the head is complete and the chain
+/// is the only thing left holding the request.
+async fn assert_gated_class_spends_the_total(
+    class: &str,
+    drive: impl FnOnce(std::net::SocketAddr) -> http_support::HttpResponse + Send + 'static,
+) {
+    let port = http_support::reserve_observed();
+    let controller = port.controller();
+    let (router, log) = counted_mapper(stalled_gate_routes());
+    let server = port.serve_with_policy(router, gate_policy());
+    let addr = server.addr();
+
+    let answered = tokio::task::spawn_blocking(move || drive(addr))
+        .await
+        .unwrap_or_else(|error| panic!("{class}: the stalled-gate peer did not settle: {error}"));
+
+    assert_eq!(answered.status, 408, "{class}: {}", answered.text());
+    assert_eq!(
+        answered.header("connection"),
+        Some("close"),
+        "{class}: an HTTP/1 refusal must state the disposition it enacts",
+    );
+    assert_eq!(
+        log.request_timeouts.load(Ordering::SeqCst),
+        1,
+        "{class} outlives the total it was admitted under, so the total must answer it",
+    );
+    assert_eq!(log.calls(), 1, "{class} was mapped exactly once");
+    assert_eq!(
+        controller.operations_observed().admitted,
+        1,
+        "{class} minted one envelope",
+    );
+
+    server
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the stalled-gate fixture tore down");
+}
+
+/// The gated classes a stalled chain is driven through: one route for each
+/// production gate a request can reach outside the buffered dispatch that builds
+/// its own.
+///
+/// No handler here is ever entered. The chain below never passes a request
+/// through, so each route only has to make its request dispatch as the class it
+/// names.
+fn stalled_gate_routes() -> Router {
+    let mut router = Router::new();
+    router.get_stream("/gated-stream", |_req: &Request| {
+        Box::pin(async move { StreamResponse::new(200).0 })
+    });
+    #[cfg(feature = "ws")]
+    router.ws(
+        "/gated-ws",
+        |_req: &Request, _conn: camber::http::WsConn| Ok(()),
+    );
+    router.proxy_stream("/gated-proxy", UNDIALLED_UPSTREAM);
+    router.multipart(
+        Method::Post,
+        "/upload",
+        MultipartLimits::builder()
+            .build()
+            .expect("the stalled-gate row's limits"),
+        |_req: &Request, _fields: MultipartStream| async move { Response::text(200, "never") },
+    );
+    router.use_middleware(|_req: &Request, _next: camber::http::Next| async move {
+        tokio::time::sleep(UNREACHED).await;
+        Response::text(200, "never")
+    });
+    router
+}
+
+/// The policy the stalled-gate row serves under.
+///
+/// Its quiet interval is out of reach on purpose. None of these classes has read
+/// a payload byte by the time its chain runs, so the total is the only deadline
+/// that can answer them — and the category the mapper records is what says which
+/// one did.
+fn gate_policy() -> ServerPolicy {
+    ServerPolicy::default()
+        .header_timeout(UNREACHED)
+        .expect("a header boundary the stalled-gate row does not reach")
+        .request_budget(
+            RequestBudget::bounded(UNREACHED, REQUEST_TOTAL)
+                .expect("the stalled-gate row's request budget"),
+        )
+        .shutdown_timeout(SHUTDOWN_BOUND)
+        .expect("the stalled-gate row's shutdown deadline")
 }
 
 /// The request total ends where the response head commits, so a response body

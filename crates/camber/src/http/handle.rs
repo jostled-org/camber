@@ -27,6 +27,7 @@ use super::ws_proxy::{self, WsUpgrade};
 use super::{BufferConfig, Request, Response};
 use crate::resource::HealthState;
 use crate::runtime_state::RuntimeInner;
+use std::convert::identity;
 use std::sync::Arc;
 
 #[cfg(feature = "grpc")]
@@ -849,9 +850,10 @@ async fn dispatch_built_request<'a>(
     // this takes must end before the check is awaited.
     let gate = pending_middleware_gate(&result, router, &scope);
     operation.observe(script.as_deref(), OperationStage::Middleware);
-    let gate_blocked = gate_outcome(gate).await;
-    if let Some(blocked) = gate_blocked {
-        return Ok(answer(ctx, blocked, start, &scope));
+    // Refused as it stands: this class declared no payload it leaves unread.
+    let answering = gate_within_total(gate_outcome(gate), request_dispatch, &scope, identity);
+    if let Some(answered) = answering.await {
+        return Ok(answered);
     }
 
     #[cfg(feature = "ws")]
@@ -869,7 +871,7 @@ async fn dispatch_built_request<'a>(
             finish_buffered(fut, held_request, ctx, &scope, start, operation).await
         }
         DispatchResult::Stream(fut, req) => {
-            handle_stream_response(fut.await, req, ctx, &scope, start)
+            finish_stream(fut, req, ctx, &scope, start, operation).await
         }
         DispatchResult::Sse(handler, req) => {
             record_scoped(ctx, &scope, 200, start);
@@ -877,14 +879,14 @@ async fn dispatch_built_request<'a>(
         }
         #[cfg(feature = "ws")]
         DispatchResult::WebSocket(handler, req) => {
-            record_upgrade(ctx, req, start, &scope, |req| {
+            record_upgrade(ctx, req, start, &scope, operation, |req| {
                 ws_proxy::handle_ws_upgrade(ws_upgrade, handler, req, ctx.ws_buffer_size, lifecycle)
             })
             .await
         }
         #[cfg(feature = "ws")]
         DispatchResult::ProxyWebSocket(req, backend, prefix) => {
-            record_upgrade(ctx, req, start, &scope, |req| {
+            record_upgrade(ctx, req, start, &scope, operation, |req| {
                 ws_proxy::handle_proxy_ws(ws_upgrade, req, backend, prefix, lifecycle)
             })
             .await
@@ -911,6 +913,39 @@ pub(super) async fn within_total<T>(
     tokio::time::timeout(remaining, producing)
         .await
         .map_err(|_| Rejected::request_timeout(operation.budget().total().unwrap_or(remaining)))
+}
+
+/// Run one middleware gate inside the request total its operation carries.
+///
+/// Every class that owes a gate reaches here. The chain is admitted work before
+/// the committed head, exactly like the producer behind it, and a buffered
+/// route's chain is already bounded because dispatch builds it into the future
+/// [`finish_buffered`] wraps. A gate awaited outside the total left the same
+/// middleware refused at the total on `router.get` and unbounded on
+/// `router.get_stream`.
+///
+/// `Some` is the answer that finishes this request: the chain's own refusal, or
+/// the total's when the chain outlives it. `None` is a pass. What a refusal owes
+/// the transport is the caller's to say through `refuse` — a class that declared
+/// a payload it never read has to close the connection the next request would
+/// otherwise be framed out of, and a class that declared none does not.
+pub(super) async fn gate_within_total(
+    gate: impl std::future::Future<Output = Option<Response>>,
+    request_dispatch: &RequestDispatch<'_>,
+    scope: &RejectionScope,
+    refuse: impl FnOnce(Response) -> Response,
+) -> Option<hyper::Response<HyperResponseBody>> {
+    let &RequestDispatch {
+        ctx,
+        start,
+        operation,
+        ..
+    } = request_dispatch;
+    match within_total(gate, operation).await {
+        Ok(None) => None,
+        Ok(Some(blocked)) => Some(answer(ctx, refuse(blocked), start, scope)),
+        Err(rejected) => Some(answer_rejected(ctx, scope, rejected, start)),
+    }
 }
 
 /// Route a request and dispatch to the appropriate handler.
@@ -994,6 +1029,36 @@ async fn finish_buffered(
     answered
 }
 
+/// Produce one streaming handler's head inside the request total it carries.
+///
+/// A streaming route's head is produced by the same user code a buffered one
+/// runs — the difference is only what the future resolves to — so it spends the
+/// same total. The body behind the committed head does not: it belongs to the
+/// download budget, and [`handle_stream_response`] runs after this returns.
+async fn finish_stream(
+    producing: std::pin::Pin<
+        Box<dyn std::future::Future<Output = super::stream::StreamResponse> + Send>,
+    >,
+    held_request: Request,
+    ctx: &ConnCtx,
+    scope: &RejectionScope,
+    start: std::time::Instant,
+    operation: &OperationEnvelope,
+) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    match within_total(producing, operation).await {
+        Ok(stream_resp) => handle_stream_response(stream_resp, held_request, ctx, scope, start),
+        Err(rejected) => {
+            let answered = Ok(answer_rejected(ctx, scope, rejected, start));
+            // Released here for the same reason the buffered arm releases it
+            // last: the request owns this response's lifetime signal, and a
+            // handler dropped by the expiring total must not be told the
+            // request ended before its refusal is built.
+            drop(held_request);
+            answered
+        }
+    }
+}
+
 /// Finish a buffered dispatch against the request that produced it.
 ///
 /// Both buffered entry points end here, and here ends in [`answer`], so neither
@@ -1020,12 +1085,21 @@ fn finish_async(
 /// second answer to a question every exit already carries one for, and the
 /// buffered and streaming exits cannot disagree about what names a request
 /// while they read the same one.
+///
+/// The handshake runs inside the request total, which ends at the handoff this
+/// records. Everything up to it is still the request — the negotiation, and for
+/// a proxied upgrade the dial and handshake of the upstream leg — so an upgrade
+/// whose peer or upstream never completes it is refused on the same deadline
+/// every other admitted route answers to. The session past a committed `101`
+/// spends no request time: it is bounded by the WebSocket quotas its own
+/// registration carries.
 #[cfg(feature = "ws")]
 async fn record_upgrade<F, Fut>(
     ctx: &ConnCtx,
     req: Request,
     start: std::time::Instant,
     scope: &RejectionScope,
+    operation: &OperationEnvelope,
     upgrade: F,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible>
 where
@@ -1034,7 +1108,11 @@ where
             Output = Result<hyper::Response<HyperResponseBody>, ws_proxy::WsRefusal>,
         >,
 {
-    match upgrade(req).await {
+    let handed_off = match within_total(upgrade(req), operation).await {
+        Ok(handed_off) => handed_off,
+        Err(rejected) => return Ok(answer_rejected(ctx, scope, rejected, start)),
+    };
+    match handed_off {
         Ok(resp) => {
             record_scoped(ctx, scope, resp.status().as_u16(), start);
             Ok(resp)
