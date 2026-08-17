@@ -3,6 +3,8 @@ use super::handle::ConnCtx;
 use super::profiling::ProfilingRequest;
 use super::response::HandlerOutcome;
 use super::router::Handler;
+#[cfg(feature = "profiling")]
+use super::server_policy::frozen_profiling_response_limit;
 use super::{Request, Response};
 use crate::RuntimeError;
 use crate::resource::HealthState;
@@ -75,7 +77,7 @@ pub(super) fn match_profiling_route(
         "/debug/pprof/cpu" if ctx.profiling_enabled => {
             Some(InternalRoute::Profiling(ProfilingRequest::new(
                 parse_profiling_seconds_from_query(query),
-                ctx.policy.profiling_response_limit_value(),
+                frozen_profiling_response_limit(&ctx.policy),
             )))
         }
         _ => None,

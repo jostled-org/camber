@@ -269,12 +269,6 @@ impl ServerPolicy {
         self.connection_limit
     }
 
-    /// The configured rendered-profile maximum, or `None` for the opt-out.
-    #[cfg(feature = "profiling")]
-    pub(crate) const fn profiling_response_limit_value(&self) -> Option<usize> {
-        self.profiling_response
-    }
-
     /// This policy applied under the one that contains it.
     ///
     /// Every dimension narrows independently through the shared rule, so a

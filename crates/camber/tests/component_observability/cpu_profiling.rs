@@ -1,18 +1,23 @@
 #![cfg(feature = "profiling")]
 
-//! The live profiling endpoint, served under the maximum it defaults to.
+//! The live profiling endpoint, answered end to end.
 //!
 //! The CPU load a profile is rendered from is the shared fixture owner in
 //! `support/service_operation.rs`, because 10.T2 needs the same load over a real
 //! peer and two fixtures for one resource are two teardowns that can drift. The
-//! bounded-output behavior itself — the frozen maximum, the dropped crossing
-//! write, and the operator's typed cause — belongs to 10.T2. What this row keeps
-//! is the whole live answer: a real sampling window renders a real SVG, and the
-//! unnamed spelling serves it under the documented default.
+//! unwind row keeps every assertion it had. The endpoint row keeps its status and
+//! non-empty answer and adds one: the answer is a rendered SVG document. Its
+//! red/green pair is M7 in the step's falsification evidence.
+//!
+//! Every bounded-output claim belongs to 10.T2 — the frozen maximum under each
+//! spelling, the dropped crossing write, and the operator's typed cause. None is
+//! restated here. A profile this row renders is orders of magnitude under the
+//! documented default, so any bound assertion it could make would hold with no
+//! ceiling wired at all. What this row keeps is the whole live answer: a real
+//! sampling window renders a real SVG through the routed endpoint.
 
 use crate::common;
 
-use camber::__private::DEFAULT_PROFILING_RESPONSE_LIMIT;
 use camber::http::{Request, Response, Router};
 use camber::runtime;
 use std::time::Duration;
@@ -72,13 +77,6 @@ fn profiling_endpoint_returns_flamegraph() {
                 "expected a rendered SVG document, got: {}",
                 &body[..body.len().min(64)],
             );
-            // The unnamed spelling serves under the documented maximum, so a
-            // rendered answer that arrives at all arrived inside it.
-            assert!(
-                resp.body_bytes().len() <= DEFAULT_PROFILING_RESPONSE_LIMIT,
-                "the rendered profile is retained under the documented maximum",
-            );
-
             server.shutdown_bounded(EVENT_TIMEOUT).unwrap();
 
             runtime::request_shutdown();

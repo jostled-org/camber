@@ -5,12 +5,19 @@
 //! retained under the one maximum the serving policy froze, and the write that
 //! crosses that maximum is dropped, answered as a redacted internal-service
 //! failure, and recorded for operators under the bound it crossed.
+//!
+//! Every spelling of that maximum is served here — the unnamed one, the named
+//! finite one, and the opt-out — because a rendered profile this suite produces
+//! is far under the documented default, so nothing on the wire tells a defaulted
+//! server from one that froze no maximum at all.
 
 #[cfg(feature = "profiling")]
 use crate::common;
 #[cfg(feature = "profiling")]
 use crate::http as http_support;
 
+#[cfg(feature = "profiling")]
+use camber::__private::DEFAULT_PROFILING_RESPONSE_LIMIT;
 #[cfg(feature = "profiling")]
 use camber::http::mock::{self, LifecycleCheckpoint, LifecycleController};
 #[cfg(feature = "profiling")]
@@ -136,6 +143,54 @@ fn served_routes() -> Router {
 #[cfg(feature = "profiling")]
 fn serve(policy: ServerPolicy) -> http_support::ObservedServer {
     http_support::reserve_observed().serve_with_policy(served_routes(), policy)
+}
+
+/// The unnamed spelling is not a spelling of unbounded.
+///
+/// A profile rendered from this fixture's load is orders of magnitude under
+/// eight MiB, so what a defaulted server answers with is byte for byte what the
+/// opt-out row beside it answers with: a bound assertion on the body would hold
+/// with no ceiling wired at all. The two spellings are told apart by the maximum
+/// production froze — this server names no profiling spelling and renders under
+/// the documented default, and only the named opt-out renders under none.
+#[cfg(feature = "profiling")]
+async fn assert_the_unnamed_spelling_freezes_the_documented_maximum() {
+    let label = "the defaulted render";
+    let controller = mock::profiling_lifecycle().expect("one profiling observer");
+    let server = serve(base_policy());
+    let addr = server.addr();
+
+    let answered = profile(addr)
+        .await
+        .expect("the defaulted profiling request was answered");
+    assert_eq!(answered.status(), 200, "{label}: unexpected status");
+    assert!(
+        answered.body().starts_with("<?xml"),
+        "{label}: the whole rendered profile reaches the peer",
+    );
+
+    let rendered = Rendered::of(&controller);
+    assert_eq!(
+        rendered.ceiling, DEFAULT_PROFILING_RESPONSE_LIMIT,
+        "{label}: the unnamed spelling renders under the documented maximum",
+    );
+    assert_eq!(
+        rendered.peak,
+        answered.body_bytes().len(),
+        "{label}: the answer the peer received is what the render retained",
+    );
+    assert!(
+        rendered.peak < rendered.ceiling,
+        "{label}: this answer is far inside the maximum, so only the frozen \
+         number distinguishes it from the opt-out: {} of {}",
+        rendered.peak,
+        rendered.ceiling,
+    );
+    assert_one_worker_ran_off_the_only_tokio_worker(&controller, label);
+
+    server
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the defaulted fixture tore down");
 }
 
 /// The whole opt-out row, and the exact boundary the crossing row then uses.
@@ -333,6 +388,7 @@ fn profiling_sampling_and_rendering_are_bounded_off_workers() {
     let boundary = profiling_runtime(base_policy().unbounded_profiling_response())
         .run(|| {
             let boundary = common::block_on(async {
+                assert_the_unnamed_spelling_freezes_the_documented_maximum().await;
                 let boundary = assert_held_entry_renders_whole_under_the_opt_out().await;
                 assert_the_crossing_write_is_dropped_and_named(
                     base_policy()
