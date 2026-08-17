@@ -2011,14 +2011,21 @@ impl SessionTerminal {
         }
     }
 
-    /// Whether an answer may fail to arrive at all.
+    /// The escalation this row's terminal must not be preempted by.
     ///
-    /// The stop is the one row where it may: a graceful stop that reaches its own
-    /// deadline escalates to cancellation, which can take the transport before the
-    /// silent answer under it is written. What the row claims either way is that
-    /// no mapper ran and that everything it owned was released.
-    const fn answer_optional(self) -> bool {
-        matches!(self, Self::Shutdown)
+    /// A graceful stop that reaches its own deadline escalates to a forced
+    /// abort, and that abort takes the connection task where it stands. Both
+    /// deadlines are the same declared value, and the session's is minted when it
+    /// first observes the transition — after the server minted its own — so the
+    /// two expire together and whichever task runs first decides whether the
+    /// session settles or is taken away mid-turn. The escalation is held at the
+    /// production checkpoint the supervisor selects it from, so what ends this
+    /// row is the bound it configured rather than that race.
+    const fn escalation(self) -> Option<LifecycleCheckpoint> {
+        match self {
+            Self::Shutdown => Some(LifecycleCheckpoint::SupervisorSelectedDeadline),
+            Self::BodyIdle | Self::RequestTotal | Self::TransferTotal | Self::Disconnect => None,
+        }
     }
 
     /// What the peer is answered with, when an answer is possible at all.
@@ -2080,6 +2087,11 @@ async fn assert_session_revoked(stall: Stall, terminal: SessionTerminal) {
         .expect("the owned server requires a Tokio runtime");
     let before = controller.multipart_observed();
 
+    if let Some(checkpoint) = terminal.escalation() {
+        controller
+            .pause_once(checkpoint)
+            .expect("arm the supervisor's escalation checkpoint");
+    }
     if let Some(checkpoint) = stall.checkpoint() {
         controller
             .pause_once(checkpoint)
@@ -2112,6 +2124,11 @@ async fn assert_session_revoked(stall: Stall, terminal: SessionTerminal) {
 
     assert_session_answer(terminal, answered.as_ref(), &fixture, &label);
     assert_session_released(&controller, &fixture, before, terminal, &label);
+    // Released only now: the session has answered and let go of everything it
+    // owned, so the escalation this row held back has nothing left to preempt.
+    if let Some(checkpoint) = terminal.escalation() {
+        wait_stalled(&controller, checkpoint, &label).await;
+    }
     assert_grammar_unchanged(terminal, addr, &fixture, &label).await;
 
     handle.cancel();
@@ -2189,10 +2206,7 @@ fn assert_session_answer(
             recorded.is_empty(),
             "{label}: a departed peer is answered by no mapper: {recorded:?}"
         ),
-        (Some(_), None) => assert!(
-            terminal.answer_optional(),
-            "{label}: no answer reached the peer"
-        ),
+        (Some(_), None) => panic!("{label}: no answer reached the peer"),
     }
 }
 

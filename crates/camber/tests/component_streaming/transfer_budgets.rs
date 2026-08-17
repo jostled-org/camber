@@ -1101,7 +1101,10 @@ async fn assert_released_on_disconnect() {
 /// operation before that deadline, which is why this row names a short one rather
 /// than expecting the stop itself to take the stream away — and why the server is
 /// held directly, so the row can read what the transfer did and then join the
-/// server on its own terms.
+/// server on its own terms. The escalation behind that deadline is held at its
+/// own checkpoint for as long as the reading takes: the abort it starts would
+/// take the transfer away mid-turn, and this row is about what the transfer
+/// decided.
 async fn assert_released_on_shutdown() {
     let row = "a stopped server";
     let port = http_support::reserve_observed();
@@ -1124,8 +1127,22 @@ async fn assert_released_on_shutdown() {
     peer.read_exact(&mut byte)
         .await
         .expect("the committed head reached the peer");
+    // The forced abort a graceful stop escalates to would take this transfer
+    // away where it stands. Both deadlines are the same declared value, and the
+    // transfer's is minted on the turn that first observes the transition —
+    // after the server minted its own — so the two expire together and whichever
+    // task runs first decides what this row reads. The escalation is held at the
+    // production checkpoint the supervisor selects it from, so the deadline this
+    // row named is the one that ends the stream.
+    let escalation = LifecycleCheckpoint::SupervisorSelectedDeadline;
+    controller
+        .pause_once(escalation)
+        .expect("arm the supervisor's escalation checkpoint");
     handle.shutdown();
 
+    // The server's own deadline is minted first, so it expires first: the row
+    // reads the transfer only once the escalation behind it is held.
+    wait_paused(&controller, escalation, row).await;
     let observed = awaited(&controller, row, |observed| {
         observed.download.terminal.is_some()
     })
@@ -1138,8 +1155,12 @@ async fn assert_released_on_shutdown() {
     assert_released_once(&controller, row).await;
 
     // Teardown is this row's own, on every path: the graceful window has already
-    // closed, so the server is cancelled and joined under a bound rather than
-    // waited on for a completion its own deadline has passed.
+    // closed, so the escalation is let go of and the server is cancelled and
+    // joined under a bound rather than waited on for a completion its own
+    // deadline has passed.
+    controller
+        .release(escalation)
+        .expect("release the supervisor's escalation checkpoint");
     handle.cancel();
     assert!(
         tokio::time::timeout(SHUTDOWN_TIMEOUT, handle).await.is_ok(),
