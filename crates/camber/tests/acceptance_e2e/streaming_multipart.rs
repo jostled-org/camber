@@ -1905,6 +1905,12 @@ const SESSION_TRANSFER_TOTAL: Duration = Duration::from_millis(250);
 const SESSION_SHUTDOWN: Duration = Duration::from_millis(200);
 /// A bound no deadline row is allowed to reach.
 const SESSION_UNREACHED: Duration = Duration::from_secs(30);
+/// The upload maximum every row's server policy declares.
+///
+/// Far above anything these rows send, because it is not meant to be crossed:
+/// what it exists to prove is that the upload owner drops it, leaving route-aware
+/// admission the only authority over this payload's bytes.
+const SESSION_UPLOAD_MAX_BYTES: usize = 1 << 20;
 
 /// Where one row stalls its session.
 ///
@@ -1970,7 +1976,13 @@ impl SessionTerminal {
             Self::BodyIdle | Self::RequestTotal | Self::Disconnect | Self::Shutdown => {
                 TransferBudget::unbounded()
             }
-        };
+        }
+        // Named so the byte-authority claim has something to be about. Route-aware
+        // admission is this payload's only counter, so the upload owner has to
+        // drop a maximum its own policy declared — a row whose policy named none
+        // could not tell an owner that dropped it from one that never had it.
+        .with_max_bytes(SESSION_UPLOAD_MAX_BYTES)
+        .expect("the row's declared upload maximum");
         let shutdown = match self {
             Self::Shutdown => SESSION_SHUTDOWN,
             _ => BOUND,
@@ -2252,9 +2264,9 @@ fn assert_session_released(
         0,
         "{label}: the reply backing left this session's accounting: {after:?}"
     );
-    // The one byte-authority claim: the upload owner carries deadlines and no
-    // maximum, so nothing counted this request's payload but route-aware
-    // admission.
+    // The one byte-authority claim: this row's server policy declared an upload
+    // maximum, and the owner carries its deadlines without it — so nothing
+    // counted this request's payload but route-aware admission.
     let transfers = controller.transfers_observed();
     assert_eq!(
         transfers.upload.max_bytes, None,

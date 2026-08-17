@@ -168,10 +168,19 @@ pub struct Streamed {
 pub async fn read_streamed(stream: &mut tokio::net::TcpStream) -> Streamed {
     use tokio::io::AsyncReadExt;
 
+    let deadline = tokio::time::Instant::now() + STREAMED_READ_BOUND;
     let mut raw = Vec::new();
     let mut buffer = [0_u8; 4096];
     loop {
-        let read = match stream.read(&mut buffer).await {
+        let read = tokio::time::timeout_at(deadline, stream.read(&mut buffer))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the streaming response neither ended nor was cut inside {STREAMED_READ_BOUND:?}: {:?}",
+                    decoded(&raw)
+                )
+            });
+        let read = match read {
             Ok(0) | Err(_) => break,
             Ok(read) => read,
         };
@@ -182,6 +191,14 @@ pub async fn read_streamed(stream: &mut tokio::net::TcpStream) -> Streamed {
     }
     decoded(&raw)
 }
+
+/// How long one streaming read waits for its body to end or be cut.
+///
+/// A bound rather than an open read, because both of this reader's endings are
+/// production's: an owner that selected no terminal at all leaves the peer with
+/// a producer that never stops and a transport that never closes. Without this,
+/// that defect stops the suite instead of failing the row that staged it.
+const STREAMED_READ_BOUND: Duration = Duration::from_secs(20);
 
 /// Whether this response has reached its terminal chunk.
 fn chunks_ended(raw: &[u8]) -> bool {

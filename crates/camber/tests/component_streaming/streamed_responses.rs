@@ -1,6 +1,7 @@
 use crate::runtime_support as common;
 
-use camber::http::{Request, Router, StreamResponse};
+use camber::http::mock::{InboundTerminal, LifecycleController, TransferObservation};
+use camber::http::{Request, Router, StreamResponse, TransferBudget};
 use camber::{RuntimeError, runtime};
 use std::io::{self, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -9,6 +10,45 @@ use std::time::Duration;
 
 const TRUNCATED_PREFIX: &[u8] = b"known-upstream-prefix";
 const ADVERTISED_BODY_LENGTH: usize = TRUNCATED_PREFIX.len() + 17;
+/// How long a row waits for the production download owner to settle.
+const OBSERVED_BOUND: Duration = Duration::from_secs(5);
+/// The payload the three incremental chunks add up to.
+const INCREMENTAL_BYTES: usize = 21;
+/// The payload maximum the buffered row's router names.
+///
+/// Above what its producer sends: the claim is which policy the unnamed
+/// `with_buffer` spelling inherited, not a crossing.
+const BUFFERED_MAX_BYTES: usize = 64;
+
+/// Wait until this listener's download owner fixed a terminal and released.
+fn settled_download(controller: &LifecycleController, row: &str) -> TransferObservation {
+    let settled = crate::http::poll_until(OBSERVED_BOUND, || {
+        let observed = controller.transfers_observed();
+        observed.download.terminal.is_some() && observed.download.releases >= 1
+    });
+    let observed = controller.transfers_observed();
+    assert!(
+        settled,
+        "{row}: the download owner never settled: {observed:?}"
+    );
+    observed
+}
+
+/// Wait until this listener's download owner reached its release.
+///
+/// For the two rows whose cause is the peer: a transport taken away can release
+/// the owner before it weighs another turn, so the release is the whole claim.
+fn released_download(controller: &LifecycleController, row: &str) -> TransferObservation {
+    let settled = crate::http::poll_until(OBSERVED_BOUND, || {
+        controller.transfers_observed().download.releases >= 1
+    });
+    let observed = controller.transfers_observed();
+    assert!(
+        settled,
+        "{row}: the download owner never released: {observed:?}"
+    );
+    observed
+}
 
 enum StreamCompletion {
     BodyError(Box<str>),
@@ -150,8 +190,22 @@ fn stream_failure_is_observable_to_client_or_owner() {
         .run(|| {
             let mut router = Router::new();
             router.proxy_stream("/api", &format!("http://{upstream_addr}"));
-            let proxy_addr = common::spawn_server(router);
-            let completion = common::block_on(observe_h2_completion(proxy_addr, close_tx));
+            let port = crate::http::reserve_observed();
+            let server = port.serve(router);
+            let completion = common::block_on(observe_h2_completion(server.addr(), close_tx));
+            // 11.T2 and 11.T4: the truncation the peer or the owner reports is
+            // a terminal one production download owner fixed, and that owner
+            // released its upstream source once rather than leaving it held.
+            let observed = settled_download(server.controller(), "the truncated upstream");
+            assert_eq!(
+                observed.download.terminal,
+                Some(InboundTerminal::SourceFailure),
+                "the upstream's own failure is the download owner's terminal: {observed:?}"
+            );
+            assert_eq!(
+                observed.download.releases, 1,
+                "the download owner released its upstream source once: {observed:?}"
+            );
             runtime::request_shutdown();
             completion
         });
@@ -176,12 +230,19 @@ fn stream_response_sends_chunks_incrementally() {
             let (first_sent_tx, first_sent_rx) = mpsc::sync_channel(1);
             let (release_tx, release_rx) = mpsc::sync_channel(1);
             let release_rx = Arc::new(Mutex::new(release_rx));
+            // 11.T1: the incremental delivery below runs under a named payload
+            // maximum, so what the peer receives one chunk at a time is what one
+            // production download owner admitted and accounted for.
+            let budget = TransferBudget::unbounded()
+                .with_max_bytes(INCREMENTAL_BYTES)
+                .expect("the incremental payload maximum is accepted");
             let mut router = Router::new();
             router.get_stream("/stream", move |_req: &Request| {
                 let first_sent_tx = first_sent_tx.clone();
                 let release_rx = Arc::clone(&release_rx);
                 Box::pin(async move {
-                    let (stream_resp, sender) = StreamResponse::new(200);
+                    let (stream_resp, sender) = StreamResponse::with_budget(200, 4, budget)
+                        .expect("a positive stream capacity is accepted");
 
                     tokio::spawn(async move {
                         sender.send("chunk-0").await.unwrap();
@@ -201,7 +262,9 @@ fn stream_response_sends_chunks_incrementally() {
                 })
             });
 
-            let addr = common::spawn_server(router);
+            let port = crate::http::reserve_observed();
+            let server = port.serve(router);
+            let addr = server.addr();
 
             let mut stream = TcpStream::connect(addr).unwrap();
             stream
@@ -214,36 +277,73 @@ fn stream_response_sends_chunks_incrementally() {
             .unwrap();
             stream.flush().unwrap();
 
-            let mut reader = BufReader::new(stream);
-            let (status, headers) = crate::wire::read_response_head(&mut reader);
-            assert_eq!(status, 200);
-            assert!(headers.iter().any(|(name, value)| {
-                name.eq_ignore_ascii_case("transfer-encoding")
-                    && value.eq_ignore_ascii_case("chunked")
-            }));
-            first_sent_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-            let first_chunk = crate::wire::read_chunk(&mut reader, 1024)
-                .expect("decode first chunk")
-                .expect("first chunk");
-            assert_eq!(first_chunk.as_ref(), b"chunk-0");
-            release_tx.send(()).unwrap();
-            let second_chunk = crate::wire::read_chunk(&mut reader, 1024)
-                .expect("decode second chunk")
-                .expect("second chunk");
-            assert_eq!(second_chunk.as_ref(), b"chunk-1");
-            let third_chunk = crate::wire::read_chunk(&mut reader, 1024)
-                .expect("decode third chunk")
-                .expect("third chunk");
-            assert_eq!(third_chunk.as_ref(), b"chunk-2");
-            assert!(
-                crate::wire::read_chunk(&mut reader, 1024)
-                    .expect("decode terminal chunk and trailers")
-                    .is_none()
-            );
+            assert_chunks_arrive_one_at_a_time(stream, &first_sent_rx, &release_tx);
+            assert_budgeted_download(server.controller(), "incremental chunks", INCREMENTAL_BYTES);
 
             runtime::request_shutdown();
         })
         .unwrap();
+}
+
+/// Each chunk reaches the peer as its own write, the second only after release.
+///
+/// The producer holds between the first chunk and the rest, so a response that
+/// buffered its body could not answer the first read at all.
+fn assert_chunks_arrive_one_at_a_time(
+    stream: TcpStream,
+    first_sent: &mpsc::Receiver<()>,
+    release: &mpsc::SyncSender<()>,
+) {
+    let mut reader = BufReader::new(stream);
+    let (status, headers) = crate::wire::read_response_head(&mut reader);
+    assert_eq!(status, 200);
+    assert!(headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("transfer-encoding") && value.eq_ignore_ascii_case("chunked")
+    }));
+    first_sent.recv_timeout(Duration::from_secs(2)).unwrap();
+    let first_chunk = crate::wire::read_chunk(&mut reader, 1024)
+        .expect("decode first chunk")
+        .expect("first chunk");
+    assert_eq!(first_chunk.as_ref(), b"chunk-0");
+    release.send(()).unwrap();
+    for expected in [b"chunk-1".as_slice(), b"chunk-2".as_slice()] {
+        let chunk = crate::wire::read_chunk(&mut reader, 1024)
+            .expect("decode released chunk")
+            .expect("released chunk");
+        assert_eq!(chunk.as_ref(), expected);
+    }
+    assert!(
+        crate::wire::read_chunk(&mut reader, 1024)
+            .expect("decode terminal chunk and trailers")
+            .is_none()
+    );
+}
+
+/// The maximum this row named reached its owner, which accounted under it.
+///
+/// Both budgeted rows end here: one names the maximum on the response and one
+/// inherits it from the router, and what each proves about the owner that
+/// carried it is the same four facts.
+fn assert_budgeted_download(controller: &LifecycleController, row: &str, maximum: usize) {
+    let observed = settled_download(controller, row);
+    assert_eq!(
+        observed.download.max_bytes,
+        Some(maximum),
+        "{row}: the maximum production froze is the one this row named: {observed:?}"
+    );
+    assert_eq!(
+        observed.download.admitted_bytes, INCREMENTAL_BYTES,
+        "{row}: every chunk the peer received was admitted by the owner: {observed:?}"
+    );
+    assert_eq!(
+        observed.download.crossings_released, 0,
+        "{row}: a payload under its maximum releases nothing"
+    );
+    assert_eq!(
+        observed.download.terminal,
+        Some(InboundTerminal::ResponseHead),
+        "{row}: the producer's own end is the terminal: {observed:?}"
+    );
 }
 
 #[test]
@@ -305,7 +405,9 @@ fn stream_response_client_disconnect_drops_sender() {
                 })
             });
 
-            let addr = common::spawn_server(router);
+            let port = crate::http::reserve_observed();
+            let server = port.serve(router);
+            let addr = server.addr();
 
             // Connect, read first chunk, then drop
             {
@@ -332,6 +434,15 @@ fn stream_response_client_disconnect_drops_sender() {
                 .recv_timeout(Duration::from_secs(2))
                 .expect("sender observed client disconnect");
 
+            // 11.T2: the sender the producer lost is the source one production
+            // download owner released, and it released it exactly once.
+            let row = "a departed peer";
+            let observed = released_download(server.controller(), row);
+            assert_eq!(
+                observed.download.releases, 1,
+                "{row}: the owner released its source and producer once: {observed:?}"
+            );
+
             runtime::request_shutdown();
         })
         .unwrap();
@@ -350,8 +461,22 @@ fn stream_response_empty_body() {
                     stream_resp
                 })
             });
+            // 11.T1: a producer whose one frame carried no payload. The peer sees
+            // the same empty body either way, so the frame that was polled and the
+            // bytes it did not cost are read from the production owner.
+            router.get_stream("/empty-frame", |_req: &Request| {
+                Box::pin(async {
+                    let (stream_resp, sender) = StreamResponse::new(200);
+                    tokio::spawn(async move {
+                        let _departed = sender.send(&b""[..]).await;
+                    });
+                    stream_resp
+                })
+            });
 
-            let addr = common::spawn_server(router);
+            let port = crate::http::reserve_observed();
+            let server = port.serve(router);
+            let addr = server.addr();
 
             let mut stream = crate::http::connect(addr).expect("connect to empty stream route");
             write!(
@@ -368,23 +493,80 @@ fn stream_response_empty_body() {
                 .expect("read empty stream through connection close");
             assert_eq!(bytes_after_head.as_ref(), b"");
 
+            assert_empty_frame_row(addr, server.controller());
+
             runtime::request_shutdown();
         })
         .unwrap();
 }
 
+/// The payload-free frame this file's second empty route produces.
+///
+/// The peer's view is the same empty body a dropped sender gives, so what tells
+/// the two apart is the owner's own record: it polled a frame, charged it
+/// nothing, released nothing, and ended on the source's own end.
+fn assert_empty_frame_row(addr: SocketAddr, controller: &LifecycleController) {
+    let row = "an empty frame";
+    let answered = crate::http::request(
+        addr,
+        "GET",
+        "/empty-frame",
+        &[],
+        &[],
+        Duration::from_secs(5),
+    )
+    .expect("read the empty-frame stream");
+    assert_eq!(answered.status, 200, "{row}: the feed committed its status");
+    assert_eq!(
+        answered.body.as_ref(),
+        b"",
+        "{row}: no payload reaches the peer"
+    );
+    let observed = settled_download(controller, row);
+    assert!(
+        observed.download.frames_polled >= 1,
+        "{row}: the empty frame was polled out of the source: {observed:?}"
+    );
+    assert_eq!(
+        observed.download.admitted_bytes, 0,
+        "{row}: an empty frame costs no payload bytes: {observed:?}"
+    );
+    assert_eq!(
+        observed.download.crossings_released, 0,
+        "{row}: nothing was released instead of delivered"
+    );
+    assert_eq!(
+        observed.download.terminal,
+        Some(InboundTerminal::ResponseHead),
+        "{row}: the source's own end is the terminal: {observed:?}"
+    );
+}
+
 #[test]
 fn stream_response_with_buffer_rejects_zero_capacity() {
-    let result = StreamResponse::with_buffer(200, 0);
+    assert_zero_capacity_refused("with_buffer", StreamResponse::with_buffer(200, 0));
+    // 11.T1: the budgeted spelling validates the same capacity, and it validates
+    // it before the budget it also names — a stream that could name a maximum and
+    // no channel to carry it would have a bound over nothing.
+    assert_zero_capacity_refused(
+        "with_budget",
+        StreamResponse::with_budget(200, 0, TransferBudget::unbounded()),
+    );
+    let (_response, _sender) = StreamResponse::with_budget(200, 1, TransferBudget::unbounded())
+        .expect("with_budget accepts the smallest positive capacity");
+}
+
+/// Both public streaming spellings refuse a zero capacity the same way.
+fn assert_zero_capacity_refused<T>(spelling: &str, result: Result<T, RuntimeError>) {
     match result {
         Err(RuntimeError::InvalidArgument(msg)) => {
             assert!(
                 msg.contains("capacity"),
-                "error should mention capacity, got: {msg}"
+                "{spelling}: error should mention capacity, got: {msg}"
             );
         }
-        Err(other) => panic!("expected InvalidArgument, got: {other}"),
-        Ok(_) => panic!("expected error for zero capacity"),
+        Err(other) => panic!("{spelling}: expected InvalidArgument, got: {other}"),
+        Ok(_) => panic!("{spelling}: expected error for zero capacity"),
     }
 }
 
@@ -408,13 +590,34 @@ fn stream_response_with_buffer_preserves_streaming_behavior() {
                 })
             });
 
-            let addr = common::spawn_server(router);
+            // 11.T1: the unnamed `with_buffer` spelling names no transfer policy
+            // of its own, so the router's download policy is what its owner must
+            // freeze. A spelling that widened instead of inheriting would freeze
+            // no maximum at all.
+            let inherited = TransferBudget::unbounded()
+                .with_max_bytes(BUFFERED_MAX_BYTES)
+                .expect("the router's download maximum is accepted");
+            let port = crate::http::reserve_observed();
+            let server = port.serve(router.download_budget(inherited));
+            let addr = server.addr();
 
             let response =
                 crate::http::request(addr, "GET", "/buffered", &[], &[], Duration::from_secs(5))
                     .unwrap();
             assert_eq!(response.status, 200);
             assert_eq!(response.body.as_ref(), b"chunk-0chunk-1chunk-2");
+
+            let row = "a backpressured buffer";
+            assert_budgeted_download(server.controller(), row, BUFFERED_MAX_BYTES);
+            assert!(
+                server
+                    .controller()
+                    .transfers_observed()
+                    .download
+                    .frames_polled
+                    >= 3,
+                "{row}: each chunk crossed the owner as its own frame"
+            );
 
             runtime::request_shutdown();
         })

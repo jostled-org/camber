@@ -14,8 +14,8 @@ use camber::http::mock::{
     InboundTerminal, LifecycleCheckpoint, LifecycleController, TransferObservation,
 };
 use camber::http::{
-    Method, MultipartLimits, MultipartStream, Request, RequestBudget, Response, Router,
-    StreamResponse, TransferBudget,
+    Method, MultipartLimits, MultipartStream, Rejection, RejectionContext, RejectionKind, Request,
+    RequestBudget, Response, Router, StreamResponse, TransferBudget,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -43,6 +43,12 @@ const UNREACHED: Duration = Duration::from_secs(30);
 const SSE_QUIET: Duration = Duration::from_secs(1);
 /// The payload maximum the byte rows are bounded by.
 const MAX_BYTES: usize = 24;
+/// The payload maximum the upload rows declare and no upload owner keeps.
+///
+/// Far above what those rows send: it is not there to be crossed, but to be
+/// dropped, which is how a row tells route-aware admission's authority from a
+/// second counter over the same bytes.
+const UPLOAD_MAX_BYTES: usize = 1 << 20;
 /// One frame of the byte rows' payload. Three of them reach the maximum exactly.
 const FRAME: &[u8] = b"12345678";
 /// How long a paced producer waits between frames.
@@ -628,9 +634,11 @@ async fn assert_sse_rows() {
 async fn assert_upload_idle_row() {
     let row = "the upload quiet interval";
     let port = http_support::reserve_observed();
-    let upload = TransferBudget::unbounded()
-        .with_idle(CROSSED_IDLE)
-        .expect("the upload interval is accepted");
+    // The upload policy names a maximum it must not keep: route-aware admission
+    // is this payload's only counter, so the owner carries the interval and drops
+    // the maximum. A policy that named none could not tell the two apart.
+    let upload = TransferBudget::bounded(UPLOAD_MAX_BYTES, CROSSED_IDLE, UNREACHED)
+        .expect("the upload policy is accepted");
     let download = TransferBudget::bounded(MAX_BYTES, UNREACHED, UNREACHED)
         .expect("the download policy is accepted");
     let server = port.serve(
@@ -689,8 +697,12 @@ async fn assert_upload_trailer_row() {
     let mut peer = tokio::net::TcpStream::connect(addr)
         .await
         .expect("connect the trailered upload");
+    // `Connection: close` because this row's answer is a buffered `Response`,
+    // which carries a length rather than a terminal chunk: a peer left on a
+    // keep-alive connection has nothing to read for until the server's own
+    // pre-head interval closes it, and would spend that whole interval waiting.
     let head = format!(
-        "POST /upload HTTP/1.1\r\nHost: transfer.test\r\nContent-Type: multipart/form-data; boundary={BOUNDARY}\r\nTransfer-Encoding: chunked\r\n\r\n"
+        "POST /upload HTTP/1.1\r\nHost: transfer.test\r\nContent-Type: multipart/form-data; boundary={BOUNDARY}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
     );
     peer.write_all(head.as_bytes())
         .await
@@ -934,7 +946,15 @@ async fn assert_byte_terminal_polls_no_later_frame() {
         (200, MAX_BYTES),
         "{row}: the peer keeps its committed status and no crossing byte"
     );
-    assert_settled_polls(&controller, row, InboundTerminal::TransferBytes).await;
+    // Three paced frames reached the maximum, and the released turn read the one
+    // that crossed it. The fifth is still in the channel.
+    assert_settled_polls(
+        &controller,
+        row,
+        InboundTerminal::TransferBytes,
+        MAX_BYTES / FRAME.len() + 1,
+    )
+    .await;
     drop(peer);
     stop(server, row);
     assert_released_once(&controller, row).await;
@@ -990,17 +1010,28 @@ async fn assert_deadline_terminal_polls_no_later_frame(
         (200, 0),
         "{row}: the committed status stands and no witnessed byte reaches the peer"
     );
-    assert_settled_polls(&controller, row, expected).await;
+    // Nothing was queued in front of the deadline, and the one frame behind it was
+    // staged after the source had already been read.
+    assert_settled_polls(&controller, row, expected, 0).await;
     drop(peer);
     stop(server, row);
     assert_released_once(&controller, row).await;
 }
 
-/// Read the fixed terminal, then prove the poll count stops moving.
+/// Read the fixed terminal, then prove the poll count is the staged one and
+/// stops moving.
+///
+/// `polls` is counted rather than compared with itself: every frame this row's
+/// producer queued before the terminal is known, and so is every frame it
+/// withheld behind it. An owner that drained its source in one turn, or that read
+/// again after its selection, reaches a number no staging can explain — and a
+/// row that only compared the count with itself would read both numbers after the
+/// extra frame had already been taken.
 async fn assert_settled_polls(
     controller: &LifecycleController,
     row: &str,
     expected: InboundTerminal,
+    polls: usize,
 ) {
     let observed = awaited(controller, row, |observed| {
         observed.download.terminal.is_some()
@@ -1015,13 +1046,16 @@ async fn assert_settled_polls(
         observed.download.terminals, 1,
         "{row}: the terminal is fixed once"
     );
-    let polled = observed.download.frames_polled;
+    assert_eq!(
+        observed.download.frames_polled, polls,
+        "{row}: the owner polled exactly the frames staged in front of its terminal: {observed:?}"
+    );
     // The witnessed frame is still in the channel, so a guard that let go would
     // read it while this row waits.
     tokio::time::sleep(CROSSED_IDLE).await;
     let settled = controller.transfers_observed();
     assert_eq!(
-        settled.download.frames_polled, polled,
+        settled.download.frames_polled, polls,
         "{row}: no frame is polled after the terminal is fixed: {settled:?}"
     );
 }
@@ -1217,6 +1251,10 @@ async fn assert_upload_idle_outranks_transfer_idle() {
 /// request lifetime are both crossed. The interval is the higher row, exactly as
 /// it was before the transfer terminals existed — an extension that inserted a
 /// transfer row above it, or that reordered these two, fails here.
+///
+/// The cause is read through the route's own rejection mapper rather than off the
+/// status: both retained rows answer `408`, so a status is the one thing that
+/// cannot tell them apart.
 async fn assert_retained_inbound_order() {
     let row = "the retained inbound pair";
     let port = http_support::reserve_observed();
@@ -1224,11 +1262,21 @@ async fn assert_retained_inbound_order() {
     router.post("/buffered", |_req: &Request| async {
         Response::text(200, "buffered")
     });
+    let mapped = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&mapped);
     let server = port.serve(
-        router.request_budget(
-            RequestBudget::bounded(CROSSED_IDLE, CROSSED_IDLE)
-                .expect("the retained request budget is accepted"),
-        ),
+        router
+            .request_budget(
+                RequestBudget::bounded(CROSSED_IDLE, CROSSED_IDLE)
+                    .expect("the retained request budget is accepted"),
+            )
+            .rejection_mapper(move |rejection: &Rejection, _: &RejectionContext| {
+                recorded
+                    .lock()
+                    .expect("the retained control's mapper log is uncontended")
+                    .push(rejection.kind());
+                Response::text(rejection.status(), rejection.message())
+            }),
     );
     let addr = server.addr();
 
@@ -1246,6 +1294,15 @@ async fn assert_retained_inbound_order() {
     assert_eq!(
         delivered.status, 408,
         "{row}: the request's own interval answered it"
+    );
+    let kinds = mapped
+        .lock()
+        .expect("the retained control's mapper log is uncontended")
+        .clone();
+    assert_eq!(
+        kinds,
+        vec![RejectionKind::BodyTimeout],
+        "{row}: the request's interval is the cause production selected, mapped once"
     );
     let observed = server.controller().transfers_observed();
     assert_eq!(

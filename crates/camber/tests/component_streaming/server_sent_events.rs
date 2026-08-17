@@ -1,6 +1,7 @@
 use crate::runtime_support as common;
 
-use camber::http::{Request, Router};
+use camber::http::mock::{InboundTerminal, LifecycleController, TransferObservation};
+use camber::http::{Request, Router, TransferBudget};
 use camber::runtime;
 use std::io::{BufReader, Write};
 use std::net::TcpStream;
@@ -8,6 +9,31 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
+
+/// How long a row waits for the production download owner to settle.
+const OBSERVED_BOUND: Duration = Duration::from_secs(5);
+/// The payload maximum the multi-event row's router names.
+///
+/// Above what the feed publishes: the claim is which policy an SSE registration
+/// that named none inherited, not a crossing.
+const FEED_MAX_BYTES: usize = 256;
+/// The payload three `data-N` events add up to.
+///
+/// Each is `event: message\ndata: data-N\n\n`: twenty-nine bytes of framed feed.
+const FEED_BYTES: usize = 87;
+
+/// Wait until this listener's download owner reached its release, and report it.
+fn released_feed(controller: &LifecycleController, row: &str) -> TransferObservation {
+    let settled = crate::http::poll_until(OBSERVED_BOUND, || {
+        controller.transfers_observed().download.releases >= 1
+    });
+    let observed = controller.transfers_observed();
+    assert!(
+        settled,
+        "{row}: the feed's owner never released: {observed:?}"
+    );
+    observed
+}
 
 #[test]
 fn sse_streams_multiple_events() {
@@ -25,7 +51,15 @@ fn sse_streams_multiple_events() {
                 },
             );
 
-            let addr = common::spawn_server(router);
+            // 11.T1: an SSE registration that names no budget of its own is
+            // bounded by its router's download policy, and the events the peer
+            // reads are what that owner admitted.
+            let inherited = TransferBudget::unbounded()
+                .with_max_bytes(FEED_MAX_BYTES)
+                .expect("the router's download maximum is accepted");
+            let port = crate::http::reserve_observed();
+            let server = port.serve(router.download_budget(inherited));
+            let addr = server.addr();
 
             let response =
                 crate::http::request(addr, "GET", "/events", &[], &[], Duration::from_secs(5))
@@ -37,6 +71,27 @@ fn sse_streams_multiple_events() {
             assert_eq!(
                 response.body.as_ref(),
                 b"event: message\ndata: data-0\n\nevent: message\ndata: data-1\n\nevent: message\ndata: data-2\n\n"
+            );
+
+            let row = "a multi-event feed";
+            let observed = released_feed(server.controller(), row);
+            assert_eq!(
+                observed.download.max_bytes,
+                Some(FEED_MAX_BYTES),
+                "{row}: the registration inherited the router's maximum: {observed:?}"
+            );
+            assert_eq!(
+                observed.download.admitted_bytes, FEED_BYTES,
+                "{row}: every event the peer read was admitted by the owner: {observed:?}"
+            );
+            assert_eq!(
+                observed.download.crossings_released, 0,
+                "{row}: a feed under its maximum releases nothing"
+            );
+            assert_eq!(
+                observed.download.terminal,
+                Some(InboundTerminal::ResponseHead),
+                "{row}: the producer's own end is the terminal: {observed:?}"
             );
 
             runtime::request_shutdown();
@@ -117,7 +172,9 @@ fn sse_client_disconnect_stops_handler() {
                 },
             );
 
-            let addr = common::spawn_server(router);
+            let port = crate::http::reserve_observed();
+            let server = port.serve(router);
+            let addr = server.addr();
 
             // Connect and read 2 events, then drop
             {
@@ -145,6 +202,15 @@ fn sse_client_disconnect_stops_handler() {
             stopped_rx
                 .recv_timeout(Duration::from_secs(2))
                 .expect("SSE handler observed client disconnect");
+
+            // 11.T2: the writer the handler lost is the source one production
+            // download owner released, and it released it exactly once.
+            let row = "a departed feed peer";
+            let observed = released_feed(server.controller(), row);
+            assert_eq!(
+                observed.download.releases, 1,
+                "{row}: the owner released its source and producer once: {observed:?}"
+            );
 
             runtime::request_shutdown();
         })
