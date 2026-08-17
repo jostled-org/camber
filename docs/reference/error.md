@@ -179,10 +179,10 @@ idea: the closed name of the maximum a policy configured, so an operator reads
 which ceiling to widen rather than that something was too big. It is what a
 buffered collection reports when it refuses to keep reading.
 
-Two boundaries reach a caller today. Both are collected under the same checked
-rule: a declared length above the maximum is refused before anything is
-allocated, an undeclared body is counted chunk by chunk, the crossing chunk is
-dropped rather than retained, and nothing is read after it.
+Four boundaries are reachable today. Each is collected under the same checked
+rule: a length the source declares above the maximum is refused before anything
+is allocated, an undeclared payload is counted chunk by chunk, the crossing chunk
+is dropped rather than retained, and nothing is read after it.
 
 - `ClientResponse` — an outbound response declared or delivered more bytes than
   the client's response maximum admits.
@@ -192,6 +192,15 @@ dropped rather than retained, and nothing is read after it.
   `502` with no upstream text in it; the boundary reaches the operator record
   instead. `ProxyPolicy::unbounded_buffered_response` is the only way to remove
   the maximum.
+- `StaticFile` — a served file states, or grows to, more bytes than the maximum
+  the entry point or the route froze. `http::serve_file_unbounded` and
+  `Router::static_files_unbounded` are the only spellings that remove it.
+- `ProfilingResponse` — a rendered CPU profile crossed the maximum
+  `ServerPolicy` froze for it, with the `profiling` feature. No caller reaches
+  this one directly: the built-in `/debug/pprof/cpu` route answers a redacted
+  `500` and the boundary reaches the operator record instead.
+  `ServerPolicy::unbounded_profiling_response` is the only way to remove the
+  maximum.
 
 `RequestBodyLimit` stays separate. It is the served side of the same rule, and
 it answers a peer rather than a caller.

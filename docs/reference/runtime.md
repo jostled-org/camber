@@ -125,6 +125,16 @@ names that ceiling. Omitting the connection limit is unbounded — intended for 
 tests, or a service behind an admission boundary that already enforces one. A production
 service should set a finite limit.
 
+With the `profiling` feature, `ServerPolicy::profiling_response_limit(max_bytes)` caps the
+rendered profile `/debug/pprof/cpu` retains. It defaults to eight MiB. Sampling and
+rendering run on a blocking thread, and each write is counted before it is kept: the write
+that would carry the answer past the maximum is dropped, and the request is refused with
+`RuntimeError::LimitExceeded` naming `ByteBoundary::ProfilingResponse` rather than answered
+with a partial profile. The peer reads a redacted 500; the operator's record names the
+bound. Zero is refused. `unbounded_profiling_response()` is the only spelling that removes
+the maximum, and it holds the whole rendered answer in memory however large the sampler
+made it.
+
 `ServerPolicy` refuses every deadline that is zero or longer than thirty years, and the
 request, transfer, and proxy budgets refuse the same two. Thirty years is the horizon
 Tokio's own timer stops at. Past it Camber would hand the clock a deadline the platform

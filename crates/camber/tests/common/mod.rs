@@ -18,6 +18,8 @@ mod rejection_kinds;
 mod rejection_metrics;
 #[path = "../support/runtime.rs"]
 mod runtime;
+#[path = "../support/service_operation.rs"]
+mod service_operation;
 #[path = "../support/stream.rs"]
 mod stream;
 #[path = "../support/temp.rs"]
@@ -47,6 +49,7 @@ pub use rejection::*;
 pub use rejection_kinds::*;
 pub use rejection_metrics::*;
 pub use runtime::*;
+pub use service_operation::*;
 pub use stream::*;
 pub use temp::*;
 pub use tls::*;

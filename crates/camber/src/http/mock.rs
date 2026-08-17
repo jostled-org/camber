@@ -71,6 +71,9 @@ pub enum LifecycleCheckpoint {
     /// One static-file worker has taken the filesystem's word for how large its
     /// file is, and has not opened it yet.
     StaticFileMetadataObserved,
+    /// One profiling worker has begun, before it has sampled anything.
+    #[cfg(feature = "profiling")]
+    ProfilingWorkerEntered,
 }
 
 #[doc(hidden)]
@@ -344,6 +347,14 @@ struct CollectionObservations {
     chunks_polled: AtomicUsize,
     /// The most any one collection from this peer retained at once.
     peak_retained_bytes: AtomicUsize,
+    /// What the first chunk this scope ever retained left behind.
+    ///
+    /// The exact boundary of a source whose chunk sizes nobody declares: a case
+    /// that wants a maximum landing exactly on one chunk reads it here rather
+    /// than guessing a number the producer never promised. Zero means no chunk
+    /// has been retained yet — a retained chunk always leaves bytes behind, and
+    /// a chunk refused before anything was kept ends its collection.
+    first_retained_bytes: AtomicUsize,
 }
 
 /// What the static-file workers under one root reported about where they ran.
@@ -378,6 +389,67 @@ struct StaticFileObservations {
     reads_off_caller: AtomicUsize,
     /// Filesystem steps of any kind that ran on the awaiting thread itself.
     steps_on_caller: AtomicUsize,
+}
+
+/// What the profiling workers in this process reported about where they ran and
+/// what they retained.
+///
+/// Counters and the maximum one render froze, each written by the production owner
+/// it names. Nothing here starts a worker, samples a stack, renders a byte,
+/// chooses a maximum, or decides which thread anything runs on.
+///
+/// Held apart from [`StaticFileObservations`] rather than folded into it: the two
+/// owners answer different questions — a file read reports three filesystem steps
+/// under one served root, and a profile is one process-wide answer whose sampling
+/// and rendering happen inside a single worker entry. One struct covering both
+/// would carry a field that is meaningless for whichever owner wrote it.
+#[cfg(feature = "profiling")]
+#[derive(Default)]
+struct ProfilingObservations {
+    /// The maximum the most recent render is retained under, as its own collector
+    /// compares it. Zero is no render yet; [`usize::MAX`] is the explicit opt-out.
+    frozen_ceiling: AtomicUsize,
+    /// Blocking workers that began sampling.
+    workers_entered: AtomicUsize,
+    /// Blocking workers that handed back an answer or a refusal.
+    ///
+    /// The difference between this and [`Self::workers_entered`] is the
+    /// abandonment claim: a caller that stopped waiting leaves a worker counted
+    /// as entered and not yet returned, still holding what it owns.
+    workers_returned: AtomicUsize,
+    /// Workers that began on the very thread awaiting them.
+    ///
+    /// Sampling and rendering both run inside one worker entry, so the thread
+    /// that entry reports is the thread both of them ran on.
+    entries_on_caller: AtomicUsize,
+}
+
+/// What one profiling worker published, at the moment it published it.
+#[cfg(feature = "profiling")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::http) enum ProfilingEvent {
+    /// The blocking worker began, on the awaiting thread or off it.
+    Entered { off_caller: bool },
+    /// This render froze the maximum it retains under.
+    ///
+    /// Carried as the collector's own comparison value, so [`usize::MAX`] is the
+    /// explicit opt-out and every other value is a real maximum.
+    CeilingFrozen(usize),
+    /// The blocking worker handed back its answer or its refusal.
+    Returned,
+}
+
+/// What this process's profiling workers have done so far.
+///
+/// Read-only, and every number in it is written by the production owner it names.
+#[cfg(feature = "profiling")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProfilingObservation {
+    pub frozen_ceiling: usize,
+    pub workers_entered: usize,
+    pub workers_returned: usize,
+    pub entries_on_caller: usize,
 }
 
 /// The one filesystem step a static-file worker is reporting.
@@ -581,6 +653,10 @@ pub(crate) struct LifecycleScript {
     /// What the static-file workers under this root published about where they
     /// ran and what they still hold.
     static_files: StaticFileObservations,
+    /// What this process's profiling workers published about where they ran and
+    /// what they retained.
+    #[cfg(feature = "profiling")]
+    profiling: ProfilingObservations,
     /// What this listener's admitted operations published about their one
     /// envelope each.
     operation: OperationObservations,
@@ -607,6 +683,8 @@ impl LifecycleScript {
             body: BodyObservations::default(),
             collection: CollectionObservations::default(),
             static_files: StaticFileObservations::default(),
+            #[cfg(feature = "profiling")]
+            profiling: ProfilingObservations::default(),
             operation: OperationObservations::default(),
             #[cfg(feature = "ws")]
             websocket: WebSocketDirectionObservations::default(),
@@ -830,7 +908,47 @@ impl LifecycleScript {
             collection
                 .peak_retained_bytes
                 .fetch_max(retained, Ordering::Release);
+            // Recorded once, at the first total this scope ever held: a
+            // collection that has kept nothing yet is still at zero, and the
+            // chunk that changes that is the one whose size nobody declared.
+            let _first = collection.first_retained_bytes.compare_exchange(
+                0,
+                retained,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
         });
+    }
+
+    /// Record one thing a profiling worker did, where it did it.
+    ///
+    /// Inert with no controller registered, exactly like [`Self::pause_at`].
+    #[cfg(feature = "profiling")]
+    pub(in crate::http) fn observe_profiling(script: Option<&Self>, event: ProfilingEvent) {
+        Self::observe(
+            script,
+            |script| &script.profiling,
+            |profiling| {
+                let counter = match event {
+                    // A value, not a tally: the question is which maximum this
+                    // render froze, and adding them would answer neither.
+                    ProfilingEvent::CeilingFrozen(ceiling) => {
+                        profiling.frozen_ceiling.store(ceiling, Ordering::Release);
+                        return;
+                    }
+                    ProfilingEvent::Entered { off_caller: true } => &profiling.workers_entered,
+                    // Counted under both, because an entry on the awaiting thread
+                    // is still an entry: the ownership claim counts workers and
+                    // the placement claim counts where they began.
+                    ProfilingEvent::Entered { off_caller: false } => {
+                        profiling.entries_on_caller.fetch_add(1, Ordering::Release);
+                        &profiling.workers_entered
+                    }
+                    ProfilingEvent::Returned => &profiling.workers_returned,
+                };
+                counter.fetch_add(1, Ordering::Release);
+            },
+        );
     }
 
     /// Record one thing a static-file worker did, where it did it.
@@ -1153,13 +1271,16 @@ fn let_go(released: Arc<ReleaseGate>) {
 ///
 /// A served listener is named by the address its peers reach. Static-file work
 /// has no peer to name it, so it is named by the root it serves from, and two
-/// roots are two independent observers. One registry holds both because a
-/// controller is the same thing either way: one script, its armed checkpoints,
-/// and its read-only counters.
+/// roots are two independent observers. Profiling has neither: the profiler is one
+/// process-wide registration, so its scope is the process and there is exactly one
+/// of it. One registry holds all three because a controller is the same thing
+/// either way: one script, its armed checkpoints, and its read-only counters.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ObservedScope {
     Listener(std::net::SocketAddr),
     StaticRoot(Box<std::path::Path>),
+    #[cfg(feature = "profiling")]
+    Profiler,
 }
 
 struct LifecycleRegistration {
@@ -1251,6 +1372,18 @@ impl LifecycleController {
             .load(Ordering::Acquire)
     }
 
+    /// What the first chunk retained under this scope left behind.
+    ///
+    /// The exact boundary a source with undeclared chunk sizes offers: a case
+    /// that freezes a maximum here lands it on a real chunk edge instead of a
+    /// number the producer never promised. Zero is "nothing retained yet".
+    pub fn collected_first_retained_bytes(&self) -> usize {
+        self.script
+            .collection
+            .first_retained_bytes
+            .load(Ordering::Acquire)
+    }
+
     /// How many admitted permit owners this listener has released.
     pub fn body_permit_owners_dropped(&self) -> usize {
         self.script
@@ -1317,6 +1450,22 @@ impl LifecycleController {
     /// backing and claims none.
     pub fn multipart_observed(&self) -> MultipartObservation {
         MultipartObservation::of(self.script.multipart(), None, None)
+    }
+
+    /// What this process's profiling workers have done so far.
+    ///
+    /// Read-only, and every number in it is written by the production owner it
+    /// names: nothing here starts a worker, samples a stack, renders a byte,
+    /// chooses a maximum, or decides the thread any of it runs on.
+    #[cfg(feature = "profiling")]
+    pub fn profiling_observed(&self) -> ProfilingObservation {
+        let profiling = &self.script.profiling;
+        ProfilingObservation {
+            frozen_ceiling: profiling.frozen_ceiling.load(Ordering::Acquire),
+            workers_entered: profiling.workers_entered.load(Ordering::Acquire),
+            workers_returned: profiling.workers_returned.load(Ordering::Acquire),
+            entries_on_caller: profiling.entries_on_caller.load(Ordering::Acquire),
+        }
     }
 
     /// What the static-file workers under this root have done so far.
@@ -1417,6 +1566,22 @@ pub(in crate::http) fn static_file_script(root: &std::path::Path) -> Option<Arc<
     scoped_script(
         |scope| matches!(scope, ObservedScope::StaticRoot(watched) if watched.as_ref() == root),
     )
+}
+
+/// Watch the profiling work this process answers.
+///
+/// One scope, because the profiler itself is one: `pprof` registers a single
+/// process-wide sampler, so two profiling observers would be two views of the
+/// same worker rather than two independent ones.
+#[cfg(feature = "profiling")]
+#[doc(hidden)]
+pub fn profiling_lifecycle() -> Result<LifecycleController, RuntimeError> {
+    register(ObservedScope::Profiler)
+}
+
+#[cfg(feature = "profiling")]
+pub(in crate::http) fn profiling_script() -> Option<Arc<LifecycleScript>> {
+    scoped_script(|scope| matches!(scope, ObservedScope::Profiler))
 }
 
 /// One checkpoint's reach and its first look, held apart.

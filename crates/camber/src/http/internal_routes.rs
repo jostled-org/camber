@@ -1,4 +1,6 @@
 use super::handle::ConnCtx;
+#[cfg(feature = "profiling")]
+use super::profiling::ProfilingRequest;
 use super::response::HandlerOutcome;
 use super::router::Handler;
 use super::{Request, Response};
@@ -24,7 +26,7 @@ pub(super) enum InternalRoute {
     Metrics(metrics_exporter_prometheus::PrometheusHandle),
     Health(HealthState),
     #[cfg(feature = "profiling")]
-    Profiling(u64),
+    Profiling(ProfilingRequest),
 }
 
 impl InternalRoute {
@@ -59,6 +61,10 @@ pub(super) fn match_internal_route_from_path(path: &str, ctx: &ConnCtx) -> Optio
 }
 
 /// Check if a path matches the profiling internal route.
+///
+/// The sampling window and the output maximum are both frozen here: the window
+/// is the peer's, clamped, and the maximum is the serving policy's at the instant
+/// this request was matched.
 #[cfg(feature = "profiling")]
 pub(super) fn match_profiling_route(
     path: &str,
@@ -66,9 +72,12 @@ pub(super) fn match_profiling_route(
     ctx: &ConnCtx,
 ) -> Option<InternalRoute> {
     match path {
-        "/debug/pprof/cpu" if ctx.profiling_enabled => Some(InternalRoute::Profiling(
-            parse_profiling_seconds_from_query(query),
-        )),
+        "/debug/pprof/cpu" if ctx.profiling_enabled => {
+            Some(InternalRoute::Profiling(ProfilingRequest::new(
+                parse_profiling_seconds_from_query(query),
+                ctx.policy.profiling_response_limit_value(),
+            )))
+        }
         _ => None,
     }
 }
@@ -87,35 +96,11 @@ pub(super) async fn invoke_internal_route(route: &InternalRoute) -> Result<Respo
         InternalRoute::Metrics(handle) => Ok(Response::bytes_raw(200, handle.render())
             .with_content_type("text/plain; version=0.0.4; charset=utf-8")),
         InternalRoute::Health(hs) => build_health_response(hs),
+        // The whole answer belongs to `profiling`: it samples for as long as the
+        // peer asked for and retains what it renders under the maximum this route
+        // froze, both on a thread that may block.
         #[cfg(feature = "profiling")]
-        InternalRoute::Profiling(seconds) => invoke_profiling(*seconds).await,
-    }
-}
-
-/// Run CPU profiling for the given duration and return a flamegraph SVG.
-///
-/// The sampling window is a real thread sleep of up to a minute, so it runs on
-/// a blocking thread rather than on the worker that accepted the request: one
-/// `/debug/pprof/cpu?seconds=60` parked a worker for that whole minute. The
-/// guard is taken and dropped inside the blocking closure, so the profiler's
-/// registration never crosses an await and never outlives the thread it sampled.
-#[cfg(feature = "profiling")]
-async fn invoke_profiling(seconds: u64) -> Result<Response, RuntimeError> {
-    let sampled = tokio::task::spawn_blocking(move || {
-        let guard = start_profiling()?;
-        std::thread::sleep(std::time::Duration::from_secs(seconds));
-        render_flamegraph(guard)
-    })
-    .await;
-    match sampled {
-        Ok(rendered) => rendered,
-        // Neither outcome is a transport failure, so neither is reported as
-        // one. A panic inside the profiler carries a payload `panic_to_error`
-        // can name, and flattening it into `Http` text lost both the name and
-        // the category; anything else the join reports is the task going away
-        // under it.
-        Err(error) if error.is_panic() => Err(crate::task::panic_to_error(error.into_panic())),
-        Err(_) => Err(RuntimeError::Cancelled),
+        InternalRoute::Profiling(request) => request.answer().await,
     }
 }
 
@@ -185,33 +170,24 @@ fn build_health_response(
     )
 }
 
+/// How long the peer asked to be profiled for, inside the allowed window.
+///
+/// A missing, unparseable, or over-long window becomes a value this process is
+/// willing to spend a blocking thread on rather than a refusal, because the
+/// endpoint is an operator's and the answer is the same shape either way.
 #[cfg(feature = "profiling")]
 fn parse_profiling_seconds_from_query(query: Option<&str>) -> u64 {
     query
         .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("seconds=")))
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(5)
-        .min(60)
+        .unwrap_or(DEFAULT_PROFILING_SECONDS)
+        .min(MAX_PROFILING_SECONDS)
 }
 
+/// How long a request that names no window is profiled for.
 #[cfg(feature = "profiling")]
-fn start_profiling() -> Result<pprof::ProfilerGuard<'static>, RuntimeError> {
-    pprof::ProfilerGuardBuilder::default()
-        .frequency(1000)
-        .build()
-        .map_err(|e| RuntimeError::Http(format!("profiler start failed: {e}").into()))
-}
+const DEFAULT_PROFILING_SECONDS: u64 = 5;
 
+/// The longest window any request can ask to be profiled for.
 #[cfg(feature = "profiling")]
-fn render_flamegraph(guard: pprof::ProfilerGuard<'_>) -> Result<Response, RuntimeError> {
-    let report = guard
-        .report()
-        .build()
-        .map_err(|e| RuntimeError::Http(format!("profiler report failed: {e}").into()))?;
-
-    let mut svg = Vec::new();
-    report
-        .flamegraph(&mut svg)
-        .map_err(|e| RuntimeError::Http(format!("flamegraph generation failed: {e}").into()))?;
-    Ok(Response::bytes_raw(200, svg).with_content_type("image/svg+xml"))
-}
+const MAX_PROFILING_SECONDS: u64 = 60;

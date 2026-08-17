@@ -132,18 +132,7 @@ pub(super) async fn read_bounded(
     let worker = StaticFileWorker::owning(base_dir, file_path, limit);
     match executor.spawn_blocking(move || worker.answer()).await {
         Ok(answered) => answered,
-        Err(joined) => Err(worker_failed(&joined)),
-    }
-}
-
-/// Why a static-file worker never handed back an answer.
-///
-/// A panic and a cancellation are different failures: one is a fault in the
-/// read, and the other is Camber's own executor taking the work away.
-fn worker_failed(joined: &tokio::task::JoinError) -> RuntimeError {
-    match joined.is_cancelled() {
-        true => RuntimeError::Cancelled,
-        false => RuntimeError::TaskPanicked("static file worker panicked".into()),
+        Err(joined) => Err(super::blocking_worker_failed(joined)),
     }
 }
 

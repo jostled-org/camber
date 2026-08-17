@@ -8,6 +8,20 @@ pub(crate) fn strip_quotes(v: &str) -> &str {
     }
 }
 
+/// Why a blocking worker never handed back an answer.
+///
+/// One rule for every offloaded owner Camber awaits — the static-file reader and
+/// the profiling sampler alike. A panic and a cancellation are different
+/// failures: one is a fault inside the work, and the other is Camber's own
+/// executor taking the work away. The panic keeps its payload, because the
+/// payload is the only thing that says which work faulted.
+pub(crate) fn blocking_worker_failed(joined: tokio::task::JoinError) -> crate::RuntimeError {
+    match joined.is_panic() {
+        true => crate::task::panic_to_error(joined.into_panic()),
+        false => crate::RuntimeError::Cancelled,
+    }
+}
+
 /// Map reqwest errors to RuntimeError, detecting timeouts.
 ///
 /// The whole cause chain is rendered into the message. `reqwest`'s own

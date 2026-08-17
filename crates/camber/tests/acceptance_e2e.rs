@@ -16,6 +16,12 @@ pub mod rejection_metrics;
 pub mod rejection_support;
 #[path = "support/runtime.rs"]
 pub mod runtime_support;
+#[path = "support/service_operation.rs"]
+pub mod service_operation;
+// Mounted for the bounded thread join `service_operation` owns its load threads
+// through, which is this suite's one spelling of that wait.
+#[path = "support/stream.rs"]
+pub mod stream;
 #[path = "support/tls.rs"]
 pub mod tls;
 #[path = "support/trace_capture.rs"]
@@ -31,6 +37,7 @@ pub mod common {
     pub use crate::rejection_metrics::*;
     pub use crate::rejection_support::*;
     pub use crate::runtime_support::*;
+    pub use crate::service_operation::*;
     pub use crate::tls::*;
     pub use crate::trace_capture::*;
     #[cfg(feature = "ws")]
@@ -53,6 +60,8 @@ pub mod mixed_content_and_websocket_proxy;
 pub mod routing_and_outbound_calls;
 #[path = "acceptance_e2e/service_deadlines.rs"]
 pub mod service_deadlines;
+#[path = "acceptance_e2e/service_operation_observability.rs"]
+pub mod service_operation_observability;
 #[path = "acceptance_e2e/streaming_multipart.rs"]
 pub mod streaming_multipart;
 #[path = "acceptance_e2e/unified_rest_sse_websocket.rs"]

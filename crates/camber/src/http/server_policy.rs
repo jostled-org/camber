@@ -15,9 +15,10 @@ pub(crate) const DEFAULT_HEADER_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// The default body-idle and request-total deadlines.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// The default maximum a rendered profiling response is retained under.
+/// The default maximum a rendered profiling response is retained under: eight
+/// MiB, the same ceiling Camber's ordinary buffered collections use.
 #[cfg(feature = "profiling")]
-const DEFAULT_PROFILING_RESPONSE_LIMIT: usize = 8 * 1024 * 1024;
+pub const DEFAULT_PROFILING_RESPONSE_LIMIT: usize = 8 * 1024 * 1024;
 
 /// Every bound one server applies to the work it admits.
 ///
@@ -35,6 +36,10 @@ const DEFAULT_PROFILING_RESPONSE_LIMIT: usize = 8 * 1024 * 1024;
 /// | `shutdown_timeout` | 30 seconds |
 /// | `profiling_response_limit` | eight MiB |
 /// | `connection_limit` | none — unbounded |
+///
+/// The rendered-profile maximum is finite by default and is removed only by
+/// [`unbounded_profiling_response`](Self::unbounded_profiling_response), which
+/// is deliberately named so its absence cannot be mistaken for a default.
 ///
 /// The two streaming defaults are unbounded on purpose: a long-lived stream
 /// that its registration did not bound stays open. Their channels remain
@@ -67,8 +72,10 @@ pub struct ServerPolicy {
     upload: TransferBudget,
     download: TransferBudget,
     shutdown_timeout: Duration,
+    /// The maximum a rendered profile is retained under, or `None` for the
+    /// explicit opt-out.
     #[cfg(feature = "profiling")]
-    profiling_response_limit: usize,
+    profiling_response: Option<usize>,
     connection_limit: Option<usize>,
 }
 
@@ -84,7 +91,7 @@ impl Default for ServerPolicy {
             download: TransferBudget::unbounded(),
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             #[cfg(feature = "profiling")]
-            profiling_response_limit: DEFAULT_PROFILING_RESPONSE_LIMIT,
+            profiling_response: Some(DEFAULT_PROFILING_RESPONSE_LIMIT),
             connection_limit: None,
         }
     }
@@ -186,15 +193,44 @@ impl ServerPolicy {
 
     /// Cap the rendered profiling response this server retains.
     ///
+    /// Sampling and rendering run on a blocking thread, and the renderer's
+    /// output is accounted before it is retained: the write that would carry the
+    /// answer past this maximum is dropped, and the request is refused rather
+    /// than answered with a partial profile.
+    ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::InvalidArgument`] when `max_bytes` is zero.
+    /// Returns [`RuntimeError::InvalidArgument`] when `max_bytes` is zero, which
+    /// would retain nothing at all. Unbounded output is spelled by
+    /// [`unbounded_profiling_response`](Self::unbounded_profiling_response).
     #[cfg(feature = "profiling")]
     pub fn profiling_response_limit(self, max_bytes: usize) -> Result<Self, RuntimeError> {
         Ok(Self {
-            profiling_response_limit: positive_limit(max_bytes, "profiling_response_limit")?,
+            profiling_response: Some(positive_limit(max_bytes, "profiling_response_limit")?),
             ..self
         })
+    }
+
+    /// Retain a rendered profiling response with no size ceiling.
+    ///
+    /// **Warning:** a flamegraph grows with the number of distinct stacks the
+    /// sampler found, so a process with deep or wide concurrency renders an
+    /// answer this server then holds entirely in memory. Use it when a profile
+    /// this service must produce is being truncated by the default, and prefer
+    /// naming a larger [`profiling_response_limit`](Self::profiling_response_limit)
+    /// where a number is known. This is the only spelling that removes the
+    /// maximum.
+    ///
+    /// A server inside a Camber runtime is still contained by that runtime's
+    /// policy: opting out here inherits an outer finite maximum rather than
+    /// erasing it.
+    #[must_use]
+    #[cfg(feature = "profiling")]
+    pub const fn unbounded_profiling_response(self) -> Self {
+        Self {
+            profiling_response: None,
+            ..self
+        }
     }
 
     // The readers below carry a `_value` suffix because each dimension's
@@ -233,6 +269,12 @@ impl ServerPolicy {
         self.connection_limit
     }
 
+    /// The configured rendered-profile maximum, or `None` for the opt-out.
+    #[cfg(feature = "profiling")]
+    pub(crate) const fn profiling_response_limit_value(&self) -> Option<usize> {
+        self.profiling_response
+    }
+
     /// This policy applied under the one that contains it.
     ///
     /// Every dimension narrows independently through the shared rule, so a
@@ -246,10 +288,22 @@ impl ServerPolicy {
             download: self.download.narrowed_by(outer.download),
             shutdown_timeout: self.shutdown_timeout.min(outer.shutdown_timeout),
             #[cfg(feature = "profiling")]
-            profiling_response_limit: self
-                .profiling_response_limit
-                .min(outer.profiling_response_limit),
+            profiling_response: narrow(self.profiling_response, outer.profiling_response),
             connection_limit: narrow(self.connection_limit, outer.connection_limit),
         }
     }
+}
+
+/// The rendered-profile maximum one served profiling route freezes from `policy`.
+///
+/// The single reader of that dimension: the built-in profiling route freezes this
+/// value at match time, the render it performs measures against it, and the
+/// focused contract reads it here rather than restating the documented default as
+/// a number of its own. `None` is the named opt-out, never a zero.
+///
+/// Pure: one field out, no allocation and no state.
+#[cfg(feature = "profiling")]
+#[doc(hidden)]
+pub const fn frozen_profiling_response_limit(policy: &ServerPolicy) -> Option<usize> {
+    policy.profiling_response
 }

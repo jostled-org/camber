@@ -1,5 +1,7 @@
 //! 1.T1: the public service-budget vocabulary validates and composes.
 
+#[cfg(feature = "profiling")]
+use camber::__private::{DEFAULT_PROFILING_RESPONSE_LIMIT, frozen_profiling_response_limit};
 use camber::__private::{
     DEFAULT_STATIC_FILE_LIMIT, frozen_buffered_response_limit, frozen_static_file_limit,
 };
@@ -282,6 +284,9 @@ fn assert_server_policy_contract() {
                 .profiling_response_limit(1024)
                 .expect("positive profiling limit"),
         );
+        // The rendered profile has an explicit opt-out of its own, and it is a
+        // different value from every finite ceiling.
+        assert_ne!(default, default.unbounded_profiling_response());
     }
 }
 
@@ -652,4 +657,76 @@ fn static_file_requires_a_limit_or_explicit_unbounded_name() {
     // The same registrations reach a host router through the router it selects.
     let mut hosts = HostRouter::new();
     hosts.add("static.example", routed);
+}
+
+/// Every `ServerPolicy` dimension that is not the rendered-profile ceiling.
+///
+/// A row reads the frozen ceiling after each one, so a setter that reached the
+/// profiling dimension is caught by the dimension it did not name rather than by
+/// a whole-value comparison that cannot say which field moved.
+#[cfg(feature = "profiling")]
+fn policies_written_beside_the_profiling_ceiling(base: ServerPolicy) -> Box<[ServerPolicy]> {
+    Box::new([
+        base.header_timeout(SHORT)
+            .expect("a finite header boundary"),
+        base.request_budget(RequestBudget::bounded(SHORT, LONG).expect("a finite request budget")),
+        base.upload_budget(TransferBudget::unbounded()),
+        base.download_budget(TransferBudget::unbounded()),
+        base.shutdown_timeout(SHORT)
+            .expect("a finite shutdown deadline"),
+        base.connection_limit(8).expect("a finite connection limit"),
+    ])
+}
+
+/// 10.T1
+#[cfg(feature = "profiling")]
+#[test]
+fn profiling_output_requires_a_limit_or_explicit_unbounded_name() {
+    let default = ServerPolicy::default();
+
+    // Zero is refused where the maximum is written, so no policy can carry it to
+    // a server and no profiler entry is ever reached under it.
+    expect_invalid(
+        default.profiling_response_limit(0),
+        "profiling_response_limit",
+    );
+
+    // The documented default, read through the accessor a served profiling
+    // route freezes its ceiling through.
+    assert_eq!(DEFAULT_PROFILING_RESPONSE_LIMIT, 8 * 1024 * 1024);
+    assert_eq!(
+        frozen_profiling_response_limit(&default),
+        Some(DEFAULT_PROFILING_RESPONSE_LIMIT),
+    );
+
+    let finite = default
+        .profiling_response_limit(1024)
+        .expect("a finite profiling ceiling");
+    assert_eq!(frozen_profiling_response_limit(&finite), Some(1024));
+
+    // Only the explicitly named opt-out removes the ceiling, and naming a
+    // maximum again restores it.
+    let opted_out = default.unbounded_profiling_response();
+    assert_eq!(frozen_profiling_response_limit(&opted_out), None);
+    assert_eq!(
+        opted_out
+            .profiling_response_limit(DEFAULT_PROFILING_RESPONSE_LIMIT)
+            .expect("the restored documented maximum"),
+        default,
+    );
+
+    for beside in policies_written_beside_the_profiling_ceiling(default) {
+        assert_eq!(
+            frozen_profiling_response_limit(&beside),
+            Some(DEFAULT_PROFILING_RESPONSE_LIMIT),
+            "no dimension outside the ceiling may remove it",
+        );
+    }
+    for beside in policies_written_beside_the_profiling_ceiling(opted_out) {
+        assert_eq!(
+            frozen_profiling_response_limit(&beside),
+            None,
+            "no dimension outside the ceiling may restore it",
+        );
+    }
 }

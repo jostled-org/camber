@@ -24,6 +24,17 @@ pub use crate::http::proxy_policy::frozen_buffered_response_limit;
 /// about the maximum a served file is actually read under.
 pub use crate::http::static_files::{DEFAULT_STATIC_FILE_LIMIT, frozen_static_file_limit};
 
+/// The exact default and the exact accessor a served profiling route freezes its
+/// output maximum through.
+///
+/// Re-exported for the reason the static-file pair is: a focused contract that
+/// read its own copy of the documented default would prove nothing about the
+/// maximum a rendered profile is actually retained under.
+#[cfg(feature = "profiling")]
+pub use crate::http::server_policy::{
+    DEFAULT_PROFILING_RESPONSE_LIMIT, frozen_profiling_response_limit,
+};
+
 #[cfg(feature = "sqs")]
 #[doc(hidden)]
 pub fn sqs_message_id(message_id: Option<&str>) -> Result<Box<str>, crate::RuntimeError> {

@@ -141,6 +141,8 @@ mod operation;
 /// OpenTelemetry request propagation and tracing hooks.
 pub mod otel;
 mod policy_value;
+#[cfg(feature = "profiling")]
+mod profiling;
 pub(crate) mod proxy_policy;
 /// Rate limiting middleware.
 pub mod rate_limit;
@@ -153,7 +155,7 @@ mod route_budgets;
 mod router;
 mod server;
 mod server_lifecycle;
-mod server_policy;
+pub(crate) mod server_policy;
 mod sse;
 pub(crate) mod static_files;
 mod stream;
@@ -216,4 +218,4 @@ pub use transfer_budget::TransferBudget;
 pub use websocket::{WsCloseCause, WsConn, WsMessage, WsReceive, WsReceiver, WsSender};
 
 pub(crate) use buffer_config::{BufferConfig, DEFAULT_CHANNEL_BUFFER};
-pub(crate) use util::{map_reqwest_error, strip_quotes};
+pub(crate) use util::{blocking_worker_failed, map_reqwest_error, strip_quotes};
