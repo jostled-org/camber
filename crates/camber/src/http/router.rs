@@ -9,6 +9,7 @@ use super::rejection::{Rejection, RejectionContext, RejectionMapper, shared_mapp
 use super::response::HandlerOutcome;
 use super::response::IntoResponse;
 use super::sse::SseWriter;
+use super::static_files::{DEFAULT_STATIC_FILE_LIMIT, frozen_static_file_limit};
 use super::stream::StreamResponse;
 use super::trie::{CANONICAL_METHODS, MultipartRegistration, RouteHandler, TrieNode};
 #[cfg(feature = "ws")]
@@ -638,16 +639,59 @@ impl Router {
     }
 
     /// Serve static files from `dir` under the given URL `prefix`.
+    ///
+    /// Each file is read under the documented eight-MiB default maximum. A file
+    /// past it is refused as an internal service failure carrying
+    /// [`ByteBoundary::StaticFile`](super::ByteBoundary::StaticFile), because a
+    /// served root holding content the service cannot answer with is the
+    /// operator's configuration and not the peer's request.
     pub fn static_files(&mut self, prefix: &str, dir: &str) {
+        self.mount_static(prefix, dir, Some(DEFAULT_STATIC_FILE_LIMIT));
+    }
+
+    /// Serve static files under a maximum of exactly `max_bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::InvalidArgument`] naming `max_bytes` when the
+    /// stated maximum is zero. The route is not registered, so no request can
+    /// reach the filesystem under a maximum nothing accepted.
+    pub fn static_files_with_limit(
+        &mut self,
+        prefix: &str,
+        dir: &str,
+        max_bytes: usize,
+    ) -> Result<(), RuntimeError> {
+        self.mount_static(prefix, dir, frozen_static_file_limit(max_bytes)?);
+        Ok(())
+    }
+
+    /// Serve static files with no maximum at all.
+    ///
+    /// The explicit opt-out, and the only routed spelling that removes the
+    /// ceiling. Every matched file is retained in memory whatever its size, so
+    /// this belongs to a root the operator controls. A root anything untrusted
+    /// can write to makes the file's author the author of this process's
+    /// memory use.
+    pub fn static_files_unbounded(&mut self, prefix: &str, dir: &str) {
+        self.mount_static(prefix, dir, None);
+    }
+
+    /// Mount one static root under both patterns its prefix claims.
+    ///
+    /// The three public spellings differ only in the maximum they froze, so the
+    /// registration itself is stated once: a second copy is a second place the
+    /// index-at-prefix rule and the captured tail can drift.
+    fn mount_static(&mut self, prefix: &str, dir: &str, limit: Option<usize>) {
         let base_dir: Arc<std::path::Path> = Arc::from(std::path::PathBuf::from(dir));
         let patterns = PrefixPatterns::under(prefix, "filepath");
         self.mount_prefix(
             &patterns,
             Method::Get,
-            static_route_handler(Arc::clone(&base_dir), |req| {
+            static_route_handler(Arc::clone(&base_dir), limit, |req| {
                 Cow::from(req.param("filepath").unwrap_or("").to_owned())
             }),
-            static_route_handler(base_dir, |_| Cow::Borrowed("index.html")),
+            static_route_handler(base_dir, limit, |_| Cow::Borrowed("index.html")),
         );
     }
 
@@ -732,13 +776,14 @@ impl PrefixPatterns {
 /// costs no allocation to say what it is.
 fn static_route_handler(
     base_dir: Arc<std::path::Path>,
+    limit: Option<usize>,
     select: impl Fn(&Request) -> Cow<'static, str> + Send + Sync + 'static,
 ) -> RouteHandler {
     RouteHandler::Async(Box::new(move |req: &Request| {
         let base_dir = Arc::clone(&base_dir);
         let file_path = select(req);
         Box::pin(
-            async move { Ok(super::static_files::serve_file_async(&base_dir, &file_path).await) },
+            async move { super::static_files::read_bounded(&base_dir, &file_path, limit).await },
         ) as Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
     }))
 }

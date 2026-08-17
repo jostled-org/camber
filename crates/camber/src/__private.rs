@@ -16,6 +16,14 @@ pub use crate::http::body_admission::{checked_body_frame_total, declared_length_
 /// actually froze.
 pub use crate::http::proxy_policy::frozen_buffered_response_limit;
 
+/// The exact default and the exact validator every static-file entry point
+/// freezes its ceiling through.
+///
+/// Re-exported for the reason the accessor above is: a focused contract that
+/// read its own copy of the default, or its own zero check, would prove nothing
+/// about the maximum a served file is actually read under.
+pub use crate::http::static_files::{DEFAULT_STATIC_FILE_LIMIT, frozen_static_file_limit};
+
 #[cfg(feature = "sqs")]
 #[doc(hidden)]
 pub fn sqs_message_id(message_id: Option<&str>) -> Result<Box<str>, crate::RuntimeError> {

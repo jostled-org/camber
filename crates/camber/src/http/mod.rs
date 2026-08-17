@@ -155,7 +155,7 @@ mod server;
 mod server_lifecycle;
 mod server_policy;
 mod sse;
-mod static_files;
+pub(crate) mod static_files;
 mod stream;
 mod streaming;
 mod transfer_budget;
@@ -209,7 +209,7 @@ pub use server::{
 };
 pub use server_policy::ServerPolicy;
 pub use sse::SseWriter;
-pub use static_files::serve_file;
+pub use static_files::{serve_file, serve_file_unbounded, serve_file_with_limit};
 pub use stream::{StreamResponse, StreamSender};
 pub use transfer_budget::TransferBudget;
 #[cfg(feature = "ws")]

@@ -15,6 +15,8 @@ mod binary_bodies;
 mod body_admission;
 #[path = "component_body_files/body_limits.rs"]
 mod body_limits;
+#[path = "component_body_files/bounded_collections.rs"]
+mod bounded_collections;
 #[path = "component_body_files/cookie_handling.rs"]
 mod cookie_handling;
 #[path = "component_body_files/framework_rejections.rs"]

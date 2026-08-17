@@ -66,6 +66,11 @@ pub enum LifecycleCheckpoint {
     MultipartHandlerCompleted,
     MultipartDriverTerminated,
     BeforeMultipartResponseSelection,
+    /// One static-file worker has begun, before it has touched the filesystem.
+    StaticFileWorkerEntered,
+    /// One static-file worker has taken the filesystem's word for how large its
+    /// file is, and has not opened it yet.
+    StaticFileMetadataObserved,
 }
 
 #[doc(hidden)]
@@ -193,6 +198,25 @@ impl ReleaseGate {
         std::future::poll_fn(|cx| self.poll_release(cx)).await;
     }
 
+    /// Hold this thread until this gate's release has been recorded.
+    ///
+    /// The blocking twin of [`Self::held`], for the one production owner that
+    /// reaches a checkpoint from a blocking worker rather than from a poll.
+    /// Deliberately the same gate and the same look: an observer waiting to
+    /// hear the checkpoint was reached cannot tell a parked worker from a
+    /// parked future, so [`LifecycleController::wait_until_paused`] needs no
+    /// second spelling.
+    ///
+    /// The waker unparks this thread, so a release wakes the worker exactly the
+    /// way it wakes a held future — nothing here spins.
+    fn held_blocking(&self) {
+        let waker = std::task::Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+        let cx = std::task::Context::from_waker(&waker);
+        while self.poll_release(&cx).is_pending() {
+            std::thread::park();
+        }
+    }
+
     /// Whether the release is recorded, registering for a wake when it is not.
     ///
     /// The registration happens under the same lock [`Self::wake`] takes, so a
@@ -222,6 +246,23 @@ impl ReleaseGate {
             self.looked.notify_waiters();
         }
         ready
+    }
+}
+
+/// The waker one parked worker is woken through.
+///
+/// A [`ReleaseGate`] records its release the same way whoever waits there is a
+/// future or a thread; this is what turns that one recorded release into an
+/// unpark instead of a task wake.
+struct ThreadWaker(std::thread::Thread);
+
+impl std::task::Wake for ThreadWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
     }
 }
 
@@ -303,6 +344,72 @@ struct CollectionObservations {
     chunks_polled: AtomicUsize,
     /// The most any one collection from this peer retained at once.
     peak_retained_bytes: AtomicUsize,
+}
+
+/// What the static-file workers under one root reported about where they ran.
+///
+/// Monotonic counters only, each written by the production step it names.
+/// Nothing here starts a worker, resolves a path, measures a file, reads a
+/// byte, or decides which thread anything runs on.
+#[derive(Default)]
+struct StaticFileObservations {
+    /// Blocking workers that began under this root.
+    workers_entered: AtomicUsize,
+    /// Blocking workers that handed back an answer or a refusal.
+    ///
+    /// The difference between this and [`Self::workers_entered`] is the whole
+    /// abandonment claim: a caller that stopped waiting leaves a worker counted
+    /// as entered and not yet returned, still holding what it owns.
+    workers_returned: AtomicUsize,
+    /// Path confinements that ran somewhere other than the awaiting thread.
+    canonicalized_off_caller: AtomicUsize,
+    /// Preflight measurements that ran somewhere other than the awaiting thread.
+    metadata_off_caller: AtomicUsize,
+    /// Checked reads that ran somewhere other than the awaiting thread.
+    reads_off_caller: AtomicUsize,
+    /// Filesystem steps of any kind that ran on the awaiting thread itself.
+    steps_on_caller: AtomicUsize,
+}
+
+/// The one filesystem step a static-file worker is reporting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::http) enum StaticFileStep {
+    /// Resolving the request to a real path inside the served root.
+    Canonicalize,
+    /// Taking the filesystem's word for how large that file is.
+    Metadata,
+    /// Reading that file under the collection's ceiling.
+    Read,
+}
+
+/// What one static-file worker published, at the moment it published it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::http) enum StaticFileEvent {
+    /// The blocking worker began, before it touched the filesystem.
+    WorkerEntered,
+    /// The blocking worker handed back its answer or its refusal.
+    WorkerReturned,
+    /// One filesystem step ran, on the awaiting thread or off it.
+    Step {
+        step: StaticFileStep,
+        off_caller: bool,
+    },
+}
+
+/// What the static-file workers under one root have done so far.
+///
+/// Read-only, and every number in it is written by the production step it
+/// names. Nothing here selects a ceiling, resolves a path, retains a byte, or
+/// chooses the thread a step runs on.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StaticFileObservation {
+    pub workers_entered: usize,
+    pub workers_returned: usize,
+    pub canonicalized_off_caller: usize,
+    pub metadata_off_caller: usize,
+    pub reads_off_caller: usize,
+    pub steps_on_caller: usize,
 }
 
 /// What one listener's admitted operations published about their envelopes.
@@ -453,6 +560,9 @@ pub(crate) struct LifecycleScript {
     body: BodyObservations,
     /// What the checked collector published while reading this peer's answers.
     collection: CollectionObservations,
+    /// What the static-file workers under this root published about where they
+    /// ran and what they still hold.
+    static_files: StaticFileObservations,
     /// What this listener's admitted operations published about their one
     /// envelope each.
     operation: OperationObservations,
@@ -478,6 +588,7 @@ impl LifecycleScript {
             supervisor_wake: tokio::sync::Notify::new(),
             body: BodyObservations::default(),
             collection: CollectionObservations::default(),
+            static_files: StaticFileObservations::default(),
             operation: OperationObservations::default(),
             #[cfg(feature = "ws")]
             websocket: WebSocketDirectionObservations::default(),
@@ -704,6 +815,38 @@ impl LifecycleScript {
         });
     }
 
+    /// Record one thing a static-file worker did, where it did it.
+    ///
+    /// Inert with no controller registered, exactly like [`Self::pause_at`].
+    pub(in crate::http) fn observe_static_file(script: Option<&Self>, event: StaticFileEvent) {
+        Self::observe(
+            script,
+            |script| &script.static_files,
+            |files| {
+                let counter = match event {
+                    StaticFileEvent::WorkerEntered => &files.workers_entered,
+                    StaticFileEvent::WorkerReturned => &files.workers_returned,
+                    StaticFileEvent::Step {
+                        off_caller: false, ..
+                    } => &files.steps_on_caller,
+                    StaticFileEvent::Step {
+                        step: StaticFileStep::Canonicalize,
+                        ..
+                    } => &files.canonicalized_off_caller,
+                    StaticFileEvent::Step {
+                        step: StaticFileStep::Metadata,
+                        ..
+                    } => &files.metadata_off_caller,
+                    StaticFileEvent::Step {
+                        step: StaticFileStep::Read,
+                        ..
+                    } => &files.reads_off_caller,
+                };
+                counter.fetch_add(1, Ordering::Release);
+            },
+        );
+    }
+
     /// Record one admitted permit owner reaching its drop.
     pub(crate) fn count_permit_owner_dropped(script: Option<&Self>) {
         Self::observe_body(script, |body| {
@@ -867,6 +1010,18 @@ impl LifecycleScript {
         }
     }
 
+    /// Hold one blocking worker at `checkpoint` until a controller releases it.
+    ///
+    /// [`Self::pause_at`] for an owner that is not inside a poll. Inert with no
+    /// controller registered, and inert for a checkpoint nothing armed: the
+    /// worker runs straight through both without parking.
+    pub(in crate::http) fn pause_blocking(script: Option<&Self>, checkpoint: LifecycleCheckpoint) {
+        match script.and_then(|script| script.reach(checkpoint)) {
+            Some(released) => released.held_blocking(),
+            None => {}
+        }
+    }
+
     /// Mark this checkpoint reached, and hand back the gate it now waits on.
     ///
     /// `None` is a checkpoint nothing armed, or a closed controller: production
@@ -970,8 +1125,21 @@ fn let_go(released: Arc<ReleaseGate>) {
     released.wake();
 }
 
+/// What one registered controller watches.
+///
+/// A served listener is named by the address its peers reach. Static-file work
+/// has no peer to name it, so it is named by the root it serves from, and two
+/// roots are two independent observers. One registry holds both because a
+/// controller is the same thing either way: one script, its armed checkpoints,
+/// and its read-only counters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ObservedScope {
+    Listener(std::net::SocketAddr),
+    StaticRoot(Box<std::path::Path>),
+}
+
 struct LifecycleRegistration {
-    addr: std::net::SocketAddr,
+    scope: ObservedScope,
     script: Weak<LifecycleScript>,
 }
 
@@ -982,7 +1150,7 @@ fn lifecycle_registry() -> &'static Mutex<Vec<LifecycleRegistration>> {
 
 #[doc(hidden)]
 pub struct LifecycleController {
-    addr: std::net::SocketAddr,
+    scope: ObservedScope,
     script: Arc<LifecycleScript>,
 }
 
@@ -1126,6 +1294,23 @@ impl LifecycleController {
     pub fn multipart_observed(&self) -> MultipartObservation {
         MultipartObservation::of(self.script.multipart(), None, None)
     }
+
+    /// What the static-file workers under this root have done so far.
+    ///
+    /// Read-only, and every number in it is written by the production step it
+    /// names: nothing here starts a worker, resolves a path, measures a file,
+    /// reads a byte, or chooses the thread any of that runs on.
+    pub fn static_files_observed(&self) -> StaticFileObservation {
+        let files = &self.script.static_files;
+        StaticFileObservation {
+            workers_entered: files.workers_entered.load(Ordering::Acquire),
+            workers_returned: files.workers_returned.load(Ordering::Acquire),
+            canonicalized_off_caller: files.canonicalized_off_caller.load(Ordering::Acquire),
+            metadata_off_caller: files.metadata_off_caller.load(Ordering::Acquire),
+            reads_off_caller: files.reads_off_caller.load(Ordering::Acquire),
+            steps_on_caller: files.steps_on_caller.load(Ordering::Acquire),
+        }
+    }
 }
 
 impl Drop for LifecycleController {
@@ -1135,7 +1320,7 @@ impl Drop for LifecycleController {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         registry.retain(|entry| {
-            entry.addr != self.addr
+            entry.scope != self.scope
                 || entry
                     .script
                     .upgrade()
@@ -1144,36 +1329,69 @@ impl Drop for LifecycleController {
     }
 }
 
-#[doc(hidden)]
-pub fn lifecycle(addr: std::net::SocketAddr) -> Result<LifecycleController, RuntimeError> {
+/// Register one observer for `scope`, or refuse a second one.
+///
+/// The whole registration, stated once: a scope already watched cannot be
+/// watched again, because two controllers over one script would each arm and
+/// release checkpoints the other is holding.
+fn register(scope: ObservedScope) -> Result<LifecycleController, RuntimeError> {
     let mut registry = lifecycle_registry()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     registry.retain(|entry| entry.script.strong_count() > 0);
-    match registry.iter().any(|entry| entry.addr == addr) {
+    match registry.iter().any(|entry| entry.scope == scope) {
         true => Err(RuntimeError::InvalidArgument(
-            "lifecycle controller already exists for address".into(),
+            "lifecycle controller already exists for scope".into(),
         )),
         false => {
             let script = Arc::new(LifecycleScript::new());
             registry.push(LifecycleRegistration {
-                addr,
+                scope: scope.clone(),
                 script: Arc::downgrade(&script),
             });
-            Ok(LifecycleController { addr, script })
+            Ok(LifecycleController { scope, script })
         }
     }
 }
 
-pub(crate) fn lifecycle_script(addr: std::net::SocketAddr) -> Option<Arc<LifecycleScript>> {
+/// The script watching the one scope `watching` recognizes, if any.
+///
+/// The scope is recognized rather than rebuilt, so a production lookup that
+/// finds nothing — which is every lookup outside a test — copies no address and
+/// no path to ask the question.
+fn scoped_script(watching: impl Fn(&ObservedScope) -> bool) -> Option<Arc<LifecycleScript>> {
     let mut registry = lifecycle_registry()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     registry.retain(|entry| entry.script.strong_count() > 0);
     registry
         .iter()
-        .find(|entry| entry.addr == addr)
+        .find(|entry| watching(&entry.scope))
         .and_then(|entry| entry.script.upgrade())
+}
+
+#[doc(hidden)]
+pub fn lifecycle(addr: std::net::SocketAddr) -> Result<LifecycleController, RuntimeError> {
+    register(ObservedScope::Listener(addr))
+}
+
+/// Watch the static-file work one served root answers from.
+///
+/// The root is the one a caller names, before any canonicalization, because
+/// that is the only spelling both a direct call and a registered route share.
+#[doc(hidden)]
+pub fn static_file_lifecycle(root: &std::path::Path) -> Result<LifecycleController, RuntimeError> {
+    register(ObservedScope::StaticRoot(root.into()))
+}
+
+pub(crate) fn lifecycle_script(addr: std::net::SocketAddr) -> Option<Arc<LifecycleScript>> {
+    scoped_script(|scope| matches!(scope, ObservedScope::Listener(listener) if *listener == addr))
+}
+
+pub(in crate::http) fn static_file_script(root: &std::path::Path) -> Option<Arc<LifecycleScript>> {
+    scoped_script(
+        |scope| matches!(scope, ObservedScope::StaticRoot(watched) if watched.as_ref() == root),
+    )
 }
 
 /// One checkpoint's reach and its first look, held apart.

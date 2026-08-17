@@ -1,13 +1,18 @@
 //! 1.T1: the public service-budget vocabulary validates and composes.
 
-use camber::__private::frozen_buffered_response_limit;
+use camber::__private::{
+    DEFAULT_STATIC_FILE_LIMIT, frozen_buffered_response_limit, frozen_static_file_limit,
+};
 use camber::RuntimeError;
 use camber::http::{
     ByteBoundary, DeadlineBoundary, HostRouter, ProxyPolicy, RequestBudget, Router, ServerPolicy,
     TransferBudget,
 };
+use std::future::Future;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 /// The largest connection limit a listener's admission semaphore can hold.
@@ -549,4 +554,102 @@ fn budget_constructors_validate_every_finite_value_and_explicit_unbounded_choice
         "profiling-response"
     );
     assert_eq!(byte_name(ByteBoundary::RequestBody), "request-body");
+}
+
+/// A root no row reads from.
+///
+/// Every direct call here is refused before it owns a path, so the directory
+/// this names never has to exist: a row that reached the filesystem would find
+/// it missing and report a 404 instead of the refusal it asserts.
+const UNREAD_STATIC_ROOT: &str = "/camber-static-file-contract";
+
+/// The file every static-file row asks for, and none of them opens.
+const UNREAD_STATIC_FILE: &str = "asset.txt";
+
+/// One static-file future's answer, taken with no executor to hand it to.
+///
+/// The claim each row makes is that its refusal is decided before any
+/// filesystem work, so the future is given exactly one turn on the caller's own
+/// stack. A future that needed a second turn — or a runtime — reports `Pending`
+/// here rather than the refusal the row names.
+fn first_turn<T>(future: impl Future<Output = T>) -> Poll<T> {
+    let mut future = std::pin::pin!(future);
+    future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+}
+
+/// Assert one static-file entry point refuses for the absent runtime alone.
+///
+/// The rows that pass a valid maximum all stop at the same place, and naming
+/// that place once is what says the maximum they carried was accepted: a
+/// ceiling refused earlier would never reach it.
+fn expect_no_runtime(answer: Poll<Result<camber::http::Response, RuntimeError>>, named: &str) {
+    match answer {
+        Poll::Ready(Err(RuntimeError::NoRuntime)) => {}
+        other => panic!("expected {named} to refuse an absent runtime, got {other:?}"),
+    }
+}
+
+/// 9.T1
+#[test]
+fn static_file_requires_a_limit_or_explicit_unbounded_name() {
+    let root = Path::new(UNREAD_STATIC_ROOT);
+
+    // Zero is refused where the maximum is frozen, which is before a path is
+    // owned, a worker starts, or a runtime is asked for.
+    expect_invalid(frozen_static_file_limit(0), "max_bytes");
+    assert_eq!(
+        frozen_static_file_limit(1024).expect("a finite ceiling"),
+        Some(1024),
+    );
+    assert_eq!(DEFAULT_STATIC_FILE_LIMIT, 8 * 1024 * 1024);
+
+    // The direct entry that names a maximum refuses zero on its first turn,
+    // ahead of the runtime check every other row stops at.
+    match first_turn(camber::http::serve_file_with_limit(
+        root,
+        UNREAD_STATIC_FILE,
+        0,
+    )) {
+        Poll::Ready(Err(RuntimeError::InvalidArgument(message))) => assert!(
+            message.contains("max_bytes"),
+            "expected max_bytes in refusal, got: {message}"
+        ),
+        other => panic!("expected a zero static-file maximum to be refused, got {other:?}"),
+    }
+
+    expect_no_runtime(
+        first_turn(camber::http::serve_file(root, UNREAD_STATIC_FILE)),
+        "serve_file",
+    );
+    expect_no_runtime(
+        first_turn(camber::http::serve_file_with_limit(
+            root,
+            UNREAD_STATIC_FILE,
+            1024,
+        )),
+        "serve_file_with_limit",
+    );
+    expect_no_runtime(
+        first_turn(camber::http::serve_file_unbounded(root, UNREAD_STATIC_FILE)),
+        "serve_file_unbounded",
+    );
+
+    // The routed spellings freeze the same three choices, and the zero one is
+    // refused at registration rather than at the first request.
+    let mut routed = Router::new();
+    routed.static_files("/default", UNREAD_STATIC_ROOT);
+    routed
+        .static_files_with_limit("/finite", UNREAD_STATIC_ROOT, 1024)
+        .expect("a finite routed ceiling");
+    routed.static_files_unbounded("/unbounded", UNREAD_STATIC_ROOT);
+    expect_invalid(
+        routed.static_files_with_limit("/zero", UNREAD_STATIC_ROOT, 0),
+        "max_bytes",
+    );
+
+    // The same registrations reach a host router through the router it selects.
+    let mut hosts = HostRouter::new();
+    hosts.add("static.example", routed);
 }

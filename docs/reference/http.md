@@ -23,7 +23,7 @@ Supported registration methods include:
 - `get_sse`
 - `ws` with the `ws` feature
 - `proxy`, `proxy_stream`, and health-checked variants
-- `static_files`
+- `static_files`, `static_files_with_limit`, and `static_files_unbounded`
 
 ### Request Body Admission
 
@@ -1043,6 +1043,45 @@ Use `router.static_files(prefix, dir)` for small static assets.
 ```rust
 let mut router = Router::new();
 router.static_files("/assets", "./public");
+router.static_files_with_limit("/small", "./tiny", 64 * 1024)?;
 ```
 
-Files are fully buffered into memory before sending. This is a convenience for small assets, not a streaming file server.
+Files are fully buffered into memory before sending. This is a convenience for
+small assets, not a streaming file server.
+
+Every read is bounded. `static_files` uses the eight-MiB default;
+`static_files_with_limit` names its own maximum and refuses zero at
+registration, so no request reaches the filesystem under a maximum nothing
+accepted. A file past the maximum is refused as an internal service failure
+carrying the typed `ByteBoundary::StaticFile` cause: a root holding content the
+service cannot answer with is the operator's configuration, not the peer's
+request. The maximum applies to actual bytes read, so a file that grew after it
+was measured is still refused on the chunk that crosses.
+
+`static_files_unbounded(prefix, dir)` is the explicit opt-out and the only
+routed spelling that removes the ceiling. Every matched file is retained in
+memory whatever its size, so it belongs to a root the operator controls. A root
+untrusted input can write to makes the file's author the author of this
+process's memory use.
+
+### Serving one file directly
+
+`http::serve_file`, `http::serve_file_with_limit`, and
+`http::serve_file_unbounded` serve one file from a handler under the same three
+choices and the same owner the routed family delegates to.
+
+```rust
+let answer = camber::http::serve_file(std::path::Path::new("./public"), "index.html").await?;
+```
+
+All three are `async` and fallible because the work they do is blocking and
+unbounded. Each requires an entered Tokio runtime and returns
+`RuntimeError::NoRuntime` before touching the filesystem when there is none.
+Each copies its paths into owned values and runs path confinement, measurement,
+and the checked read inside `spawn_blocking`, so no filesystem work ever runs on
+a Tokio worker.
+
+A caller that stops waiting — an expired request deadline, a cancelled request,
+a shutdown — stops Camber waiting and nothing more. The blocking worker keeps
+its own paths and its own buffer until it returns; Camber never reports it as
+terminated.

@@ -101,11 +101,27 @@ impl CheckedCollector {
     /// boundary when the chunk would carry the total past the maximum, or when
     /// the addition that would prove otherwise overflows.
     pub(super) fn retain(&mut self, chunk: Bytes) -> Result<(), RuntimeError> {
+        self.retain_slice(&chunk)
+    }
+
+    /// Count one chunk this collection does not own, then copy it — or refuse.
+    ///
+    /// The same three rules as [`Self::retain`], for a source that hands out a
+    /// borrowed window onto a buffer it reuses: a file read fills one buffer
+    /// over and over, and a crossing window is left in that buffer for its
+    /// owner to overwrite rather than copied here first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::LimitExceeded`] naming this collection's
+    /// boundary when the chunk would carry the total past the maximum, or when
+    /// the addition that would prove otherwise overflows.
+    pub(super) fn retain_slice(&mut self, chunk: &[u8]) -> Result<(), RuntimeError> {
         LifecycleScript::count_collected_chunk(self.observer.as_deref());
         let admitted =
             checked_body_frame_total(self.retained.len(), chunk.len(), self.ceiling()).is_some();
         if admitted {
-            self.retained.extend_from_slice(&chunk);
+            self.retained.extend_from_slice(chunk);
         }
         // Read from the buffer, after the decision, on both paths: a collector
         // that kept a crossing chunk before refusing it would report the bytes

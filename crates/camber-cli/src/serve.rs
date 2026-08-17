@@ -142,20 +142,16 @@ fn overlay_handler(
         let base = std::sync::Arc::clone(&base_dir);
         let backend = std::sync::Arc::clone(&backend);
         let proxy_fut = camber::http::proxy_forward(req, &backend, "");
+        // No `spawn_blocking` here: the static-file entry point offloads its own
+        // filesystem work, so wrapping it would only put one blocking thread in
+        // front of another.
         Box::pin(async move {
-            match serve_overlay_file(base, file_path).await {
+            match camber::http::serve_file(&base, &file_path).await {
                 Ok(file_resp) if file_resp.status() != 404 => file_resp,
                 Ok(_) | Err(_) => proxy_fut.await,
             }
         })
     }
-}
-
-async fn serve_overlay_file(
-    base: std::sync::Arc<std::path::Path>,
-    file_path: Box<str>,
-) -> Result<camber::http::Response, tokio::task::JoinError> {
-    tokio::task::spawn_blocking(move || camber::http::serve_file(&base, &file_path)).await
 }
 
 fn load_dns_token(tls: &camber_cli::config::TlsConfig) -> Result<Box<str>, CliError> {
