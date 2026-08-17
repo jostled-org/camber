@@ -141,7 +141,7 @@ mod operation;
 /// OpenTelemetry request propagation and tracing hooks.
 pub mod otel;
 mod policy_value;
-mod proxy_policy;
+pub(crate) mod proxy_policy;
 /// Rate limiting middleware.
 pub mod rate_limit;
 mod record;

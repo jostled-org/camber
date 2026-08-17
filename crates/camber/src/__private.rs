@@ -8,6 +8,14 @@ pub use crossbeam_channel;
 /// body, or owns anything.
 pub use crate::http::body_admission::{checked_body_frame_total, declared_length_exceeds_limit};
 
+/// The exact accessor a registered buffered proxy route freezes its ceiling
+/// through.
+///
+/// Re-exported for the same reason the two above are: a focused contract that
+/// read a copy of the field would prove nothing about the value a route
+/// actually froze.
+pub use crate::http::proxy_policy::frozen_buffered_response_limit;
+
 #[cfg(feature = "sqs")]
 #[doc(hidden)]
 pub fn sqs_message_id(message_id: Option<&str>) -> Result<Box<str>, crate::RuntimeError> {

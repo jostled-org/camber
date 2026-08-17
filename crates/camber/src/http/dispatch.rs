@@ -564,9 +564,15 @@ impl FrozenRouter {
                 backend,
                 prefix,
                 healthy,
-            } => {
-                self.dispatch_proxy_route(ProxyKind::Buffered, req, backend, prefix, healthy, scope)
-            }
+                buffered_limit,
+            } => self.dispatch_proxy_route(
+                ProxyKind::Buffered(*buffered_limit),
+                req,
+                backend,
+                prefix,
+                healthy,
+                scope,
+            ),
             RouteHandler::ProxyStream {
                 backend,
                 prefix,
@@ -669,8 +675,9 @@ impl FrozenRouter {
         }
 
         match kind {
-            ProxyKind::Buffered => {
-                dispatch_proxy_through_middleware(self, req, backend, prefix, scope).into()
+            ProxyKind::Buffered(buffered_limit) => {
+                dispatch_proxy_through_middleware(self, req, backend, prefix, buffered_limit, scope)
+                    .into()
             }
             // The gate mechanism, not a wrapped response: middleware gates the
             // request and the body streams with backpressure.
@@ -742,8 +749,9 @@ impl FrozenRouter {
 /// Which proxy kind a matched route dispatches as, once the upgrade
 /// pre-check both kinds share has answered.
 enum ProxyKind {
-    /// `Terminal::Proxy` through the middleware chain, response buffered.
-    Buffered,
+    /// `Terminal::Proxy` through the middleware chain, response buffered under
+    /// the maximum this route froze.
+    Buffered(Option<usize>),
     /// Gated by middleware, body streamed with backpressure.
     Streaming,
 }
@@ -757,11 +765,13 @@ fn dispatch_proxy_through_middleware(
     req: Request,
     backend: &Arc<str>,
     prefix: &Arc<str>,
+    buffered_limit: Option<usize>,
     scope: &RejectionScope,
 ) -> AsyncDispatch {
     let terminal = Terminal::Proxy {
         backend: Arc::clone(backend),
         prefix: Arc::clone(prefix),
+        buffered_limit,
     };
     let next = Next::new(&router.middleware, terminal, scope.clone());
     let fut = next.call(&req);

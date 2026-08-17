@@ -144,3 +144,16 @@ impl ProxyPolicy {
         }
     }
 }
+
+/// The buffered maximum one proxy route freezes from `policy`.
+///
+/// The single reader of that dimension: a registered buffered route freezes
+/// this value, the collection that route performs measures against it, and the
+/// focused contract reads it here rather than restating the documented default
+/// as a number of its own. `None` is the named opt-out, never a zero.
+///
+/// Pure: one field out, no allocation and no state.
+#[doc(hidden)]
+pub const fn frozen_buffered_response_limit(policy: &ProxyPolicy) -> Option<usize> {
+    policy.buffered_response
+}

@@ -585,10 +585,17 @@ async fn send_upstream(builder: reqwest::RequestBuilder) -> Result<UpstreamAnswe
 /// middleware terminal maps it through the rejection boundary, where a
 /// traversal probe must not be recorded as a backend outage, and
 /// [`proxy_forward`] settles a status from the same class alone.
+///
+/// `buffered_limit` is the maximum the route registration froze, and `None` is
+/// its named opt-out. Collection is the shared checked one every buffered
+/// Camber consumer performs, so an upstream body this route would refuse is
+/// refused before the crossing frame is retained — and the answer the peer gets
+/// carries no part of the payload that crossed it.
 pub(super) async fn forward_request_buffered(
     req: ProxyRequest,
     backend: &str,
     prefix: &str,
+    buffered_limit: Option<usize>,
 ) -> Result<super::Response, ProxyFailure> {
     let builder = build_upstream_request(&req, backend, prefix)?;
     let UpstreamAnswer {
@@ -596,7 +603,12 @@ pub(super) async fn forward_request_buffered(
         status,
         headers,
     } = send_upstream(builder).await?;
-    let body = response.bytes().await.map_err(map_reqwest_error)?;
+    let body = super::checked_collect::collect_response(
+        response,
+        super::boundary::ByteBoundary::ProxyBufferedResponse,
+        buffered_limit,
+    )
+    .await?;
     Ok(headers.iter().fold(
         super::Response::bytes_raw(status, body),
         |answered, (name, value)| answered.with_header(name, value),
@@ -620,6 +632,15 @@ pub(super) async fn forward_request_buffered(
 /// gateway, and the CLI's `proxy` plus `root` overlay routes real GET and HEAD
 /// traffic through this path, so a third spelling of that rule is user-visible
 /// the moment it drifts.
+///
+/// The upstream body is collected under [`ProxyPolicy`]'s default maximum,
+/// which is the same one a route registered with [`Router::proxy`] freezes.
+/// This entry point takes no policy — it is handed a backend and a prefix and
+/// nothing else — so the documented default is the only maximum it can name,
+/// and a caller who needs another one registers the route instead.
+///
+/// [`ProxyPolicy`]: super::ProxyPolicy
+/// [`Router::proxy`]: super::Router::proxy
 pub fn proxy_forward(
     req: &super::Request,
     backend: &str,
@@ -628,8 +649,10 @@ pub fn proxy_forward(
     let proxy_req = ProxyRequest::from_request(req);
     let backend: Box<str> = backend.into();
     let prefix: Box<str> = prefix.into();
+    let buffered_limit =
+        super::proxy_policy::frozen_buffered_response_limit(&super::ProxyPolicy::default());
     Box::pin(async move {
-        match forward_request_buffered(proxy_req, &backend, &prefix).await {
+        match forward_request_buffered(proxy_req, &backend, &prefix, buffered_limit).await {
             Ok(resp) => resp,
             Err(failure) => {
                 tracing::warn!(error = %failure, "proxy forward failed");

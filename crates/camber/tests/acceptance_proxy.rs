@@ -12,6 +12,8 @@ pub mod runtime_support;
 pub mod stream;
 #[path = "support/tls.rs"]
 pub mod tls;
+#[path = "support/trace_capture.rs"]
+pub mod trace_capture;
 #[cfg(feature = "ws")]
 #[path = "support/ws.rs"]
 pub mod ws;
@@ -26,6 +28,7 @@ pub mod common {
     pub use crate::rejection_support::*;
     pub use crate::runtime_support::*;
     pub use crate::tls::*;
+    pub use crate::trace_capture::*;
     #[cfg(feature = "ws")]
     pub use crate::ws::*;
     #[cfg(feature = "ws")]
@@ -34,6 +37,8 @@ pub mod common {
 
 #[path = "acceptance_proxy/body_admission.rs"]
 mod body_admission;
+#[path = "acceptance_proxy/bounded_buffers.rs"]
+mod bounded_buffers;
 #[path = "acceptance_proxy/buffered_forwarding.rs"]
 mod buffered_forwarding;
 #[path = "acceptance_proxy/downstream_flow_control.rs"]

@@ -89,6 +89,13 @@ pub(super) enum RouteHandler {
         backend: Arc<str>,
         prefix: Arc<str>,
         healthy: Option<Arc<AtomicBool>>,
+        /// The buffered upstream maximum this route froze at registration.
+        ///
+        /// Frozen here rather than read from a shared policy at forward time:
+        /// two routes to the same backend may name different ceilings, and a
+        /// route that resolved one per request could be answered under a bound
+        /// its registration never chose. `None` is the named opt-out.
+        buffered_limit: Option<usize>,
     },
     ProxyStream {
         backend: Arc<str>,

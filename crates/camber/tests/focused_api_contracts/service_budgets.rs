@@ -1,9 +1,13 @@
 //! 1.T1: the public service-budget vocabulary validates and composes.
 
+use camber::__private::frozen_buffered_response_limit;
 use camber::RuntimeError;
 use camber::http::{
-    ByteBoundary, DeadlineBoundary, ProxyPolicy, RequestBudget, ServerPolicy, TransferBudget,
+    ByteBoundary, DeadlineBoundary, HostRouter, ProxyPolicy, RequestBudget, Router, ServerPolicy,
+    TransferBudget,
 };
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 /// The largest connection limit a listener's admission semaphore can hold.
@@ -427,6 +431,94 @@ fn buffered_client_requires_a_limit_or_explicit_unbounded_name() {
         Some(DEFAULT_CLIENT_RESPONSE_LIMIT),
         "no deadline setter may remove the response ceiling",
     );
+}
+
+/// The buffered upstream maximum every proxy route starts with.
+const DEFAULT_PROXY_BUFFERED_LIMIT: usize = 8 * 1024 * 1024;
+
+/// The finite ceiling one registered route names instead of the default.
+const NAMED_PROXY_BUFFERED_LIMIT: usize = 1024;
+
+/// A backend no row connects to: every registration here is frozen and dropped.
+const UNREACHED_BACKEND: &str = "http://127.0.0.1:1";
+
+/// Every policy dimension that is not the buffered ceiling.
+///
+/// A row reads the frozen ceiling before and after each one, so a setter that
+/// reached the buffered dimension is caught by the dimension it did not name
+/// rather than by a whole-value comparison that cannot say which field moved.
+fn policies_written_beside_the_ceiling(base: ProxyPolicy) -> Box<[ProxyPolicy]> {
+    let finite_transfer = TransferBudget::unbounded()
+        .with_max_bytes(4096)
+        .expect("a finite transfer maximum");
+    Box::new([
+        base.connect_timeout(SHORT).expect("a finite connect"),
+        base.request_timeout(SHORT).expect("a finite request"),
+        base.upstream_idle_timeout(SHORT)
+            .expect("a finite upstream idle"),
+        base.upload_budget(finite_transfer),
+        base.download_budget(finite_transfer),
+    ])
+}
+
+/// 8.T1
+#[test]
+fn buffered_proxy_requires_a_limit_or_explicit_unbounded_name() {
+    // Zero is refused where the value is built, so no route can freeze it and
+    // no registration ever sees it. Validation precedes the freeze because the
+    // freeze takes a value only validation produces.
+    expect_invalid(
+        ProxyPolicy::default().buffered_response_limit(0),
+        "buffered_response_limit",
+    );
+
+    // The documented default, read through the same accessor a route freezes.
+    let default = ProxyPolicy::default();
+    assert_eq!(
+        frozen_buffered_response_limit(&default),
+        Some(DEFAULT_PROXY_BUFFERED_LIMIT),
+    );
+
+    let finite = default
+        .buffered_response_limit(NAMED_PROXY_BUFFERED_LIMIT)
+        .expect("a finite buffered ceiling");
+    assert_eq!(
+        frozen_buffered_response_limit(&finite),
+        Some(NAMED_PROXY_BUFFERED_LIMIT),
+    );
+
+    // Only the explicitly named opt-out removes the ceiling.
+    let opted_out = default.unbounded_buffered_response();
+    assert_eq!(frozen_buffered_response_limit(&opted_out), None);
+
+    for beside in policies_written_beside_the_ceiling(default) {
+        assert_eq!(
+            frozen_buffered_response_limit(&beside),
+            Some(DEFAULT_PROXY_BUFFERED_LIMIT),
+            "no dimension outside the ceiling may remove it",
+        );
+    }
+    for beside in policies_written_beside_the_ceiling(opted_out) {
+        assert_eq!(
+            frozen_buffered_response_limit(&beside),
+            None,
+            "no dimension outside the ceiling may restore it",
+        );
+    }
+
+    // Every exported buffered-proxy registration takes one of those values, and
+    // the concise spellings freeze the documented default.
+    let healthy = Arc::new(AtomicBool::new(true));
+    let mut routed = Router::new();
+    routed.proxy("/default", UNREACHED_BACKEND);
+    routed.proxy_checked("/default-checked", UNREACHED_BACKEND, Arc::clone(&healthy));
+    routed.proxy_with_policy("/finite", UNREACHED_BACKEND, finite);
+    routed.proxy_with_policy("/unbounded", UNREACHED_BACKEND, opted_out);
+    routed.proxy_checked_with_policy("/checked", UNREACHED_BACKEND, Arc::clone(&healthy), finite);
+
+    // The same registrations reach a host router through the router it selects.
+    let mut hosts = HostRouter::new();
+    hosts.add("bounded.example", routed);
 }
 
 /// 1.T1

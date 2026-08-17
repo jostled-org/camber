@@ -61,8 +61,12 @@ struct UpstreamState {
     /// connection count of zero and blames the subject under test for a
     /// transport failure that was never its.
     accept_failure: Mutex<Option<Box<str>>>,
-    status: u16,
-    body: Box<str>,
+    /// The exact bytes one connection is answered with.
+    ///
+    /// Held whole rather than assembled per answer: a case that scripts a
+    /// declared length its payload does not keep, or a chunked answer whose
+    /// frames are the claim, cannot describe its answer as a status and a body.
+    answer: Box<[u8]>,
     answers: UpstreamAnswers,
 }
 
@@ -75,17 +79,6 @@ impl UpstreamState {
             (UpstreamAnswers::Withheld, _) => false,
             (UpstreamAnswers::OnBodyEnd, read) => read == ConnectionRead::Ended,
         }
-    }
-
-    /// The exact bytes this upstream answers one request with.
-    fn answer(&self) -> Box<str> {
-        format!(
-            "HTTP/1.1 {} OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-            self.status,
-            self.body.len(),
-            self.body
-        )
-        .into_boxed_str()
     }
 
     /// Record what one connection has read so far, up to this fixture's cap.
@@ -127,6 +120,21 @@ pub struct RawUpstream {
 /// is already accepting: a case can register it on a proxy route without
 /// waiting for a readiness probe this upstream would not answer.
 pub fn raw_upstream(status: u16, body: &str, answers: UpstreamAnswers) -> RawUpstream {
+    let answer = format!(
+        "HTTP/1.1 {status} OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len(),
+    );
+    scripted_upstream(answer.into_bytes().into_boxed_slice(), answers)
+}
+
+/// Bind a raw upstream that answers with exactly `answer`, byte for byte.
+///
+/// [`raw_upstream`]'s counterpart for a case whose claim is the answer's own
+/// framing: a length above what the reader will retain, or a chunked body whose
+/// frames cross a ceiling one at a time. Both forms share this fixture's accept
+/// loop, byte record, and bounded teardown, so a scripted answer costs one
+/// spelling of the bytes and nothing else.
+pub fn scripted_upstream(answer: Box<[u8]>, answers: UpstreamAnswers) -> RawUpstream {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind the raw upstream");
     let addr = listener.local_addr().expect("name the raw upstream");
     let state = Arc::new(UpstreamState {
@@ -136,8 +144,7 @@ pub fn raw_upstream(status: u16, body: &str, answers: UpstreamAnswers) -> RawUps
         answered: AtomicUsize::new(0),
         stopped: AtomicBool::new(false),
         accept_failure: Mutex::new(None),
-        status,
-        body: body.into(),
+        answer,
         answers,
     });
     let served = Arc::clone(&state);
@@ -456,9 +463,8 @@ fn answer_when_due(
 /// counted an answer the peer never saw, and a case reading that count would
 /// hold the subject responsible for the fixture's own broken socket.
 fn write_answer(stream: &mut TcpStream, state: &Arc<UpstreamState>) -> bool {
-    let answer = state.answer();
     let written = stream
-        .write_all(answer.as_bytes())
+        .write_all(&state.answer)
         .and_then(|()| stream.flush());
     match written {
         Ok(()) => {

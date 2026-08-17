@@ -179,13 +179,19 @@ idea: the closed name of the maximum a policy configured, so an operator reads
 which ceiling to widen rather than that something was too big. It is what a
 buffered collection reports when it refuses to keep reading.
 
-One boundary reaches a caller today:
+Two boundaries reach a caller today. Both are collected under the same checked
+rule: a declared length above the maximum is refused before anything is
+allocated, an undeclared body is counted chunk by chunk, the crossing chunk is
+dropped rather than retained, and nothing is read after it.
 
 - `ClientResponse` — an outbound response declared or delivered more bytes than
-  the client's response maximum admits. The declaration is refused before
-  anything is allocated; an undeclared body is counted chunk by chunk and the
-  crossing chunk is dropped rather than retained. Nothing is read after it.
+  the client's response maximum admits.
   `ClientBuilder::unbounded_response` is the only way to remove the maximum.
+- `ProxyBufferedResponse` — a buffered proxy route's upstream declared or
+  delivered more bytes than the maximum that route froze. The peer is answered
+  `502` with no upstream text in it; the boundary reaches the operator record
+  instead. `ProxyPolicy::unbounded_buffered_response` is the only way to remove
+  the maximum.
 
 `RequestBodyLimit` stays separate. It is the served side of the same rule, and
 it answers a peer rather than a caller.

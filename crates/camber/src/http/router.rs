@@ -4,6 +4,7 @@ use super::body_admission::{
 use super::method::Method;
 use super::middleware::MiddlewareFn;
 use super::multipart::{MultipartLimits, MultipartStream};
+use super::proxy_policy::{ProxyPolicy, frozen_buffered_response_limit};
 use super::rejection::{Rejection, RejectionContext, RejectionMapper, shared_mapper};
 use super::response::HandlerOutcome;
 use super::response::IntoResponse;
@@ -529,8 +530,23 @@ impl Router {
     /// All HTTP methods are handled. The full upstream response is buffered,
     /// so middleware can inspect and modify the response body.
     /// On backend failure, returns 502.
+    ///
+    /// The route buffers under [`ProxyPolicy`]'s default maximum of eight MiB.
+    /// Use [`Router::proxy_with_policy`] to name another one, or to opt out of
+    /// the maximum by name.
     pub fn proxy(&mut self, prefix: &str, backend: &str) {
-        self.insert_proxy_routes(prefix, backend, None, false);
+        self.proxy_with_policy(prefix, backend, ProxyPolicy::default());
+    }
+
+    /// Register a buffered reverse proxy under the policy `policy` names.
+    ///
+    /// The buffered maximum is frozen with the route, so two routes to one
+    /// backend keep the maximum each of them chose. An upstream answer above
+    /// that maximum is refused as a bad gateway: the crossing data frame is
+    /// never retained, no part of the upstream payload reaches the peer, and
+    /// the bound that was crossed is recorded for the operator.
+    pub fn proxy_with_policy(&mut self, prefix: &str, backend: &str, policy: ProxyPolicy) {
+        self.insert_proxy_routes(prefix, backend, None, ProxyRegistration::buffered(policy));
     }
 
     /// Register a health-checked reverse proxy.
@@ -538,7 +554,27 @@ impl Router {
     /// Behaves like `proxy()` but checks the `healthy` flag before forwarding.
     /// When `healthy` is `false`, returns 503 immediately.
     pub fn proxy_checked(&mut self, prefix: &str, backend: &str, healthy: Arc<AtomicBool>) {
-        self.insert_proxy_routes(prefix, backend, Some(healthy), false);
+        self.proxy_checked_with_policy(prefix, backend, healthy, ProxyPolicy::default());
+    }
+
+    /// Register a health-checked buffered reverse proxy under `policy`.
+    ///
+    /// [`Router::proxy_with_policy`]'s health-checked form: the frozen maximum
+    /// and its refusal are the same, and an unhealthy backend is refused with
+    /// 503 before the upstream is reached at all.
+    pub fn proxy_checked_with_policy(
+        &mut self,
+        prefix: &str,
+        backend: &str,
+        healthy: Arc<AtomicBool>,
+        policy: ProxyPolicy,
+    ) {
+        self.insert_proxy_routes(
+            prefix,
+            backend,
+            Some(healthy),
+            ProxyRegistration::buffered(policy),
+        );
     }
 
     /// Register a streaming reverse proxy under `prefix`.
@@ -548,7 +584,7 @@ impl Router {
     /// a request gate only — it can reject before the upstream call, but does not
     /// wrap the streamed response.
     pub fn proxy_stream(&mut self, prefix: &str, backend: &str) {
-        self.insert_proxy_routes(prefix, backend, None, true);
+        self.insert_proxy_routes(prefix, backend, None, ProxyRegistration::Streaming);
     }
 
     /// Register a health-checked streaming reverse proxy.
@@ -556,7 +592,7 @@ impl Router {
     /// Behaves like `proxy_stream()` but checks the `healthy` flag before forwarding.
     /// When `healthy` is `false`, returns 503 immediately.
     pub fn proxy_checked_stream(&mut self, prefix: &str, backend: &str, healthy: Arc<AtomicBool>) {
-        self.insert_proxy_routes(prefix, backend, Some(healthy), true);
+        self.insert_proxy_routes(prefix, backend, Some(healthy), ProxyRegistration::Streaming);
     }
 
     fn insert_proxy_routes(
@@ -564,7 +600,7 @@ impl Router {
         prefix: &str,
         backend: &str,
         healthy: Option<Arc<AtomicBool>>,
-        streaming: bool,
+        registration: ProxyRegistration,
     ) {
         let backend: Arc<str> = backend.into();
         let prefix_owned: Arc<str> = prefix.into();
@@ -573,8 +609,7 @@ impl Router {
         // answers for both: the pair differs in what it matches, not in what it
         // does with the match.
         let forward = || {
-            proxy_route_handler(
-                streaming,
+            registration.route_handler(
                 Arc::clone(&backend),
                 Arc::clone(&prefix_owned),
                 healthy.as_ref().map(Arc::clone),
@@ -708,22 +743,46 @@ fn static_route_handler(
     }))
 }
 
-fn proxy_route_handler(
-    streaming: bool,
-    backend: Arc<str>,
-    prefix: Arc<str>,
-    healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
-) -> RouteHandler {
-    match streaming {
-        true => RouteHandler::ProxyStream {
-            backend,
-            prefix,
-            healthy,
-        },
-        false => RouteHandler::Proxy {
-            backend,
-            prefix,
-            healthy,
-        },
+/// How one registered proxy route carries its answer back.
+///
+/// The buffered kind names the maximum it collects under; the streaming kind
+/// retains nothing to bound. Stated as the two kinds rather than as a flag and
+/// an ignored maximum, so a registration that can name a ceiling and one that
+/// cannot are told apart by the type the caller built.
+enum ProxyRegistration {
+    /// Buffered, under the maximum this route froze.
+    Buffered { buffered_limit: Option<usize> },
+    /// Streamed to the peer with backpressure.
+    Streaming,
+}
+
+impl ProxyRegistration {
+    /// Freeze the buffered maximum `policy` names.
+    fn buffered(policy: ProxyPolicy) -> Self {
+        Self::Buffered {
+            buffered_limit: frozen_buffered_response_limit(&policy),
+        }
+    }
+
+    /// The route this registration mounts under one pattern.
+    fn route_handler(
+        &self,
+        backend: Arc<str>,
+        prefix: Arc<str>,
+        healthy: Option<Arc<AtomicBool>>,
+    ) -> RouteHandler {
+        match *self {
+            Self::Buffered { buffered_limit } => RouteHandler::Proxy {
+                backend,
+                prefix,
+                healthy,
+                buffered_limit,
+            },
+            Self::Streaming => RouteHandler::ProxyStream {
+                backend,
+                prefix,
+                healthy,
+            },
+        }
     }
 }

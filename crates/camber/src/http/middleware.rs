@@ -52,7 +52,15 @@ pub(super) enum Terminal<'a> {
     /// frame that refused only after the terminal had already been reached.
     Gate,
     /// Proxy terminal — forwards the request to a backend without boxing a closure.
-    Proxy { backend: Arc<str>, prefix: Arc<str> },
+    ///
+    /// The buffered maximum arrives from the route that froze it, so this
+    /// terminal names the ceiling its own registration chose rather than a
+    /// process-wide one every proxied route would share.
+    Proxy {
+        backend: Arc<str>,
+        prefix: Arc<str>,
+        buffered_limit: Option<usize>,
+    },
 }
 
 impl Terminal<'_> {
@@ -69,10 +77,15 @@ impl Terminal<'_> {
             }
             Self::Rejected(rejected) => Box::pin(async move { scope.map(rejected) }),
             Self::Gate => Box::pin(async { Response::empty_raw(200).mark_gate() }),
-            Self::Proxy { backend, prefix } => Box::pin(forward_proxy(
+            Self::Proxy {
+                backend,
+                prefix,
+                buffered_limit,
+            } => Box::pin(forward_proxy(
                 ProxyRequest::from_request(req),
                 backend,
                 prefix,
+                buffered_limit,
                 scope,
             )),
         }
@@ -139,9 +152,12 @@ async fn forward_proxy(
     proxy_req: ProxyRequest,
     backend: Arc<str>,
     prefix: Arc<str>,
+    buffered_limit: Option<usize>,
     scope: RejectionScope,
 ) -> Response {
-    match super::async_proxy::forward_request_buffered(proxy_req, &backend, &prefix).await {
+    match super::async_proxy::forward_request_buffered(proxy_req, &backend, &prefix, buffered_limit)
+        .await
+    {
         Ok(resp) => resp,
         Err(failure) => scope.map(Rejected::from_proxy_failure(failure)),
     }

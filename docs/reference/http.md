@@ -786,6 +786,35 @@ bodies should stay streaming end to end.
 - `proxy_stream(...)` preserves the incoming request body stream for the upstream call
 - Middleware on `proxy_stream(...)` acts as a request gate before streaming begins
 
+### The buffered upstream maximum
+
+A buffered proxy route reads the whole upstream answer into this process, so it
+reads it under a maximum. `proxy(...)` and `proxy_checked(...)` freeze
+`ProxyPolicy`'s default of eight MiB. `proxy_with_policy(...)` and
+`proxy_checked_with_policy(...)` freeze the one the policy names:
+
+```rust
+use camber::http::{ProxyPolicy, Router};
+
+let policy = ProxyPolicy::default().buffered_response_limit(1024 * 1024)?;
+let mut router = Router::new();
+router.proxy_with_policy("/api", "http://backend:8080", policy);
+```
+
+The maximum is frozen with the route, so two routes to one backend keep the
+maximum each of them chose. An upstream that declares more than the maximum is
+refused before anything is allocated; one that declares nothing is counted
+frame by frame, and the frame that would cross the maximum is dropped rather
+than retained. Either way the peer is answered `502` with no part of the
+upstream payload in it, and the operator record names the boundary that was
+crossed.
+
+`ProxyPolicy::unbounded_buffered_response()` removes the maximum, and it is the
+only proxy configuration that does. An upstream that then answers with an
+unbounded or hostile body is read entirely into this process's memory: use it
+only for an upstream you control and trust, and prefer `proxy_stream(...)` for
+large payloads.
+
 ## Host Routing
 
 Use `HostRouter` to dispatch by `Host` header:
