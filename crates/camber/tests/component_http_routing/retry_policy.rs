@@ -414,7 +414,7 @@ async fn client_retries_on_timeout() {
     let result = http::client()
         .retries(1)
         .backoff(Duration::from_millis(10))
-        .read_timeout(Duration::from_millis(50))
+        .request_timeout(Duration::from_millis(50))
         .get(&format!("http://{addr}/slow"))
         .await;
 

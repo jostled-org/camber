@@ -43,6 +43,28 @@ pub(super) fn finite_duration(value: Duration, name: &str) -> Result<Duration, R
     }
 }
 
+/// A duration brought inside the range a policy owner can enforce.
+///
+/// The refusing [`finite_duration`] is what a caller stating a bound gets. This
+/// is for the builder setters whose long-standing signature returns `Self` and
+/// so cannot report a refusal: raising zero and lowering the unreachable keeps
+/// them from holding a value the enforcing clock would panic on, and warns
+/// rather than adopting the caller's number in silence. Neither adjustment can
+/// produce an unbounded dimension: both ends of the range are finite.
+pub(super) fn clamped_duration(value: Duration, min: Duration, name: &str) -> Duration {
+    match crate::time::clamp_duration(value, min, name) {
+        deadline if deadline > MAX_POLICY_DEADLINE => {
+            tracing::warn!(
+                requested = ?deadline,
+                clamped = ?MAX_POLICY_DEADLINE,
+                "{name} above maximum"
+            );
+            MAX_POLICY_DEADLINE
+        }
+        deadline => deadline,
+    }
+}
+
 /// Accept a whole-unit maximum a policy may enforce, or refuse zero.
 ///
 /// Bytes and connections are both counted this way: a maximum of zero admits

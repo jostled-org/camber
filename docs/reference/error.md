@@ -11,6 +11,7 @@ The variants cluster into a few stable buckets:
 
 - runtime and coordination: `Io`, `Timeout`, `Cancelled`, `TaskPanicked`, channel errors
 - configured service deadlines: `DeadlineExceeded(DeadlineBoundary)`
+- configured byte maximums: `LimitExceeded(ByteBoundary)`
 - runtime context and task lifecycle: `NoRuntime`, `ScopeClosed`, `ScopeDrainTimeout`
 - request and API misuse: `BadRequest`, `InvalidArgument`
 - unparseable request payloads: `MalformedBody`, `Multipart`
@@ -170,6 +171,24 @@ Two request boundaries reach a served peer today:
   production, and it ends at the committed head: response-body time belongs to
   the selected download `TransferBudget`, not to the request. Classified as
   `RequestTimeout`, answered `408`, with the same unread-payload disposition.
+
+## Configured Byte Maximums
+
+`LimitExceeded` carries a `ByteBoundary`, and it is the other half of the same
+idea: the closed name of the maximum a policy configured, so an operator reads
+which ceiling to widen rather than that something was too big. It is what a
+buffered collection reports when it refuses to keep reading.
+
+One boundary reaches a caller today:
+
+- `ClientResponse` — an outbound response declared or delivered more bytes than
+  the client's response maximum admits. The declaration is refused before
+  anything is allocated; an undeclared body is counted chunk by chunk and the
+  crossing chunk is dropped rather than retained. Nothing is read after it.
+  `ClientBuilder::unbounded_response` is the only way to remove the maximum.
+
+`RequestBodyLimit` stays separate. It is the served side of the same rule, and
+it answers a peer rather than a caller.
 
 A request that ends because the server was cancelled, because its aggregate
 shutdown deadline expired, or because the peer had already gone invokes no

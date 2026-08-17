@@ -15,6 +15,8 @@ mod async_client;
 mod audit_http_rate_limit;
 #[path = "component_http_routing/body_admission.rs"]
 mod body_admission;
+#[path = "component_http_routing/bounded_client.rs"]
+mod bounded_client;
 #[path = "component_http_routing/client_methods.rs"]
 mod client_methods;
 #[path = "component_http_routing/client_timeouts.rs"]

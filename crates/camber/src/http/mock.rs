@@ -290,6 +290,21 @@ struct BodyObservations {
     permit_owners_dropped: AtomicUsize,
 }
 
+/// What the checked collector reported while reading this peer's answers.
+///
+/// The outbound counterpart of [`BodyObservations`], and the same two rules:
+/// monotonic counters only, each written by the production collector's own
+/// decision to poll a chunk or keep one. Nothing here chooses a maximum,
+/// retains a byte, drops a frame, or selects a terminal.
+#[derive(Default)]
+struct CollectionObservations {
+    /// Chunks the collector was handed, counted before it accounted for them,
+    /// so a chunk refused for crossing the maximum is still counted as read.
+    chunks_polled: AtomicUsize,
+    /// The most any one collection from this peer retained at once.
+    peak_retained_bytes: AtomicUsize,
+}
+
 /// What one listener's admitted operations published about their envelopes.
 ///
 /// Written by the production owner that mints an envelope and by each owner
@@ -436,6 +451,8 @@ pub(crate) struct LifecycleScript {
     state: Mutex<ScriptState>,
     supervisor_wake: tokio::sync::Notify,
     body: BodyObservations,
+    /// What the checked collector published while reading this peer's answers.
+    collection: CollectionObservations,
     /// What this listener's admitted operations published about their one
     /// envelope each.
     operation: OperationObservations,
@@ -460,6 +477,7 @@ impl LifecycleScript {
             }),
             supervisor_wake: tokio::sync::Notify::new(),
             body: BodyObservations::default(),
+            collection: CollectionObservations::default(),
             operation: OperationObservations::default(),
             #[cfg(feature = "ws")]
             websocket: WebSocketDirectionObservations::default(),
@@ -651,6 +669,35 @@ impl LifecycleScript {
     pub(crate) fn observe_body_retained(script: Option<&Self>, retained: usize) {
         Self::observe_body(script, |body| {
             body.peak_retained_bytes
+                .fetch_max(retained, Ordering::Release);
+        });
+    }
+
+    /// Write one buffered-collection observation.
+    fn observe_collection(script: Option<&Self>, apply: impl FnOnce(&CollectionObservations)) {
+        Self::observe(script, |script| &script.collection, apply);
+    }
+
+    /// Record one chunk the checked collector was handed.
+    ///
+    /// Counted before the collector accounts for it, so a chunk refused for
+    /// crossing the maximum is counted as read and one refused before any read
+    /// began is not. Inert with no controller registered.
+    pub(in crate::http) fn count_collected_chunk(script: Option<&Self>) {
+        Self::observe_collection(script, |collection| {
+            collection.chunks_polled.fetch_add(1, Ordering::Release);
+        });
+    }
+
+    /// Record what one collection holds after keeping a chunk.
+    ///
+    /// The high-water mark, for the reason [`Self::observe_body_retained`]
+    /// keeps one: the claim is the most a single collection ever held at once,
+    /// and a sum would report every answer this peer gave instead.
+    pub(in crate::http) fn observe_collected_retained(script: Option<&Self>, retained: usize) {
+        Self::observe_collection(script, |collection| {
+            collection
+                .peak_retained_bytes
                 .fetch_max(retained, Ordering::Release);
         });
     }
@@ -992,6 +1039,22 @@ impl LifecycleController {
     /// The most bytes any one request on this listener retained at once.
     pub fn body_peak_retained_bytes(&self) -> usize {
         self.script.body.peak_retained_bytes.load(Ordering::Acquire)
+    }
+
+    /// How many chunks the checked collector read from this peer's answers.
+    ///
+    /// Zero after a refused declaration is the whole claim there: the maximum
+    /// was crossed before anything was read, so nothing was allocated for it.
+    pub fn collected_chunks_polled(&self) -> usize {
+        self.script.collection.chunks_polled.load(Ordering::Acquire)
+    }
+
+    /// The most any one collection from this peer retained at once.
+    pub fn collected_peak_retained_bytes(&self) -> usize {
+        self.script
+            .collection
+            .peak_retained_bytes
+            .load(Ordering::Acquire)
     }
 
     /// How many admitted permit owners this listener has released.

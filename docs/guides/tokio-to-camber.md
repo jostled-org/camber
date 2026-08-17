@@ -162,7 +162,7 @@ loop {
 ```rust
 let client = http::client()
     .connect_timeout(Duration::from_secs(5))
-    .read_timeout(Duration::from_secs(10))
+    .request_timeout(Duration::from_secs(10))
     .retries(3)
     .backoff(Duration::from_millis(100));
 

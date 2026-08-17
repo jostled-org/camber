@@ -182,7 +182,7 @@ async fn client_builder_timeout() {
     let addr = common::spawn_server(backend);
 
     let result = http::client()
-        .read_timeout(Duration::from_millis(100))
+        .request_timeout(Duration::from_millis(100))
         .get(&format!("http://{addr}/slow"))
         .await;
 
@@ -203,7 +203,7 @@ async fn client_builder_reuses_built_client() {
     });
     let addr = common::spawn_server(backend);
 
-    let builder = http::client().read_timeout(Duration::from_secs(5));
+    let builder = http::client().request_timeout(Duration::from_secs(5));
 
     let resp1 = builder.get(&format!("http://{addr}/ping")).await.unwrap();
     assert_eq!(resp1.status(), 200);
@@ -318,7 +318,7 @@ async fn client_builder_put_with_custom_timeout() {
     });
     let addr = common::spawn_server(backend);
 
-    let builder = http::client().read_timeout(Duration::from_secs(5));
+    let builder = http::client().request_timeout(Duration::from_secs(5));
     let resp = builder
         .put(&format!("http://{addr}/resource"), "builder body")
         .await

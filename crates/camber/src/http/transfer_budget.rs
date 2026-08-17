@@ -1,6 +1,6 @@
 //! The three independent bounds one streaming transfer runs under.
 
-use super::policy_value::{finite_duration, narrow, positive_limit};
+use super::policy_value::{clamped_duration, finite_duration, narrow, positive_limit};
 use crate::RuntimeError;
 use std::time::Duration;
 
@@ -78,6 +78,49 @@ impl TransferBudget {
             max_bytes: None,
             idle: None,
             total: None,
+        }
+    }
+
+    /// One budget built from values this crate states as constants.
+    ///
+    /// The validating constructors above are for a caller's values, and they
+    /// refuse by returning. A framework default has no caller to return to, so
+    /// it is written here the way [`ProxyPolicy`](super::ProxyPolicy) writes its
+    /// own: as literals this crate owns, which the same rules already accept.
+    /// Nothing outside `crate::http` can reach it, and no caller's value may.
+    pub(super) const fn of(
+        max_bytes: Option<usize>,
+        idle: Option<Duration>,
+        total: Option<Duration>,
+    ) -> Self {
+        Self {
+            max_bytes,
+            idle,
+            total,
+        }
+    }
+
+    /// Replace the quiet-interval deadline with `timeout` brought inside the
+    /// range a policy owner can enforce.
+    ///
+    /// For the infallible builder setters, whose signature cannot report a
+    /// refusal. [`Self::with_idle`] is what a caller stating a bound gets.
+    pub(super) fn with_clamped_idle(self, timeout: Duration, min: Duration, name: &str) -> Self {
+        Self {
+            idle: Some(clamped_duration(timeout, min, name)),
+            ..self
+        }
+    }
+
+    /// Replace the lifetime deadline with `timeout` brought inside the range a
+    /// policy owner can enforce.
+    ///
+    /// For the infallible builder setters, whose signature cannot report a
+    /// refusal. [`Self::with_total`] is what a caller stating a bound gets.
+    pub(super) fn with_clamped_total(self, timeout: Duration, min: Duration, name: &str) -> Self {
+        Self {
+            total: Some(clamped_duration(timeout, min, name)),
+            ..self
         }
     }
 

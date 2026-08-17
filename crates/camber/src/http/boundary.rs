@@ -92,3 +92,30 @@ pub enum ByteBoundary {
     /// The maximum a rendered profiling response is retained under.
     ProfilingResponse,
 }
+
+impl ByteBoundary {
+    /// The bounded name this maximum is reported and counted under.
+    ///
+    /// A closed vocabulary of static text, for the reason
+    /// [`DeadlineBoundary::label`] is one: an operator's error message reads
+    /// it, so it can never become a value derived from a request. Private
+    /// until an owner outside this module reports one, which is the same rule
+    /// that would widen it.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::RequestBody => "request_body",
+            Self::TransferUpload => "transfer_upload",
+            Self::TransferDownload => "transfer_download",
+            Self::ClientResponse => "client_response",
+            Self::ProxyBufferedResponse => "proxy_buffered_response",
+            Self::StaticFile => "static_file",
+            Self::ProfilingResponse => "profiling_response",
+        }
+    }
+}
+
+impl std::fmt::Display for ByteBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}

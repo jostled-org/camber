@@ -78,7 +78,8 @@
 //! async fn fetch() -> Result<(), RuntimeError> {
 //!     let client = http::client()
 //!         .connect_timeout(Duration::from_secs(5))
-//!         .read_timeout(Duration::from_secs(10))
+//!         .request_timeout(Duration::from_secs(10))
+//!         .response_idle_timeout(Duration::from_secs(2))
 //!         .retries(3)
 //!         .backoff(Duration::from_millis(100));
 //!
@@ -112,6 +113,7 @@ mod body;
 pub(crate) mod body_admission;
 mod boundary;
 mod buffer_config;
+mod checked_collect;
 mod client;
 /// Response compression helpers.
 pub mod compression;

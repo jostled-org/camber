@@ -46,6 +46,17 @@ pub enum RuntimeError {
     #[error("deadline exceeded: {0}")]
     DeadlineExceeded(crate::http::DeadlineBoundary),
 
+    /// A buffered collection crossed the byte maximum its policy configured.
+    ///
+    /// The counterpart of [`RuntimeError::DeadlineExceeded`] for the other half
+    /// of the same vocabulary: an oversized outbound response, upstream body,
+    /// static file, or rendered profile names the bound it crossed, so an
+    /// operator reads which maximum to widen rather than that "something was
+    /// too big". The crossing bytes are never retained, and the payload that
+    /// was retained before it is released with this failure.
+    #[error("byte limit exceeded: {0}")]
+    LimitExceeded(crate::http::ByteBoundary),
+
     /// Cooperative cancellation was requested.
     #[error("operation cancelled")]
     Cancelled,

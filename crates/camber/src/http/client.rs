@@ -1,7 +1,10 @@
 use super::Response;
+use super::boundary::ByteBoundary;
+use super::checked_collect::collect_response;
 use super::map_reqwest_error;
 use super::method::Method as LocalMethod;
 use super::mock;
+use super::transfer_budget::TransferBudget;
 use crate::RuntimeError;
 use crate::runtime;
 use reqwest::Method;
@@ -79,9 +82,23 @@ macro_rules! http_free_functions {
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BACKOFF: Duration = Duration::from_millis(100);
+/// The buffered response maximum every client starts with, matching Camber's
+/// ordinary request ceiling.
+const DEFAULT_RESPONSE_LIMIT: usize = 8 * 1024 * 1024;
+/// The shortest deadline the infallible response setters will hold.
+const MIN_RESPONSE_DEADLINE: Duration = Duration::from_millis(1);
+
+/// The response policy a client starts with: eight MiB, thirty seconds of
+/// quiet between body frames, and thirty seconds for one whole attempt.
+const DEFAULT_RESPONSE_POLICY: TransferBudget = TransferBudget::of(
+    Some(DEFAULT_RESPONSE_LIMIT),
+    Some(DEFAULT_TIMEOUT),
+    Some(DEFAULT_TIMEOUT),
+);
 
 static CLIENT: LazyLock<Result<reqwest::Client, Arc<str>>> = LazyLock::new(|| {
-    build_client(DEFAULT_TIMEOUT, DEFAULT_TIMEOUT).map_err(|e| -> Arc<str> { e.to_string().into() })
+    build_client(DEFAULT_TIMEOUT, DEFAULT_RESPONSE_POLICY)
+        .map_err(|e| -> Arc<str> { e.to_string().into() })
 });
 
 fn default_client() -> Result<&'static reqwest::Client, RuntimeError> {
@@ -90,13 +107,24 @@ fn default_client() -> Result<&'static reqwest::Client, RuntimeError> {
         .map_err(|e| RuntimeError::Http(Arc::clone(e)))
 }
 
+/// Build the Reqwest client one response policy describes.
+///
+/// The two deadlines are handed to the boundaries that actually enforce them:
+/// the lifetime becomes Reqwest's whole-attempt timeout, and the quiet interval
+/// becomes its per-read timeout. An unbounded dimension configures no timer at
+/// all rather than a very long one.
 fn build_client(
     connect_timeout: Duration,
-    read_timeout: Duration,
+    response: TransferBudget,
 ) -> Result<reqwest::Client, RuntimeError> {
-    reqwest::Client::builder()
-        .connect_timeout(connect_timeout)
-        .timeout(read_timeout)
+    let mut builder = reqwest::Client::builder().connect_timeout(connect_timeout);
+    if let Some(total) = response.total() {
+        builder = builder.timeout(total);
+    }
+    if let Some(idle) = response.idle() {
+        builder = builder.read_timeout(idle);
+    }
+    builder
         .build()
         .map_err(|e| RuntimeError::Http(e.to_string().into()))
 }
@@ -174,14 +202,33 @@ fn parse_retry_after(resp: &reqwest::Response) -> Option<u64> {
         .ok()
 }
 
+/// What one dispatch runs under, once eligibility has been decided.
+///
+/// The transport, the retry schedule, and the ceiling the answer is collected
+/// under travel together because they are one configuration: a retry that
+/// reused a different client, or an answer collected under a different maximum,
+/// would be a second policy for the same call.
+#[derive(Clone, Copy)]
+struct Dispatch<'a> {
+    client: &'a reqwest::Client,
+    retries: u32,
+    backoff: Duration,
+    /// The response ceiling, or `None` for the named opt-out.
+    response_limit: Option<usize>,
+}
+
 async fn do_request_with_retry(
-    client: &reqwest::Client,
+    dispatch: Dispatch<'_>,
     method: Method,
     url: &str,
     body: Option<(&str, &str)>,
-    retries: u32,
-    backoff: Duration,
 ) -> Result<Response, RuntimeError> {
+    let Dispatch {
+        client,
+        retries,
+        backoff,
+        response_limit,
+    } = dispatch;
     let mut remaining = retries;
     loop {
         let result = build_and_send(client, &method, url, body).await;
@@ -212,7 +259,7 @@ async fn do_request_with_retry(
                 sleep_backoff(backoff, attempt, None).await;
                 remaining -= 1;
             }
-            Ok(resp) => return read_response(resp).await,
+            Ok(resp) => return read_response(resp, response_limit).await,
             Err(error) => return Err(map_reqwest_error(error)),
         }
     }
@@ -224,30 +271,32 @@ fn try_mock(method: &Method, url: &str) -> Option<Response> {
 }
 
 async fn retry_dispatch(
-    client: &reqwest::Client,
+    dispatch: Dispatch<'_>,
     method: Method,
     url: &str,
     body: Option<(&str, &str)>,
-    retries: u32,
-    backoff: Duration,
     retry_unsafe_methods: bool,
 ) -> Result<Response, RuntimeError> {
     runtime::check_cancel()?;
-    let eligible_retries = match is_retry_eligible(&method, retry_unsafe_methods) {
-        true => retries,
-        false => 0,
+    let eligible = Dispatch {
+        retries: match is_retry_eligible(&method, retry_unsafe_methods) {
+            true => dispatch.retries,
+            false => 0,
+        },
+        ..dispatch
     };
     match try_mock(&method, url) {
         Some(resp) => Ok(resp),
-        None => do_request_with_retry(client, method, url, body, eligible_retries, backoff).await,
+        None => do_request_with_retry(eligible, method, url, body).await,
     }
 }
 
-/// Create a client builder with custom timeout and retry configuration.
+/// Create a client builder with custom timeout, retry, and response
+/// configuration.
 pub fn client() -> ClientBuilder {
     ClientBuilder {
         connect_timeout: DEFAULT_TIMEOUT,
-        read_timeout: DEFAULT_TIMEOUT,
+        response: DEFAULT_RESPONSE_POLICY,
         retries: 0,
         backoff: DEFAULT_BACKOFF,
         retry_unsafe_methods: false,
@@ -259,7 +308,7 @@ impl std::fmt::Debug for ClientBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientBuilder")
             .field("connect_timeout", &self.connect_timeout)
-            .field("read_timeout", &self.read_timeout)
+            .field("response", &self.response)
             .field("retries", &self.retries)
             .field("backoff", &self.backoff)
             .field("retry_unsafe_methods", &self.retry_unsafe_methods)
@@ -267,13 +316,40 @@ impl std::fmt::Debug for ClientBuilder {
     }
 }
 
-/// Builder for configuring outbound HTTP client timeouts and retry behavior.
+/// Builder for configuring outbound HTTP client deadlines, retries, and the
+/// maximum one response may retain.
+///
+/// The three deadlines are independent boundaries, not one shared timeout:
+///
+/// - `connect_timeout` ends when the transport is established;
+/// - `request_timeout` covers one whole attempt, from connect through the end
+///   of the response body;
+/// - `response_idle_timeout` covers each gap between response body reads.
+///
+/// | Dimension | Default |
+/// | --- | --- |
+/// | `connect_timeout` | 30 seconds |
+/// | `request_timeout` | 30 seconds |
+/// | `response_idle_timeout` | 30 seconds |
+/// | response maximum | eight MiB |
+///
+/// The last three are one stored [`TransferBudget`], which
+/// [`response_budget`](Self::response_budget) replaces whole and the named
+/// setters write one field of. Call order is authoritative: the last write to a
+/// field is the one the client is built from.
+///
+/// A retry is one more attempt under the same policy. Retry eligibility, count,
+/// backoff, and the unsafe-method opt-in are unaffected by any of it; the
+/// request-total deadline bounds each attempt rather than the sequence.
 ///
 /// The underlying `reqwest::Client` is built lazily on first request
 /// and cached for subsequent calls.
 pub struct ClientBuilder {
     connect_timeout: Duration,
-    read_timeout: Duration,
+    /// The one response policy: byte maximum, quiet interval, and attempt
+    /// lifetime. One store, so a caller reading it back sees what the client
+    /// will be built from rather than three fields that can disagree.
+    response: TransferBudget,
     retries: u32,
     backoff: Duration,
     retry_unsafe_methods: bool,
@@ -288,12 +364,74 @@ impl ClientBuilder {
         self
     }
 
-    /// Set the read timeout (applies to both response headers and body).
-    /// Minimum: 1ms. Zero values are clamped.
-    pub fn read_timeout(mut self, timeout: Duration) -> Self {
-        const MIN: Duration = Duration::from_millis(1);
-        self.read_timeout = crate::time::clamp_duration(timeout, MIN, "read_timeout");
+    /// Set how long one whole attempt may take, from connect through the end
+    /// of the response body. Minimum: 1ms. Zero values are clamped.
+    ///
+    /// This replaces the former `read_timeout`, which never owned a read-level
+    /// boundary: the value has always bounded the complete attempt, and the
+    /// name now says which deadline it is. The per-read boundary it was
+    /// mistaken for is [`response_idle_timeout`](Self::response_idle_timeout).
+    ///
+    /// It writes the lifetime dimension of this client's one response policy,
+    /// so a later [`response_budget`](Self::response_budget) replaces it.
+    #[must_use]
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.response =
+            self.response
+                .with_clamped_total(timeout, MIN_RESPONSE_DEADLINE, "request_timeout");
         self
+    }
+
+    /// Set the longest quiet interval allowed between response body reads.
+    /// Minimum: 1ms. Zero values are clamped.
+    ///
+    /// The interval resets on each successful read, so it detects a peer that
+    /// stopped sending without bounding a large body that keeps arriving. It
+    /// writes the quiet-interval dimension of this client's one response
+    /// policy, so a later [`response_budget`](Self::response_budget) replaces
+    /// it.
+    #[must_use]
+    pub fn response_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.response = self.response.with_clamped_idle(
+            timeout,
+            MIN_RESPONSE_DEADLINE,
+            "response_idle_timeout",
+        );
+        self
+    }
+
+    /// Replace this client's whole response policy.
+    ///
+    /// All three dimensions at once: the buffered maximum, the quiet interval,
+    /// and the attempt lifetime. A [`TransferBudget`] validates every finite
+    /// value it holds, so a zero maximum or deadline is refused where it is
+    /// written and no client is ever built from one.
+    #[must_use]
+    pub fn response_budget(mut self, budget: TransferBudget) -> Self {
+        self.response = budget;
+        self
+    }
+
+    /// Collect responses with no size ceiling.
+    ///
+    /// **Warning:** a peer that answers with an unbounded or hostile body is
+    /// then read entirely into this process's memory. Use it only for a peer
+    /// you control and trust. This is the only client configuration that
+    /// removes the response maximum, and it is deliberately named so its
+    /// absence cannot be mistaken for a default. Both deadlines survive it.
+    #[must_use]
+    pub fn unbounded_response(mut self) -> Self {
+        self.response = self.response.without_max_bytes();
+        self
+    }
+
+    /// The one response policy this client will be built from.
+    ///
+    /// What the last write to each dimension left, which is what a call reads
+    /// its maximum and its two deadlines from.
+    #[must_use]
+    pub fn response_policy(&self) -> TransferBudget {
+        self.response
     }
 
     /// Set the maximum number of retries for transient failures.
@@ -327,7 +465,7 @@ impl ClientBuilder {
     fn get_client(&self) -> Result<&reqwest::Client, RuntimeError> {
         self.cached_client
             .get_or_init(|| {
-                build_client(self.connect_timeout, self.read_timeout).map_err(client_build_error)
+                build_client(self.connect_timeout, self.response).map_err(client_build_error)
             })
             .as_ref()
             .map_err(|e| RuntimeError::Http(Arc::clone(e)))
@@ -339,16 +477,13 @@ impl ClientBuilder {
         url: &str,
         body: Option<(&str, &str)>,
     ) -> Result<Response, RuntimeError> {
-        retry_dispatch(
-            self.get_client()?,
-            method,
-            url,
-            body,
-            self.retries,
-            self.backoff,
-            self.retry_unsafe_methods,
-        )
-        .await
+        let dispatch = Dispatch {
+            client: self.get_client()?,
+            retries: self.retries,
+            backoff: self.backoff,
+            response_limit: self.response.max_bytes(),
+        };
+        retry_dispatch(dispatch, method, url, body, self.retry_unsafe_methods).await
     }
 
     http_methods! {
@@ -389,16 +524,13 @@ async fn default_dispatch(
     url: &str,
     body: Option<(&str, &str)>,
 ) -> Result<Response, RuntimeError> {
-    retry_dispatch(
-        default_client()?,
-        method,
-        url,
-        body,
-        0,
-        Duration::ZERO,
-        false,
-    )
-    .await
+    let dispatch = Dispatch {
+        client: default_client()?,
+        retries: 0,
+        backoff: Duration::ZERO,
+        response_limit: DEFAULT_RESPONSE_POLICY.max_bytes(),
+    };
+    retry_dispatch(dispatch, method, url, body, false).await
 }
 
 http_free_functions! {
@@ -432,7 +564,16 @@ http_free_functions! {
     options => OPTIONS, no_body;
 }
 
-async fn read_response(resp: reqwest::Response) -> Result<Response, RuntimeError> {
+/// Read one answer's head, then collect its body under the configured maximum.
+///
+/// The head is taken first because the ceiling refuses bodies: a caller told
+/// that its peer answered too large still learns the status and headers it
+/// answered with from the typed cause's own boundary, and nothing here has to
+/// re-read a response the collector consumed.
+async fn read_response(
+    resp: reqwest::Response,
+    response_limit: Option<usize>,
+) -> Result<Response, RuntimeError> {
     let status = resp.status().as_u16();
 
     let headers: Vec<_> = resp
@@ -445,10 +586,7 @@ async fn read_response(resp: reqwest::Response) -> Result<Response, RuntimeError
         })
         .collect();
 
-    let body_bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| RuntimeError::Http(e.to_string().into()))?;
+    let body_bytes = collect_response(resp, ByteBoundary::ClientResponse, response_limit).await?;
 
     Ok(Response::new(status, body_bytes, headers))
 }

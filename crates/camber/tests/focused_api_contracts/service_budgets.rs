@@ -349,6 +349,86 @@ fn assert_proxy_policy_contract() {
     );
 }
 
+/// The buffered response maximum every client starts with.
+const DEFAULT_CLIENT_RESPONSE_LIMIT: usize = 8 * 1024 * 1024;
+
+/// The deadlines every client starts with, on both response dimensions.
+const DEFAULT_CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The smallest deadline a client builder's infallible setters will hold.
+const MIN_CLIENT_DEADLINE: Duration = Duration::from_millis(1);
+
+/// 7.T2
+#[test]
+fn buffered_client_requires_a_limit_or_explicit_unbounded_name() {
+    let default = camber::http::client().response_policy();
+
+    // The documented default, read back through the setter that writes it.
+    assert_eq!(default.max_bytes(), Some(DEFAULT_CLIENT_RESPONSE_LIMIT));
+    assert_eq!(default.idle(), Some(DEFAULT_CLIENT_TIMEOUT));
+    assert_eq!(default.total(), Some(DEFAULT_CLIENT_TIMEOUT));
+    assert_eq!(
+        camber::http::client()
+            .response_budget(
+                TransferBudget::bounded(
+                    DEFAULT_CLIENT_RESPONSE_LIMIT,
+                    DEFAULT_CLIENT_TIMEOUT,
+                    DEFAULT_CLIENT_TIMEOUT,
+                )
+                .expect("the default client response policy"),
+            )
+            .response_policy(),
+        default,
+    );
+
+    // A finite ceiling is written whole, and it is the only dimension the
+    // caller stated.
+    let finite = TransferBudget::bounded(1024, SHORT, LONG).expect("a finite response policy");
+    assert_eq!(
+        camber::http::client()
+            .response_budget(finite)
+            .response_policy(),
+        finite,
+    );
+
+    // Zero is refused where the value is built, so no client is ever
+    // constructed holding it — and zero is never a spelling of unbounded.
+    expect_invalid(finite.with_max_bytes(0), "max_bytes");
+    expect_invalid(TransferBudget::bounded(0, SHORT, LONG), "max_bytes");
+    assert_eq!(
+        camber::http::client()
+            .request_timeout(ZERO)
+            .response_policy()
+            .total(),
+        Some(MIN_CLIENT_DEADLINE),
+    );
+    assert_eq!(
+        camber::http::client()
+            .response_idle_timeout(ZERO)
+            .response_policy()
+            .idle(),
+        Some(MIN_CLIENT_DEADLINE),
+    );
+
+    // Only the explicitly named opt-out removes the ceiling, and it removes
+    // nothing else.
+    let unbounded = camber::http::client()
+        .unbounded_response()
+        .response_policy();
+    assert_eq!(unbounded.max_bytes(), None);
+    assert_eq!(unbounded.idle(), default.idle());
+    assert_eq!(unbounded.total(), default.total());
+    assert_eq!(
+        camber::http::client()
+            .request_timeout(SHORT)
+            .response_idle_timeout(SHORT)
+            .response_policy()
+            .max_bytes(),
+        Some(DEFAULT_CLIENT_RESPONSE_LIMIT),
+        "no deadline setter may remove the response ceiling",
+    );
+}
+
 /// 1.T1
 #[test]
 fn budget_constructors_validate_every_finite_value_and_explicit_unbounded_choice() {
