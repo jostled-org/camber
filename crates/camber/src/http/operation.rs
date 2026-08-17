@@ -330,6 +330,51 @@ impl OperationEnvelope {
         )
     }
 
+    /// Run one pre-commit producer under this operation's carried authority.
+    ///
+    /// For an owner whose answer is a whole future rather than a stream of
+    /// frames — the streaming proxy's upstream head is the one this exists for.
+    /// The producer's answer is weighed as one source among the carried ones, so
+    /// a shutdown deadline, a forced cancellation, a peer whose lifetime ended,
+    /// or an expired request total that became observable in the same scheduling
+    /// turn is selected by the declared precedence before an upstream head this
+    /// service has not committed.
+    ///
+    /// The quiet interval is deliberately absent: the payload owner accounts for
+    /// data frames, and a second guard that never sees one would report a
+    /// healthy upload as an idle body.
+    pub(super) async fn pre_commit<T>(
+        &self,
+        producing: impl Future<Output = T>,
+    ) -> Result<T, InboundTerminal> {
+        let mut watch = InboundWatch::over(self.guard(None, self.total));
+        let mut producing = std::pin::pin!(producing);
+        let mut produced = None;
+        std::future::poll_fn(|cx| {
+            // Read first, weigh second — the one order every coordinator here
+            // shares. A producer that answered in this turn is what makes the
+            // turn a tie at all, and reading it after the carried sources would
+            // decide the tie by poll order instead of by the declared one.
+            produced = produced.take().or_else(|| answered(producing.as_mut(), cx));
+            let ready = weighed(&mut watch, cx, produced.is_some());
+            match (ready.select(), produced.take()) {
+                (Some(InboundTerminal::ResponseHead), Some(value)) => {
+                    std::task::Poll::Ready(Ok(value))
+                }
+                (Some(InboundTerminal::ResponseHead) | None, held) => {
+                    produced = held;
+                    std::task::Poll::Pending
+                }
+                // The head in hand is released rather than delivered: a local
+                // cause selected in the same turn ends this request, and
+                // committing the answer first would commit one to a request
+                // this service has already ended.
+                (Some(terminal), _) => std::task::Poll::Ready(Err(terminal)),
+            }
+        })
+        .await
+    }
+
     /// One inbound handle over the two request deadlines its owner enforces.
     fn guard(&self, idle: Option<Duration>, total: Option<Instant>) -> InboundGuard {
         InboundGuard {
@@ -479,6 +524,30 @@ impl InboundGuard {
         .into_iter()
         .flatten()
         .min()
+    }
+}
+
+/// The answer one producer has given, if it has given one this turn.
+fn answered<T>(
+    producing: std::pin::Pin<&mut impl Future<Output = T>>,
+    cx: &mut std::task::Context<'_>,
+) -> Option<T> {
+    match producing.poll(cx) {
+        std::task::Poll::Ready(value) => Some(value),
+        std::task::Poll::Pending => None,
+    }
+}
+
+/// Every source one pre-commit turn can decide, the producer's included.
+fn weighed(
+    watch: &mut InboundWatch,
+    cx: &mut std::task::Context<'_>,
+    answered: bool,
+) -> InboundReady {
+    let carried = watch.observed(cx, None);
+    match answered {
+        true => carried.with_response_head(),
+        false => carried,
     }
 }
 

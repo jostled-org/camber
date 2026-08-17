@@ -34,8 +34,15 @@ const CHUNKED_TERMINATOR: &[u8] = b"0\r\n\r\n";
 pub enum UpstreamAnswers {
     /// As soon as the request head has arrived, with the upload still running.
     OnHead,
-    /// Never. The answer is withheld, so a case can settle a request that
-    /// never received one.
+    /// As [`UpstreamAnswers::OnHead`], and then the connection is held open.
+    ///
+    /// For the one claim a whole answer cannot stage: an upstream that commits
+    /// a head, sends part of a body, and then goes quiet without ending
+    /// anything. A closed connection would be a truncated answer instead, which
+    /// is a different fault entirely.
+    OnHeadThenHold,
+    /// Never. The answer is withheld and the connection is held open, so a case
+    /// can settle a request that never received one.
     Withheld,
     /// Once the peer's payload has ended, or its connection has.
     OnBodyEnd,
@@ -75,10 +82,25 @@ impl UpstreamState {
     fn may_answer(&self, read: ConnectionRead) -> bool {
         match (self.answers, read) {
             (_, ConnectionRead::Partial) => false,
-            (UpstreamAnswers::OnHead, _) => true,
+            (UpstreamAnswers::OnHead | UpstreamAnswers::OnHeadThenHold, _) => true,
             (UpstreamAnswers::Withheld, _) => false,
-            (UpstreamAnswers::OnBodyEnd, read) => read == ConnectionRead::Ended,
+            (UpstreamAnswers::OnBodyEnd, read) => {
+                matches!(read, ConnectionRead::Ended | ConnectionRead::Closed)
+            }
         }
+    }
+
+    /// Whether this upstream keeps a connection open after its request ended.
+    ///
+    /// The two modes that stop short of a whole answer both do: an upstream that
+    /// closes when the request ends has given its peer a failed transport, and a
+    /// case waiting on a head that never commits, or on a body frame that never
+    /// arrives, would be reading that instead of what it staged.
+    const fn holds_open(&self) -> bool {
+        matches!(
+            self.answers,
+            UpstreamAnswers::OnHeadThenHold | UpstreamAnswers::Withheld
+        )
     }
 
     /// Record what one connection has read so far, up to this fixture's cap.
@@ -275,9 +297,13 @@ fn serve_connection(mut stream: TcpStream, state: &Arc<UpstreamState>, deadline:
     while !state.stopped.load(Ordering::Acquire) && Instant::now() < deadline {
         let read = read_into(&mut stream, &mut buffer, &mut connection, state);
         answered = answer_when_due(&mut stream, state, answered, read);
+        // A peer that ended the transport always ends this connection: nothing
+        // more can arrive on it, and holding it would spend this fixture's whole
+        // deadline before the next connection is accepted.
         match read {
-            ConnectionRead::Ended => break,
-            ConnectionRead::Partial | ConnectionRead::Head => {}
+            ConnectionRead::Closed => break,
+            ConnectionRead::Ended if !state.holds_open() => break,
+            ConnectionRead::Ended | ConnectionRead::Partial | ConnectionRead::Head => {}
         }
     }
 }
@@ -289,8 +315,14 @@ enum ConnectionRead {
     Partial,
     /// The head has arrived and payload is still coming.
     Head,
-    /// The peer finished its request, or ended the connection.
+    /// The peer finished the request it was sending.
     Ended,
+    /// The peer ended the connection.
+    ///
+    /// Held apart from [`ConnectionRead::Ended`] because an upstream that holds
+    /// its connection open after answering has to tell a request that finished
+    /// from a peer that is gone: only the second one ends the connection.
+    Closed,
 }
 
 /// How one request framed the payload behind its head.
@@ -400,7 +432,7 @@ fn read_into(
     match stream.read(buffer) {
         Ok(0) => {
             state.dropped.fetch_add(1, Ordering::Release);
-            ConnectionRead::Ended
+            ConnectionRead::Closed
         }
         Ok(count) => {
             state.record(&buffer[..count]);
@@ -415,9 +447,9 @@ fn read_into(
         // fail whenever the platform delivered the reset instead.
         Err(error) if is_closed_connection_error(&error) => {
             state.dropped.fetch_add(1, Ordering::Release);
-            ConnectionRead::Ended
+            ConnectionRead::Closed
         }
-        Err(_) => ConnectionRead::Ended,
+        Err(_) => ConnectionRead::Closed,
     }
 }
 

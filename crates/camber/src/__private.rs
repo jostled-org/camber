@@ -16,6 +16,14 @@ pub use crate::http::body_admission::{checked_body_frame_total, declared_length_
 /// actually froze.
 pub use crate::http::proxy_policy::frozen_buffered_response_limit;
 
+/// The exact upstream owner each proxy registration on one router froze.
+///
+/// Re-exported for the reason the accessor above is: a contract that read its
+/// own copy of a policy would prove nothing about which client a registered
+/// route actually forwards through, and sharing is only observable at the owner
+/// itself.
+pub use crate::http::router::frozen_proxy_client_identities;
+
 /// The exact default and the exact validator every static-file entry point
 /// freezes its ceiling through.
 ///

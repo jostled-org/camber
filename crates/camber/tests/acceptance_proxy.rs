@@ -47,5 +47,7 @@ mod downstream_flow_control;
 mod framework_rejections;
 #[path = "acceptance_proxy/streaming_forwarding.rs"]
 mod streaming_forwarding;
+#[path = "acceptance_proxy/transfer_budgets.rs"]
+mod transfer_budgets;
 #[path = "acceptance_proxy/websocket_forwarding.rs"]
 mod websocket_forwarding;

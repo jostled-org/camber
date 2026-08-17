@@ -1,16 +1,19 @@
 use super::body_admission::{AdmittedBody, BodyBudget, BodyPermit};
+use super::boundary::DeadlineBoundary;
 use super::encoding::decode_hex_pair;
 use super::map_reqwest_error;
 use super::method::{Method, RequestMethod};
 use super::mock::{LifecycleCheckpoint, LifecycleScript};
+use super::proxy_upstream::ProxyUpstream;
 use super::rejection::{Diagnostic, Rejected, proxy_failure_status};
 use super::response::HeaderPair;
+use super::transfer::{IncomingSource, Transfer, TransferFailure, TransferOwner};
 use crate::RuntimeError;
 use arrayvec::ArrayString;
 use std::borrow::Cow;
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 /// The one account of the only path [`strip_prefix`] refuses.
@@ -20,14 +23,6 @@ use tokio::sync::oneshot;
 /// reading two proxy classes reads the same reason for the same probe.
 pub(super) const TRAVERSAL_SEGMENT: &str = "the request path contains a traversal segment";
 
-static PROXY_CLIENT: LazyLock<Result<reqwest::Client, Arc<str>>> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| -> Arc<str> { e.to_string().into() })
-});
-
 /// How long an upload gets to confirm it stopped before its answer goes out.
 ///
 /// The acknowledgement arrives only on another poll of the outbound request
@@ -36,12 +31,6 @@ static PROXY_CLIENT: LazyLock<Result<reqwest::Client, Arc<str>>> = LazyLock::new
 /// generous. Unbounded, a head in hand waits for as long as that upstream
 /// connection lives.
 const UPLOAD_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-pub(crate) fn proxy_client() -> Result<&'static reqwest::Client, RuntimeError> {
-    PROXY_CLIENT
-        .as_ref()
-        .map_err(|e| RuntimeError::Http(Arc::clone(e)))
-}
 
 /// Check whether a header must not be forwarded between hops.
 fn is_hop_by_hop(name: &str) -> bool {
@@ -408,24 +397,126 @@ pub(super) enum ProxyFailure {
     /// Carries a diagnostic rather than a fixed sentence: both faults in this
     /// class are reported by a library, so neither states its reason in advance.
     Unsendable(Diagnostic),
-    /// No usable upstream answer arrived.
+    /// One phase of the forward failed, naming the phase it failed in.
     ///
-    /// Either no response head arrived, or a head arrived whose body could not
-    /// be read. Both leave the caller nothing to forward, and an expired
-    /// deadline reads the same on either, so both answer as one fault.
-    Upstream(RuntimeError),
+    /// The phase is the provenance. Establishing the transport, taking a head,
+    /// and waiting for the next body frame are three configured bounds on one
+    /// route, and an operator reading one failure has to learn which of them
+    /// ended the work — a dead upstream and a slow one are the same status and
+    /// nothing else.
+    Phase(PhaseFailure),
 }
 
-impl From<RuntimeError> for ProxyFailure {
-    fn from(error: RuntimeError) -> Self {
-        Self::Upstream(error)
+/// The phase of one proxied request a failure belongs to.
+///
+/// Closed and exhaustively matched: each value is a dimension
+/// [`ProxyPolicy`](super::ProxyPolicy) configures separately, so a new phase is
+/// a deliberate addition here rather than a string a caller invents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ProxyPhase {
+    /// Establishing the upstream transport.
+    Connect,
+    /// Building and sending the request, up to a usable upstream head.
+    Request,
+    /// Waiting for the next frame of the upstream answer's body.
+    UpstreamIdle,
+    /// Carrying this request's own payload to the upstream.
+    Upload,
+    /// Carrying the upstream answer's payload to the peer.
+    Download,
+}
+
+impl ProxyPhase {
+    /// The bounded name this phase is reported under.
+    ///
+    /// A closed vocabulary of static text, for the reason
+    /// [`DeadlineBoundary`] has one: an operator filters on it, so it can never
+    /// become a value derived from a request.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Request => "request",
+            Self::UpstreamIdle => "upstream idle",
+            Self::Upload => "upload",
+            Self::Download => "download",
+        }
     }
 }
+
+impl fmt::Display for ProxyPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// One phase's failure, and the typed cause the phase's own owner minted.
+///
+/// Both halves are needed. The cause names the bound — a crossed deadline names
+/// its [`DeadlineBoundary`], a crossed maximum its
+/// [`ByteBoundary`](super::ByteBoundary) — and the phase names the leg of the
+/// forward that was running, which is what a transport fault carrying only a
+/// library's own account cannot say.
+#[derive(Debug)]
+pub(super) struct PhaseFailure {
+    phase: ProxyPhase,
+    cause: RuntimeError,
+}
+
+impl PhaseFailure {
+    /// The failure one phase reports from the cause its own owner minted.
+    const fn new(phase: ProxyPhase, cause: RuntimeError) -> Self {
+        Self { phase, cause }
+    }
+
+    /// The typed cause this phase failed with.
+    pub(super) const fn cause(&self) -> &RuntimeError {
+        &self.cause
+    }
+}
+
+impl fmt::Display for PhaseFailure {
+    /// The cause, under the phase that raised it — unless the cause already
+    /// names its own bound.
+    ///
+    /// A crossed deadline or maximum states the boundary it crossed, and every
+    /// proxy boundary is named for its phase already: "proxy download failed:
+    /// byte limit exceeded: proxy_buffered_response" tells an operator the same
+    /// thing twice. A transport fault carries a library's own account and names
+    /// nothing, so there the phase is the whole of the provenance.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match names_its_bound(&self.cause) {
+            true => fmt::Display::fmt(&self.cause, f),
+            false => write!(f, "proxy {} failed: {}", self.phase, self.cause),
+        }
+    }
+}
+
+/// Whether one cause already names the bound it crossed.
+fn names_its_bound(cause: &RuntimeError) -> bool {
+    matches!(
+        cause,
+        RuntimeError::DeadlineExceeded(_) | RuntimeError::LimitExceeded(_)
+    )
+}
+
+// No `source`: the cause is already rendered above, and the recorded diagnostic
+// walks the chain — implementing it would print the same sentence twice.
+impl std::error::Error for PhaseFailure {}
 
 impl ProxyFailure {
     /// A fault this proxy raised on itself, in the shape a refusal carries it.
     fn unsendable(error: RuntimeError) -> Self {
         Self::Unsendable(Arc::new(error))
+    }
+
+    /// One phase's failure, carrying the cause that phase's owner minted.
+    const fn phase(phase: ProxyPhase, cause: RuntimeError) -> Self {
+        Self::Phase(PhaseFailure::new(phase, cause))
+    }
+
+    /// One phase's failure from a deadline that phase configured.
+    fn expired(phase: ProxyPhase, boundary: DeadlineBoundary) -> Self {
+        Self::phase(phase, RuntimeError::DeadlineExceeded(boundary))
     }
 }
 
@@ -434,7 +525,7 @@ impl fmt::Display for ProxyFailure {
         match self {
             Self::UnbuildableTarget(detail) => f.write_str(detail),
             Self::Unsendable(diagnostic) => fmt::Display::fmt(diagnostic, f),
-            Self::Upstream(error) => fmt::Display::fmt(error, f),
+            Self::Phase(failure) => fmt::Display::fmt(failure, f),
         }
     }
 }
@@ -450,26 +541,37 @@ impl fmt::Display for ProxyFailure {
 fn upstream_builder(
     method: reqwest::Method,
     path_and_query: &str,
-    backend: &str,
-    prefix: &str,
+    target: &ProxyTarget<'_>,
 ) -> Result<reqwest::RequestBuilder, ProxyFailure> {
-    let remainder = match strip_prefix(path_and_query, prefix) {
+    let remainder = match strip_prefix(path_and_query, target.prefix) {
         Some(remainder) => remainder,
         None => return Err(ProxyFailure::UnbuildableTarget(TRAVERSAL_SEGMENT)),
     };
-    let url = format!("{backend}{remainder}");
-    let client = proxy_client().map_err(ProxyFailure::unsendable)?;
+    let url = format!("{}{remainder}", target.backend);
+    let client = target.upstream.client().map_err(ProxyFailure::unsendable)?;
     Ok(client.request(method, &url))
+}
+
+/// Where one forward sends, and the frozen owner it sends through.
+///
+/// The three travel together because a route froze them together: the backend
+/// it forwards to, the prefix it rewrites, and the client and phase deadlines
+/// its policy produced. Passed as one value so no caller can pair one route's
+/// backend with another route's client.
+#[derive(Clone, Copy)]
+pub(super) struct ProxyTarget<'a> {
+    pub(super) backend: &'a str,
+    pub(super) prefix: &'a str,
+    pub(super) upstream: &'a ProxyUpstream,
 }
 
 /// Build a reqwest builder for upstream forwarding with a buffered body.
 fn build_upstream_request(
     req: &ProxyRequest,
-    backend: &str,
-    prefix: &str,
+    target: &ProxyTarget<'_>,
 ) -> Result<reqwest::RequestBuilder, ProxyFailure> {
     let method = to_reqwest_method(&req.method).map_err(ProxyFailure::unsendable)?;
-    let builder = upstream_builder(method, &req.path, backend, prefix)?;
+    let builder = upstream_builder(method, &req.path, target)?;
     let forwarded = forward_headers(
         builder,
         &collected_headers(req),
@@ -504,14 +606,12 @@ fn incoming_headers(parts: &IncomingProxyParts) -> Box<[ForwardedHeader<'_>]> {
 fn build_upstream_request_streaming(
     parts: &IncomingProxyParts,
     upload: reqwest::Body,
-    backend: &str,
-    prefix: &str,
+    target: &ProxyTarget<'_>,
 ) -> Result<reqwest::RequestBuilder, ProxyFailure> {
     let builder = upstream_builder(
         routable_reqwest_method(parts.method),
         &parts.path_and_query,
-        backend,
-        prefix,
+        target,
     )?;
     let forwarded = forward_headers(
         builder,
@@ -564,8 +664,22 @@ struct UpstreamAnswer {
 }
 
 /// Send one built request and take the head of the answer it earns.
-async fn send_upstream(builder: reqwest::RequestBuilder) -> Result<UpstreamAnswer, ProxyFailure> {
-    let response = builder.send().await.map_err(map_reqwest_error)?;
+///
+/// Two phases meet here and are held apart. The request total bounds everything
+/// up to a usable head — construction, upload, and the head's arrival — and is
+/// enforced here because this is the last owner that can name it. What the send
+/// itself raises belongs to whichever phase it happened in: a transport that was
+/// never established is the connect phase's, whatever else Reqwest reports is
+/// the request phase's.
+async fn send_upstream(
+    builder: reqwest::RequestBuilder,
+    upstream: &ProxyUpstream,
+) -> Result<UpstreamAnswer, ProxyFailure> {
+    let sending = builder.send();
+    let sent = tokio::time::timeout(upstream.request_timeout(), sending)
+        .await
+        .map_err(|_| ProxyFailure::expired(ProxyPhase::Request, DeadlineBoundary::ProxyRequest))?;
+    let response = sent.map_err(sent_failure)?;
     let status = response.status().as_u16();
     let headers = collect_response_headers(&response);
     Ok(UpstreamAnswer {
@@ -573,6 +687,34 @@ async fn send_upstream(builder: reqwest::RequestBuilder) -> Result<UpstreamAnswe
         status,
         headers,
     })
+}
+
+/// Name the phase one Reqwest send failed in.
+///
+/// A connect that expired is the one deadline Reqwest owns, so it is reported
+/// under the boundary the policy configured rather than as an untyped timeout.
+/// Every other fault keeps the phase it happened in.
+fn sent_failure(error: reqwest::Error) -> ProxyFailure {
+    match (sent_phase(&error), error.is_timeout()) {
+        (ProxyPhase::Connect, true) => {
+            ProxyFailure::expired(ProxyPhase::Connect, DeadlineBoundary::ProxyConnect)
+        }
+        (phase, _) => ProxyFailure::phase(phase, map_reqwest_error(error)),
+    }
+}
+
+/// The phase one Reqwest fault happened in.
+///
+/// Reqwest states whether a fault reached the transport and whether it came from
+/// the request body, which is the whole distinction: a transport that was never
+/// established is the connect phase's, a payload that stopped arriving is this
+/// request's own upload, and what is left belongs to the request itself.
+fn sent_phase(error: &reqwest::Error) -> ProxyPhase {
+    match (error.is_connect(), error.is_body()) {
+        (true, _) => ProxyPhase::Connect,
+        (false, true) => ProxyPhase::Upload,
+        (false, false) => ProxyPhase::Request,
+    }
 }
 
 /// Forward a request to upstream and return a buffered camber Response.
@@ -586,33 +728,52 @@ async fn send_upstream(builder: reqwest::RequestBuilder) -> Result<UpstreamAnswe
 /// traversal probe must not be recorded as a backend outage, and
 /// [`proxy_forward`] settles a status from the same class alone.
 ///
-/// `buffered_limit` is the maximum the route registration froze, and `None` is
+/// The buffered maximum this route froze is the frozen owner's, and `None` is
 /// its named opt-out. Collection is the shared checked one every buffered
 /// Camber consumer performs, so an upstream body this route would refuse is
 /// refused before the crossing frame is retained — and the answer the peer gets
-/// carries no part of the payload that crossed it.
+/// carries no part of the payload that crossed it. Each of its frames is read
+/// under the quiet interval this route configured, so an upstream that commits a
+/// head and then stops sending is named as the idle phase rather than waited on.
 pub(super) async fn forward_request_buffered(
     req: ProxyRequest,
-    backend: &str,
-    prefix: &str,
-    buffered_limit: Option<usize>,
+    target: &ProxyTarget<'_>,
 ) -> Result<super::Response, ProxyFailure> {
-    let builder = build_upstream_request(&req, backend, prefix)?;
+    let builder = build_upstream_request(&req, target)?;
     let UpstreamAnswer {
         response,
         status,
         headers,
-    } = send_upstream(builder).await?;
+    } = send_upstream(builder, target.upstream).await?;
     let body = super::checked_collect::collect_response(
         response,
         super::boundary::ByteBoundary::ProxyBufferedResponse,
-        buffered_limit,
+        target.upstream.buffered_limit(),
+        Some(super::checked_collect::CollectionIdle::new(
+            target.upstream.upstream_idle(),
+            DeadlineBoundary::ProxyUpstreamIdle,
+        )),
     )
-    .await?;
+    .await
+    .map_err(collected_failure)?;
     Ok(headers.iter().fold(
         super::Response::bytes_raw(status, body),
         |answered, (name, value)| answered.with_header(name, value),
     ))
+}
+
+/// Name the phase one buffered collection failed in.
+///
+/// The quiet interval and everything else the answer's body did are two phases
+/// on one route: an upstream that stopped sending is the idle phase's, and a
+/// body too large or unreadable is the download the route could not carry.
+fn collected_failure(error: RuntimeError) -> ProxyFailure {
+    match error {
+        RuntimeError::DeadlineExceeded(DeadlineBoundary::ProxyUpstreamIdle) => {
+            ProxyFailure::phase(ProxyPhase::UpstreamIdle, error)
+        }
+        error => ProxyFailure::phase(ProxyPhase::Download, error),
+    }
 }
 
 /// Forward a request to a backend service and return a buffered response.
@@ -633,11 +794,12 @@ pub(super) async fn forward_request_buffered(
 /// traffic through this path, so a third spelling of that rule is user-visible
 /// the moment it drifts.
 ///
-/// The upstream body is collected under [`ProxyPolicy`]'s default maximum,
-/// which is the same one a route registered with [`Router::proxy`] freezes.
-/// This entry point takes no policy — it is handed a backend and a prefix and
-/// nothing else — so the documented default is the only maximum it can name,
-/// and a caller who needs another one registers the route instead.
+/// The upstream is reached under [`ProxyPolicy`]'s documented defaults, which
+/// are the same ones a route registered with [`Router::proxy`] freezes. This
+/// entry point takes no policy — it is handed a backend and a prefix and nothing
+/// else — so the defaults are the only bounds it can name, and a caller who
+/// needs others registers the route instead. Its client is frozen here, with
+/// this call, and shared with nothing.
 ///
 /// [`ProxyPolicy`]: super::ProxyPolicy
 /// [`Router::proxy`]: super::Router::proxy
@@ -649,10 +811,14 @@ pub fn proxy_forward(
     let proxy_req = ProxyRequest::from_request(req);
     let backend: Box<str> = backend.into();
     let prefix: Box<str> = prefix.into();
-    let buffered_limit =
-        super::proxy_policy::frozen_buffered_response_limit(&super::ProxyPolicy::default());
+    let upstream = ProxyUpstream::defaults();
     Box::pin(async move {
-        match forward_request_buffered(proxy_req, &backend, &prefix, buffered_limit).await {
+        let target = ProxyTarget {
+            backend: &backend,
+            prefix: &prefix,
+            upstream,
+        };
+        match forward_request_buffered(proxy_req, &target).await {
             Ok(resp) => resp,
             Err(failure) => {
                 tracing::warn!(error = %failure, "proxy forward failed");
@@ -689,25 +855,51 @@ pub(super) enum UploadDisposition {
 /// Spawn a task that streams response body chunks into an mpsc channel.
 ///
 /// Shared between buffered-request and incoming-streaming proxy paths.
+///
+/// Each frame is read under the quiet interval this route configured, and only
+/// the read is: time spent waiting for the downstream peer to take a frame is
+/// backpressure, not an upstream that went quiet, and charging it here would end
+/// healthy transfers whose reader is simply slower than their producer.
 fn spawn_response_streamer(
     resp: reqwest::Response,
+    idle: std::time::Duration,
 ) -> tokio::sync::mpsc::Receiver<Result<bytes::Bytes, super::body::BodyError>> {
     let (tx, rx) = tokio::sync::mpsc::channel(super::DEFAULT_CHANNEL_BUFFER);
     tokio::spawn(async move {
         use futures_util::StreamExt;
         let mut stream = resp.bytes_stream();
         loop {
-            let result = tokio::select! {
+            let read = tokio::select! {
                 biased;
                 () = tx.closed() => break,
-                result = stream.next() => result,
+                read = tokio::time::timeout(idle, stream.next()) => read,
             };
-            if !forward_stream_result(&tx, result).await {
+            if !forward_stream_read(&tx, read).await {
                 break;
             }
         }
     });
     rx
+}
+
+/// Hand one read of the upstream body on, or end the transfer with its cause.
+async fn forward_stream_read(
+    tx: &tokio::sync::mpsc::Sender<Result<bytes::Bytes, super::body::BodyError>>,
+    read: Result<Option<Result<bytes::Bytes, reqwest::Error>>, tokio::time::error::Elapsed>,
+) -> bool {
+    match read {
+        Ok(result) => forward_stream_result(tx, result).await,
+        Err(_) => {
+            let expired = RuntimeError::DeadlineExceeded(DeadlineBoundary::ProxyUpstreamIdle);
+            tracing::warn!(error = %expired, "proxy upstream body went quiet");
+            let _ = tx
+                .send(Err(super::body::BodyError::UpstreamProxy(
+                    expired.to_string().into(),
+                )))
+                .await;
+            false
+        }
+    }
 }
 
 async fn forward_stream_result(
@@ -739,9 +931,10 @@ async fn forward_stream_result(
 /// the moment it became ready, not after this call has already returned it.
 async fn stream_upstream(
     builder: reqwest::RequestBuilder,
+    upstream: &ProxyUpstream,
     observer: Option<&Arc<LifecycleScript>>,
 ) -> Result<StreamingProxyResponse, ProxyFailure> {
-    let answer = send_upstream(builder).await?;
+    let answer = send_upstream(builder, upstream).await?;
     LifecycleScript::pause_at(
         observer.map(Arc::as_ref),
         LifecycleCheckpoint::StreamingUpstreamHeadReady,
@@ -750,7 +943,7 @@ async fn stream_upstream(
     Ok(StreamingProxyResponse {
         status: answer.status,
         headers: answer.headers,
-        rx: spawn_response_streamer(answer.response),
+        rx: spawn_response_streamer(answer.response, upstream.upstream_idle()),
         upload: UploadDisposition::Drained,
     })
 }
@@ -761,10 +954,10 @@ async fn stream_upstream(
 /// nothing to settle: only the answer is still outstanding.
 pub(super) async fn forward_request_streaming(
     req: ProxyRequest,
-    backend: &str,
-    prefix: &str,
+    target: &ProxyTarget<'_>,
 ) -> Result<StreamingProxyResponse, UploadFailure> {
-    Ok(stream_upstream(build_upstream_request(&req, backend, prefix)?, None).await?)
+    let builder = build_upstream_request(&req, target)?;
+    Ok(stream_upstream(builder, target.upstream, None).await?)
 }
 
 /// Forward an incoming hyper body stream to upstream under its admission.
@@ -773,17 +966,26 @@ pub(super) async fn forward_request_streaming(
 /// bound this request's own route admitted and forwarded as it arrives. What
 /// settles the request is the race between that bound and the upstream's
 /// answer, which [`settle_upload`] owns.
+///
+/// `upload` is this direction's own transfer owner, already narrowed to the
+/// deadlines it may enforce: route-aware admission stays the single authority
+/// over payload bytes, and transfer policy contributes the quiet interval and
+/// the lifetime that authority does not carry.
 pub(super) async fn forward_incoming_streaming(
     parts: IncomingProxyParts,
     incoming: hyper::body::Incoming,
     admitted: AdmittedBody,
-    backend: &str,
-    prefix: &str,
+    upload: TransferOwner,
+    target: &ProxyTarget<'_>,
     observer: Option<&Arc<LifecycleScript>>,
 ) -> Result<StreamingProxyResponse, UploadFailure> {
-    let (upload, coordinator) = bounded_upload(incoming, admitted, observer);
-    let builder = build_upstream_request_streaming(&parts, upload, backend, prefix)?;
-    settle_upload(coordinator, stream_upstream(builder, observer)).await
+    let (body, coordinator) = bounded_upload(incoming, admitted, upload, observer);
+    let builder = build_upstream_request_streaming(&parts, body, target)?;
+    settle_upload(
+        coordinator,
+        stream_upstream(builder, target.upstream, observer),
+    )
+    .await
 }
 
 /// Why one streaming forward committed no upstream answer.
@@ -831,9 +1033,11 @@ enum UploadEnd {
 }
 
 /// What one poll of a bounded upload produced.
+///
+/// No payload-free step: the transfer owner skips trailers and empty frames
+/// before this upload sees them, so every step here is a frame to measure or an
+/// end to report.
 enum UploadStep {
-    /// A frame with no payload. Nothing to measure and nothing to forward.
-    Skipped,
     /// One data frame the bound admitted.
     Forward(bytes::Bytes),
     /// The upload ends here.
@@ -847,7 +1051,14 @@ enum UploadStep {
 /// refusal, a stop, a dropped upstream request, a cancelled request future —
 /// releases that permit exactly once.
 struct BoundedUpload {
-    incoming: hyper::body::Incoming,
+    /// The peer's payload under this direction's own transfer owner.
+    ///
+    /// The owner carries the quiet interval, the lifetime, and the operation's
+    /// cancellation, shutdown, and peer-lifetime authority. It carries no byte
+    /// maximum: [`BodyBudget`] below is this request's single payload-byte
+    /// authority, and a second counter over the same frames would be a second
+    /// authority over the same bytes.
+    transfer: Transfer<IncomingSource<hyper::body::Incoming>>,
     budget: BodyBudget,
     permit: Option<BodyPermit>,
     /// The channel a refusal travels on, and the one the coordinator closes to
@@ -877,12 +1088,13 @@ struct UploadSignals {
 fn bounded_upload(
     incoming: hyper::body::Incoming,
     admitted: AdmittedBody,
+    upload: TransferOwner,
     observer: Option<&Arc<LifecycleScript>>,
 ) -> (reqwest::Body, UploadCoordinator) {
     let (signals, coordinator) = upload_coordination(observer);
     match hyper::body::Body::is_end_stream(&incoming) {
         true => (drained_upload(admitted.permit, signals), coordinator),
-        false => live_upload(incoming, admitted, signals, coordinator, observer),
+        false => live_upload(incoming, admitted, upload, signals, coordinator, observer),
     }
 }
 
@@ -917,13 +1129,14 @@ fn drained_upload(permit: Option<BodyPermit>, signals: UploadSignals) -> reqwest
 fn live_upload(
     incoming: hyper::body::Incoming,
     admitted: AdmittedBody,
+    upload: TransferOwner,
     signals: UploadSignals,
     coordinator: UploadCoordinator,
     observer: Option<&Arc<LifecycleScript>>,
 ) -> (reqwest::Body, UploadCoordinator) {
     let upload = BoundedUpload {
         budget: BodyBudget::new(&admitted),
-        incoming,
+        transfer: upload.deadlines_only().over(IncomingSource::new(incoming)),
         permit: admitted.permit,
         refusal: Some(signals.refusal),
         finished: Some(signals.finished),
@@ -953,12 +1166,9 @@ impl BoundedUpload {
 
     /// Poll until this upload has a frame to forward or an end to report.
     async fn forward_next(mut self) -> Option<(UploadItem, Self)> {
-        loop {
-            match self.step().await {
-                UploadStep::Skipped => continue,
-                UploadStep::Forward(data) => return Some((Ok(data), self)),
-                UploadStep::End(end) => return self.ended(end),
-            }
+        match self.step().await {
+            UploadStep::Forward(data) => Some((Ok(data), self)),
+            UploadStep::End(end) => self.ended(end),
         }
     }
 
@@ -969,29 +1179,26 @@ impl BoundedUpload {
     /// ever look at.
     async fn step(&mut self) -> UploadStep {
         let Self {
-            incoming, refusal, ..
+            transfer, refusal, ..
         } = self;
-        let polled = tokio::select! {
+        let read = tokio::select! {
             biased;
             () = stop_requested(refusal.as_mut()) => return UploadStep::End(UploadEnd::Stopped),
-            frame = <hyper::body::Incoming as http_body_util::BodyExt>::frame(incoming) => frame,
+            read = transfer.frame() => read,
         };
-        self.measure(polled).await
+        self.measure(read).await
     }
 
-    /// Measure one polled frame against the bound this request was admitted under.
-    async fn measure(
-        &mut self,
-        polled: Option<Result<hyper::body::Frame<bytes::Bytes>, hyper::Error>>,
-    ) -> UploadStep {
-        let frame = match polled {
-            None => return UploadStep::End(UploadEnd::Drained),
-            Some(Err(error)) => return UploadStep::End(unreadable(error)),
-            Some(Ok(frame)) => frame,
-        };
-        // Trailers carry no payload, so they are neither counted nor measured.
-        let Ok(data) = frame.into_data() else {
-            return UploadStep::Skipped;
+    /// Measure one delivered frame against the bound this request was admitted
+    /// under.
+    ///
+    /// Only payload arrives here: the transfer owner skips trailers and empty
+    /// frames, so neither is counted and neither restarts a quiet interval.
+    async fn measure(&mut self, read: Result<Option<bytes::Bytes>, TransferFailure>) -> UploadStep {
+        let data = match read {
+            Ok(None) => return UploadStep::End(UploadEnd::Drained),
+            Err(failure) => return UploadStep::End(transfer_end(&failure)),
+            Ok(Some(data)) => data,
         };
         LifecycleScript::count_body_frame(self.observer.as_deref());
         self.admit(data).await
@@ -1088,13 +1295,18 @@ fn refusal_of(end: UploadEnd) -> Option<Rejected> {
     }
 }
 
-/// The refusal a payload that stopped arriving is answered with.
+/// How one upload ends when its transfer owner fixed a terminal.
 ///
-/// The transport's own fault, kept apart from the bound: a peer whose
-/// connection failed mid-upload sent no oversized request, and telling it to
-/// send less would name the wrong fault.
-fn unreadable(error: hyper::Error) -> UploadEnd {
-    UploadEnd::Refused(Rejected::body_unreadable(Box::new(error)))
+/// The owner that measured the bound is the one that mints the refusal naming
+/// it, so nothing is restated here. A terminal the declared table gives no
+/// refusal — a shutdown, a forced cancellation, a peer whose lifetime ended, or
+/// a request deadline the coordinator answers — stops this upload without one:
+/// its answer belongs to the stage that selected it, not to the body.
+fn transfer_end(failure: &TransferFailure) -> UploadEnd {
+    match failure.refusal() {
+        Some(rejected) => UploadEnd::Refused(rejected),
+        None => UploadEnd::Stopped,
+    }
 }
 
 /// Whether the coordinator has asked this upload to stop.

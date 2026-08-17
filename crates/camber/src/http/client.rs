@@ -586,7 +586,11 @@ async fn read_response(
         })
         .collect();
 
-    let body_bytes = collect_response(resp, ByteBoundary::ClientResponse, response_limit).await?;
+    // No quiet interval of this collection's own: a client's response idle
+    // deadline is configured on its Reqwest client and enforced per read there,
+    // so arming a second timer here would be a second owner of one dimension.
+    let body_bytes =
+        collect_response(resp, ByteBoundary::ClientResponse, response_limit, None).await?;
 
     Ok(Response::new(status, body_bytes, headers))
 }

@@ -4,7 +4,8 @@ use super::body_admission::{
 use super::method::Method;
 use super::middleware::MiddlewareFn;
 use super::multipart::{MultipartLimits, MultipartStream};
-use super::proxy_policy::{ProxyPolicy, frozen_buffered_response_limit};
+use super::proxy_policy::ProxyPolicy;
+use super::proxy_upstream::{ProxyClients, ProxyUpstream};
 use super::rejection::{Rejection, RejectionContext, RejectionMapper, shared_mapper};
 use super::response::HandlerOutcome;
 use super::response::IntoResponse;
@@ -72,6 +73,8 @@ pub struct Router {
     body_ceiling: ConfiguredCeiling,
     body_policy: Option<Arc<BodyPolicy>>,
     budgets: super::route_budgets::RouteBudgets,
+    /// The upstream owners this graph's proxy registrations were frozen with.
+    proxy_clients: ProxyClients,
     #[cfg(feature = "grpc")]
     grpc_router: Option<super::dispatch::GrpcRouter>,
 }
@@ -87,6 +90,7 @@ impl Default for Router {
             body_ceiling: ConfiguredCeiling::default(),
             body_policy: None,
             budgets: super::route_budgets::RouteBudgets::default(),
+            proxy_clients: ProxyClients::default(),
             #[cfg(feature = "grpc")]
             grpc_router: None,
         }
@@ -598,7 +602,8 @@ impl Router {
     /// never retained, no part of the upstream payload reaches the peer, and
     /// the bound that was crossed is recorded for the operator.
     pub fn proxy_with_policy(&mut self, prefix: &str, backend: &str, policy: ProxyPolicy) {
-        self.insert_proxy_routes(prefix, backend, None, ProxyRegistration::buffered(policy));
+        let registration = self.buffered_registration(policy);
+        self.insert_proxy_routes(prefix, backend, None, registration);
     }
 
     /// Register a health-checked reverse proxy.
@@ -621,12 +626,8 @@ impl Router {
         healthy: Arc<AtomicBool>,
         policy: ProxyPolicy,
     ) {
-        self.insert_proxy_routes(
-            prefix,
-            backend,
-            Some(healthy),
-            ProxyRegistration::buffered(policy),
-        );
+        let registration = self.buffered_registration(policy);
+        self.insert_proxy_routes(prefix, backend, Some(healthy), registration);
     }
 
     /// Register a streaming reverse proxy under `prefix`.
@@ -635,8 +636,23 @@ impl Router {
     /// with backpressure instead of being buffered in memory. Middleware acts as
     /// a request gate only — it can reject before the upstream call, but does not
     /// wrap the streamed response.
+    ///
+    /// The route runs under [`ProxyPolicy`]'s documented defaults. Use
+    /// [`Router::proxy_stream_with_policy`] to name the upload and download
+    /// budgets and the phase deadlines it forwards under.
     pub fn proxy_stream(&mut self, prefix: &str, backend: &str) {
-        self.insert_proxy_routes(prefix, backend, None, ProxyRegistration::Streaming);
+        self.proxy_stream_with_policy(prefix, backend, ProxyPolicy::default());
+    }
+
+    /// Register a streaming reverse proxy under the policy `policy` names.
+    ///
+    /// The upload and download budgets are frozen with the route, along with the
+    /// client its phase deadlines produced. Route-aware body admission remains
+    /// this request's payload-byte authority: an upload budget here narrows the
+    /// bytes that route admits and never widens them.
+    pub fn proxy_stream_with_policy(&mut self, prefix: &str, backend: &str, policy: ProxyPolicy) {
+        let registration = self.streaming_registration(policy);
+        self.insert_proxy_routes(prefix, backend, None, registration);
     }
 
     /// Register a health-checked streaming reverse proxy.
@@ -644,7 +660,33 @@ impl Router {
     /// Behaves like `proxy_stream()` but checks the `healthy` flag before forwarding.
     /// When `healthy` is `false`, returns 503 immediately.
     pub fn proxy_checked_stream(&mut self, prefix: &str, backend: &str, healthy: Arc<AtomicBool>) {
-        self.insert_proxy_routes(prefix, backend, Some(healthy), ProxyRegistration::Streaming);
+        self.proxy_checked_stream_with_policy(prefix, backend, healthy, ProxyPolicy::default());
+    }
+
+    /// Register a health-checked streaming reverse proxy under `policy`.
+    ///
+    /// [`Router::proxy_stream_with_policy`]'s health-checked form: the frozen
+    /// budgets and deadlines are the same, and an unhealthy backend is refused
+    /// with 503 before the upstream is reached at all.
+    pub fn proxy_checked_stream_with_policy(
+        &mut self,
+        prefix: &str,
+        backend: &str,
+        healthy: Arc<AtomicBool>,
+        policy: ProxyPolicy,
+    ) {
+        let registration = self.streaming_registration(policy);
+        self.insert_proxy_routes(prefix, backend, Some(healthy), registration);
+    }
+
+    /// Freeze one buffered registration's upstream owner on this graph.
+    fn buffered_registration(&mut self, policy: ProxyPolicy) -> ProxyRegistration {
+        ProxyRegistration::Buffered(self.proxy_clients.frozen(policy))
+    }
+
+    /// Freeze one streaming registration's upstream owner on this graph.
+    fn streaming_registration(&mut self, policy: ProxyPolicy) -> ProxyRegistration {
+        ProxyRegistration::Streaming(self.proxy_clients.frozen(policy))
     }
 
     fn insert_proxy_routes(
@@ -841,25 +883,18 @@ fn static_route_handler(
 
 /// How one registered proxy route carries its answer back.
 ///
-/// The buffered kind names the maximum it collects under; the streaming kind
-/// retains nothing to bound. Stated as the two kinds rather than as a flag and
-/// an ignored maximum, so a registration that can name a ceiling and one that
-/// cannot are told apart by the type the caller built.
+/// Both kinds carry the upstream owner their policy froze; they differ in what
+/// they do with the answer. Stated as the two kinds rather than as a flag, so a
+/// registration that collects an answer and one that streams it are told apart
+/// by the type the caller built.
 enum ProxyRegistration {
-    /// Buffered, under the maximum this route froze.
-    Buffered { buffered_limit: Option<usize> },
+    /// Buffered, under the maximum this route's owner froze.
+    Buffered(Arc<ProxyUpstream>),
     /// Streamed to the peer with backpressure.
-    Streaming,
+    Streaming(Arc<ProxyUpstream>),
 }
 
 impl ProxyRegistration {
-    /// Freeze the buffered maximum `policy` names.
-    fn buffered(policy: ProxyPolicy) -> Self {
-        Self::Buffered {
-            buffered_limit: frozen_buffered_response_limit(&policy),
-        }
-    }
-
     /// The route this registration mounts under one pattern.
     fn route_handler(
         &self,
@@ -867,18 +902,29 @@ impl ProxyRegistration {
         prefix: Arc<str>,
         healthy: Option<Arc<AtomicBool>>,
     ) -> RouteHandler {
-        match *self {
-            Self::Buffered { buffered_limit } => RouteHandler::Proxy {
+        match self {
+            Self::Buffered(upstream) => RouteHandler::Proxy {
                 backend,
                 prefix,
                 healthy,
-                buffered_limit,
+                upstream: Arc::clone(upstream),
             },
-            Self::Streaming => RouteHandler::ProxyStream {
+            Self::Streaming(upstream) => RouteHandler::ProxyStream {
                 backend,
                 prefix,
                 healthy,
+                upstream: Arc::clone(upstream),
             },
         }
     }
+}
+
+/// The upstream owner each of one router's proxy registrations froze.
+///
+/// A test seam, not API, on the same footing as the frozen-ceiling accessors:
+/// the value is the identity of the owner itself, which is what tells a shared
+/// owner from a second one holding equal configuration.
+#[doc(hidden)]
+pub fn frozen_proxy_client_identities(router: &Router) -> Box<[usize]> {
+    router.proxy_clients.identities()
 }

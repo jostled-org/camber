@@ -144,6 +144,7 @@ mod policy_value;
 #[cfg(feature = "profiling")]
 mod profiling;
 pub(crate) mod proxy_policy;
+mod proxy_upstream;
 /// Rate limiting middleware.
 pub mod rate_limit;
 mod record;
@@ -152,7 +153,7 @@ mod request;
 mod request_budget;
 mod response;
 mod route_budgets;
-mod router;
+pub(crate) mod router;
 mod server;
 mod server_lifecycle;
 pub(crate) mod server_policy;

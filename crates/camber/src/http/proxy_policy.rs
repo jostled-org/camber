@@ -143,6 +143,36 @@ impl ProxyPolicy {
             ..self
         }
     }
+
+    /// How long establishing this route's upstream transport may take.
+    pub(super) const fn connect(self) -> Duration {
+        self.connect
+    }
+
+    /// How long this route's upstream request may run before a usable head.
+    pub(super) const fn request(self) -> Duration {
+        self.request
+    }
+
+    /// The longest quiet interval this route allows between upstream frames.
+    pub(super) const fn upstream_idle(self) -> Duration {
+        self.upstream_idle
+    }
+
+    /// The buffered maximum this route collects an upstream answer under.
+    pub(super) const fn buffered_response(self) -> Option<usize> {
+        self.buffered_response
+    }
+
+    /// The budget this route's streaming upload runs under.
+    pub(super) const fn upload(self) -> TransferBudget {
+        self.upload
+    }
+
+    /// The budget this route's streaming download runs under.
+    pub(super) const fn download(self) -> TransferBudget {
+        self.download
+    }
 }
 
 /// The buffered maximum one proxy route freezes from `policy`.
@@ -155,5 +185,5 @@ impl ProxyPolicy {
 /// Pure: one field out, no allocation and no state.
 #[doc(hidden)]
 pub const fn frozen_buffered_response_limit(policy: &ProxyPolicy) -> Option<usize> {
-    policy.buffered_response
+    policy.buffered_response()
 }

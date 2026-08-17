@@ -59,7 +59,9 @@ pub(super) enum Terminal<'a> {
     Proxy {
         backend: Arc<str>,
         prefix: Arc<str>,
-        buffered_limit: Option<usize>,
+        /// The upstream owner this route froze: its client, its phase
+        /// deadlines, and the maximum it collects an answer under.
+        upstream: Arc<super::proxy_upstream::ProxyUpstream>,
     },
 }
 
@@ -80,12 +82,12 @@ impl Terminal<'_> {
             Self::Proxy {
                 backend,
                 prefix,
-                buffered_limit,
+                upstream,
             } => Box::pin(forward_proxy(
                 ProxyRequest::from_request(req),
                 backend,
                 prefix,
-                buffered_limit,
+                upstream,
                 scope,
             )),
         }
@@ -152,12 +154,15 @@ async fn forward_proxy(
     proxy_req: ProxyRequest,
     backend: Arc<str>,
     prefix: Arc<str>,
-    buffered_limit: Option<usize>,
+    upstream: Arc<super::proxy_upstream::ProxyUpstream>,
     scope: RejectionScope,
 ) -> Response {
-    match super::async_proxy::forward_request_buffered(proxy_req, &backend, &prefix, buffered_limit)
-        .await
-    {
+    let target = super::async_proxy::ProxyTarget {
+        backend: &backend,
+        prefix: &prefix,
+        upstream: &upstream,
+    };
+    match super::async_proxy::forward_request_buffered(proxy_req, &target).await {
         Ok(resp) => resp,
         Err(failure) => scope.map(Rejected::from_proxy_failure(failure)),
     }

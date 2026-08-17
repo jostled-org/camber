@@ -939,9 +939,14 @@ async fn finish_dispatched<'a>(
             })
             .await
         }
-        DispatchResult::ProxyStream(req, backend, prefix) => {
-            let download = operation.download(super::TransferBudget::unbounded(), script);
-            handle_proxy_stream_response(req, &backend, &prefix, ctx, scope, start, download).await
+        DispatchResult::ProxyStream(req, backend, prefix, upstream) => {
+            let download = operation.download(upstream.download(), script);
+            let target = super::async_proxy::ProxyTarget {
+                backend: &backend,
+                prefix: &prefix,
+                upstream: &upstream,
+            };
+            handle_proxy_stream_response(req, &target, ctx, scope, start, download).await
         }
     }
 }
@@ -962,6 +967,25 @@ pub(super) async fn within_total<T>(
     tokio::time::timeout(remaining, producing)
         .await
         .map_err(|_| Rejected::request_timeout(operation.budget().total().unwrap_or(remaining)))
+}
+
+/// Produce one pre-commit answer under the operation's carried authority.
+///
+/// [`within_total`]'s counterpart for the owner whose answer races carried
+/// sources rather than only the clock: the streaming proxy's upstream head is
+/// uncommitted until this returns, so a shutdown, a forced cancellation, a peer
+/// whose lifetime ended, or an expired request total selected in the same
+/// scheduling turn ends the request instead of it. The failure is the shared
+/// one every selected terminal is answered through, so no second table decides
+/// which causes are mapped and which end silently.
+pub(super) async fn pre_commit<T>(
+    producing: impl std::future::Future<Output = T>,
+    operation: &OperationEnvelope,
+) -> Result<T, InboundFailure> {
+    operation
+        .pre_commit(producing)
+        .await
+        .map_err(|terminal| InboundFailure::of(terminal, operation.budget(), None))
 }
 
 /// Run one middleware gate inside the request total its operation carries.

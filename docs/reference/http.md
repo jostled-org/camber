@@ -850,6 +850,35 @@ unbounded or hostile body is read entirely into this process's memory: use it
 only for an upstream you control and trust, and prefer `proxy_stream(...)` for
 large payloads.
 
+### Distinct proxy phases
+
+`ProxyPolicy` bounds five things that fail separately, and each keeps its own
+name in the operator record:
+
+| Phase | Bound | Peer answer |
+| --- | --- | --- |
+| connect | `connect_timeout` | `502`, or `504` when the deadline expired |
+| request | `request_timeout`, up to a usable upstream head | `504` |
+| upstream idle | `upstream_idle_timeout`, between answer body frames | `504` before the head commits |
+| upload | `upload_budget`, narrowed by route body admission | the route's own body refusal |
+| download | `download_budget`, or `buffered_response_limit` | `502` buffered; post-commit the transport ends |
+
+A failure before the response head commits is mapped once through the route's
+rejection policy. A failure after it never rewrites the committed status: HTTP/1
+closes the connection and HTTP/2 resets that one stream. The peer is told only
+the safe sentence; the upstream's own account stays in the operator record.
+
+`proxy_stream_with_policy(...)` and `proxy_checked_stream_with_policy(...)`
+register a streaming route under a named policy; `proxy_stream(...)` and
+`proxy_checked_stream(...)` take the documented defaults. Route-aware body
+admission stays the request payload's byte authority — an `upload_budget`
+maximum narrows what the route admits and never widens it.
+
+Each registration freezes the client it forwards through, so a route's connect
+deadline is the route's. Two routes registered under equal policies on one
+router share that client; two routes under different policies never do, and no
+router shares one with another. There is no process-wide proxy client.
+
 ## Host Routing
 
 Use `HostRouter` to dispatch by `Host` header:

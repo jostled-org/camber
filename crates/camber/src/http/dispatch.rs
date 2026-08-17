@@ -2,6 +2,7 @@ use super::body_admission::{BodyPolicy, ConfiguredCeiling, RequestBodyMode, Reso
 use super::host_router::FrozenHostRouter;
 use super::method::Method;
 use super::middleware::{MiddlewareFn, Next, ResponseFuture, Terminal};
+use super::proxy_upstream::ProxyUpstream;
 use super::rejection::{
     Rejected, RejectionMapper, RejectionProtocol, RejectionScope, RequestIdentity,
 };
@@ -29,6 +30,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(super) struct StreamingProxyTarget {
     pub(super) backend: Arc<str>,
     pub(super) prefix: Arc<str>,
+    /// The upstream owner this route froze: its client, its phase deadlines,
+    /// and the two transfer budgets its directions run under.
+    pub(super) upstream: Arc<ProxyUpstream>,
     pub(super) params: RequestParams,
     pub(super) method: Method,
     /// The immutable body plan this route resolved to, in
@@ -282,7 +286,7 @@ pub(super) enum DispatchResult {
     #[cfg(feature = "ws")]
     ProxyWebSocket(Request, Arc<str>, Arc<str>),
     /// Streaming proxy: middleware gates the request, body streams with backpressure.
-    ProxyStream(Request, Arc<str>, Arc<str>),
+    ProxyStream(Request, Arc<str>, Arc<str>, Arc<ProxyUpstream>),
 }
 
 /// A dispatch that can only end in a buffered handler future.
@@ -327,7 +331,7 @@ impl DispatchResult {
             Self::Async(_, req)
             | Self::Stream(_, req)
             | Self::Sse(_, req)
-            | Self::ProxyStream(req, _, _) => req,
+            | Self::ProxyStream(req, _, _, _) => req,
             #[cfg(feature = "ws")]
             Self::WebSocket(_, req) | Self::ProxyWebSocket(req, _, _) => req,
         }
@@ -424,13 +428,19 @@ impl FrozenRouter {
                 RouteClass::HeadOnly
             }
             RouteHandler::ProxyStream {
-                backend, prefix, ..
+                backend,
+                prefix,
+                upstream,
+                ..
             } => RouteClass::StreamingProxy(StreamingProxyTarget {
                 backend: Arc::clone(backend),
                 prefix: Arc::clone(prefix),
+                upstream: Arc::clone(upstream),
                 params: self.gate_params(selected),
                 method,
-                plan: self.body_plan(route, RequestBodyMode::Streaming, outer),
+                plan: self
+                    .body_plan(route, RequestBodyMode::Streaming, outer)
+                    .narrowed_to(upstream.upload().max_bytes()),
             }),
             RouteHandler::Multipart(registration) => {
                 RouteClass::StreamingMultipart(StreamingMultipartTarget {
@@ -442,12 +452,16 @@ impl FrozenRouter {
             RouteHandler::Sse(_) => RouteClass::HeadOnly,
             #[cfg(feature = "ws")]
             RouteHandler::WebSocket(_) => RouteClass::HeadOnly,
-            RouteHandler::Async(_) | RouteHandler::Stream(_) | RouteHandler::Proxy { .. } => {
-                RouteClass::Buffered {
-                    method,
-                    plan: self.body_plan(route, RequestBodyMode::Buffered, outer),
-                }
-            }
+            RouteHandler::Proxy { upstream, .. } => RouteClass::Buffered {
+                method,
+                plan: self
+                    .body_plan(route, RequestBodyMode::Buffered, outer)
+                    .narrowed_to(upstream.upload().max_bytes()),
+            },
+            RouteHandler::Async(_) | RouteHandler::Stream(_) => RouteClass::Buffered {
+                method,
+                plan: self.body_plan(route, RequestBodyMode::Buffered, outer),
+            },
         }
     }
 
@@ -564,12 +578,15 @@ impl FrozenRouter {
                 backend,
                 prefix,
                 healthy,
-                buffered_limit,
+                upstream,
             } => self.dispatch_proxy_route(
-                ProxyKind::Buffered(*buffered_limit),
+                ProxyKind::Buffered,
                 req,
-                backend,
-                prefix,
+                ProxyRoute {
+                    backend,
+                    prefix,
+                    upstream,
+                },
                 healthy,
                 scope,
             ),
@@ -577,11 +594,15 @@ impl FrozenRouter {
                 backend,
                 prefix,
                 healthy,
+                upstream,
             } => self.dispatch_proxy_route(
                 ProxyKind::Streaming,
                 req,
-                backend,
-                prefix,
+                ProxyRoute {
+                    backend,
+                    prefix,
+                    upstream,
+                },
                 healthy,
                 scope,
             ),
@@ -608,8 +629,7 @@ impl FrozenRouter {
         &self,
         kind: ProxyKind,
         req: Request,
-        backend: &Arc<str>,
-        prefix: &Arc<str>,
+        route: ProxyRoute<'_>,
         healthy: &Option<Arc<AtomicBool>>,
         scope: &RejectionScope,
     ) -> DispatchResult {
@@ -621,7 +641,7 @@ impl FrozenRouter {
                     req,
                 )
             }
-            false => self.dispatch_proxy(kind, req, backend, prefix, scope),
+            false => self.dispatch_proxy(kind, req, route, scope),
         }
     }
 
@@ -665,25 +685,30 @@ impl FrozenRouter {
         &self,
         kind: ProxyKind,
         req: Request,
-        backend: &Arc<str>,
-        prefix: &Arc<str>,
+        route: ProxyRoute<'_>,
         scope: &RejectionScope,
     ) -> DispatchResult {
         #[cfg(feature = "ws")]
         if super::ws_proxy::is_ws_upgrade_request(&req) {
-            return DispatchResult::ProxyWebSocket(req, Arc::clone(backend), Arc::clone(prefix));
+            return DispatchResult::ProxyWebSocket(
+                req,
+                Arc::clone(route.backend),
+                Arc::clone(route.prefix),
+            );
         }
 
         match kind {
-            ProxyKind::Buffered(buffered_limit) => {
-                dispatch_proxy_through_middleware(self, req, backend, prefix, buffered_limit, scope)
-                    .into()
+            ProxyKind::Buffered => {
+                dispatch_proxy_through_middleware(self, req, route, scope).into()
             }
             // The gate mechanism, not a wrapped response: middleware gates the
             // request and the body streams with backpressure.
-            ProxyKind::Streaming => {
-                DispatchResult::ProxyStream(req, Arc::clone(backend), Arc::clone(prefix))
-            }
+            ProxyKind::Streaming => DispatchResult::ProxyStream(
+                req,
+                Arc::clone(route.backend),
+                Arc::clone(route.prefix),
+                Arc::clone(route.upstream),
+            ),
         }
     }
 
@@ -750,10 +775,22 @@ impl FrozenRouter {
 /// pre-check both kinds share has answered.
 enum ProxyKind {
     /// `Terminal::Proxy` through the middleware chain, response buffered under
-    /// the maximum this route froze.
-    Buffered(Option<usize>),
+    /// the maximum this route's frozen owner names.
+    Buffered,
     /// Gated by middleware, body streamed with backpressure.
     Streaming,
+}
+
+/// What one registered proxy route forwards to, borrowed from its handler.
+///
+/// The three travel together because the registration froze them together, and
+/// passing them as one value is what keeps a dispatch from pairing one route's
+/// backend with another route's frozen client.
+#[derive(Clone, Copy)]
+struct ProxyRoute<'a> {
+    backend: &'a Arc<str>,
+    prefix: &'a Arc<str>,
+    upstream: &'a Arc<ProxyUpstream>,
 }
 
 /// Dispatch a proxy request through the middleware chain.
@@ -763,15 +800,13 @@ enum ProxyKind {
 fn dispatch_proxy_through_middleware(
     router: &FrozenRouter,
     req: Request,
-    backend: &Arc<str>,
-    prefix: &Arc<str>,
-    buffered_limit: Option<usize>,
+    route: ProxyRoute<'_>,
     scope: &RejectionScope,
 ) -> AsyncDispatch {
     let terminal = Terminal::Proxy {
-        backend: Arc::clone(backend),
-        prefix: Arc::clone(prefix),
-        buffered_limit,
+        backend: Arc::clone(route.backend),
+        prefix: Arc::clone(route.prefix),
+        upstream: Arc::clone(route.upstream),
     };
     let next = Next::new(&router.middleware, terminal, scope.clone());
     let fut = next.call(&req);

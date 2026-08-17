@@ -1213,7 +1213,7 @@ impl Rejected {
         match failure {
             ProxyFailure::UnbuildableTarget(detail) => Self::decided(rejection, detail),
             ProxyFailure::Unsendable(diagnostic) => Self::plain(rejection, diagnostic),
-            ProxyFailure::Upstream(error) => Self::plain(rejection, Arc::new(error)),
+            ProxyFailure::Phase(failure) => Self::plain(rejection, Arc::new(failure)),
         }
     }
 
@@ -1279,9 +1279,24 @@ impl Rejected {
 /// all: a second spelling of the pair is a second place it can drift from this
 /// one.
 pub(super) fn proxy_failure_status(failure: &ProxyFailure) -> (u16, &'static str) {
+    match expired_upstream(failure) {
+        true => (504, GATEWAY_TIMEOUT_BODY),
+        false => (502, BAD_GATEWAY_BODY),
+    }
+}
+
+/// Whether one proxy fault is a deadline this route configured.
+///
+/// Only a phase that reached an upstream can expire, and it names which of its
+/// deadlines it crossed. The two faults that stopped before an upstream was
+/// reached waited on nothing, so neither can be one.
+fn expired_upstream(failure: &ProxyFailure) -> bool {
     match failure {
-        ProxyFailure::Upstream(RuntimeError::Timeout) => (504, GATEWAY_TIMEOUT_BODY),
-        _ => (502, BAD_GATEWAY_BODY),
+        ProxyFailure::Phase(failure) => matches!(
+            failure.cause(),
+            RuntimeError::Timeout | RuntimeError::DeadlineExceeded(_)
+        ),
+        ProxyFailure::UnbuildableTarget(_) | ProxyFailure::Unsendable(_) => false,
     }
 }
 

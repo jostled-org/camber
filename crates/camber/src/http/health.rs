@@ -7,6 +7,37 @@ use std::time::Duration;
 
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a health probe may take to establish its transport.
+const HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The client every backend health probe in this process shares.
+///
+/// The health checker's own transport, not a proxy route's. Its probes are one
+/// configuration — one fixed per-attempt deadline, stated above, and no policy a
+/// caller can vary — so one client is the whole population rather than a cache
+/// two configurations would share. A proxied route reaches its upstream through
+/// the client its own registration froze, which is a different owner entirely.
+static HEALTH_CLIENT: std::sync::LazyLock<Result<reqwest::Client, Arc<str>>> =
+    std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(HEALTH_CONNECT_TIMEOUT)
+            .build()
+            .map_err(|error| -> Arc<str> { error.to_string().into() })
+    });
+
+/// The client a health probe runs through.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError::Http`] carrying the account of the build this
+/// process could not complete.
+fn health_client() -> Result<&'static reqwest::Client, RuntimeError> {
+    HEALTH_CLIENT
+        .as_ref()
+        .map_err(|error| RuntimeError::Http(Arc::clone(error)))
+}
+
 /// Why a backend health probe failed.
 ///
 /// A probe has exactly two ways to fail and they call for different operator
@@ -92,7 +123,7 @@ impl Resource for ProxyHealthResource {
     }
 
     fn health_check(&self) -> Result<(), RuntimeError> {
-        let client = super::async_proxy::proxy_client()?;
+        let client = health_client()?;
         // Absence is typed, not fatal: this is a public method returning
         // `Result`, so a caller holding no runtime gets the error its signature
         // promises rather than an abort.
@@ -149,8 +180,8 @@ impl Resource for ProxyHealthResource {
 /// # Errors
 ///
 /// Returns `RuntimeError::InvalidArgument` if `interval` is below the minimum
-/// health interval, `RuntimeError::Http` if the shared proxy client could not
-/// be built, or `RuntimeError::ScopeClosed` if the root scope has already
+/// health interval, `RuntimeError::Http` if the shared health-probe client could
+/// not be built, or `RuntimeError::ScopeClosed` if the root scope has already
 /// closed to admission.
 ///
 /// `RuntimeError::NoRuntime` has two origins. Resolving the runtime context
@@ -179,10 +210,11 @@ pub async fn spawn_health_checker(
     let runtime = crate::runtime::runtime_context()?;
     let url = health_url(backend, path);
 
-    // Reuse the shared no-proxy client from async_proxy to avoid a second
-    // connection pool and TLS session cache. The borrow is `'static`, so the
-    // scope child's future carries it without a clone.
-    let client = super::async_proxy::proxy_client()?;
+    // The health checker's own client, shared by every probe in this process so
+    // the loop below adds no second connection pool or TLS session cache. The
+    // borrow is `'static`, so the scope child's future carries it without a
+    // clone.
+    let client = health_client()?;
 
     // Initial probe before admitting the background loop. It publishes through
     // the same recorder as every later probe, so a backend that is already down

@@ -265,8 +265,7 @@ pub(super) fn handle_stream_response(
 /// Forward a streaming proxy request to the backend and return a streaming hyper response.
 pub(super) async fn handle_proxy_stream_response(
     req: Request,
-    backend: &str,
-    prefix: &str,
+    target: &super::async_proxy::ProxyTarget<'_>,
     ctx: &ConnCtx,
     scope: &RejectionScope,
     start: std::time::Instant,
@@ -274,7 +273,7 @@ pub(super) async fn handle_proxy_stream_response(
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let proxy_req = super::async_proxy::ProxyRequest::from_request(&req);
 
-    let forwarded = super::async_proxy::forward_request_streaming(proxy_req, backend, prefix).await;
+    let forwarded = super::async_proxy::forward_request_streaming(proxy_req, target).await;
     Ok(finish_upstream_stream(
         forwarded, ctx, scope, start, download,
     ))
@@ -348,6 +347,7 @@ pub(super) async fn dispatch_streaming_proxy(
     let super::dispatch::StreamingProxyTarget {
         backend,
         prefix,
+        upstream,
         params,
         method,
         plan,
@@ -398,8 +398,11 @@ pub(super) async fn dispatch_streaming_proxy(
         body,
         admitted,
         Forwarding {
-            backend: &backend,
-            prefix: &prefix,
+            target: super::async_proxy::ProxyTarget {
+                backend: &backend,
+                prefix: &prefix,
+                upstream: &upstream,
+            },
             scope: &scope,
             request_dispatch,
         },
@@ -413,8 +416,7 @@ pub(super) async fn dispatch_streaming_proxy(
 /// route froze, the prefix it rewrites, the policy every refusal on this path is
 /// answered under, and the operation whose deadlines both legs spend.
 struct Forwarding<'a> {
-    backend: &'a str,
-    prefix: &'a str,
+    target: super::async_proxy::ProxyTarget<'a>,
     scope: &'a RejectionScope,
     request_dispatch: &'a super::handle::RequestDispatch<'a>,
 }
@@ -432,8 +434,7 @@ async fn forwarded_stream(
     forwarding: Forwarding<'_>,
 ) -> hyper::Response<HyperResponseBody> {
     let Forwarding {
-        backend,
-        prefix,
+        target,
         scope,
         request_dispatch,
     } = forwarding;
@@ -450,15 +451,19 @@ async fn forwarded_stream(
         proxy_parts,
         body,
         admitted,
-        backend,
-        prefix,
+        operation.upload(target.upstream.upload(), script.clone()),
+        &target,
         script.as_ref(),
     );
-    let forwarded = match super::handle::within_total(forwarding, operation).await {
+    // Under the operation's own authority, not a bare deadline: a shutdown, a
+    // forced cancellation, a peer whose lifetime ended, and an expired request
+    // total are all local causes that must win over an upstream head this
+    // service has not committed.
+    let forwarded = match super::handle::pre_commit(forwarding, operation).await {
         Ok(forwarded) => forwarded,
-        Err(rejected) => return answer_rejected(ctx, scope, rejected, start),
+        Err(failure) => return super::handle::answer_inbound_failure(ctx, scope, failure, start),
     };
     operation.observe(script.as_deref(), OperationStage::ResponseHead);
-    let download = operation.download(super::TransferBudget::unbounded(), script);
+    let download = operation.download(target.upstream.download(), script);
     finish_upstream_stream(forwarded, ctx, scope, start, download)
 }

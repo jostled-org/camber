@@ -316,6 +316,21 @@ impl ResolvedBodyPlan {
             policy,
         }
     }
+
+    /// This plan under a specialized route policy's own payload maximum.
+    ///
+    /// A proxy route's upload budget narrows the bytes its route admits and can
+    /// never widen them, so the two are one ceiling here rather than two
+    /// counters over the same frames: route-aware admission stays the single
+    /// authority over request payload bytes, and this is the number it enforces.
+    /// `None` is a specialized policy that named no maximum of its own.
+    #[must_use]
+    pub(super) fn narrowed_to(self, max_bytes: Option<usize>) -> Self {
+        Self {
+            ceiling: max_bytes.map_or(self.ceiling, |max| self.ceiling.min(max)),
+            ..self
+        }
+    }
 }
 
 /// The bounded read one admitted request was granted.

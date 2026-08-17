@@ -143,6 +143,45 @@ impl CheckedCollector {
     }
 }
 
+/// The quiet interval one collection allows between the chunks it reads.
+///
+/// Carried as the interval and the boundary together, because a collection that
+/// enforces one owes the operator the name of the deadline that was configured:
+/// a buffered upstream answer and an outbound client answer stall under
+/// different policies and must not report each other's.
+#[derive(Clone, Copy)]
+pub(super) struct CollectionIdle {
+    interval: std::time::Duration,
+    boundary: super::boundary::DeadlineBoundary,
+}
+
+impl CollectionIdle {
+    /// The quiet interval one collection enforces, under the name it reports.
+    pub(super) const fn new(
+        interval: std::time::Duration,
+        boundary: super::boundary::DeadlineBoundary,
+    ) -> Self {
+        Self { interval, boundary }
+    }
+}
+
+/// Take the next chunk of one answer, under the quiet interval it allows.
+///
+/// `None` for `idle` is a consumer whose own transport already bounds its
+/// reads; nothing here arms a second timer for it.
+async fn next_chunk(
+    response: &mut reqwest::Response,
+    idle: Option<CollectionIdle>,
+) -> Result<Option<Bytes>, RuntimeError> {
+    let read = match idle {
+        None => response.chunk().await,
+        Some(idle) => tokio::time::timeout(idle.interval, response.chunk())
+            .await
+            .map_err(|_| RuntimeError::DeadlineExceeded(idle.boundary))?,
+    };
+    read.map_err(super::map_reqwest_error)
+}
+
 /// Collect one outbound response body under `limit`.
 ///
 /// The shared entry point for every Reqwest-backed consumer: the public client
@@ -157,19 +196,21 @@ impl CheckedCollector {
 /// # Errors
 ///
 /// Returns [`RuntimeError::LimitExceeded`] naming `boundary` when the body
-/// crosses `limit`, or the mapped transport failure when the body cannot be
-/// read.
+/// crosses `limit`, [`RuntimeError::DeadlineExceeded`] naming `idle`'s boundary
+/// when the source goes quiet for longer than it allows, or the mapped
+/// transport failure when the body cannot be read.
 pub(super) async fn collect_response(
     mut response: reqwest::Response,
     boundary: ByteBoundary,
     limit: Option<usize>,
+    idle: Option<CollectionIdle>,
 ) -> Result<Bytes, RuntimeError> {
     let observer = response
         .remote_addr()
         .and_then(super::mock::lifecycle_script);
     let mut collector = CheckedCollector::new(boundary, limit, observer);
     collector.admit_declared(response.content_length())?;
-    while let Some(chunk) = response.chunk().await.map_err(super::map_reqwest_error)? {
+    while let Some(chunk) = next_chunk(&mut response, idle).await? {
         collector.retain(chunk)?;
     }
     Ok(collector.finish())
