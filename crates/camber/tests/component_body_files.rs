@@ -8,6 +8,8 @@ pub mod rejection_support;
 pub mod runtime_support;
 #[path = "support/streaming_multipart.rs"]
 pub mod streaming_multipart;
+#[path = "support/trace_capture.rs"]
+pub mod trace_capture;
 
 #[path = "component_body_files/binary_bodies.rs"]
 mod binary_bodies;

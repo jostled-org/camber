@@ -2,8 +2,11 @@
 //! Tokio worker, and never retain the chunk that crosses that ceiling.
 
 use crate::http as http_support;
+use crate::rejection_support;
 use crate::runtime_support as common;
+use crate::trace_capture;
 
+use camber::__private::DEFAULT_STATIC_FILE_LIMIT;
 use camber::RuntimeError;
 use camber::http::mock::{self, LifecycleCheckpoint, LifecycleController};
 use camber::http::{ByteBoundary, Router};
@@ -29,6 +32,27 @@ const GROWN: &str = "0123456789abcdef0123456789abcdef";
 
 /// How long a released worker has to hand back what it owns.
 const WORKER_BOUND: Duration = Duration::from_secs(5);
+
+/// The maximum an explicit opt-out reports having frozen.
+///
+/// Production compares every collection against one number, and the opt-out's
+/// number is the largest total a collection could ever reach. Naming it here is
+/// what lets a row say "this read froze no ceiling" as a value rather than as
+/// the absence of one.
+const UNBOUNDED: usize = usize::MAX;
+
+/// The row label every assertion about the routed crossing reports under.
+const ROUTED_CROSSING: &str = "the routed crossing";
+
+/// The typed cause an operator reads when a static-file maximum is crossed.
+const STATIC_FILE_CEILING_CAUSE: &str = "cause=byte limit exceeded: static_file";
+
+/// The category a routed static-file crossing is recorded under.
+///
+/// A served root holding content the service cannot answer with is the
+/// operator's configuration, so the refusal is Camber's fault and not the
+/// peer's request.
+const ROUTED_CROSSING_KIND: &str = "kind=internal_service";
 
 /// One temporary root, the observer bound to it, and the files under it.
 ///
@@ -85,6 +109,14 @@ impl Retention {
             peak: controller.collected_peak_retained_bytes(),
         }
     }
+}
+
+/// The maximum one root's most recent read was actually collected under.
+///
+/// Published by the collector that enforces it, so a spelling that froze no
+/// ceiling reports [`UNBOUNDED`] here however small the file it served was.
+fn frozen_ceiling(controller: &LifecycleController) -> usize {
+    controller.static_files_observed().frozen_ceiling
 }
 
 /// Assert one answer is the typed static-file ceiling refusal.
@@ -172,6 +204,58 @@ async fn assert_only_the_unbounded_name_reads_past_the_ceiling() {
     assert_eq!(served.body(), GROWN);
 }
 
+/// Neither unnamed spelling is a spelling of unbounded.
+///
+/// The documented default is eight MiB, which no row here writes a file past,
+/// so what a defaulted read answers with is exactly what an unbounded one
+/// answers with. The two are told apart by the maximum production froze: a
+/// defaulted read froze the documented one, and only the named opt-out froze
+/// none.
+async fn assert_the_default_spellings_freeze_the_documented_maximum() {
+    let root = StaticRoot::holding("asset.txt", ADMITTED);
+
+    let defaulted = camber::http::serve_file(root.path(), "asset.txt")
+        .await
+        .expect("the unnamed direct spelling serves a small file");
+    assert_eq!(defaulted.status(), 200);
+    assert_eq!(defaulted.body(), ADMITTED);
+    assert_eq!(
+        frozen_ceiling(&root.controller),
+        DEFAULT_STATIC_FILE_LIMIT,
+        "the unnamed direct spelling reads under the documented maximum",
+    );
+
+    let opted_out = camber::http::serve_file_unbounded(root.path(), "asset.txt")
+        .await
+        .expect("the named direct opt-out serves the same file");
+    assert_eq!(opted_out.status(), 200);
+    assert_eq!(
+        frozen_ceiling(&root.controller),
+        UNBOUNDED,
+        "only the named direct opt-out reads under no maximum at all",
+    );
+}
+
+/// The peer learned nothing; the operator learned which maximum was crossed.
+///
+/// The refusal a routed crossing becomes is redacted, so the typed provenance
+/// is not on the wire to read: the operator's record is the only place the
+/// promise that a routed crossing carries `ByteBoundary::StaticFile` can be
+/// held to.
+fn assert_the_crossing_reached_the_operator(recorded: &trace_capture::TraceCapture) {
+    let events = recorded.events();
+    let event = trace_capture::only_event(
+        &events,
+        rejection_support::REJECTION_MESSAGE,
+        ROUTED_CROSSING,
+    );
+    trace_capture::assert_fields(
+        event,
+        &[STATIC_FILE_CEILING_CAUSE, ROUTED_CROSSING_KIND],
+        ROUTED_CROSSING,
+    );
+}
+
 /// The registered ceiling is the one a routed request is answered under.
 async fn assert_routed_rows_apply_the_registered_ceiling() {
     let root = StaticRoot::holding("asset.txt", GROWN);
@@ -183,6 +267,7 @@ async fn assert_routed_rows_apply_the_registered_ceiling() {
     router.static_files("/default", root.as_str());
     let addr = common::spawn_server(router);
 
+    let recorded = trace_capture::capture_events("raw_path=/bounded/asset.txt");
     let refused = camber::http::get(&format!("http://{addr}/bounded/asset.txt"))
         .await
         .unwrap();
@@ -192,18 +277,34 @@ async fn assert_routed_rows_apply_the_registered_ceiling() {
         "no crossing byte reaches the peer: {}",
         refused.body(),
     );
+    assert_eq!(
+        frozen_ceiling(&root.controller),
+        CEILING,
+        "the finite route reads under the maximum it registered",
+    );
+    assert_the_crossing_reached_the_operator(&recorded);
 
     let opted_out = camber::http::get(&format!("http://{addr}/unbounded/asset.txt"))
         .await
         .unwrap();
     assert_eq!(opted_out.status(), 200);
     assert_eq!(opted_out.body(), GROWN);
+    assert_eq!(
+        frozen_ceiling(&root.controller),
+        UNBOUNDED,
+        "only the named routed opt-out reads under no maximum at all",
+    );
 
     let defaulted = camber::http::get(&format!("http://{addr}/default/asset.txt"))
         .await
         .unwrap();
     assert_eq!(defaulted.status(), 200);
     assert_eq!(defaulted.body(), GROWN);
+    assert_eq!(
+        frozen_ceiling(&root.controller),
+        DEFAULT_STATIC_FILE_LIMIT,
+        "the unnamed routed spelling reads under the documented maximum",
+    );
 
     runtime::request_shutdown();
 }
@@ -215,6 +316,7 @@ async fn static_file_applies_selected_ceiling_without_crossing_retention() {
     assert_declared_oversize_is_refused_unread().await;
     assert_growth_past_the_ceiling_drops_the_crossing_chunk().await;
     assert_only_the_unbounded_name_reads_past_the_ceiling().await;
+    assert_the_default_spellings_freeze_the_documented_maximum().await;
     assert_routed_rows_apply_the_registered_ceiling().await;
 }
 
@@ -353,6 +455,22 @@ fn assert_cancelled_wait_leaves_the_worker_its_ownership() {
             held.workers_returned, 0,
             "the abandoned worker still owns its paths and its buffer",
         );
+        // Nothing the worker was given had been resolved, measured, or read
+        // while a caller was still waiting, so everything below happens with
+        // the paths and the buffer belonging to the worker alone.
+        assert_eq!(
+            held.canonicalized_off_caller
+                + held.metadata_off_caller
+                + held.reads_off_caller
+                + held.steps_on_caller,
+            0,
+            "the abandoned work had not started when its caller left",
+        );
+        assert_eq!(
+            Retention::of(&root.controller).peak,
+            0,
+            "nothing was retained before the caller left",
+        );
 
         root.controller
             .release(LifecycleCheckpoint::StaticFileWorkerEntered)
@@ -364,6 +482,15 @@ fn assert_cancelled_wait_leaves_the_worker_its_ownership() {
             root.controller.static_files_observed().workers_returned == 1
         }),
         "the released worker returned what it owned",
+    );
+    // What it finished with nobody waiting is the whole ownership claim: it
+    // resolved and measured the paths it copied, and it filled the buffer it
+    // holds, after the only caller that could have lent it either was gone.
+    assert_off_worker(&root.controller, 1);
+    assert_eq!(
+        Retention::of(&root.controller).peak,
+        ADMITTED.len(),
+        "the abandoned worker filled its own buffer",
     );
 }
 

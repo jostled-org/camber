@@ -348,11 +348,20 @@ struct CollectionObservations {
 
 /// What the static-file workers under one root reported about where they ran.
 ///
-/// Monotonic counters only, each written by the production step it names.
-/// Nothing here starts a worker, resolves a path, measures a file, reads a
-/// byte, or decides which thread anything runs on.
+/// Counters and the maximum a read froze, each written by the production step
+/// it names. Nothing here starts a worker, resolves a path, measures a file,
+/// reads a byte, chooses a maximum, or decides which thread anything runs on.
 #[derive(Default)]
 struct StaticFileObservations {
+    /// The ceiling the most recent read under this root actually collects
+    /// under, as its own collector compares it.
+    ///
+    /// The last value rather than a count, because that is the question a row
+    /// asks: this read, under this registration, froze this maximum. Zero is
+    /// no read yet — a frozen maximum is never zero — and [`usize::MAX`] is
+    /// the explicit opt-out, which is what makes a defaulted spelling and an
+    /// unbounded one two different observations rather than one.
+    frozen_ceiling: AtomicUsize,
     /// Blocking workers that began under this root.
     workers_entered: AtomicUsize,
     /// Blocking workers that handed back an answer or a refusal.
@@ -389,6 +398,11 @@ pub(in crate::http) enum StaticFileEvent {
     WorkerEntered,
     /// The blocking worker handed back its answer or its refusal.
     WorkerReturned,
+    /// This read's collection froze the maximum it measures against.
+    ///
+    /// Carried as the collector's own comparison value, so [`usize::MAX`] is
+    /// the explicit opt-out and every other value is a real ceiling.
+    CeilingFrozen(usize),
     /// One filesystem step ran, on the awaiting thread or off it.
     Step {
         step: StaticFileStep,
@@ -404,6 +418,10 @@ pub(in crate::http) enum StaticFileEvent {
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StaticFileObservation {
+    /// The maximum the most recent read under this root collects under, as its
+    /// collector compares it: `usize::MAX` is the explicit opt-out, and zero
+    /// means no read has frozen one yet.
+    pub frozen_ceiling: usize,
     pub workers_entered: usize,
     pub workers_returned: usize,
     pub canonicalized_off_caller: usize,
@@ -824,6 +842,12 @@ impl LifecycleScript {
             |script| &script.static_files,
             |files| {
                 let counter = match event {
+                    // A value, not a tally: the question is which maximum this
+                    // read froze, and adding them would answer neither.
+                    StaticFileEvent::CeilingFrozen(ceiling) => {
+                        files.frozen_ceiling.store(ceiling, Ordering::Release);
+                        return;
+                    }
                     StaticFileEvent::WorkerEntered => &files.workers_entered,
                     StaticFileEvent::WorkerReturned => &files.workers_returned,
                     StaticFileEvent::Step {
@@ -1303,6 +1327,7 @@ impl LifecycleController {
     pub fn static_files_observed(&self) -> StaticFileObservation {
         let files = &self.script.static_files;
         StaticFileObservation {
+            frozen_ceiling: files.frozen_ceiling.load(Ordering::Acquire),
             workers_entered: files.workers_entered.load(Ordering::Acquire),
             workers_returned: files.workers_returned.load(Ordering::Acquire),
             canonicalized_off_caller: files.canonicalized_off_caller.load(Ordering::Acquire),

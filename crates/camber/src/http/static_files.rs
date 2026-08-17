@@ -158,6 +158,10 @@ struct StaticFileWorker {
     /// The maximum to retain under, or `None` for the explicit opt-out.
     limit: Option<usize>,
     /// The root-scoped observer, when a test registered one. Inert otherwise.
+    ///
+    /// Resolved on the blocking thread rather than beside the paths, because
+    /// the lookup takes a process-wide lock: every static-file request would
+    /// otherwise take it on the worker it is awaiting from.
     observer: Option<Arc<LifecycleScript>>,
     /// The thread awaiting this read, so each step can report it ran elsewhere.
     caller: std::thread::ThreadId,
@@ -165,9 +169,12 @@ struct StaticFileWorker {
 
 impl StaticFileWorker {
     /// Take owned copies of everything this read needs.
+    ///
+    /// Everything except the observer, which [`Self::answer`] resolves once it
+    /// is running where a lock costs the awaiting worker nothing.
     fn owning(base_dir: &Path, file_path: &str, limit: Option<usize>) -> Self {
         Self {
-            observer: super::mock::static_file_script(base_dir),
+            observer: None,
             base_dir: base_dir.into(),
             file_path: file_path.into(),
             limit,
@@ -182,7 +189,8 @@ impl StaticFileWorker {
     /// Returns [`RuntimeError::LimitExceeded`] naming
     /// [`ByteBoundary::StaticFile`] when the file crosses the maximum, and
     /// [`RuntimeError::Io`] when a file that opened cannot be read.
-    fn answer(self) -> Result<Response, RuntimeError> {
+    fn answer(mut self) -> Result<Response, RuntimeError> {
+        self.observer = super::mock::static_file_script(&self.base_dir);
         self.observe(StaticFileEvent::WorkerEntered);
         LifecycleScript::pause_blocking(
             self.observer.as_deref(),
@@ -220,6 +228,10 @@ impl StaticFileWorker {
 
         let mut collected =
             CheckedCollector::new(ByteBoundary::StaticFile, self.limit, self.observer.clone());
+        // Read back off the collector rather than from `self.limit`, so what is
+        // reported is the number this read is actually measured against and not
+        // the argument that was meant to become it.
+        self.observe(StaticFileEvent::CeilingFrozen(collected.ceiling()));
         collected.admit_declared(Some(declared))?;
         LifecycleScript::pause_blocking(
             self.observer.as_deref(),

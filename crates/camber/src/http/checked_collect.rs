@@ -64,7 +64,11 @@ impl CheckedCollector {
     /// An opt-out is the largest total the platform can represent rather than a
     /// second code path: one comparison then serves both, and an unbounded
     /// collection still fails on an overflowing total instead of wrapping.
-    fn ceiling(&self) -> usize {
+    ///
+    /// Readable by the module a collection belongs to, so an owner reporting
+    /// which maximum it froze reports the number this comparison uses rather
+    /// than a copy of the argument it passed in.
+    pub(super) fn ceiling(&self) -> usize {
         self.limit.unwrap_or(usize::MAX)
     }
 
