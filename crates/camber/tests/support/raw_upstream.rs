@@ -162,6 +162,16 @@ impl RawUpstream {
         format!("http://{}", self.addr).into_boxed_str()
     }
 
+    /// The address this upstream is bound to.
+    ///
+    /// What a case registers a lifecycle controller under: the production
+    /// collectors publish what they read and kept against the address they read
+    /// it from, so this is how a proxy case reads the collection its own
+    /// upstream answered.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
     /// Every byte this upstream has read, across every connection.
     fn received(&self) -> Box<[u8]> {
         self.state
