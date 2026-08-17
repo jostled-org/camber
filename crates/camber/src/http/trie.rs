@@ -19,8 +19,10 @@ use std::sync::atomic::AtomicBool;
 
 pub(super) type Handler =
     Box<dyn Fn(&Request) -> Pin<Box<dyn Future<Output = HandlerOutcome> + Send>> + Send + Sync>;
-pub(super) type SseHandler =
-    Arc<dyn Fn(&Request, &mut SseWriter) -> Result<(), RuntimeError> + Send + Sync>;
+pub(super) type SseHandler = Arc<SseRegistration>;
+/// One registered SSE producer, erased the way every stored handler is.
+pub(super) type SseProducer =
+    Box<dyn Fn(&Request, &mut SseWriter) -> Result<(), RuntimeError> + Send + Sync>;
 pub(super) type StreamHandler =
     Box<dyn Fn(&Request) -> Pin<Box<dyn Future<Output = StreamResponse> + Send>> + Send + Sync>;
 #[cfg(feature = "ws")]
@@ -36,6 +38,40 @@ pub(super) type MultipartHandler = Box<
         + Send
         + Sync,
 >;
+
+/// One SSE route: the producer, and the download policy its body runs under.
+///
+/// The policy travels with the producer because it is the registration's, not the
+/// router's: two SSE routes on one router publish under their own bounds, and the
+/// route class has to hand the selected pair over together. Shared behind one
+/// `Arc`, so selecting this route stays a reference-count bump and
+/// [`RouteHandler`] keeps the width every method slot of every frozen trie node
+/// pays for.
+pub(super) struct SseRegistration {
+    producer: SseProducer,
+    budget: super::TransferBudget,
+}
+
+impl SseRegistration {
+    /// Register one producer under the policy the application chose for it.
+    pub(super) fn new(producer: SseProducer, budget: super::TransferBudget) -> Self {
+        Self { producer, budget }
+    }
+
+    /// The download policy this registration's body is bounded by.
+    pub(super) const fn budget(&self) -> super::TransferBudget {
+        self.budget
+    }
+
+    /// Run this registration's producer against the one writer it is given.
+    pub(super) fn produce(
+        &self,
+        request: &Request,
+        writer: &mut SseWriter,
+    ) -> Result<(), RuntimeError> {
+        (self.producer)(request, writer)
+    }
+}
 
 /// One streaming multipart route: the handler, and the bounds it reads its
 /// payload under.

@@ -72,3 +72,166 @@ pub fn bounded_read(
         Err(error) => Err(BoundedReadError::Io(error)),
     }
 }
+
+/// Open one HTTP/1 request for a streaming response, and send its head.
+///
+/// The connection stays in the caller's hands: a post-commit claim is about what
+/// the peer keeps receiving and about when the transport ends, neither of which a
+/// request-and-answer helper can report.
+pub async fn open_streaming(
+    addr: std::net::SocketAddr,
+    path: &str,
+    bound: Duration,
+) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt;
+
+    let mut stream = tokio::time::timeout(bound, tokio::net::TcpStream::connect(addr))
+        .await
+        .expect("the streaming peer connected inside its bound")
+        .expect("the streaming peer connected");
+    let head = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    stream
+        .write_all(head.as_bytes())
+        .await
+        .expect("the streaming request head was written");
+    stream.flush().await.expect("the streaming request flushed");
+    stream
+}
+
+/// Read one streaming response's head, leaving its body on the wire.
+///
+/// For the rows whose cause is the peer or the server rather than the producer:
+/// each needs the head committed before it acts, and neither may consume the body
+/// it is about to interrupt.
+pub async fn read_streaming_head(stream: &mut tokio::net::TcpStream, bound: Duration) -> u16 {
+    use tokio::io::AsyncReadExt;
+
+    let deadline = tokio::time::Instant::now() + bound;
+    let mut head = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        let read = tokio::time::timeout_at(deadline, stream.read(&mut byte))
+            .await
+            .expect("the committed head arrived inside its bound")
+            .expect("the committed head was readable");
+        assert!(read == 1, "the peer closed before its head was complete");
+        head.push(byte[0]);
+    }
+    String::from_utf8_lossy(&head)
+        .split_whitespace()
+        .nth(1)
+        .and_then(|token| token.parse::<u16>().ok())
+        .unwrap_or(0)
+}
+
+/// Read the rest of one streaming body, and report whether it was cut.
+///
+/// For the rows whose head was already taken off the wire: what is left to
+/// establish is only how the body ended, and a cut is what a post-commit terminal
+/// leaves behind.
+pub async fn read_cut(stream: &mut tokio::net::TcpStream) -> bool {
+    use tokio::io::AsyncReadExt;
+
+    let mut raw = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = match stream.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        raw.extend_from_slice(&buffer[..read]);
+        if chunks_ended(&raw) {
+            return false;
+        }
+    }
+    !chunks_ended(&raw)
+}
+
+/// What one peer saw of a committed streaming response.
+///
+/// The three facts every post-commit claim is made of: the status that was
+/// committed before anything could be rewritten, the payload that actually
+/// reached the peer, and whether the body reached its terminal chunk or was cut
+/// under the status already on the wire.
+#[derive(Debug, Eq, PartialEq)]
+pub struct Streamed {
+    pub status: u16,
+    pub bytes: usize,
+    pub complete: bool,
+}
+
+/// Read one streaming HTTP/1 response, stopping at its terminal chunk or its cut.
+///
+/// A cut is what a post-commit terminal looks like on HTTP/1: the head is already
+/// written, so the transport ends under it rather than replacing it. Both endings
+/// are answers a case asserts on, so neither is treated as a fixture failure.
+pub async fn read_streamed(stream: &mut tokio::net::TcpStream) -> Streamed {
+    use tokio::io::AsyncReadExt;
+
+    let mut raw = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = match stream.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        raw.extend_from_slice(&buffer[..read]);
+        if chunks_ended(&raw) {
+            break;
+        }
+    }
+    decoded(&raw)
+}
+
+/// Whether this response has reached its terminal chunk.
+fn chunks_ended(raw: &[u8]) -> bool {
+    raw.windows(5).any(|window| window == b"\r\n0\r\n") && raw.ends_with(b"\r\n\r\n")
+}
+
+/// Split one raw HTTP/1 response into the status and the payload it delivered.
+fn decoded(raw: &[u8]) -> Streamed {
+    let text = String::from_utf8_lossy(raw);
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|token| token.parse::<u16>().ok())
+        .unwrap_or(0);
+    let body = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map_or(&[][..], |head| &raw[head + 4..]);
+    let (bytes, complete) = chunked_payload(body);
+    Streamed {
+        status,
+        bytes,
+        complete,
+    }
+}
+
+/// Count the payload of a chunked body, and say whether it ended.
+fn chunked_payload(mut body: &[u8]) -> (usize, bool) {
+    let mut bytes = 0;
+    loop {
+        let Some(end) = body.windows(2).position(|window| window == b"\r\n") else {
+            return (bytes, false);
+        };
+        let size = std::str::from_utf8(&body[..end]).ok().and_then(|line| {
+            usize::from_str_radix(line.split(';').next().unwrap_or(line), 16).ok()
+        });
+        let Some(size) = size else {
+            return (bytes, false);
+        };
+        if size == 0 {
+            return (bytes, true);
+        }
+        // The chunk's own trailing CRLF is framing, not payload: a decoder that
+        // left it in front of the next size line would read the empty string as
+        // that line and report a body that ended early.
+        let payload = end + 2;
+        if body.len() < payload + size + 2 {
+            return (bytes, false);
+        }
+        bytes += size;
+        body = &body[payload + size + 2..];
+    }
+}

@@ -9,5 +9,7 @@ pub mod stream_support;
 mod server_sent_events;
 #[path = "component_streaming/streamed_responses.rs"]
 mod streamed_responses;
+#[path = "component_streaming/transfer_budgets.rs"]
+mod transfer_budgets;
 #[path = "component_streaming/wire.rs"]
 mod wire;

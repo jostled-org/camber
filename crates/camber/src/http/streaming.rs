@@ -2,7 +2,7 @@ use super::Request;
 use super::async_proxy::UploadDisposition;
 use super::body::{HyperResponseBody, StreamBody};
 use super::handle::{ConnCtx, answer_rejected, run_head_gate};
-use super::operation::OperationStage;
+use super::operation::{OperationEnvelope, OperationStage};
 use super::record::record_scoped;
 use super::rejection::{Rejected, RejectionScope, RequestIdentity};
 use super::request::{RequestHead, RequestOrigin};
@@ -30,15 +30,21 @@ pub(super) async fn handle_sse(
     req: Request,
     buffer_size: usize,
     lifecycle: &ConnectionLifecycle,
+    operation: &OperationEnvelope,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    let script = lifecycle.script();
     super::mock::LifecycleScript::pause_at(
-        lifecycle.script().as_deref(),
+        script.as_deref(),
         super::mock::LifecycleCheckpoint::SseBufferConfigured(buffer_size),
     )
     .await;
+    // Resolved before the producer exists, from the registration's own policy
+    // under the route's: the body that carries these events is bounded by one
+    // owner, and a HEAD that produces none still resolves it the same way.
+    let owner = operation.download(handler.budget(), script);
     let body = match req.is_head() {
         true => StreamBody::Drained,
-        false => spawn_sse_producer(handler, req, buffer_size),
+        false => spawn_sse_producer(handler, req, buffer_size, owner),
     };
     let builder = hyper::Response::builder()
         .status(200)
@@ -59,6 +65,7 @@ fn spawn_sse_producer(
     handler: super::router::SseHandler,
     req: Request,
     buffer_size: usize,
+    owner: super::transfer::TransferOwner,
 ) -> StreamBody {
     let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(buffer_size);
 
@@ -69,12 +76,12 @@ fn spawn_sse_producer(
     let uri = req.uri_owned();
     crate::task::spawn_internal_blocking("sse", uri.path(), move || {
         let mut writer = SseWriter::new(tx);
-        if let Err(e) = handler(&req, &mut writer) {
+        if let Err(e) = handler.produce(&req, &mut writer) {
             tracing::warn!(error = %e, "SSE handler returned error");
         }
     });
 
-    StreamBody::Channel(rx)
+    StreamBody::channel(owner, rx)
 }
 
 /// Finish the SSE response, or answer with `fallback` if it cannot be built.
@@ -149,6 +156,7 @@ fn finish_upstream_stream(
     ctx: &ConnCtx,
     scope: &RejectionScope,
     start: std::time::Instant,
+    download: super::transfer::TransferOwner,
 ) -> hyper::Response<HyperResponseBody> {
     let upstream = match forwarded {
         Ok(upstream) => upstream,
@@ -160,7 +168,7 @@ fn finish_upstream_stream(
     let response = match build_streaming_response(
         upstream.status,
         &disposed(upstream.headers, upstream.upload, scope),
-        StreamBody::Proxy(upstream.rx),
+        StreamBody::upstream(download, upstream.rx),
         scope,
     ) {
         Ok(response) => response,
@@ -229,12 +237,13 @@ pub(super) fn handle_stream_response(
     ctx: &ConnCtx,
     scope: &RejectionScope,
     start: std::time::Instant,
+    download: super::transfer::TransferOwner,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let parts = stream_resp.into_parts();
     let response = match build_streaming_response(
         parts.status,
         &parts.headers,
-        StreamBody::Channel(parts.rx),
+        StreamBody::channel(download, parts.rx),
         scope,
     ) {
         Ok(response) => response,
@@ -261,11 +270,14 @@ pub(super) async fn handle_proxy_stream_response(
     ctx: &ConnCtx,
     scope: &RejectionScope,
     start: std::time::Instant,
+    download: super::transfer::TransferOwner,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let proxy_req = super::async_proxy::ProxyRequest::from_request(&req);
 
     let forwarded = super::async_proxy::forward_request_streaming(proxy_req, backend, prefix).await;
-    Ok(finish_upstream_stream(forwarded, ctx, scope, start))
+    Ok(finish_upstream_stream(
+        forwarded, ctx, scope, start, download,
+    ))
 }
 
 /// The outbound request one streaming forward is built from, and its payload.
@@ -381,22 +393,72 @@ pub(super) async fn dispatch_streaming_proxy(
         return Ok(answered);
     }
     let (proxy_parts, body) = outbound_parts(hyper_req, method, &origin);
-    // The upload this route forwards is this operation's request payload, and
-    // acquiring a usable upstream head is still pre-commit work, so both spend
-    // the one request total the admitted head minted.
+    Ok(forwarded_stream(
+        proxy_parts,
+        body,
+        admitted,
+        Forwarding {
+            backend: &backend,
+            prefix: &prefix,
+            scope: &scope,
+            request_dispatch,
+        },
+    )
+    .await)
+}
+
+/// Where one streaming forward sends its payload, and under what.
+///
+/// Grouped because the forward is one decision over all of it: the upstream this
+/// route froze, the prefix it rewrites, the policy every refusal on this path is
+/// answered under, and the operation whose deadlines both legs spend.
+struct Forwarding<'a> {
+    backend: &'a str,
+    prefix: &'a str,
+    scope: &'a RejectionScope,
+    request_dispatch: &'a super::handle::RequestDispatch<'a>,
+}
+
+/// Forward one incoming stream and answer with what the upstream gave back.
+///
+/// The upload this route forwards is this operation's request payload, and
+/// acquiring a usable upstream head is still pre-commit work, so both spend the
+/// one request total the admitted head minted. The download is resolved after
+/// that head commits, which is where its own lifetime starts.
+async fn forwarded_stream(
+    proxy_parts: super::async_proxy::IncomingProxyParts,
+    body: hyper::body::Incoming,
+    admitted: super::body_admission::AdmittedBody,
+    forwarding: Forwarding<'_>,
+) -> hyper::Response<HyperResponseBody> {
+    let Forwarding {
+        backend,
+        prefix,
+        scope,
+        request_dispatch,
+    } = forwarding;
+    let &super::handle::RequestDispatch {
+        ctx,
+        lifecycle,
+        start,
+        operation,
+        ..
+    } = request_dispatch;
+    let script = lifecycle.script();
     operation.observe(script.as_deref(), OperationStage::Body);
     let forwarding = super::async_proxy::forward_incoming_streaming(
         proxy_parts,
         body,
         admitted,
-        &backend,
-        &prefix,
+        backend,
+        prefix,
         script.as_ref(),
     );
     let forwarded = match super::handle::within_total(forwarding, operation).await {
         Ok(forwarded) => forwarded,
-        Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, start)),
+        Err(rejected) => return answer_rejected(ctx, scope, rejected, start),
     };
     operation.observe(script.as_deref(), OperationStage::ResponseHead);
-    Ok(finish_upstream_stream(forwarded, ctx, &scope, start))
+    let download = operation.download(super::TransferBudget::unbounded(), script);
+    finish_upstream_stream(forwarded, ctx, scope, start, download)
 }

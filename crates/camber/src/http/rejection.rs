@@ -13,7 +13,7 @@
 //! below that is private to the crate.
 
 use super::async_proxy::ProxyFailure;
-use super::boundary::DeadlineBoundary;
+use super::boundary::{ByteBoundary, DeadlineBoundary};
 use super::method::RequestMethod;
 use super::request::Request;
 use super::response::{
@@ -948,6 +948,49 @@ impl Rejected {
     /// begin.
     pub(super) fn body_unreadable(error: Box<dyn Error + Send + Sync>) -> Self {
         Self::plain_closing(Rejection::body_unreadable(), Arc::from(error))
+    }
+
+    /// One streaming direction carried more payload than its maximum allows.
+    ///
+    /// The same category and safe answer the buffered and route-aware refusals
+    /// give, because a peer or a producer that crossed a byte maximum is one
+    /// condition however it was counted. What differs is the boundary the
+    /// operator reads: the direction names itself, so an upload maximum is never
+    /// reported as the download's.
+    ///
+    /// Forces close for the reason every byte refusal does: the payload past the
+    /// maximum is unread, so nothing establishes where the next request on this
+    /// connection would begin.
+    pub(super) fn transfer_too_large(boundary: ByteBoundary, limit: usize) -> Self {
+        Self::closing(
+            Rejection::body_limit(),
+            format!("{boundary} exceeds the {limit}-byte maximum"),
+        )
+    }
+
+    /// One streaming direction crossed a configured transfer deadline.
+    ///
+    /// The peer is told what it is told for every request-body deadline; the
+    /// operator reads which of the two transfer bounds ended the work.
+    pub(super) fn transfer_timeout(
+        boundary: DeadlineBoundary,
+        configured: std::time::Duration,
+    ) -> Self {
+        Self::crossed_deadline(
+            Rejection::raw(RejectionKind::BodyTimeout, 408, "request body timed out"),
+            boundary,
+            configured,
+        )
+    }
+
+    /// One streaming direction's source stopped delivering its payload.
+    ///
+    /// The source's own account is the diagnostic, for the reason
+    /// [`Self::body_unreadable`] keeps the transport's: the stage that raised the
+    /// fault is the one that can name it, and the peer is told only that Camber
+    /// could not read what it sent.
+    pub(super) fn transfer_source_failed(account: Box<str>) -> Self {
+        Self::body_read_failed(RuntimeError::RequestBodyUnreadable(account))
     }
 
     /// The body stayed quiet longer than its configured idle interval.

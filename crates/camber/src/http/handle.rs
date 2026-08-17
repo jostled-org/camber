@@ -651,7 +651,7 @@ async fn dispatch_classified_route<'a>(
     // One envelope per admitted head, minted from the policy the classifier
     // just resolved and carried from here to the response-head boundary.
     let operation = OperationEnvelope::admit(
-        budgets.request(),
+        budgets,
         lifecycle.control(),
         connection,
         origin.disconnect,
@@ -767,9 +767,24 @@ fn refuse_body(
         uri,
     } = refused;
     let scope = pre_body.scope(RequestIdentity::from_head(&origin, &method, &uri));
+    answer_inbound_failure(ctx, &scope, failure, start)
+}
+
+/// Answer one selected inbound terminal with the disposition it declares.
+///
+/// Both owners that select one reach here — the buffered read loop and the
+/// streaming multipart session — so a mapped cause cannot be answered once
+/// through this route's mapper and once through a second spelling of the same
+/// two arms.
+pub(super) fn answer_inbound_failure(
+    ctx: &ConnCtx,
+    scope: &RejectionScope,
+    failure: InboundFailure,
+    start: std::time::Instant,
+) -> hyper::Response<HyperResponseBody> {
     match failure {
-        InboundFailure::Mapped(rejected) => answer_rejected(ctx, &scope, rejected, start),
-        InboundFailure::Silent(terminal) => end_without_mapping(ctx, &scope, terminal, start),
+        InboundFailure::Mapped(rejected) => answer_rejected(ctx, scope, rejected, start),
+        InboundFailure::Silent(terminal) => end_without_mapping(ctx, scope, terminal, start),
     }
 }
 
@@ -781,7 +796,7 @@ fn refuse_body(
 /// left to read one. The transport closes, the status an operator sees is
 /// recorded under the same scope every other exit records under, and no
 /// rejection category is counted for a request nothing categorised.
-fn end_without_mapping(
+pub(super) fn end_without_mapping(
     ctx: &ConnCtx,
     scope: &RejectionScope,
     terminal: InboundTerminal,
@@ -792,7 +807,10 @@ fn end_without_mapping(
         InboundTerminal::ShutdownDeadline
         | InboundTerminal::ForcedCancellation
         | InboundTerminal::RouteBodyLimit
+        | InboundTerminal::TransferBytes
         | InboundTerminal::BodyIdle
+        | InboundTerminal::TransferIdle
+        | InboundTerminal::TransferTotal
         | InboundTerminal::RequestTotal
         | InboundTerminal::SourceFailure
         | InboundTerminal::ResponseHead => hyper::StatusCode::SERVICE_UNAVAILABLE,
@@ -866,33 +884,64 @@ async fn dispatch_built_request<'a>(
     }
 
     operation.observe(script.as_deref(), OperationStage::ResponseHead);
+    finish_dispatched(
+        result,
+        #[cfg(feature = "ws")]
+        ws_upgrade,
+        &scope,
+        request_dispatch,
+    )
+    .await
+}
+
+/// Answer one dispatched result under the scope and operation it resolved to.
+///
+/// Each arm names the owner that finishes its class, and the two streaming arms
+/// resolve their download owner here rather than inside the body: the head this
+/// function commits is where a download's own lifetime begins, and a body handed
+/// no owner would have no policy left to read.
+async fn finish_dispatched<'a>(
+    result: DispatchResult,
+    #[cfg(feature = "ws")] ws_upgrade: WsUpgrade,
+    scope: &RejectionScope,
+    request_dispatch: &RequestDispatch<'a>,
+) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    let &RequestDispatch {
+        ctx,
+        lifecycle,
+        start,
+        operation,
+        ..
+    } = request_dispatch;
+    let script = lifecycle.script();
     match result {
         DispatchResult::Async(fut, held_request) => {
-            finish_buffered(fut, held_request, ctx, &scope, start, operation).await
+            finish_buffered(fut, held_request, ctx, scope, start, operation).await
         }
         DispatchResult::Stream(fut, req) => {
-            finish_stream(fut, req, ctx, &scope, start, operation).await
+            finish_stream(fut, req, ctx, scope, start, operation, lifecycle).await
         }
         DispatchResult::Sse(handler, req) => {
-            record_scoped(ctx, &scope, 200, start);
-            handle_sse(handler, req, ctx.sse_buffer_size, lifecycle).await
+            record_scoped(ctx, scope, 200, start);
+            handle_sse(handler, req, ctx.sse_buffer_size, lifecycle, operation).await
         }
         #[cfg(feature = "ws")]
         DispatchResult::WebSocket(handler, req) => {
-            record_upgrade(ctx, req, start, &scope, operation, |req| {
+            record_upgrade(ctx, req, start, scope, operation, |req| {
                 ws_proxy::handle_ws_upgrade(ws_upgrade, handler, req, ctx.ws_buffer_size, lifecycle)
             })
             .await
         }
         #[cfg(feature = "ws")]
         DispatchResult::ProxyWebSocket(req, backend, prefix) => {
-            record_upgrade(ctx, req, start, &scope, operation, |req| {
+            record_upgrade(ctx, req, start, scope, operation, |req| {
                 ws_proxy::handle_proxy_ws(ws_upgrade, req, backend, prefix, lifecycle)
             })
             .await
         }
         DispatchResult::ProxyStream(req, backend, prefix) => {
-            handle_proxy_stream_response(req, &backend, &prefix, ctx, &scope, start).await
+            let download = operation.download(super::TransferBudget::unbounded(), script);
+            handle_proxy_stream_response(req, &backend, &prefix, ctx, scope, start, download).await
         }
     }
 }
@@ -1044,9 +1093,17 @@ async fn finish_stream(
     scope: &RejectionScope,
     start: std::time::Instant,
     operation: &OperationEnvelope,
+    lifecycle: &ConnectionLifecycle,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     match within_total(producing, operation).await {
-        Ok(stream_resp) => handle_stream_response(stream_resp, held_request, ctx, scope, start),
+        Ok(stream_resp) => {
+            // The response the handler produced names its own policy, and the
+            // route's contains it: resolved here, at the one head this arm
+            // commits, rather than inside the body that then has no policy to
+            // read.
+            let download = operation.download(stream_resp.budget(), lifecycle.script());
+            handle_stream_response(stream_resp, held_request, ctx, scope, start, download)
+        }
         Err(rejected) => {
             let answered = Ok(answer_rejected(ctx, scope, rejected, start));
             // Released here for the same reason the buffered arm releases it

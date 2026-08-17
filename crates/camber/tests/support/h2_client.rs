@@ -254,6 +254,31 @@ impl PersistentH2Client {
         answered
     }
 
+    /// Open one download whose body the caller reads a frame at a time.
+    ///
+    /// For the post-commit rows: the head has to be observed before the terminal
+    /// they trigger, and the body has to be readable up to the exact point the
+    /// stream is reset. Nothing here drains to completion, because completion is
+    /// what these rows prove does not happen.
+    pub async fn open_download(&mut self, path: &str) -> H2Download {
+        let deadline = Instant::now() + self.bound;
+        let (response, mut stream) = self
+            .open("GET", path, "localhost", &[], true, deadline)
+            .await;
+        // The request carries no body, so the send half is closed at once: a
+        // stream left half-open would keep the peer waiting on payload the row
+        // never means to send.
+        let _ended = stream.send_data(Bytes::new(), true);
+        H2Download {
+            response: Some(response),
+            body: None,
+            status: 0,
+            bytes: 0,
+            stream,
+            bound: self.bound,
+        }
+    }
+
     /// Open one stream whose body the caller sends frame by frame.
     ///
     /// [`Self::send_paced`] sends every frame it was given and then reads the
@@ -579,5 +604,87 @@ async fn join_driver(driver: tokio::task::JoinHandle<Result<(), h2::Error>>) {
         Err(error) if error.is_cancelled() => {}
         Ok(Err(error)) => panic!("HTTP/2 client driver failed: {error}"),
         Err(error) => panic!("HTTP/2 client driver join failed: {error}"),
+    }
+}
+
+/// What one HTTP/2 peer saw of a committed streaming response.
+#[derive(Debug, Eq, PartialEq)]
+pub struct H2Streamed {
+    pub status: u16,
+    /// Payload bytes the peer actually received.
+    pub bytes: usize,
+    /// Whether the stream was reset under its committed head, rather than ended.
+    pub reset: bool,
+}
+
+/// One download whose committed head and partial body its case reads itself.
+pub struct H2Download {
+    response: Option<h2::client::ResponseFuture>,
+    body: Option<h2::RecvStream>,
+    status: u16,
+    bytes: usize,
+    stream: h2::SendStream<Bytes>,
+    bound: Duration,
+}
+
+impl H2Download {
+    /// Read this download's committed head, leaving its body on the stream.
+    pub async fn head(&mut self) -> u16 {
+        let response = self
+            .response
+            .take()
+            .expect("this HTTP/2 download's head was already read");
+        let response = bounded(response, self.bound, "HTTP/2 download head")
+            .await
+            .expect("no HTTP/2 download head");
+        self.status = response.status().as_u16();
+        self.body = Some(response.into_body());
+        self.status
+    }
+
+    /// Read this download until its stream ends or is reset.
+    ///
+    /// The head is read first when a case has not already read it, so one call
+    /// covers the rows whose cause is the producer and the rows whose cause is
+    /// something the case does between the head and the body.
+    pub async fn drain(&mut self) -> H2Streamed {
+        if self.response.is_some() {
+            self.head().await;
+        }
+        let deadline = Instant::now() + self.bound;
+        let mut body = self
+            .body
+            .take()
+            .expect("this HTTP/2 download's body was already drained");
+        let mut reset = false;
+        while let Some(chunk) =
+            bounded(body.data(), remaining(deadline), "HTTP/2 download body").await
+        {
+            match chunk {
+                Ok(chunk) => {
+                    body.flow_control()
+                        .release_capacity(chunk.len())
+                        .expect("the HTTP/2 reader could not release its capacity");
+                    self.bytes += chunk.len();
+                }
+                // A reset under an answered head is the stream-local disposition
+                // a post-commit terminal applies. It is this row's answer, not a
+                // fault: the status is already on the wire and cannot change.
+                Err(_) => {
+                    reset = true;
+                    break;
+                }
+            }
+        }
+        H2Streamed {
+            status: self.status,
+            bytes: self.bytes,
+            reset,
+        }
+    }
+
+    /// Cancel this stream, leaving the body it was given unread.
+    pub fn reset(&mut self) {
+        self.stream.send_reset(h2::Reason::CANCEL);
     }
 }

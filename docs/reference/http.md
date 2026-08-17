@@ -20,7 +20,7 @@ Supported registration methods include:
 
 - `get`, `post`, `put`, `patch`, `delete`, `head`, `options`
 - `get_stream`
-- `get_sse`
+- `get_sse` and `get_sse_with_budget`
 - `ws` with the `ws` feature
 - `proxy`, `proxy_stream`, and health-checked variants
 - `static_files`, `static_files_with_limit`, and `static_files_unbounded`
@@ -767,12 +767,47 @@ router.get_sse("/events", |_req: &Request, sse: &mut SseWriter| -> Result<(), Ru
 SSE routes are also classified before request-body buffering. They keep the same handler API, but
 the framework does not collect request bodies for routes that never use them.
 
+### Bounding an event stream
+
+`get_sse` states `TransferBudget::unbounded()` for the feed it registers: an event
+stream has no payload maximum and no lifetime of its own, and its memory stays
+bounded by the configured event-channel depth. Under a router, host, server, or
+runtime download policy it inherits that policy rather than widening it.
+
+`get_sse_with_budget(path, budget, handler)` is how one feed names its own payload
+maximum, quiet interval between events, and lifetime. The budget is applied under
+whatever the outer layers already selected: an unbounded dimension here inherits
+the outer bound, and two finite values resolve to the smaller. The bounds are
+enforced on the event body, after the `200` has committed, so a crossing ends the
+stream rather than replacing its status.
+
+For untrusted or long-lived consumers, set a finite download policy on the router
+or the server rather than leaving every feed unbounded.
+
 ## Streaming Responses
 
 Use `router.get_stream(...)` for chunked async responses.
 
 `StreamResponse::new(status)` uses the default stream buffer. Use
 `StreamResponse::with_buffer(status, cap)` when you need explicit channel depth control.
+
+`StreamResponse::with_budget(status, cap, budget)` adds the transfer policy this
+response's body runs under: a payload maximum, a quiet interval between frames,
+and a lifetime. `new` and `with_buffer` both state `TransferBudget::unbounded()`,
+which inherits the router, host, server, or runtime download policy rather than
+widening it — an unbounded dimension at the response is not an unbounded
+dimension at the service.
+
+The bounds are enforced on the body, after the head has committed. A crossing
+therefore ends the response rather than replacing its status: the frame that would
+cross the payload maximum is never written, HTTP/1 closes the connection whose
+framing cannot continue, and HTTP/2 resets the one affected stream. The route's
+rejection mapper is not called — there is no response left to map.
+
+Upload and download are accounted separately. A streaming upload's bytes, quiet
+interval, and lifetime are its own, and route-aware body admission remains the
+only authority over request payload bytes; a transfer policy adds time to that
+path and never a second byte accountant.
 
 Generic `StreamResponse` handlers remain on the buffered request path because the handler receives
 the public owned `Request` and may inspect its body.

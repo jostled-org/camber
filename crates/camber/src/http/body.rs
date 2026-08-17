@@ -1,9 +1,24 @@
 use super::disconnect::ResponseGuard;
+use super::operation::InboundTerminal;
+use super::transfer::{ChannelSource, Transfer, TransferOwner, UpstreamSource};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum BodyError {
     #[error("upstream proxy body read failed: {0}")]
     UpstreamProxy(std::sync::Arc<str>),
+    /// One committed response body ended on a bound its download owner
+    /// enforced.
+    ///
+    /// The head is already on the wire, so this replaces no status and reaches
+    /// no mapper. It is what tells the transport that the framing cannot
+    /// continue: HTTP/1 closes the connection, and HTTP/2 resets the one stream
+    /// it belongs to.
+    #[error("{direction} transfer ended on {terminal:?}: {diagnostic}")]
+    Transfer {
+        direction: &'static str,
+        terminal: InboundTerminal,
+        diagnostic: Box<str>,
+    },
 }
 
 /// Response body that owns this response's disconnect guard.
@@ -193,42 +208,84 @@ fn completes_at_construction(
 /// response or a builder-failure fallback has no producer to hold a channel
 /// open for, and allocating one purely to close it buys nothing.
 pub(super) enum StreamBody {
-    Channel(tokio::sync::mpsc::Receiver<bytes::Bytes>),
-    Proxy(tokio::sync::mpsc::Receiver<Result<bytes::Bytes, BodyError>>),
+    Channel(Box<TransferBody<ChannelSource>>),
+    Proxy(Box<TransferBody<UpstreamSource>>),
     Drained,
+}
+
+impl StreamBody {
+    /// One channel-backed response body under the download owner bounding it.
+    pub(super) fn channel(
+        owner: TransferOwner,
+        receiver: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    ) -> Self {
+        Self::Channel(Box::new(TransferBody::new(
+            owner.over(ChannelSource::new(receiver)),
+        )))
+    }
+
+    /// One upstream-backed response body under the download owner bounding it.
+    pub(super) fn upstream(
+        owner: TransferOwner,
+        receiver: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, BodyError>>,
+    ) -> Self {
+        Self::Proxy(Box::new(TransferBody::new(
+            owner.over(UpstreamSource::new(receiver)),
+        )))
+    }
+}
+
+/// One streaming response body, under the one download owner that bounds it.
+///
+/// Held behind one allocation by both [`StreamBody`] variants. The owner carries
+/// a guard, a peer-lifetime wait, and a deadline wake, which inline would set the
+/// width of every response body this server builds — including the buffered ones
+/// that stream nothing. One allocation per streaming response buys that back.
+///
+/// The owner is what Hyper actually polls: bytes, quiet interval, lifetime,
+/// cancellation, and the peer's response lifetime are all decided inside it, and
+/// what reaches Hyper is either the frame it admitted or the one terminal it
+/// fixed. A terminal is reported once, and the body reports end of stream
+/// afterwards rather than a second failure, so no transport is asked to fail
+/// twice for one transfer.
+pub(super) struct TransferBody<S> {
+    transfer: Transfer<S>,
+    reported: bool,
+}
+
+impl<S> TransferBody<S> {
+    const fn new(transfer: Transfer<S>) -> Self {
+        Self {
+            transfer,
+            reported: false,
+        }
+    }
+}
+
+impl<S: super::transfer::TransferSource> TransferBody<S> {
+    /// Produce the next frame this body was admitted to write.
+    fn poll_body(&mut self, cx: &mut std::task::Context<'_>) -> BodyFramePoll {
+        if self.reported {
+            return std::task::Poll::Ready(None);
+        }
+        match self.transfer.poll_transfer(cx) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Ok(None)) => std::task::Poll::Ready(None),
+            std::task::Poll::Ready(Ok(Some(data))) => {
+                std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(data))))
+            }
+            std::task::Poll::Ready(Err(failure)) => {
+                self.reported = true;
+                std::task::Poll::Ready(Some(Err(BodyError::from(failure))))
+            }
+        }
+    }
 }
 
 type BodyFramePoll = std::task::Poll<Option<Result<hyper::body::Frame<bytes::Bytes>, BodyError>>>;
 
 fn impossible_body_error(never: std::convert::Infallible) -> BodyError {
     match never {}
-}
-
-fn poll_byte_receiver(
-    receiver: &mut tokio::sync::mpsc::Receiver<bytes::Bytes>,
-    cx: &mut std::task::Context<'_>,
-) -> BodyFramePoll {
-    match receiver.poll_recv(cx) {
-        std::task::Poll::Ready(Some(data)) => {
-            std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(data))))
-        }
-        std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-        std::task::Poll::Pending => std::task::Poll::Pending,
-    }
-}
-
-fn poll_proxy_receiver(
-    receiver: &mut tokio::sync::mpsc::Receiver<Result<bytes::Bytes, BodyError>>,
-    cx: &mut std::task::Context<'_>,
-) -> BodyFramePoll {
-    match receiver.poll_recv(cx) {
-        std::task::Poll::Ready(Some(Ok(data))) => {
-            std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(data))))
-        }
-        std::task::Poll::Ready(Some(Err(error))) => std::task::Poll::Ready(Some(Err(error))),
-        std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-        std::task::Poll::Pending => std::task::Poll::Pending,
-    }
 }
 
 fn map_infallible_frame(
@@ -255,8 +312,8 @@ impl hyper::body::Body for StreamBody {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
         match self.get_mut() {
-            StreamBody::Channel(receiver) => poll_byte_receiver(receiver, cx),
-            StreamBody::Proxy(receiver) => poll_proxy_receiver(receiver, cx),
+            StreamBody::Channel(body) => body.poll_body(cx),
+            StreamBody::Proxy(body) => body.poll_body(cx),
             StreamBody::Drained => std::task::Poll::Ready(None),
         }
     }

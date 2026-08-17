@@ -160,6 +160,7 @@ mod sse;
 pub(crate) mod static_files;
 mod stream;
 mod streaming;
+mod transfer;
 mod transfer_budget;
 mod trie;
 mod util;

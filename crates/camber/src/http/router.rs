@@ -33,6 +33,15 @@ pub(super) use super::dispatch::{
     DispatchResult, FrozenRouter, GateCheck, Handler, ServerDispatch, SseHandler, gate_result,
 };
 
+/// The transfer policy an SSE registration that names none is bounded by.
+///
+/// Unbounded is a statement here, not an omission: a server-sent event stream is
+/// the shape a long-lived feed is written in, so it declares no payload maximum
+/// and no lifetime of its own, and its memory stays bounded by the configured
+/// event-channel depth. Under a router, host, server, or runtime download policy
+/// it inherits that policy rather than widening it.
+const INHERITED_SSE_POLICY: super::TransferBudget = super::TransferBudget::unbounded();
+
 impl std::fmt::Debug for Router {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Router")
@@ -447,13 +456,55 @@ impl Router {
     ///
     /// The handler receives the request and an `SseWriter` for sending events.
     /// The connection stays open until the handler returns or the client disconnects.
+    ///
+    /// The event stream is bounded by the download policy this router, its host,
+    /// its server, or the runtime selected. An SSE registration that names none
+    /// of its own states [`TransferBudget::unbounded`](super::TransferBudget::unbounded):
+    /// a long-lived feed has no payload maximum and no lifetime of its own, and
+    /// its memory stays bounded by the configured event-channel depth.
+    /// [`Self::get_sse_with_budget`] is how one feed names its own bounds.
     pub fn get_sse(
         &mut self,
         path: &str,
         handler: impl Fn(&Request, &mut SseWriter) -> Result<(), RuntimeError> + Send + Sync + 'static,
     ) {
-        self.root
-            .insert_route(Method::Get, path, RouteHandler::Sse(Arc::new(handler)));
+        self.add_sse(path, INHERITED_SSE_POLICY, handler);
+    }
+
+    /// Register an SSE streaming handler under the transfer policy it names.
+    ///
+    /// `budget` is the payload maximum, quiet interval between events, and feed
+    /// lifetime this stream is bounded by. It is applied under whatever the
+    /// router, host, server, or runtime already selected: an unbounded dimension
+    /// here inherits the outer bound rather than removing it, and two finite
+    /// values resolve to the smaller.
+    ///
+    /// The bounds are enforced on the event body, after the `200` has committed,
+    /// so a crossing ends the stream rather than replacing its status.
+    pub fn get_sse_with_budget(
+        &mut self,
+        path: &str,
+        budget: super::TransferBudget,
+        handler: impl Fn(&Request, &mut SseWriter) -> Result<(), RuntimeError> + Send + Sync + 'static,
+    ) {
+        self.add_sse(path, budget, handler);
+    }
+
+    /// Insert one SSE registration under the policy its caller selected.
+    fn add_sse(
+        &mut self,
+        path: &str,
+        budget: super::TransferBudget,
+        handler: impl Fn(&Request, &mut SseWriter) -> Result<(), RuntimeError> + Send + Sync + 'static,
+    ) {
+        self.root.insert_route(
+            Method::Get,
+            path,
+            RouteHandler::Sse(Arc::new(super::trie::SseRegistration::new(
+                Box::new(handler),
+                budget,
+            ))),
+        );
     }
 
     /// Register a WebSocket handler for the given path.

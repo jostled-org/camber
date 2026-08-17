@@ -18,13 +18,15 @@
 use super::body::HyperResponseBody;
 use super::body_admission::{self, AdmittedBody, ResolvedBodyPlan};
 use super::dispatch::{FrozenRouter, PreBodyScope, StreamingMultipartTarget};
-use super::handle::{RequestDispatch, answer, answer_rejected, gate_outcome};
+use super::handle::{
+    RequestDispatch, answer, answer_inbound_failure, answer_rejected, gate_outcome,
+};
 use super::mock::{LifecycleCheckpoint, LifecycleScript};
 use super::multipart::{
     MultipartCompletion, MultipartRevocation, MultipartSessionDriver, MultipartTerminal,
     SessionObserver, open, request_boundary,
 };
-use super::operation::OperationStage;
+use super::operation::{InboundFailure, OperationStage};
 use super::rejection::{
     HANDLER, MULTIPART_SESSION, ProducerKinds, Rejected, RejectionScope, RequestIdentity,
 };
@@ -104,25 +106,18 @@ pub(super) async fn dispatch_streaming_multipart(
             }
         };
 
-    let (stream, revocation, driver) = open(
+    let session = opened(
         hyper_req.into_body(),
-        admitted,
-        &boundary,
-        limits,
-        observer.clone(),
+        &request,
+        &registration,
+        Opening {
+            admitted,
+            boundary: &boundary,
+            limits,
+            observer: observer.clone(),
+            operation,
+        },
     );
-    operation.observe(observer.as_deref(), OperationStage::Body);
-    let session = Session {
-        // Entered against a borrow that ends here. The future it hands back is
-        // `'static`, so nothing this session holds borrows from the request, and
-        // the request goes on owning this response's lifetime signal for as long
-        // as this frame does.
-        handler: registration.enter(&request, stream),
-        driver,
-        revocation,
-        observer: observer.clone(),
-    }
-    .run();
     // The session reads this operation's request payload and produces its
     // response head, so the whole of it spends the one request total the
     // admitted head minted.
@@ -131,7 +126,62 @@ pub(super) async fn dispatch_streaming_multipart(
         Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, start)),
     };
     operation.observe(observer.as_deref(), OperationStage::ResponseHead);
-    Ok(answer(ctx, settled.respond(&scope), start, &scope))
+    Ok(match settled {
+        Answered::Settled(settled) => answer(ctx, settled.respond(&scope), start, &scope),
+        // The upload owner's cause carries its own disposition: a mapped one owes
+        // the peer this route's mapper once, and a silent one owes it nothing.
+        Answered::Ended(failure) => answer_inbound_failure(ctx, &scope, failure, start),
+    })
+}
+
+/// What one session is opened over, beside the body and the handler.
+///
+/// Grouped because the open is one decision over all of it: the admitted budget,
+/// the declared boundary, the registration's grammar bounds, the listener's
+/// observer, and the operation whose transfer policy the upload runs under move
+/// together or not at all.
+struct Opening<'a> {
+    admitted: AdmittedBody,
+    boundary: &'a str,
+    limits: super::multipart::MultipartLimits,
+    observer: SessionObserver,
+    operation: &'a super::operation::OperationEnvelope,
+}
+
+/// Open one session over an admitted payload and enter its handler.
+///
+/// The upload owner is resolved here, before a frame is polled: the route's
+/// transfer policy narrowed by nothing else, because a multipart registration
+/// states its grammar bounds rather than a transfer budget of its own.
+///
+/// The handler is entered against a borrow that ends here. The future it hands
+/// back is `'static`, so nothing the session holds borrows from the request, and
+/// the request goes on owning this response's lifetime signal for as long as its
+/// caller's frame does.
+fn opened(
+    body: hyper::body::Incoming,
+    request: &Request,
+    registration: &super::trie::MultipartRegistration,
+    opening: Opening<'_>,
+) -> impl Future<Output = Answered> {
+    let Opening {
+        admitted,
+        boundary,
+        limits,
+        observer,
+        operation,
+    } = opening;
+    let upload = operation.upload(super::TransferBudget::unbounded(), observer.clone());
+    let (stream, revocation, driver) =
+        open(body, admitted, boundary, limits, observer.clone(), upload);
+    operation.observe(observer.as_deref(), OperationStage::Body);
+    Session {
+        handler: registration.enter(request, stream),
+        driver,
+        revocation,
+        observer,
+    }
+    .run(operation.budget())
 }
 
 /// Admit this request's payload before anything reads a byte of it.
@@ -183,7 +233,7 @@ impl Session {
     /// the driver has returned: what this hands back is the outcome precedence
     /// chose over a session that has already released its body, its source
     /// frame, its parser buffers, and its permit.
-    async fn run(self) -> Settled {
+    async fn run(self, budget: super::RequestBudget) -> Answered {
         let Self {
             handler,
             driver,
@@ -196,7 +246,37 @@ impl Session {
             LifecycleCheckpoint::BeforeMultipartResponseSelection,
         )
         .await;
-        Settled::of(terminal.completion(), outcome)
+        Answered::of(terminal.completion(), outcome, budget)
+    }
+}
+
+/// What one finished multipart request answers with.
+///
+/// The two arms are two different authorities. A settled session is answered by
+/// the precedence between its own terminal and its handler's outcome. A session
+/// the operation's owner ended is answered by the declared inbound precedence,
+/// which already named the cause and its disposition — a handler cannot turn a
+/// crossed deadline into a committed response.
+enum Answered {
+    Settled(Settled),
+    Ended(InboundFailure),
+}
+
+impl Answered {
+    /// Apply the precedence one finished session and its handler settle on.
+    fn of(
+        completion: MultipartCompletion,
+        outcome: HandlerOutcome,
+        budget: super::RequestBudget,
+    ) -> Self {
+        match completion {
+            MultipartCompletion::Ended(failure) => Self::Ended(InboundFailure::of(
+                failure.terminal(),
+                budget,
+                failure.refusal(),
+            )),
+            settled => Self::Settled(Settled::of(settled, outcome)),
+        }
     }
 }
 
@@ -289,6 +369,11 @@ impl Settled {
                 unread: true,
             },
             (MultipartCompletion::Incomplete(incomplete), Ok(_)) => Self::framework(incomplete),
+            // Answered by [`Answered::of`], which reaches this precedence only
+            // for the completions the session itself owns. Named rather than
+            // wildcarded so a later completion cannot fall through into the
+            // handler's outcome.
+            (MultipartCompletion::Ended(ended), _) => Self::framework(ended.error()),
         }
     }
 

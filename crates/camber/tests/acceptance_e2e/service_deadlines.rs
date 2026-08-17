@@ -8,12 +8,13 @@
 
 use crate::common;
 use crate::http as http_support;
+use crate::stream::{Streamed, open_streaming, read_cut, read_streamed, read_streaming_head};
 
 use camber::http::mock::{InboundTerminal, LifecycleCheckpoint};
 use camber::http::{
     BodyAdmission, BodyAdmissionContext, Method, MultipartLimits, MultipartStream, Rejection,
     RejectionContext, RejectionKind, Request, RequestBudget, Response, Router, ServerPolicy,
-    StreamResponse,
+    StreamResponse, TransferBudget,
 };
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -1359,4 +1360,465 @@ fn admitting_routes(released: &Arc<AtomicUsize>) -> Router {
             http_support::permit_probe(&released),
         ))
     })
+}
+
+/// The payload maximum every post-commit byte row is bounded by.
+const TRANSFER_MAX_BYTES: usize = 24;
+/// One frame of a post-commit row's payload. Three reach the maximum exactly.
+const TRANSFER_FRAME: &[u8] = b"12345678";
+/// The quiet interval a post-commit row that means to cross one configures.
+const TRANSFER_IDLE: Duration = Duration::from_millis(150);
+/// The lifetime a post-commit row that means to cross one configures.
+const TRANSFER_TOTAL: Duration = Duration::from_millis(400);
+/// How long a paced post-commit producer waits between frames.
+///
+/// Well under every crossed bound, and long enough that each frame reaches the
+/// peer as its own write rather than as part of one buffer a cut would discard.
+const TRANSFER_PACE: Duration = Duration::from_millis(20);
+
+/// Which post-commit download terminal one row triggers.
+///
+/// Named as a closed set rather than staged ad hoc, because the claim is that
+/// every one of them ends the same way: the committed status stands, no mapper
+/// runs, and the transport applies its own disposition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PostCommit {
+    /// The download's own payload maximum.
+    Bytes,
+    /// The download's quiet interval.
+    Idle,
+    /// The download's lifetime.
+    Total,
+    /// The body's source failed mid-stream.
+    Source,
+    /// The peer stopped reading and went away.
+    Disconnect,
+    /// The one aggregate shutdown deadline expired.
+    Shutdown,
+}
+
+impl PostCommit {
+    /// The route this terminal is triggered on.
+    const fn path(self) -> &'static str {
+        match self {
+            Self::Bytes => "/post-bytes",
+            Self::Idle => "/post-idle",
+            Self::Total => "/post-total",
+            Self::Source => "/post-source",
+            Self::Disconnect | Self::Shutdown => "/post-paced",
+        }
+    }
+
+    /// Payload bytes this row's peer receives before the terminal ends it.
+    ///
+    /// `None` is a row whose delivered prefix is not fixed: a peer that goes away
+    /// and a server that stops both cut at whatever the producer had reached.
+    const fn delivered(self) -> Option<usize> {
+        match self {
+            Self::Bytes => Some(TRANSFER_MAX_BYTES),
+            Self::Idle => Some(TRANSFER_FRAME.len()),
+            Self::Source | Self::Total | Self::Disconnect | Self::Shutdown => None,
+        }
+    }
+
+    /// Whether `observed` is a terminal this row's cause can produce.
+    ///
+    /// One cause per row, except the stop: a graceful stop that reaches its own
+    /// deadline escalates to cancellation, and whether a turn falls between the
+    /// two is the supervisor's timing rather than this row's claim. Both are
+    /// silent rows that end the body without touching the committed status, which
+    /// is what the row is about.
+    const fn accepts(self, observed: InboundTerminal) -> bool {
+        match self {
+            Self::Bytes => matches!(observed, InboundTerminal::TransferBytes),
+            Self::Idle => matches!(observed, InboundTerminal::TransferIdle),
+            Self::Total => matches!(observed, InboundTerminal::TransferTotal),
+            Self::Source => matches!(observed, InboundTerminal::SourceFailure),
+            Self::Disconnect => matches!(observed, InboundTerminal::Disconnect),
+            Self::Shutdown => matches!(
+                observed,
+                InboundTerminal::ShutdownDeadline | InboundTerminal::ForcedCancellation
+            ),
+        }
+    }
+}
+
+/// 11.T4
+///
+/// A committed response head is never replaced. Every post-commit download
+/// terminal — the payload maximum, the quiet interval, the lifetime, a failed
+/// source, a departed peer, and the aggregate shutdown deadline — ends its body
+/// and nothing else: the peer keeps the `200` it was already given, the route's
+/// mapper is never called, HTTP/1 closes the connection whose framing cannot
+/// continue, and HTTP/2 resets the one affected stream while another stream on
+/// the same connection still answers.
+#[test]
+fn postcommit_transfer_failure_preserves_the_wire_status() {
+    camber::runtime::builder()
+        .run(|| {
+            camber::runtime::block_on(async {
+                for row in [
+                    PostCommit::Bytes,
+                    PostCommit::Idle,
+                    PostCommit::Total,
+                    PostCommit::Source,
+                    PostCommit::Disconnect,
+                    PostCommit::Shutdown,
+                ] {
+                    assert_postcommit_http1(row).await;
+                    assert_postcommit_http2(row).await;
+                }
+            });
+        })
+        .expect("the post-commit transfer runtime ran");
+}
+
+/// One row over HTTP/1: the head stands, the body is cut, the connection closes.
+async fn assert_postcommit_http1(row: PostCommit) {
+    let label = format!("{row:?} over HTTP/1");
+    let upstream = truncating_upstream(row);
+    let port = http_support::reserve_observed();
+    let controller = port.controller();
+    let (router, log) = counted_mapper(postcommit_routes(upstream.as_ref()));
+    let (listener, addr, _) = port.into_owned_parts();
+    let handle = camber::http::server(router)
+        .policy(postcommit_policy(row))
+        .serve_background(listener)
+        .expect("the owned server requires a Tokio runtime");
+
+    let mut peer = open_streaming(addr, row.path(), CLOSE_BOUND).await;
+    let delivered = match row {
+        // The peer is the cause: it reads its committed head and then goes away
+        // with the body still coming.
+        PostCommit::Disconnect => {
+            let status = read_streaming_head(&mut peer, CLOSE_BOUND).await;
+            assert_eq!(
+                status, 200,
+                "{label}: the head committed before the peer left"
+            );
+            drop(peer);
+            None
+        }
+        // The server is the cause, and it can only be applied to a head already
+        // written: the status is read first, and what is left to establish is how
+        // the body under it ended.
+        PostCommit::Shutdown => {
+            let status = read_streaming_head(&mut peer, CLOSE_BOUND).await;
+            assert_eq!(status, 200, "{label}: the head committed before the stop");
+            handle.shutdown();
+            assert!(
+                read_cut(&mut peer).await,
+                "{label}: the body is cut under its committed head rather than ended"
+            );
+            None
+        }
+        _ => Some(read_streamed(&mut peer).await),
+    };
+    assert_postcommit_wire(row, &label, delivered.as_ref());
+    assert_postcommit_owner(&controller, row, &label).await;
+    assert_eq!(
+        log.calls(),
+        0,
+        "{label}: a post-commit terminal reaches no mapper"
+    );
+
+    handle.cancel();
+    assert!(
+        tokio::time::timeout(SHUTDOWN_BOUND, handle).await.is_ok(),
+        "{label}: the fixture server joined"
+    );
+}
+
+/// One row over HTTP/2: the stream resets, and its neighbour still answers.
+async fn assert_postcommit_http2(row: PostCommit) {
+    let label = format!("{row:?} over HTTP/2");
+    let upstream = truncating_upstream(row);
+    let port = http_support::reserve_observed();
+    let controller = port.controller();
+    let (router, log) = counted_mapper(postcommit_routes(upstream.as_ref()));
+    let (listener, addr, _) = port.into_owned_parts();
+    let handle = camber::http::server(router)
+        .policy(postcommit_policy(row))
+        .serve_background(listener)
+        .expect("the owned server requires a Tokio runtime");
+
+    let mut client = common::PersistentH2Client::connect(addr, CLOSE_BOUND).await;
+    let mut download = client.open_download(row.path()).await;
+    let streamed = match row {
+        PostCommit::Disconnect => {
+            download.head().await;
+            download.reset();
+            None
+        }
+        PostCommit::Shutdown => {
+            download.head().await;
+            handle.shutdown();
+            Some(download.drain().await)
+        }
+        _ => Some(download.drain().await),
+    };
+    assert_postcommit_stream(row, &label, streamed.as_ref());
+    assert_postcommit_owner(&controller, row, &label).await;
+    assert_eq!(
+        log.calls(),
+        0,
+        "{label}: a post-commit terminal reaches no mapper"
+    );
+    // The claim HTTP/2 alone can make: the connection under a reset stream is
+    // still a connection. A shutdown row has closed admission by now, so it is
+    // the one row with no neighbour left to ask.
+    match row {
+        PostCommit::Shutdown => {}
+        _ => {
+            let reused = client
+                .send_complete("GET", "/quick", "localhost", &[], b"")
+                .await;
+            assert_eq!(
+                reused.status,
+                200,
+                "{label}: another stream on the same connection still answers: {}",
+                reused.text()
+            );
+        }
+    }
+    client.close().await;
+
+    handle.cancel();
+    assert!(
+        tokio::time::timeout(SHUTDOWN_BOUND, handle).await.is_ok(),
+        "{label}: the fixture server joined"
+    );
+}
+
+/// Assert what one row's HTTP/2 stream was given.
+///
+/// The reset is the claim HTTP/2 makes that HTTP/1 cannot: the status stays what
+/// was committed, and what ends is one stream rather than the transport under it.
+fn assert_postcommit_stream(row: PostCommit, label: &str, streamed: Option<&common::H2Streamed>) {
+    let Some(streamed) = streamed else {
+        return;
+    };
+    assert_eq!(
+        streamed.status, 200,
+        "{label}: the committed status is not replaced"
+    );
+    assert!(
+        streamed.reset,
+        "{label}: the affected stream is reset rather than ended: {streamed:?}"
+    );
+    let Some(delivered) = row.delivered() else {
+        return;
+    };
+    assert_eq!(
+        streamed.bytes, delivered,
+        "{label}: the peer receives what was admitted and no more"
+    );
+}
+
+/// Assert what one row's HTTP/1 peer was given.
+fn assert_postcommit_wire(row: PostCommit, label: &str, delivered: Option<&Streamed>) {
+    let Some(delivered) = delivered else {
+        return;
+    };
+    assert_eq!(
+        delivered.status, 200,
+        "{label}: the committed status is not replaced"
+    );
+    assert!(
+        !delivered.complete,
+        "{label}: the body is cut under its committed head rather than ended: {delivered:?}"
+    );
+    let Some(bytes) = row.delivered() else {
+        return;
+    };
+    assert_eq!(
+        delivered.bytes, bytes,
+        "{label}: the peer receives what was admitted and no more"
+    );
+}
+
+/// Assert the production owner fixed this row's terminal and released once.
+async fn assert_postcommit_owner(
+    controller: &camber::http::mock::LifecycleController,
+    row: PostCommit,
+    label: &str,
+) {
+    // A row whose cause is the peer or the server can have its transport taken
+    // away before the owner weighs another turn: the response is released through
+    // the same destruction either way. The four rows a producer causes have no
+    // such excuse, so each must fix its own terminal.
+    let transport_caused = matches!(row, PostCommit::Disconnect | PostCommit::Shutdown);
+    let settled = http_support::poll_until(CLOSE_BOUND, || {
+        let observed = controller.transfers_observed();
+        observed.download.releases >= 1
+            && (transport_caused || observed.download.terminal.is_some())
+    });
+    let observed = controller.transfers_observed();
+    assert!(settled, "{label}: the download never settled: {observed:?}");
+    assert_eq!(
+        observed.download.releases, 1,
+        "{label}: the download released its source once: {observed:?}"
+    );
+    match observed.download.terminal {
+        None => assert!(
+            transport_caused,
+            "{label}: a producer-caused row fixes its own terminal: {observed:?}"
+        ),
+        Some(terminal) => assert!(
+            row.accepts(terminal),
+            "{label}: this row's own cause is the terminal: {observed:?}"
+        ),
+    }
+    assert!(
+        observed.download.terminals <= 1,
+        "{label}: a terminal is fixed at most once: {observed:?}"
+    );
+}
+
+/// The policy one post-commit row serves under.
+///
+/// Only the shutdown row names a short aggregate deadline: every other row is
+/// answered by a bound of its own, and a deadline they could reach would decide
+/// them instead.
+fn postcommit_policy(row: PostCommit) -> ServerPolicy {
+    let deadline = match row {
+        PostCommit::Shutdown => SHUTDOWN_DEADLINE,
+        _ => SHUTDOWN_BOUND,
+    };
+    ServerPolicy::default()
+        .header_timeout(UNREACHED)
+        .expect("a header boundary no post-commit row reaches")
+        .request_budget(
+            RequestBudget::bounded(UNREACHED, UNREACHED)
+                .expect("request deadlines no post-commit row reaches"),
+        )
+        .shutdown_timeout(deadline)
+        .expect("the row's aggregate deadline")
+}
+
+/// The routes every post-commit row is served through.
+///
+/// One router carries all of them: the terminal a row triggers is the route it
+/// asks for, so a row cannot be answered by a bound another row configured.
+fn postcommit_routes(upstream: Option<&http_support::ReadyServer>) -> Router {
+    let mut router = Router::new();
+    router.get("/quick", |_req: &Request| async {
+        Response::text(200, "quick")
+    });
+    router.get_stream("/post-bytes", |_req: &Request| {
+        Box::pin(async move {
+            let (response, sender) = StreamResponse::with_budget(
+                200,
+                4,
+                TransferBudget::bounded(TRANSFER_MAX_BYTES, UNREACHED, UNREACHED)
+                    .expect("the byte row's budget"),
+            )
+            .expect("a positive stream capacity");
+            spawn_paced(sender, TRANSFER_MAX_BYTES / TRANSFER_FRAME.len() + 1);
+            response
+        })
+    });
+    router.get_stream("/post-idle", |_req: &Request| {
+        Box::pin(async move {
+            let (response, sender) = StreamResponse::with_budget(
+                200,
+                4,
+                TransferBudget::unbounded()
+                    .with_idle(TRANSFER_IDLE)
+                    .expect("the idle row's budget"),
+            )
+            .expect("a positive stream capacity");
+            spawn_paced(sender, 1);
+            response
+        })
+    });
+    router.get_stream("/post-total", |_req: &Request| {
+        Box::pin(async move {
+            let (response, sender) = StreamResponse::with_budget(
+                200,
+                4,
+                TransferBudget::unbounded()
+                    .with_total(TRANSFER_TOTAL)
+                    .expect("the total row's budget"),
+            )
+            .expect("a positive stream capacity");
+            spawn_paced(sender, usize::MAX);
+            response
+        })
+    });
+    // The two rows the producer cannot cause: a peer that leaves and a server
+    // that stops both cut a stream that would otherwise run on.
+    router.get_stream("/post-paced", |_req: &Request| {
+        Box::pin(async move {
+            let (response, sender) = StreamResponse::with_budget(
+                200,
+                4,
+                TransferBudget::unbounded()
+                    .with_idle(UNREACHED)
+                    .expect("the paced row's budget"),
+            )
+            .expect("a positive stream capacity");
+            spawn_paced(sender, usize::MAX);
+            response
+        })
+    });
+    match upstream {
+        Some(upstream) => {
+            router.proxy_stream("/post-source", &format!("http://{}", upstream.local_addr()));
+        }
+        None => {}
+    }
+    router
+}
+
+/// Publish `frames` paced frames, then hold the stream open.
+///
+/// Paced so each frame reaches the peer as its own write: a producer that filled
+/// the channel in one turn would leave Hyper holding every frame in one unflushed
+/// buffer, and a body that then ended would take the whole of it with the
+/// transport. Held open afterwards so the terminal a row asserts on is the
+/// owner's and not the producer's end.
+fn spawn_paced(sender: camber::http::StreamSender, frames: usize) {
+    tokio::spawn(async move {
+        for _ in 0..frames {
+            if sender.send(TRANSFER_FRAME).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(TRANSFER_PACE).await;
+        }
+        std::future::pending::<()>().await;
+    });
+}
+
+/// The upstream one source row proxies to, and nothing for every other row.
+///
+/// It is a Camber server whose own download maximum its producer crosses, so it
+/// answers with a `200`, writes one frame, and then has its body cut. Read
+/// through the proxy that forwarded its head, that cut is a source failure under a
+/// response head Camber has already committed — which is the one download source
+/// failure a served route can actually produce.
+fn truncating_upstream(row: PostCommit) -> Option<http_support::ReadyServer> {
+    match row {
+        PostCommit::Source => {
+            let mut upstream = Router::new();
+            upstream.get_stream("/", |_req: &Request| {
+                Box::pin(async move {
+                    let (response, sender) = StreamResponse::with_budget(
+                        200,
+                        4,
+                        TransferBudget::bounded(TRANSFER_FRAME.len(), UNREACHED, UNREACHED)
+                            .expect("the upstream's own maximum"),
+                    )
+                    .expect("a positive stream capacity");
+                    spawn_paced(sender, 2);
+                    response
+                })
+            });
+            Some(
+                http_support::spawn_server_ready(upstream, CLOSE_BOUND)
+                    .expect("the source row's upstream answered"),
+            )
+        }
+        _ => None,
+    }
 }

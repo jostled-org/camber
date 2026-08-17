@@ -29,7 +29,7 @@ use camber::RuntimeError;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, MultipartObservation};
 use camber::http::{
     BodyAdmission, BodyAdmissionContext, Method, MultipartField, MultipartLimits, MultipartStream,
-    RejectionKind, Request, Response, Router,
+    RejectionKind, Request, RequestBudget, Response, Router, ServerPolicy, TransferBudget,
 };
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -1400,6 +1400,12 @@ fn send_prefix(addr: SocketAddr, connection: &str, path: &str, body: &[u8]) -> T
 /// takes the peer away, and then lets the handler ask: the read fails on the
 /// truncated payload, the request ends, and everything the session owned goes
 /// with it even though no answer can ever be delivered.
+///
+/// What the read fails on is the peer's departure, and the declared inbound
+/// precedence ranks that above the source failure it caused: a peer whose
+/// response lifetime has ended has no answer coming, so the row is silent and no
+/// mapper runs for it. The ownership claims above are unchanged; the
+/// classification claim is that there is none.
 async fn assert_disconnect_releases(
     addr: SocketAddr,
     fixture: &Fixture,
@@ -1427,28 +1433,12 @@ async fn assert_disconnect_releases(
             settles: Settles::Once,
         },
     );
-    let label = "a truncated payload is unreadable";
-    let observed = awaited(&fixture.mapped, label);
-    assert_eq!(
-        (observed.origin, observed.kind),
-        (LIVE, RejectionKind::BodyUnreadable),
-        "{label}: classified once, with nobody left to answer: {observed:?}"
+    let label = "a departed peer";
+    let recorded = settled_classification(&fixture.mapped).await;
+    assert!(
+        recorded.is_empty(),
+        "{label} is answered with no mapper call at all: {recorded:?}"
     );
-}
-
-/// Wait for exactly one refusal to be recorded, and report it.
-///
-/// The peer whose request this belongs to is gone, so nothing on the wire says
-/// when its answer was built. The journal is the only arrival left to wait for.
-fn awaited(mapped: &Journal, label: &str) -> Observed {
-    let recorded = wire::poll_value(BOUND, || {
-        let observed = drain(mapped);
-        (!observed.is_empty()).then_some(observed)
-    })
-    .unwrap_or_else(|| panic!("{label}: nothing was classified"));
-    let mut recorded = recorded.into_vec();
-    assert_eq!(recorded.len(), 1, "{label}: classified once: {recorded:?}");
-    recorded.remove(0)
 }
 
 /// Assert a reset HTTP/2 stream releases the session it left behind.
@@ -1903,4 +1893,410 @@ async fn escaped_stream_handle_is_inert_after_live_handler_completion() {
     }
 
     server.shutdown_bounded(BOUND).expect("the fixture stopped");
+}
+
+/// The quiet interval the deadline rows below cross.
+const SESSION_IDLE: Duration = Duration::from_millis(150);
+/// The request lifetime the request-total row crosses.
+const SESSION_TOTAL: Duration = Duration::from_millis(250);
+/// The transfer lifetime the transfer-total rows cross.
+const SESSION_TRANSFER_TOTAL: Duration = Duration::from_millis(250);
+/// The aggregate deadline the shutdown row names.
+const SESSION_SHUTDOWN: Duration = Duration::from_millis(200);
+/// A bound no deadline row is allowed to reach.
+const SESSION_UNREACHED: Duration = Duration::from_secs(30);
+
+/// Where one row stalls its session.
+///
+/// The four moments a streaming multipart session can be interrupted at, each
+/// anchored on the production checkpoint that names it rather than on a sleep:
+/// before it has asked the transport for anything, with a command accepted and no
+/// frame read, with a frame the parser is holding, and with a reply already
+/// handed to the application.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Stall {
+    BeforeFrame,
+    AfterAdmission,
+    ParserRetention,
+    AfterReply,
+}
+
+impl Stall {
+    /// The production checkpoint this stall holds the session at.
+    const fn checkpoint(self) -> Option<LifecycleCheckpoint> {
+        match self {
+            Self::BeforeFrame => None,
+            Self::AfterAdmission => Some(LifecycleCheckpoint::MultipartCommandAccepted),
+            Self::ParserRetention => Some(LifecycleCheckpoint::MultipartIngressAdvanced),
+            Self::AfterReply => Some(LifecycleCheckpoint::MultipartReplyPublished),
+        }
+    }
+}
+
+/// Which terminal one row revokes its session with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionTerminal {
+    /// The request body's quiet interval.
+    BodyIdle,
+    /// The lifetime from admitted head to committed response head.
+    RequestTotal,
+    /// The selected upload transfer's lifetime.
+    TransferTotal,
+    /// The peer went away with payload still owed.
+    Disconnect,
+    /// The one aggregate shutdown deadline expired.
+    Shutdown,
+}
+
+impl SessionTerminal {
+    /// The policy a row carrying this terminal serves under.
+    ///
+    /// Exactly one bound is reachable per row: every other is set past anything
+    /// the row can spend, so the terminal a row reports is the one it configured
+    /// and not whichever bound happened to be shortest.
+    fn policy(self) -> ServerPolicy {
+        let request = match self {
+            Self::BodyIdle => RequestBudget::bounded(SESSION_IDLE, SESSION_UNREACHED),
+            Self::RequestTotal => RequestBudget::bounded(SESSION_UNREACHED, SESSION_TOTAL),
+            Self::TransferTotal | Self::Disconnect | Self::Shutdown => {
+                RequestBudget::bounded(SESSION_UNREACHED, SESSION_UNREACHED)
+            }
+        }
+        .expect("the row's request budget");
+        let upload = match self {
+            Self::TransferTotal => TransferBudget::unbounded()
+                .with_total(SESSION_TRANSFER_TOTAL)
+                .expect("the row's transfer lifetime"),
+            Self::BodyIdle | Self::RequestTotal | Self::Disconnect | Self::Shutdown => {
+                TransferBudget::unbounded()
+            }
+        };
+        let shutdown = match self {
+            Self::Shutdown => SESSION_SHUTDOWN,
+            _ => BOUND,
+        };
+        ServerPolicy::default()
+            .header_timeout(SESSION_UNREACHED)
+            .expect("a header boundary no session row reaches")
+            .request_budget(request)
+            .upload_budget(upload)
+            .shutdown_timeout(shutdown)
+            .expect("the row's aggregate deadline")
+    }
+
+    /// What became of the driver that owned this row's session.
+    ///
+    /// Every bound the session itself observes lets its driver report a terminal
+    /// summary. The request total is the one that does not: it expires at the
+    /// route, which drops the whole session future — so whether the driver had
+    /// already settled is not this row's to claim.
+    const fn settles(self) -> Settles {
+        match self {
+            Self::RequestTotal => Settles::Either,
+            Self::BodyIdle | Self::TransferTotal | Self::Disconnect | Self::Shutdown => {
+                Settles::Once
+            }
+        }
+    }
+
+    /// Whether an answer may fail to arrive at all.
+    ///
+    /// The stop is the one row where it may: a graceful stop that reaches its own
+    /// deadline escalates to cancellation, which can take the transport before the
+    /// silent answer under it is written. What the row claims either way is that
+    /// no mapper ran and that everything it owned was released.
+    const fn answer_optional(self) -> bool {
+        matches!(self, Self::Shutdown)
+    }
+
+    /// What the peer is answered with, when an answer is possible at all.
+    ///
+    /// A departed peer has none: the declared precedence gives its row no mapper,
+    /// and there is nobody left to read one either way.
+    const fn answer(self) -> Option<(u16, Option<RejectionKind>)> {
+        match self {
+            Self::BodyIdle | Self::TransferTotal => Some((408, Some(RejectionKind::BodyTimeout))),
+            Self::RequestTotal => Some((408, Some(RejectionKind::RequestTimeout))),
+            // The aggregate deadline is a silent row: the transport ends and
+            // ownership releases without a mapped response.
+            Self::Shutdown => Some((503, None)),
+            Self::Disconnect => None,
+        }
+    }
+}
+
+/// 11.T5
+///
+/// One selected owner revokes a streaming multipart session, and route-aware body
+/// admission stays the only authority over its payload bytes. Every row stalls at
+/// a production checkpoint, crosses exactly one configured bound, and then reads
+/// what the session released: the permit once, the parser and reply backings to
+/// nothing, and command admission closed by the coordinator's own revocation. The
+/// grammar is unchanged throughout — the clean control row on each server still
+/// answers with the bytes it read.
+#[test]
+fn multipart_deadline_revokes_without_a_second_byte_owner() {
+    camber::runtime::builder()
+        .run(|| {
+            camber::runtime::block_on(async {
+                for (stall, terminal) in [
+                    (Stall::BeforeFrame, SessionTerminal::BodyIdle),
+                    (Stall::BeforeFrame, SessionTerminal::RequestTotal),
+                    (Stall::AfterAdmission, SessionTerminal::TransferTotal),
+                    (Stall::AfterAdmission, SessionTerminal::Disconnect),
+                    (Stall::ParserRetention, SessionTerminal::BodyIdle),
+                    (Stall::ParserRetention, SessionTerminal::Shutdown),
+                    (Stall::AfterReply, SessionTerminal::TransferTotal),
+                ] {
+                    assert_session_revoked(stall, terminal).await;
+                }
+            });
+        })
+        .expect("the multipart revocation runtime ran");
+}
+
+/// One row: stall the session, cross one bound, and read what it released.
+async fn assert_session_revoked(stall: Stall, terminal: SessionTerminal) {
+    let label = format!("{stall:?} ended by {terminal:?}");
+    let fixture = Fixture::new();
+    let port = wire::reserve_observed();
+    let controller = port.controller();
+    let (listener, addr, _) = port.into_owned_parts();
+    let handle = camber::http::server(live_router(&fixture))
+        .policy(terminal.policy())
+        .serve_background(listener)
+        .expect("the owned server requires a Tokio runtime");
+    let before = controller.multipart_observed();
+
+    if let Some(checkpoint) = stall.checkpoint() {
+        controller
+            .pause_once(checkpoint)
+            .expect("arm the session's stall checkpoint");
+    }
+    // The reading route asks for every chunk, so the driver is waiting on the
+    // transport whenever the peer withholds. That is what makes the bound this row
+    // configured the one thing that can end it.
+    let body = held_body();
+    let socket = tokio::task::spawn_blocking({
+        let label = label.clone();
+        move || {
+            let socket = send_prefix(addr, wire::CLOSE_AFTER_RESPONSE, "/read", &body);
+            socket
+                .set_read_timeout(Some(BOUND))
+                .unwrap_or_else(|error| panic!("{label}: the peer's read bound was set: {error}"));
+            socket
+        }
+    })
+    .await
+    .expect("the withholding peer was opened");
+
+    if let Some(checkpoint) = stall.checkpoint() {
+        wait_stalled(&controller, checkpoint, &label).await;
+        // The row's one reachable bound expires while the session is held, so the
+        // turn that resumes is the turn that observes it.
+        tokio::time::sleep(SESSION_TRANSFER_TOTAL + SESSION_IDLE).await;
+    }
+    let answered = act(terminal, socket, &handle).await;
+
+    assert_session_answer(terminal, answered.as_ref(), &fixture, &label);
+    assert_session_released(&controller, &fixture, before, terminal, &label);
+    assert_grammar_unchanged(terminal, addr, &fixture, &label).await;
+
+    handle.cancel();
+    assert!(
+        tokio::time::timeout(BOUND, handle).await.is_ok(),
+        "{label}: the fixture server joined"
+    );
+}
+
+/// Do the one thing this row's terminal needs, and read whatever answer follows.
+async fn act(
+    terminal: SessionTerminal,
+    socket: TcpStream,
+    handle: &camber::http::ServerHandle,
+) -> Option<wire::HttpResponse> {
+    match terminal {
+        // The peer itself is the cause, so it goes away and reads nothing.
+        SessionTerminal::Disconnect => {
+            drop(socket);
+            None
+        }
+        SessionTerminal::Shutdown => {
+            handle.shutdown();
+            read_session_answer(socket).await
+        }
+        SessionTerminal::BodyIdle
+        | SessionTerminal::RequestTotal
+        | SessionTerminal::TransferTotal => read_session_answer(socket).await,
+    }
+}
+
+/// Read one row's answer off its own socket, on a thread that may block.
+///
+/// `None` is a transport that ended without one. Only the stop row is allowed to
+/// be that, and the caller is what says which row is which.
+async fn read_session_answer(mut socket: TcpStream) -> Option<wire::HttpResponse> {
+    tokio::task::spawn_blocking(move || wire::read_http_response_bounded(&mut socket).ok())
+        .await
+        .expect("the answering peer settled")
+}
+
+/// Wait until the session has been held at its stall checkpoint.
+async fn wait_stalled(
+    controller: &LifecycleController,
+    checkpoint: LifecycleCheckpoint,
+    label: &str,
+) {
+    tokio::time::timeout(BOUND, controller.wait_until_paused(checkpoint))
+        .await
+        .unwrap_or_else(|_| panic!("{label}: {checkpoint:?} was never reached"))
+        .unwrap_or_else(|error| panic!("{label}: waiting for {checkpoint:?} failed: {error}"));
+    controller
+        .release(checkpoint)
+        .expect("release the session's stall checkpoint");
+}
+
+/// Assert the answer this row's terminal declares, and the mapper calls it owes.
+fn assert_session_answer(
+    terminal: SessionTerminal,
+    answered: Option<&wire::HttpResponse>,
+    fixture: &Fixture,
+    label: &str,
+) {
+    let recorded = wire::poll_value(QUIET, || {
+        let observed = drain(&fixture.mapped);
+        (!observed.is_empty()).then_some(observed)
+    })
+    .unwrap_or_default();
+    match (terminal.answer(), answered) {
+        (Some((status, kind)), Some(answered)) => {
+            assert_eq!(answered.status, status, "{label}: {}", answered.text());
+            assert_mapped_once(kind, &recorded, label);
+        }
+        (None, _) => assert!(
+            recorded.is_empty(),
+            "{label}: a departed peer is answered by no mapper: {recorded:?}"
+        ),
+        (Some(_), None) => assert!(
+            terminal.answer_optional(),
+            "{label}: no answer reached the peer"
+        ),
+    }
+}
+
+/// Assert the mapper calls one cause owes, and no more.
+///
+/// A mapped cause owes this route's mapper exactly one call under its own kind. A
+/// silent one owes it none: the declared precedence gives it no mapper, so an
+/// answer that carried one would be a response nothing was allowed to shape.
+fn assert_mapped_once(kind: Option<RejectionKind>, recorded: &[Observed], label: &str) {
+    let Some(kind) = kind else {
+        assert!(
+            recorded.is_empty(),
+            "{label}: a silent cause calls no mapper: {recorded:?}"
+        );
+        return;
+    };
+    assert_eq!(
+        recorded.len(),
+        1,
+        "{label}: one cause invokes one mapper once: {recorded:?}"
+    );
+    let observed = &recorded[0];
+    assert_eq!(
+        (observed.origin, observed.kind),
+        (LIVE, kind),
+        "{label}: mapped once, under its own cause: {observed:?}"
+    );
+}
+
+/// Assert this session released everything it owned, and counted no bytes of its
+/// own.
+///
+/// Ownership itself goes through the shared assertion every other terminal in
+/// this file uses, so a deadline row cannot claim a release under a weaker rule
+/// than a grammar row does. What this adds is the two claims only a revoked
+/// session makes: the coordinator closed command admission exactly once, and the
+/// upload owner that ended it counted no bytes of its own.
+fn assert_session_released(
+    controller: &LifecycleController,
+    fixture: &Fixture,
+    before: MultipartObservation,
+    terminal: SessionTerminal,
+    label: &str,
+) {
+    let settled = wire::poll_until(BOUND, || {
+        controller.multipart_observed().revocations() > before.revocations()
+            && fixture.released.load(Ordering::SeqCst) == 1
+    });
+    let after = controller.multipart_observed();
+    assert!(settled, "{label}: the session never revoked: {after:?}");
+    assert_ownership_released(
+        label,
+        fixture,
+        controller,
+        before,
+        1,
+        &Ownership {
+            reads: true,
+            settles: terminal.settles(),
+        },
+    );
+    assert_eq!(
+        after.revocations() - before.revocations(),
+        1,
+        "{label}: the coordinator closed command admission once: {after:?}"
+    );
+    assert_eq!(
+        after.reply_retained_bytes(),
+        0,
+        "{label}: the reply backing left this session's accounting: {after:?}"
+    );
+    // The one byte-authority claim: the upload owner carries deadlines and no
+    // maximum, so nothing counted this request's payload but route-aware
+    // admission.
+    let transfers = controller.transfers_observed();
+    assert_eq!(
+        transfers.upload.max_bytes, None,
+        "{label}: the upload owner is no second byte authority: {transfers:?}"
+    );
+    assert_eq!(
+        transfers.download,
+        Default::default(),
+        "{label}: an ended upload writes nothing to the download's record: {transfers:?}"
+    );
+}
+
+/// Assert the grammar, the nesting, and the part lifetimes are what they were.
+///
+/// The same server answers one complete upload after the row's own request ended.
+/// A shutdown row has closed admission by then, which is the one row with no
+/// server left to ask.
+async fn assert_grammar_unchanged(
+    terminal: SessionTerminal,
+    addr: SocketAddr,
+    fixture: &Fixture,
+    label: &str,
+) {
+    match terminal {
+        SessionTerminal::Shutdown => return,
+        _ => {}
+    }
+    let handled = fixture.handled.load(Ordering::SeqCst);
+    let body = valid_body();
+    let label = label.to_owned();
+    let answered = tokio::task::spawn_blocking(move || upload(addr, "/read", &body))
+        .await
+        .expect("the control upload settled");
+    assert_eq!(
+        answered.status,
+        200,
+        "{label}: a complete body still answers: {}",
+        answered.text()
+    );
+    assert_eq!(
+        fixture.handled.load(Ordering::SeqCst),
+        handled + 1,
+        "{label}: the control upload reached its handler"
+    );
 }

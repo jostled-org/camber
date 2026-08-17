@@ -20,8 +20,9 @@ use super::parser::{FieldMetadata, IncrementalParser, ParserEvent};
 use crate::RuntimeError;
 use crate::http::body_admission::{AdmittedBody, BodyBudget, BodyPermit};
 use crate::http::mock::{LifecycleCheckpoint, LifecycleScript};
+use crate::http::operation::InboundTerminal;
+use crate::http::transfer::{IncomingSource, Transfer, TransferFailure, TransferOwner};
 use bytes::Bytes;
-use http_body_util::BodyExt;
 use std::fmt::Display;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -68,6 +69,12 @@ pub(in crate::http) enum MultipartTerminal {
     ParserFailure(MultipartFailure, Box<str>),
     /// An incomplete field, a canceled operation, or revocation ended it.
     Abandoned,
+    /// The selected upload owner fixed one inbound or transfer terminal.
+    ///
+    /// Held apart from a parser failure because the answer is not this session's
+    /// to shape: the declared precedence already named the cause, and the route
+    /// answers it with the one disposition that cause carries.
+    Ended(TransferFailure),
 }
 
 impl MultipartTerminal {
@@ -79,6 +86,7 @@ impl MultipartTerminal {
                 MultipartCompletion::Failed(failure.restate(diagnostic))
             }
             Self::Abandoned => MultipartCompletion::Incomplete(malformed(INCOMPLETE_BODY)),
+            Self::Ended(failure) => MultipartCompletion::Ended(failure),
         }
     }
 }
@@ -97,6 +105,10 @@ pub(in crate::http) enum MultipartCompletion {
     /// The session ended with payload unread. A handler that reported its own
     /// failure keeps it; one that claimed success is answered with this.
     Incomplete(RuntimeError),
+    /// The selected upload owner fixed one inbound or transfer terminal. It owes
+    /// the peer exactly what the declared precedence gives that cause, and
+    /// nothing the handler said can change it.
+    Ended(TransferFailure),
 }
 
 /// Which kind of failure ended a session.
@@ -861,7 +873,13 @@ impl Drop for MultipartField<'_> {
 /// the source frame, the parser buffers, and the permit leave through the same
 /// stack-owned destruction.
 pub(in crate::http) struct MultipartSessionDriver<B> {
-    body: B,
+    /// The incoming payload, under the one upload owner that bounds its time.
+    ///
+    /// The owner carries this direction's quiet interval and lifetime, the
+    /// request deadlines the admitted head minted, and the cancellation,
+    /// shutdown, and peer-lifetime authority. It deliberately carries no payload
+    /// maximum: the budget below is this request's single byte accountant.
+    upload: Transfer<IncomingSource<B>>,
     budget: BodyBudget,
     /// The admitted permit, held only so that dropping this driver releases it.
     permit: Option<BodyPermit>,
@@ -1064,24 +1082,59 @@ where
     }
 
     /// Poll one decoded data frame, or report that the body ended.
+    ///
+    /// The frame arrives through the upload owner, so every deadline and
+    /// cancellation this request runs under is weighed in the same turn the
+    /// frame is read in — and by the one declared precedence, not by a rule of
+    /// this session's own. Payload bytes are still admitted here, by the one
+    /// accountant this request has.
     async fn pull_frame(&mut self) -> Result<bool, RuntimeError> {
-        loop {
-            let frame = match self.body.frame().await {
-                None => return Ok(false),
-                Some(result) => result.map_err(Self::unreadable)?,
-            };
-            self.count_frame();
-            let Ok(data) = frame.into_data() else {
-                continue;
-            };
-            if data.is_empty() {
-                continue;
+        let data = match self.upload.frame().await {
+            Ok(None) => return Ok(false),
+            Ok(Some(data)) => data,
+            Err(failure) => return Err(self.ended(failure)),
+        };
+        self.count_frame();
+        self.admit(data.len())?;
+        self.source = Some(data);
+        self.pause_at(LifecycleCheckpoint::MultipartIngressAdvanced)
+            .await;
+        Ok(true)
+    }
+
+    /// Record one upload terminal as this session's own, and name its error.
+    ///
+    /// A transport failure keeps the provenance this session has always reported
+    /// it under. Every other cause is the operation's, so it is recorded as the
+    /// terminal the route answers rather than folded into a parser fault the
+    /// grammar never saw.
+    fn ended(&mut self, failure: TransferFailure) -> RuntimeError {
+        let error = failure.error();
+        match failure.terminal() {
+            InboundTerminal::SourceFailure => RuntimeError::RequestBodyUnreadable(
+                format!("request body read failed: {error}").into(),
+            ),
+            InboundTerminal::ShutdownDeadline
+            | InboundTerminal::ForcedCancellation
+            | InboundTerminal::RouteBodyLimit
+            | InboundTerminal::TransferBytes
+            | InboundTerminal::BodyIdle
+            | InboundTerminal::TransferIdle
+            | InboundTerminal::TransferTotal
+            | InboundTerminal::RequestTotal
+            | InboundTerminal::Disconnect
+            | InboundTerminal::ResponseHead => {
+                self.record_ended(failure);
+                error
             }
-            self.admit(data.len())?;
-            self.source = Some(data);
-            self.pause_at(LifecycleCheckpoint::MultipartIngressAdvanced)
-                .await;
-            return Ok(true);
+        }
+    }
+
+    /// Keep the first terminal this session reached, and only the first.
+    fn record_ended(&mut self, failure: TransferFailure) {
+        match self.terminal {
+            None => self.terminal = Some(MultipartTerminal::Ended(failure)),
+            Some(_) => {}
         }
     }
 
@@ -1098,11 +1151,6 @@ where
                     format!("request body exceeds the admitted maximum of {limit} bytes").into(),
                 )
             })
-    }
-
-    /// Name one incoming transport failure as its own provenance.
-    fn unreadable(error: B::Error) -> RuntimeError {
-        RuntimeError::RequestBodyUnreadable(format!("request body read failed: {error}").into())
     }
 
     /// Record typed terminal provenance before the failure is replied with.
@@ -1175,15 +1223,20 @@ pub(in crate::http) fn open<B>(
     boundary: &str,
     limits: MultipartLimits,
     observer: SessionObserver,
+    upload: TransferOwner,
 ) -> (
     MultipartStream,
     MultipartRevocation,
     MultipartSessionDriver<B>,
-) {
+)
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: Display,
+{
     let budget = BodyBudget::new(&admitted);
     let slot = Arc::new(CommandSlot::new(observer.clone()));
     let driver = MultipartSessionDriver {
-        body,
+        upload: upload.deadlines_only().over(IncomingSource::new(body)),
         budget,
         permit: admitted.permit,
         parser: IncrementalParser::new(boundary, limits),

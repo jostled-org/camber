@@ -36,6 +36,14 @@ pub enum LifecycleCheckpoint {
         upload: super::TransferBudget,
         download: super::TransferBudget,
     },
+    /// One transfer owner is about to read its source.
+    ///
+    /// Held here, a case makes every source it wants weighed ready before the
+    /// turn that reads them begins, including the frame the source is holding.
+    BeforeTransferSourcePoll,
+    /// One transfer owner has read its source and is about to weigh a whole
+    /// scheduling turn's ready sources against the declared precedence.
+    BeforeTransferTerminalSelection,
     /// One admitted request's inbound coordinator is about to weigh a whole
     /// scheduling turn's ready sources against the declared precedence.
     ///
@@ -530,6 +538,182 @@ struct OperationObservations {
     response_head: AtomicUsize,
 }
 
+/// What one streaming direction's owner published about itself.
+///
+/// Written by the production owner it names — the policy it froze, the frames it
+/// polled, the bytes it admitted, the frame it released at a crossing, the one
+/// terminal it fixed, and its own release — and read by the observing case.
+/// Nothing here polls a source, admits a byte, selects a terminal, or releases
+/// anything.
+#[derive(Default)]
+struct DirectionObservations {
+    /// The byte maximum this direction froze. Zero is unbounded, which no
+    /// validated maximum can be.
+    max_bytes: AtomicUsize,
+    /// The frozen quiet interval and lifetime, in nanoseconds. `u64::MAX` is
+    /// unbounded.
+    idle_nanos: AtomicU64,
+    total_nanos: AtomicU64,
+    /// Frames this owner polled out of its source, payload-carrying or not.
+    frames_polled: AtomicUsize,
+    /// The running total this direction has admitted.
+    admitted_bytes: AtomicUsize,
+    /// Frames released rather than delivered: the one that crossed the maximum,
+    /// and the one in hand when a terminal was fixed.
+    crossings_released: AtomicUsize,
+    /// Set-once, exactly as the owner's own terminal is.
+    terminal: OnceLock<InboundTerminal>,
+    /// How many terminals reached this record, including any the set-once above
+    /// kept out.
+    terminals: AtomicUsize,
+    /// How many owners of this direction reached their drop.
+    releases: AtomicUsize,
+}
+
+/// One armed checkpoint an owner inside a poll is held at.
+///
+/// The gate itself, wrapped so that reaching a checkpoint and holding at it stay
+/// the two moments they already are for every awaiting owner: the hold is taken
+/// synchronously, and the poll that took it decides when to look for the
+/// release.
+pub(in crate::http) struct CheckpointHold(Arc<ReleaseGate>);
+
+impl CheckpointHold {
+    /// Whether this hold has been released, registering interest if it has not.
+    pub(in crate::http) fn poll_released(
+        &self,
+        cx: &std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        self.0.poll_release(cx)
+    }
+}
+
+impl DirectionObservations {
+    /// Apply one event this direction's owner published.
+    fn apply(&self, event: TransferEvent) {
+        let counter = match event {
+            TransferEvent::PolicyFrozen(budget) => {
+                self.max_bytes
+                    .store(budget.max_bytes().unwrap_or(0), Ordering::Release);
+                self.idle_nanos
+                    .store(nanos_of(budget.idle()), Ordering::Release);
+                self.total_nanos
+                    .store(nanos_of(budget.total()), Ordering::Release);
+                return;
+            }
+            // A running total, not a tally: the claim is how much this direction
+            // admitted, and adding each report to the last would double it.
+            TransferEvent::Admitted(counted) => {
+                self.admitted_bytes.fetch_max(counted, Ordering::Release);
+                return;
+            }
+            TransferEvent::Terminal(terminal) => {
+                let _kept_the_first = self.terminal.set(terminal);
+                &self.terminals
+            }
+            TransferEvent::FramePolled => &self.frames_polled,
+            TransferEvent::CrossingReleased => &self.crossings_released,
+            TransferEvent::Released => &self.releases,
+        };
+        counter.fetch_add(1, Ordering::Release);
+    }
+
+    /// This record as the snapshot an observing case reads.
+    fn snapshot(&self) -> TransferDirectionObservation {
+        TransferDirectionObservation {
+            max_bytes: match self.max_bytes.load(Ordering::Acquire) {
+                0 => None,
+                max => Some(max),
+            },
+            idle: duration_of(self.idle_nanos.load(Ordering::Acquire)),
+            total: duration_of(self.total_nanos.load(Ordering::Acquire)),
+            frames_polled: self.frames_polled.load(Ordering::Acquire),
+            admitted_bytes: self.admitted_bytes.load(Ordering::Acquire),
+            crossings_released: self.crossings_released.load(Ordering::Acquire),
+            terminal: self.terminal.get().copied(),
+            terminals: self.terminals.load(Ordering::Acquire),
+            releases: self.releases.load(Ordering::Acquire),
+        }
+    }
+}
+
+/// The nanosecond spelling one frozen deadline is recorded as.
+fn nanos_of(configured: Option<std::time::Duration>) -> u64 {
+    configured.map_or(UNBOUNDED_TOTAL_NANOS, |value| {
+        u64::try_from(value.as_nanos()).unwrap_or(UNBOUNDED_TOTAL_NANOS)
+    })
+}
+
+/// The deadline one recorded nanosecond value names.
+///
+/// Zero is "nothing recorded yet" rather than a configured deadline: every
+/// finite deadline is validated above zero before a policy can hold one.
+fn duration_of(nanos: u64) -> Option<std::time::Duration> {
+    (nanos != UNBOUNDED_TOTAL_NANOS && nanos > 0).then(|| std::time::Duration::from_nanos(nanos))
+}
+
+/// The two independent direction records one listener's transfers publish to.
+#[derive(Default)]
+struct TransferObservations {
+    upload: DirectionObservations,
+    download: DirectionObservations,
+}
+
+/// What one thing a transfer owner did.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::http) enum TransferEvent {
+    /// The one budget this direction resolved to, before its first poll.
+    PolicyFrozen(super::TransferBudget),
+    /// One frame was polled out of the source.
+    FramePolled,
+    /// One payload frame was admitted, carrying the running total.
+    Admitted(usize),
+    /// One frame was released rather than delivered.
+    CrossingReleased,
+    /// The one terminal this direction fixed.
+    Terminal(InboundTerminal),
+    /// This owner reached its drop.
+    Released,
+}
+
+/// What one listener's streaming transfers published, per direction.
+///
+/// Read-only. Every field is written by the production owner it names, and the
+/// two directions never share a counter: that separation is the claim.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TransferDirectionObservation {
+    /// The frozen payload maximum, or `None` for an unbounded one.
+    pub max_bytes: Option<usize>,
+    /// The frozen quiet interval, or `None` for an unbounded one.
+    pub idle: Option<std::time::Duration>,
+    /// The frozen lifetime, or `None` for an unbounded one.
+    pub total: Option<std::time::Duration>,
+    /// Frames this direction's owner polled out of its source.
+    pub frames_polled: usize,
+    /// Payload bytes this direction admitted.
+    pub admitted_bytes: usize,
+    /// Frames released rather than delivered.
+    pub crossings_released: usize,
+    /// The one terminal this direction fixed, if it fixed one.
+    pub terminal: Option<InboundTerminal>,
+    /// How many terminals reached this record, including a second the set-once
+    /// kept out.
+    pub terminals: usize,
+    /// How many owners of this direction reached their drop.
+    pub releases: usize,
+}
+
+/// What one listener's two transfer directions published so far.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TransferObservation {
+    /// What the streaming uploads under this listener published.
+    pub upload: TransferDirectionObservation,
+    /// What the streaming downloads under this listener published.
+    pub download: TransferDirectionObservation,
+}
+
 /// Record one value, and count it when it differs from the last one recorded.
 ///
 /// A last-value cell beside a change count. Four owners reading one identity
@@ -660,6 +844,8 @@ pub(crate) struct LifecycleScript {
     /// What this listener's admitted operations published about their one
     /// envelope each.
     operation: OperationObservations,
+    /// What this listener's streaming transfers published, per direction.
+    transfers: TransferObservations,
     /// What this listener's direct WebSocket bridges published.
     #[cfg(feature = "ws")]
     websocket: WebSocketDirectionObservations,
@@ -686,6 +872,7 @@ impl LifecycleScript {
             #[cfg(feature = "profiling")]
             profiling: ProfilingObservations::default(),
             operation: OperationObservations::default(),
+            transfers: TransferObservations::default(),
             #[cfg(feature = "ws")]
             websocket: WebSocketDirectionObservations::default(),
             multipart: super::multipart::SessionMetrics::default(),
@@ -765,6 +952,45 @@ impl LifecycleScript {
                 );
             },
         );
+    }
+
+    /// Record one thing a transfer owner did, under its own direction.
+    ///
+    /// Inert with no controller registered, exactly like [`Self::pause_at`]. The
+    /// direction picks the record, so nothing an upload publishes can be read as
+    /// a download's.
+    pub(in crate::http) fn observe_transfer(
+        script: Option<&Self>,
+        direction: super::transfer::TransferDirection,
+        event: TransferEvent,
+    ) {
+        Self::observe(
+            script,
+            |script| &script.transfers,
+            |transfers| {
+                let record = match direction {
+                    super::transfer::TransferDirection::Upload => &transfers.upload,
+                    super::transfer::TransferDirection::Download => &transfers.download,
+                };
+                record.apply(event);
+            },
+        );
+    }
+
+    /// Reach one checkpoint from inside a poll, and hand back the gate to hold at.
+    ///
+    /// `None` is a checkpoint nothing armed, a closed controller, or no
+    /// controller at all: an owner that gets it runs straight through. The
+    /// async [`Self::pause_at`] is what an owner that can await uses; this is for
+    /// the streaming owners that are driven from a body poll and have no await to
+    /// take.
+    pub(in crate::http) fn hold_at(
+        script: Option<&Self>,
+        checkpoint: LifecycleCheckpoint,
+    ) -> Option<CheckpointHold> {
+        script
+            .and_then(|script| script.reach(checkpoint))
+            .map(CheckpointHold)
     }
 
     /// Write one direct-WebSocket observation.
@@ -1418,6 +1644,20 @@ impl LifecycleController {
         }
     }
 
+    /// What this listener's streaming transfers have published so far.
+    ///
+    /// Read-only, and every number in it is written by the production owner it
+    /// names: the policy each direction froze, the frames it polled, the bytes
+    /// it admitted, the frame it released instead of delivering, the one terminal
+    /// it fixed, and its own release. Nothing here polls a source, admits a
+    /// byte, selects a terminal, maps a refusal, or releases a producer.
+    pub fn transfers_observed(&self) -> TransferObservation {
+        TransferObservation {
+            upload: self.script.transfers.upload.snapshot(),
+            download: self.script.transfers.download.snapshot(),
+        }
+    }
+
     /// What this listener's direct WebSocket bridges have published so far.
     ///
     /// Read-only, and every value in it is written by the production decision
@@ -1984,6 +2224,8 @@ pub enum MultipartTerminalKind {
     Unreadable,
     /// A grammar, structural, or framing failure ended it.
     Structural,
+    /// The selected upload owner fixed one inbound or transfer terminal.
+    Ended(InboundTerminal),
 }
 
 /// A read-only snapshot of what one multipart session has done so far.
@@ -2163,6 +2405,10 @@ impl MultipartOutcome {
             MultipartTerminal::ParserFailure(MultipartFailure::Structural, diagnostic) => {
                 (MultipartTerminalKind::Structural, Some(diagnostic))
             }
+            MultipartTerminal::Ended(failure) => (
+                MultipartTerminalKind::Ended(failure.terminal()),
+                Some(failure.error().to_string().into()),
+            ),
         };
         Self {
             terminal,
@@ -2319,6 +2565,14 @@ impl MultipartSessionBuilder {
             &self.boundary,
             self.limits,
             Some(Arc::clone(&observer)),
+            // No admitted operation stands behind a controlled session, so it
+            // carries no deadline, no cancellation, and no peer lifetime: the
+            // claims these cases make are the parser's, the budget's, and the
+            // command protocol's.
+            super::transfer::TransferOwner::detached(
+                super::transfer::TransferDirection::Upload,
+                super::TransferBudget::unbounded(),
+            ),
         );
         MultipartSession {
             stream: Some(stream),

@@ -15,7 +15,11 @@ use super::disconnect::{ConnectionLiveness, DisconnectSignal};
 use super::mock::LifecycleScript;
 use super::rejection::Rejected;
 use super::request_budget::RequestBudget;
+use super::route_budgets::RouteBudgets;
 use super::server_lifecycle::ServerControl;
+use super::transfer::{TransferDirection, TransferOwner};
+use super::transfer_budget::TransferBudget;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -45,9 +49,11 @@ pub enum OperationStage {
 /// A terminal fixed in an earlier turn is immutable; for sources first observed
 /// in the same turn, the earliest row here wins.
 ///
-/// Later steps extend this set with the transfer terminals their adapters own.
-/// They add a variant and an [`InboundTerminal::ORDER`] row; they do not
-/// redefine the order already declared.
+/// The three transfer rows are read by the streaming owners in
+/// [`transfer`](super::transfer), which extend this one selector rather than
+/// keeping a precedence table of their own. A later step that adds a terminal
+/// adds a variant and an [`InboundTerminal::ORDER`] row; it does not redefine
+/// the order already declared.
 ///
 /// A test seam, not API, on the same footing as [`OperationStage`].
 #[doc(hidden)]
@@ -59,15 +65,22 @@ pub enum InboundTerminal {
     ForcedCancellation,
     /// The route-aware body admission's byte maximum was crossed.
     RouteBodyLimit,
+    /// One streaming direction's own byte maximum was crossed.
+    TransferBytes,
     /// The quiet interval allowed between request body data frames expired.
     BodyIdle,
+    /// The quiet interval allowed between one transfer's data frames expired.
+    TransferIdle,
+    /// One streaming direction's lifetime expired.
+    TransferTotal,
     /// The lifetime from admitted head to committed response head expired.
     RequestTotal,
     /// The peer's response lifetime ended before an answer was possible.
     Disconnect,
     /// The inbound source failed.
     SourceFailure,
-    /// The request payload ended, so the response head may be produced.
+    /// The request payload ended, so the response head may be produced, or one
+    /// transfer's source reached its normal end.
     ResponseHead,
 }
 
@@ -77,11 +90,14 @@ impl InboundTerminal {
     /// Named exhaustively rather than derived from declaration order: the order
     /// is the contract, and a variant reordered for readability must not
     /// silently reorder the terminals a live service selects.
-    const ORDER: [Self; 8] = [
+    const ORDER: [Self; 11] = [
         Self::ShutdownDeadline,
         Self::ForcedCancellation,
         Self::RouteBodyLimit,
+        Self::TransferBytes,
         Self::BodyIdle,
+        Self::TransferIdle,
+        Self::TransferTotal,
         Self::RequestTotal,
         Self::Disconnect,
         Self::SourceFailure,
@@ -100,7 +116,10 @@ pub(super) struct InboundReady {
     shutdown_deadline: bool,
     forced_cancellation: bool,
     route_body_limit: bool,
+    transfer_bytes: bool,
     body_idle: bool,
+    transfer_idle: bool,
+    transfer_total: bool,
     request_total: bool,
     disconnect: bool,
     source_failure: bool,
@@ -117,11 +136,38 @@ impl InboundReady {
             InboundTerminal::ShutdownDeadline => self.shutdown_deadline,
             InboundTerminal::ForcedCancellation => self.forced_cancellation,
             InboundTerminal::RouteBodyLimit => self.route_body_limit,
+            InboundTerminal::TransferBytes => self.transfer_bytes,
             InboundTerminal::BodyIdle => self.body_idle,
+            InboundTerminal::TransferIdle => self.transfer_idle,
+            InboundTerminal::TransferTotal => self.transfer_total,
             InboundTerminal::RequestTotal => self.request_total,
             InboundTerminal::Disconnect => self.disconnect,
             InboundTerminal::SourceFailure => self.source_failure,
             InboundTerminal::ResponseHead => self.response_head,
+        }
+    }
+
+    /// Record that one transfer direction's byte maximum was crossed.
+    pub(super) const fn with_transfer_bytes(self) -> Self {
+        Self {
+            transfer_bytes: true,
+            ..self
+        }
+    }
+
+    /// Record that one transfer's quiet interval expired.
+    pub(super) const fn with_transfer_idle(self) -> Self {
+        Self {
+            transfer_idle: true,
+            ..self
+        }
+    }
+
+    /// Record that one transfer's lifetime expired.
+    pub(super) const fn with_transfer_total(self) -> Self {
+        Self {
+            transfer_total: true,
+            ..self
         }
     }
 
@@ -185,9 +231,9 @@ impl OperationId {
 /// that is meant to be one.
 pub(super) struct OperationEnvelope {
     id: OperationId,
-    /// The effective request policy, already narrowed outer-to-inner by the
-    /// classifier that selected this route's authority.
-    budget: RequestBudget,
+    /// The effective request and transfer policies, already narrowed
+    /// outer-to-inner by the classifier that selected this route's authority.
+    budgets: RouteBudgets,
     /// The absolute instant this request's total deadline expires at, computed
     /// once from the admitted head.
     total: Option<Instant>,
@@ -204,7 +250,7 @@ pub(super) struct OperationEnvelope {
 impl OperationEnvelope {
     /// Mint the one envelope an admitted head carries.
     pub(super) fn admit(
-        budget: RequestBudget,
+        budgets: RouteBudgets,
         control: Option<tokio::sync::watch::Receiver<ServerControl>>,
         connection: &Arc<ConnectionLiveness>,
         disconnect: &DisconnectSignal,
@@ -212,16 +258,17 @@ impl OperationEnvelope {
         script: Option<&LifecycleScript>,
     ) -> Self {
         let admitted_at = Instant::now();
+        let request = budgets.request();
         let envelope = Self {
             id: OperationId::mint(),
-            budget,
-            total: budget.total().map(|total| admitted_at + total),
+            budgets,
+            total: request.total().map(|total| admitted_at + total),
             control,
             shutdown_timeout,
             connection: Arc::clone(connection),
             disconnect: disconnect.clone(),
         };
-        LifecycleScript::observe_operation_admitted(script, envelope.id, budget.total());
+        LifecycleScript::observe_operation_admitted(script, envelope.id, request.total());
         envelope
     }
 
@@ -232,7 +279,7 @@ impl OperationEnvelope {
 
     /// The effective request policy this operation runs under.
     pub(super) const fn budget(&self) -> RequestBudget {
-        self.budget
+        self.budgets.request()
     }
 
     /// The narrow inbound handle one payload owner takes.
@@ -241,9 +288,53 @@ impl OperationEnvelope {
     /// measures starts when that owner started reading rather than when the
     /// head was admitted.
     pub(super) fn inbound(&self) -> InboundGuard {
+        self.guard(self.budgets.request().body_idle(), self.total)
+    }
+
+    /// The narrow upload owner one streaming request consumer takes.
+    ///
+    /// The consumer's own registration policy is narrowed under the route's,
+    /// which the classifier already narrowed under the host's, the server's, and
+    /// the runtime's. The carried request deadlines travel with it: an upload
+    /// runs before the response head commits, so its turn weighs the request's
+    /// idle and total against the transfer's own two.
+    pub(super) fn upload(
+        &self,
+        registration: TransferBudget,
+        observer: Option<Arc<LifecycleScript>>,
+    ) -> TransferOwner {
+        TransferOwner::new(
+            TransferDirection::Upload,
+            registration.narrowed_by(self.budgets.upload()),
+            InboundWatch::over(self.inbound()),
+            observer,
+        )
+    }
+
+    /// The narrow download owner one streaming response body takes.
+    ///
+    /// The request deadlines are deliberately absent. A download begins at a
+    /// committed response head, and request-total enforcement ends there, so a
+    /// body that carried them would answer to a deadline that is no longer
+    /// reachable and charge response time to the request that produced it.
+    pub(super) fn download(
+        &self,
+        registration: TransferBudget,
+        observer: Option<Arc<LifecycleScript>>,
+    ) -> TransferOwner {
+        TransferOwner::new(
+            TransferDirection::Download,
+            registration.narrowed_by(self.budgets.download()),
+            InboundWatch::over(self.guard(None, None)),
+            observer,
+        )
+    }
+
+    /// One inbound handle over the two request deadlines its owner enforces.
+    fn guard(&self, idle: Option<Duration>, total: Option<Instant>) -> InboundGuard {
         InboundGuard {
-            idle: self.budget.body_idle(),
-            total: self.total,
+            idle,
+            total,
             control: self.control.clone(),
             shutdown_timeout: self.shutdown_timeout,
             shutdown_deadline: None,
@@ -310,9 +401,12 @@ impl InboundGuard {
                 .is_some_and(|deadline| now >= deadline),
             forced_cancellation: matches!(control, Some(ServerControl::Abort)),
             route_body_limit: false,
+            transfer_bytes: false,
             body_idle: self
                 .idle
                 .is_some_and(|idle| now.saturating_duration_since(self.quiet_since) >= idle),
+            transfer_idle: false,
+            transfer_total: false,
             request_total: self.total.is_some_and(|total| now >= total),
             disconnect: self.connection.is_terminating() || self.disconnect.observed().is_some(),
             source_failure: false,
@@ -388,6 +482,97 @@ impl InboundGuard {
     }
 }
 
+/// The inbound authority one poll-driven owner holds.
+///
+/// A streaming transfer is driven from inside a body poll or a `poll_fn`, not
+/// from a `select!`, so it cannot await [`InboundGuard::quiet`]. This wraps the
+/// same guard and answers the same question one poll at a time: which sources
+/// are ready now, and wake me when one of them can change that.
+///
+/// What it arms a wake for is the deadlines and the peer's response lifetime.
+/// The supervisor's control state is read synchronously instead, every turn,
+/// because a graceful transition does not end an admitted operation — the
+/// deadline it mints does, and minting that deadline is what arms the wake that
+/// ends the work. A forced cancellation takes the connection's task with it, so
+/// the transfer's own release runs through its drop.
+pub(super) struct InboundWatch {
+    guard: InboundGuard,
+    /// The peer's response lifetime, awaited through one future built once. The
+    /// signal resolves once, so nothing ever rebuilds it.
+    lifetime: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>,
+    /// The deadline wake in flight, and the instant it was armed for.
+    ///
+    /// Kept across polls rather than rebuilt per frame: a wake armed for an
+    /// interval that has since moved later only fires early, and the turn it
+    /// wakes re-reads every source and arms the correct one. A wake armed for an
+    /// instant later than the earliest deadline would miss it, so that is the
+    /// one case this rebuilds for.
+    sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    armed: Option<Instant>,
+}
+
+impl InboundWatch {
+    /// Wrap one inbound handle for an owner that reads it from a poll.
+    pub(super) fn over(guard: InboundGuard) -> Self {
+        let signal = guard.disconnect.clone();
+        Self {
+            guard,
+            lifetime: Box::pin(async move {
+                signal.cancelled().await;
+            }),
+            sleep: None,
+            armed: None,
+        }
+    }
+
+    /// Every source this turn can decide, with the wake for the next turn armed.
+    ///
+    /// `extra` is the caller's own earliest deadline — a transfer's quiet
+    /// interval or lifetime — so one wake covers both families rather than each
+    /// owner arming a timer of its own.
+    ///
+    /// Interest is registered before the sources are read, which is what makes
+    /// a source that becomes ready between the two visible to this turn instead
+    /// of parking the owner behind it.
+    pub(super) fn observed(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        extra: Option<Instant>,
+    ) -> InboundReady {
+        let _ = self.lifetime.as_mut().poll(cx);
+        self.arm(cx, extra);
+        self.guard.observed()
+    }
+
+    /// Arm the wake for the earliest deadline this turn can be changed by.
+    fn arm(&mut self, cx: &mut std::task::Context<'_>, extra: Option<Instant>) {
+        let wanted = [self.guard.next_deadline(), extra]
+            .into_iter()
+            .flatten()
+            .min();
+        let Some(wanted) = wanted else {
+            return;
+        };
+        // A wake already armed no later than the earliest deadline still covers
+        // it, so long as it has not already fired: a fired wake registers no
+        // waker, and returning on one would park this owner with nothing left to
+        // wake it.
+        let covering = self.armed.is_some_and(|armed| armed <= wanted);
+        let held = covering
+            && self
+                .sleep
+                .as_mut()
+                .is_some_and(|sleep| sleep.as_mut().poll(cx).is_pending());
+        if held {
+            return;
+        }
+        let mut sleep = Box::pin(tokio::time::sleep_until(wanted));
+        let _ = sleep.as_mut().poll(cx);
+        self.sleep = Some(sleep);
+        self.armed = Some(wanted);
+    }
+}
+
 /// How one admitted request's inbound work ended when it did not complete.
 ///
 /// The two arms are the precedence table's two dispositions, not a success and
@@ -432,7 +617,15 @@ fn mapped_refusal(
     wire: Option<Rejected>,
 ) -> Option<Rejected> {
     match terminal {
-        InboundTerminal::RouteBodyLimit | InboundTerminal::SourceFailure => wire,
+        // The three transfer rows join the two that already travel this way:
+        // the owner that measured the bound minted the refusal that names it,
+        // and no later stage restates a maximum or a deadline it did not
+        // enforce.
+        InboundTerminal::RouteBodyLimit
+        | InboundTerminal::TransferBytes
+        | InboundTerminal::TransferIdle
+        | InboundTerminal::TransferTotal
+        | InboundTerminal::SourceFailure => wire,
         InboundTerminal::BodyIdle => budget.body_idle().map(Rejected::body_timeout),
         InboundTerminal::RequestTotal => budget.total().map(Rejected::request_timeout),
         InboundTerminal::ShutdownDeadline
