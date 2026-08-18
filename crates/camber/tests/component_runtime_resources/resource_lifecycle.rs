@@ -59,9 +59,16 @@ fn resources_shut_down_in_reverse_registration_order() {
         })
         .unwrap();
 
-    let mut order = log.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    order.sort();
-    assert_eq!(&*order, &["A", "B", "C"], "all resources must be shut down");
+    let order: Box<[&str]> = log
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .into_boxed_slice();
+    assert_eq!(
+        &*order,
+        &["C", "B", "A"],
+        "teardown must visit resources in reverse registration order"
+    );
 }
 
 #[test]
@@ -129,24 +136,26 @@ fn resource_shutdown_error_is_logged_but_does_not_block_others() {
         }
     }
 
-    // Register failing first, then recorder.
-    // Reverse order: recorder shuts down first (should succeed),
-    // then failing shuts down (errors but doesn't block).
-    // But the test intent is: A errors, B still called.
-    // So register recorder first, failing second.
-    // Reverse order: failing (errors), then recorder (should still run).
-    runtime::builder()
+    // Registered recorder first, failing second, so teardown's reverse order
+    // reaches the failing callback before the one that must still run.
+    let outcome = runtime::builder()
         .shutdown_timeout(std::time::Duration::from_secs(1))
         .resource(RecordingResource(Arc::clone(&b_called)))
         .resource(FailingResource)
         .run(|| {
             runtime::request_shutdown();
-        })
-        .unwrap();
+        });
 
     assert!(
         b_called.load(Ordering::Acquire),
         "recorder shutdown was not called despite failing resource error"
+    );
+    // The error is no longer disposed of in a log line: it reaches the caller
+    // through the aggregate, named against the resource that returned it.
+    let error = outcome.unwrap_err();
+    assert!(
+        matches!(&error, RuntimeError::Lifecycle(failures) if failures.len() == 1),
+        "one returned teardown error must be the whole aggregate: {error:?}"
     );
 }
 
@@ -236,9 +245,15 @@ fn resource_shutdown_panic_is_reported_after_other_callbacks_finish() {
         .resource(FinalizationProbe(Arc::clone(&finalized)))
         .run(|| ());
 
+    let panicked = match &outcome {
+        Err(RuntimeError::Lifecycle(failures)) => failures.primary().kind().clone(),
+        other => panic!("resource panic was not reported as an aggregate: {other:?}"),
+    };
     assert!(
-        matches!(&outcome, Err(RuntimeError::TaskPanicked(message)) if &**message == "resource shutdown panic"),
-        "resource panic was not reported through the runtime result: {outcome:?}"
+        matches!(&panicked, camber::LifecycleFailureKind::Resource(resource)
+            if matches!(resource.kind(), camber::ResourceFailureKind::Panicked(message)
+                if &**message == "resource shutdown panic")),
+        "the aggregate did not carry the callback's own panic payload: {panicked}"
     );
     assert!(
         finalized.load(Ordering::Acquire),
@@ -264,20 +279,6 @@ impl Resource for HealthyResource {
     }
 }
 
-struct UnhealthyResource(&'static str);
-
-impl Resource for UnhealthyResource {
-    fn name(&self) -> &str {
-        self.0
-    }
-    fn health_check(&self) -> Result<(), RuntimeError> {
-        Err(RuntimeError::InvalidArgument("connection refused".into()))
-    }
-    fn shutdown(&self) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-}
-
 #[test]
 fn health_endpoint_returns_200_when_all_resources_healthy() {
     common::test_runtime()
@@ -295,17 +296,28 @@ fn health_endpoint_returns_200_when_all_resources_healthy() {
 
 #[test]
 fn health_endpoint_returns_503_when_any_resource_unhealthy() {
-    common::test_runtime()
+    let log = Arc::new(common::CallbackLog::default());
+    // The unwell state arrives on a later pass: a resource already unwell at
+    // the readiness pass refuses the run instead of being served through.
+    let degrading =
+        common::ScriptedResource::new("cache", &log).health(common::Behavior::FailFrom(2));
+    let (status, body) = common::test_runtime()
+        .health_interval(common::TICK)
         .resource(HealthyResource("db"))
-        .resource(UnhealthyResource("cache"))
+        .resource(degrading)
         .run(|| {
             let addr = common::spawn_server(Router::new());
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
-            assert_eq!(resp.status(), 503);
-            assert!(resp.body().contains(r#""status":"unhealthy""#));
+            let answer = common::health_until(addr, |status, _| status == 503);
             runtime::request_shutdown();
+            answer
         })
         .unwrap();
+
+    assert_eq!(status, 503, "an unwell resource did not reach the status");
+    assert!(
+        body.contains(r#""status":"unhealthy""#),
+        "expected an unhealthy summary in {body}"
+    );
 }
 
 #[test]
@@ -342,25 +354,6 @@ fn health_check_runs_on_configured_interval() {
             let initial = checked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
             let periodic = checked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
             assert_eq!((initial, periodic), (1, 2));
-            runtime::request_shutdown();
-        })
-        .unwrap();
-}
-
-#[test]
-fn health_endpoint_lists_individual_resource_status() {
-    common::test_runtime()
-        .resource(HealthyResource("db"))
-        .resource(UnhealthyResource("cache"))
-        .run(|| {
-            let addr = common::spawn_server(Router::new());
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
-            let body = resp.body();
-            assert!(body.contains(r#""db":"ok""#), "expected db:ok in {body}");
-            assert!(
-                body.contains(r#""cache":"error""#),
-                "expected cache:error in {body}"
-            );
             runtime::request_shutdown();
         })
         .unwrap();

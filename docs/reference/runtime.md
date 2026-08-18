@@ -252,20 +252,19 @@ boundary found outstanding. Aborting drops a task that is waiting at an
 `.await`; a task that never awaits, and any `camber::spawn` blocking closure,
 cannot be stopped — the drain reports it and proceeds instead of waiting.
 
-Resource shutdown then runs unbounded — `shutdown_timeout` does not apply to it.
-The final Tokio shutdown is bounded by a second, full `shutdown_timeout`: that
-window belongs to whatever Tokio still carries once the scope has drained — a
-server handle you dropped without joining, and the connection tasks its
-supervisor was still ending. Worst-case return is therefore roughly
-`2 × shutdown_timeout` plus however long resource shutdown takes.
+Resource shutdown then runs under its own bound: each resource gets the
+`ResourceBudget` shutdown deadline, visited one at a time in reverse
+registration order. The final Tokio shutdown is bounded by a second, full
+`shutdown_timeout`: that window belongs to whatever Tokio still carries once the
+scope has drained — a server handle you dropped without joining, and the
+connection tasks its supervisor was still ending.
 
-A per-resource health task is a root-scope child, and `Resource::health_check`
-runs under `block_in_place`, which `abort()` cannot preempt. A resource whose
-health check blocks — a database ping with its own multi-second timeout, say —
-while the drain escalates will not join within the forced-join grace, so the
-scope reports it outstanding and `run` returns `RuntimeError::ScopeDrainTimeout`
-where it previously returned `Ok`. Keep `health_check` bounded well inside
-`shutdown_timeout`, or expect that result.
+One root-scope child runs every periodic health pass, and it abandons a probe it
+is still waiting on when the scope closes. So a resource whose health check
+blocks does not hold the drain open — but it does keep the resource, so its
+teardown callback is reported as blocked rather than being called beside the
+probe that never returned. Keep `health_check` bounded well inside its
+configured deadline, or expect that result.
 
 A forcibly aborted `spawn_async` task's own handle resolves
 `RuntimeError::TaskPanicked("task channel closed")`. `RuntimeError::Cancelled`
@@ -305,9 +304,14 @@ fn main() -> Result<(), RuntimeError> {
 }
 ```
 
-Resources shut down concurrently — one thread per resource, every one joined
-before `run` returns. There is no ordering guarantee between them, so a resource
-must not depend on another still being up while it shuts down.
+One coordinator visits every resource. The readiness pass and each periodic
+health pass go in registration order; teardown goes in reverse registration
+order, so a resource may depend on one registered before it still being up while
+it shuts down. One resource never has two callbacks running at once.
+
+Every callback runs on its own worker under the `ResourceBudget` deadline for
+its phase. See the [Resource Reference](resource.md) for the budget, the
+`/health` projection, and how each failure reaches a caller.
 
 ### Sync bridge: `runtime::block_on`
 

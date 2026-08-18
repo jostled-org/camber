@@ -41,9 +41,74 @@ camber::runtime::builder()
 
 Behavior:
 
-- health checks run periodically on background threads
-- shutdown runs during runtime teardown
-- resources shut down in reverse registration order
+- one readiness health check runs before the service admits traffic; any
+  failure refuses the run and returns `RuntimeError::Lifecycle`
+- later health checks run on the configured interval, in registration order
+- shutdown runs during runtime teardown, in reverse registration order
+- one resource never has two callbacks running at once
+- every callback runs on its own worker under the deadline `ResourceBudget`
+  configures for its phase
+
+## Budgets And Ownership
+
+`ResourceBudget` carries three finite deadlines — startup health, periodic
+health, and shutdown — and defaults to 30 seconds each:
+
+```rust
+use camber::{ResourceBudget, runtime};
+use std::time::Duration;
+
+# fn main() -> Result<(), camber::RuntimeError> {
+let budget = ResourceBudget::bounded(
+    Duration::from_secs(5),
+    Duration::from_secs(2),
+    Duration::from_secs(10),
+)?;
+runtime::builder().resource_budget(budget).run(|| ())?;
+# Ok(())
+# }
+```
+
+The deadline bounds how long Camber **waits**, not how long the callback runs. A
+synchronous callback has no cancellation point, so a worker that misses its
+deadline keeps the resource until the callback returns on its own. Camber
+records the resource as having exceeded its deadline, refuses to start another
+callback for it, and never claims the worker was terminated. A later phase that
+finds the resource still held reports it as blocked rather than calling a second
+callback concurrently.
+
+## Health Projection
+
+`/health` reports every registered resource, in registration order:
+
+```json
+{
+  "status": "unhealthy",
+  "resources": {
+    "db": { "status": "ok" },
+    "cache": { "status": "error", "failure": "returned" }
+  }
+}
+```
+
+`failure` is one of `returned`, `panicked`, `deadline`, `lost-worker`, or
+`blocked`. The cause behind a failure never reaches this body — it is carried in
+the structured operator event the coordinator emits, and no resource name
+becomes a metric label. The endpoint answers 200 when every resource is well and
+503 otherwise.
+
+## Failures
+
+No resource failure is reduced to a log line:
+
+- a readiness failure prevents the service from serving and is returned from
+  `RuntimeBuilder::run`
+- a periodic failure is published through `/health` and one operator event
+- a teardown failure is retained in the `RuntimeError::Lifecycle` aggregate the
+  runtime returns, and never stops another resource's teardown from being
+  attempted
+
+Read an aggregate through `primary()`, `iter()`, and `len()`.
 
 ## Subprocess Lifecycle
 

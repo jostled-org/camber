@@ -39,6 +39,12 @@ pub(crate) struct RuntimeSchedule {
     /// Set when a second builder tried to attach. Latched rather than logged
     /// alone, because the probes are what must refuse afterwards.
     conflicted: AtomicBool,
+    /// Resources whose next lifecycle callback gets no worker admitted.
+    ///
+    /// A scheduling decision, not a result: the seam declines to start a
+    /// worker, exactly as the operating system can, and production decides what
+    /// a callback with no worker is called.
+    refused_workers: Mutex<std::collections::HashSet<Box<str>>>,
 }
 
 impl RuntimeSchedule {
@@ -51,7 +57,24 @@ impl RuntimeSchedule {
             changed: Condvar::new(),
             runtime: OnceLock::new(),
             conflicted: AtomicBool::new(false),
+            refused_workers: Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Admit no worker for this resource's lifecycle callbacks until the
+    /// refusal is lifted.
+    fn refuse_resource_worker(&self, resource: &str) {
+        recover_poisoned(self.refused_workers.lock()).insert(Box::from(resource));
+    }
+
+    /// Admit workers for this resource again.
+    fn admit_resource_worker(&self, resource: &str) {
+        recover_poisoned(self.refused_workers.lock()).remove(resource);
+    }
+
+    /// Whether this resource's next callback gets no worker.
+    pub(crate) fn refuses_resource_worker(&self, resource: &str) -> bool {
+        recover_poisoned(self.refused_workers.lock()).contains(resource)
     }
 
     /// Publish the runtime this controller was attached to, so the read-only
@@ -298,6 +321,21 @@ impl RuntimeController {
     /// zero count alone do not establish. Read-only.
     pub fn scope_joined_count(&self) -> Result<usize, RuntimeError> {
         Ok(self.schedule.attached_runtime()?.scope_joined_count())
+    }
+
+    /// Admit no worker for `resource`'s lifecycle callbacks.
+    ///
+    /// The seam declines to START a worker, which is the one refusal the
+    /// operating system can also deliver. It manufactures no result: what a
+    /// callback with no worker is called, and where that name is reported, stay
+    /// entirely with the production coordinator.
+    pub fn refuse_resource_worker(&self, resource: &str) {
+        self.schedule.refuse_resource_worker(resource);
+    }
+
+    /// Admit workers for `resource` again.
+    pub fn admit_resource_worker(&self, resource: &str) {
+        self.schedule.admit_resource_worker(resource);
     }
 
     pub(crate) fn schedule(&self) -> Arc<RuntimeSchedule> {

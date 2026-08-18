@@ -14,6 +14,8 @@ pub mod rejection_kinds;
 pub mod rejection_metrics;
 #[path = "support/rejection.rs"]
 pub mod rejection_support;
+#[path = "support/resource_scripts.rs"]
+pub mod resource_scripts;
 #[path = "support/runtime.rs"]
 pub mod runtime_support;
 #[path = "support/service_operation.rs"]
@@ -36,6 +38,7 @@ pub mod common {
     pub use crate::rejection_kinds::*;
     pub use crate::rejection_metrics::*;
     pub use crate::rejection_support::*;
+    pub use crate::resource_scripts::*;
     pub use crate::runtime_support::*;
     pub use crate::service_operation::*;
     pub use crate::tls::*;

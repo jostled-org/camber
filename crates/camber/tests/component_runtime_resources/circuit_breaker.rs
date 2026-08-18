@@ -216,7 +216,7 @@ fn circuit_breaker_composes_with_runtime() {
             let addr = common::spawn_server(Router::new());
             let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
             assert_eq!(resp.status(), 200);
-            assert!(resp.body().contains(r#""runtime-db":"ok""#));
+            assert!(resp.body().contains(r#""runtime-db":{"status":"ok"}"#));
             runtime::request_shutdown();
         })
         .unwrap();

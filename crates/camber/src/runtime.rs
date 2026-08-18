@@ -1,7 +1,6 @@
-use crate::resource::{HealthState, MIN_HEALTH_INTERVAL, Resource};
-use crate::resource_lifecycle::{
-    admit_health_tasks, run_initial_health_checks, shutdown_resources,
-};
+use crate::resource::registry::ResourceRegistry;
+use crate::resource::{MIN_HEALTH_INTERVAL, Resource};
+use crate::resource_lifecycle::{admit_health_coordinator, run_startup_health, shutdown_resources};
 use crate::runtime_state::{
     RuntimeConfig, RuntimeContextGuard, RuntimeInner, drain_root_scope, install_runtime,
     stop_cancel_watcher, teardown_runtime,
@@ -9,7 +8,6 @@ use crate::runtime_state::{
 use crate::runtime_test_support::{RuntimeController, RuntimeSchedule};
 use crate::tls::CertStore;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 /// Re-export of `tokio::runtime::Handle` for use with [`tokio_handle()`].
@@ -302,7 +300,10 @@ impl RuntimeBuilder {
         if let Some(error) = self.invalid_policy {
             return Err(error);
         }
-        crate::resource::validate_registry(&self.resources)?;
+        // Frozen before anything is established: a registration nothing could
+        // be reported under is refused while refusing still costs only the
+        // caller's registration.
+        let registry = crate::resource::registry::freeze(self.resources)?;
 
         let mut config = self.config;
 
@@ -331,7 +332,7 @@ impl RuntimeBuilder {
         run_inner_impl(
             config,
             self.test_schedule,
-            self.resources.into(),
+            registry,
             f,
             #[cfg(feature = "acme")]
             acme_state,
@@ -476,7 +477,9 @@ where
     let (inner, context) =
         establish_runtime(Some(tokio_rt.handle().clone()), config, None, None, None);
 
-    let scoped = run_scoped(&tokio_rt, &inner, f);
+    // The async test entry registers no resource, so it has no readiness pass
+    // to refuse it and its value is already the one `finish_runtime` returns.
+    let scoped = run_scoped(&tokio_rt, &inner, || async { Ok(f().await) });
     let drain = close_and_drain(&inner, &tokio_rt);
 
     finish_runtime(&inner, tokio_rt, context, drain, None, scoped)
@@ -532,12 +535,12 @@ pub(crate) fn establish_runtime(
     config: RuntimeConfig,
     test_schedule: Option<Arc<RuntimeSchedule>>,
     metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
-    health_state: Option<HealthState>,
+    resources: Option<ResourceRegistry>,
 ) -> (Arc<RuntimeInner>, RuntimeContextGuard) {
     let mut inner = RuntimeInner::with_config_and_schedule(config, test_schedule);
     inner.tokio_handle = tokio_handle;
     inner.metrics_handle = metrics_handle;
-    inner.health_state = health_state;
+    inner.resources = resources;
 
     let inner = Arc::new(inner);
     inner.publish_to_test_schedule();
@@ -595,8 +598,8 @@ fn close_and_drain(
 
 /// Order the runtime-level failures that displace the closure's value.
 ///
-/// A recorded internal panic outranks a resource panic, and either panic
-/// outranks a drain timeout: a timeout is frequently the consequence of a
+/// A recorded internal panic outranks the resource lifecycle aggregate, and
+/// either outranks a drain timeout: a timeout is frequently the consequence of a
 /// wedged panicking child, so reporting the panic localizes the fault. The
 /// closure's value is never inspected — `T` is opaque, so it is either returned
 /// or displaced.
@@ -628,7 +631,10 @@ fn select_runtime_panic(
 ) -> Option<crate::RuntimeError> {
     match (internal, resource) {
         (Some(primary), Some(displaced)) => {
-            tracing::warn!(%displaced, "resource panic displaced by an internal runtime panic");
+            tracing::warn!(
+                %displaced,
+                "resource lifecycle aggregate displaced by an internal runtime panic"
+            );
             Some(primary)
         }
         (panic, None) | (None, panic) => panic,
@@ -648,7 +654,7 @@ where
     run_inner_impl(
         RuntimeConfig::default(),
         None,
-        Vec::new().into(),
+        ResourceRegistry::from([]),
         f,
         #[cfg(feature = "acme")]
         None,
@@ -662,7 +668,7 @@ where
 fn run_inner_impl<F, T>(
     config: RuntimeConfig,
     test_schedule: Option<Arc<RuntimeSchedule>>,
-    resources: Arc<[Box<dyn Resource>]>,
+    registry: ResourceRegistry,
     f: F,
     #[cfg(feature = "acme")] acme_state: Option<crate::acme::AcmeState<std::io::Error>>,
     #[cfg(feature = "dns01")] dns01_setup: Option<crate::dns01::Dns01Setup>,
@@ -697,39 +703,35 @@ where
         crate::http::otel::init_exporter(&endpoint)?;
     }
 
-    let health_state = build_health_state(&resources);
-    let health_interval = config.health_interval;
-
     let (inner, context) = establish_runtime(
         Some(tokio_rt.handle().clone()),
         config,
         test_schedule,
         metrics_handle,
-        health_state.clone(),
+        published_registry(&registry),
     );
 
     // Run the user closure inside tokio's block_on so that tokio::spawn_blocking
     // and other tokio APIs are available on this thread.
     let runtime_scope = || async {
-        // Run initial health checks before the user closure starts serving
-        // traffic. Runs inside block_on so Handle::current() is available
-        // for resources that need async I/O (e.g. ProxyHealthResource).
-        if let Some(ref hs) = health_state {
-            run_initial_health_checks(&resources, hs).await;
+        // The readiness pass runs before anything is admitted and before the
+        // closure serves. Every resource is visited, so a caller reads the whole
+        // account of what was unwell, and any failure at all refuses the run
+        // rather than leaving a service to discover it on its first request.
+        match run_startup_health(&inner, &registry).await {
+            Some(refusal) => Err(refusal),
+            None => {
+                admit_owned_subsystems(
+                    &inner,
+                    &registry,
+                    #[cfg(feature = "acme")]
+                    acme_state,
+                    #[cfg(feature = "dns01")]
+                    dns01_renewal,
+                );
+                Ok(f())
+            }
         }
-
-        admit_owned_subsystems(
-            &inner,
-            &resources,
-            &health_state,
-            health_interval,
-            #[cfg(feature = "acme")]
-            acme_state,
-            #[cfg(feature = "dns01")]
-            dns01_renewal,
-        );
-
-        f()
     };
     // The closure's return closes root-scope admission and fires ScopeClosing.
     // It is not a shutdown request: ShutdownSignal stays unset. An unwinding
@@ -740,7 +742,7 @@ where
     // stop may still reach a registered resource once shutdown starts.
     let drain = close_and_drain(&inner, &tokio_rt);
 
-    let resource_failure = shutdown_runtime_services(&inner, &tokio_rt, &resources);
+    let resource_failure = shutdown_runtime_services(&inner, &tokio_rt, &registry);
 
     finish_runtime(&inner, tokio_rt, context, drain, resource_failure, scoped)
 }
@@ -749,10 +751,10 @@ where
 fn shutdown_runtime_services(
     inner: &RuntimeInner,
     tokio_rt: &tokio::runtime::Runtime,
-    resources: &[Box<dyn Resource>],
+    registry: &ResourceRegistry,
 ) -> Option<crate::RuntimeError> {
     stop_cancel_watcher(inner, tokio_rt.handle());
-    let resource_failure = shutdown_resources(resources);
+    let resource_failure = shutdown_resources(inner, registry);
 
     #[cfg(feature = "otel")]
     crate::http::otel::shutdown_exporter();
@@ -803,19 +805,16 @@ struct Dns01Renewal {
     store: CertStore,
 }
 
-/// Build health state from registered resources: one `AtomicBool` per
-/// resource, or nothing at all when none is registered.
-fn build_health_state(resources: &[Box<dyn Resource>]) -> Option<HealthState> {
-    match resources.is_empty() {
+/// The registry `/health` answers from, or nothing at all when no resource is
+/// registered.
+///
+/// Absence is what keeps the route unregistered: a service with no resources
+/// has nothing to report, and answering `healthy` on an empty registry would
+/// tell an operator that something was checked.
+fn published_registry(registry: &ResourceRegistry) -> Option<ResourceRegistry> {
+    match registry.is_empty() {
         true => None,
-        // `Arc<[T]>: FromIterator<T>` over a `TrustedLen` map allocates once,
-        // where collecting through a `Vec` allocates twice and memcpys.
-        false => Some(
-            resources
-                .iter()
-                .map(|r| (Box::from(r.name()), AtomicBool::new(true)))
-                .collect(),
-        ),
+        false => Some(Arc::clone(registry)),
     }
 }
 
@@ -834,9 +833,7 @@ fn build_health_state(resources: &[Box<dyn Resource>]) -> Option<HealthState> {
 /// applies while the scope that owned it came from somewhere else entirely.
 fn admit_owned_subsystems(
     inner: &Arc<RuntimeInner>,
-    resources: &Arc<[Box<dyn Resource>]>,
-    health_state: &Option<HealthState>,
-    health_interval: Duration,
+    registry: &ResourceRegistry,
     #[cfg(feature = "acme")] acme_state: Option<crate::acme::AcmeState<std::io::Error>>,
     #[cfg(feature = "dns01")] dns01_renewal: Option<Dns01Renewal>,
 ) {
@@ -870,7 +867,7 @@ fn admit_owned_subsystems(
         ));
     }
 
-    admit_health_tasks(inner, resources, health_state, health_interval);
+    admit_health_coordinator(inner, registry);
 }
 
 /// Admit the OS signal watcher one runtime owns.
@@ -917,7 +914,7 @@ fn finish_runtime<T>(
     runtime_guard: RuntimeContextGuard,
     drain: Option<crate::RuntimeError>,
     resource_failure: Option<crate::RuntimeError>,
-    scoped: ScopedOutcome<T>,
+    scoped: ScopedOutcome<Result<T, crate::RuntimeError>>,
 ) -> Result<T, crate::RuntimeError> {
     teardown_runtime(inner);
     drop(runtime_guard);
@@ -931,10 +928,27 @@ fn finish_runtime<T>(
     // Read BEFORE the unwind resumes: `resume_unwind` diverges, and the panic
     // slot has exactly one reader.
     match (scoped, runtime_failure(inner, resource_failure, drain)) {
-        (Ok(value), None) => Ok(value),
-        (Ok(_), Some(error)) => Err(error),
+        (Ok(Ok(value)), None) => Ok(value),
+        (Ok(Ok(_)), Some(error)) => Err(error),
+        (Ok(Err(refusal)), teardown) => Err(refuse_past_teardown(refusal, teardown)),
         (Err(payload), failure) => resume_past_failure(failure, payload),
     }
+}
+
+/// Report the startup refusal that kept the closure from running, logging the
+/// teardown failure it displaces.
+///
+/// A run that never served is described by why it could not start, not by what
+/// tearing down that unserved runtime then found. The loser has no return path
+/// left, so the log is the only trace it can leave.
+fn refuse_past_teardown(
+    refusal: crate::RuntimeError,
+    teardown: Option<crate::RuntimeError>,
+) -> crate::RuntimeError {
+    if let Some(displaced) = teardown {
+        tracing::warn!(%displaced, "teardown failure displaced by a startup refusal");
+    }
+    refusal
 }
 
 /// Resume the closure's caught unwind, logging the runtime-level failure that

@@ -7,10 +7,10 @@ use super::router::Handler;
 use super::server_policy::frozen_profiling_response_limit;
 use super::{Request, Response};
 use crate::RuntimeError;
-use crate::resource::HealthState;
+use crate::resource::entry::ResourceEntry;
+use crate::resource::registry::ResourceRegistry;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
 /// The fixed identity `/metrics` is named by.
@@ -26,7 +26,7 @@ static PROFILING_ROUTE: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from("/debug/
 /// Which internal route was matched. Used to avoid per-request Box<dyn Fn> allocation.
 pub(super) enum InternalRoute {
     Metrics(metrics_exporter_prometheus::PrometheusHandle),
-    Health(HealthState),
+    Health(ResourceRegistry),
     #[cfg(feature = "profiling")]
     Profiling(ProfilingRequest),
 }
@@ -55,7 +55,7 @@ pub(super) fn match_internal_route_from_path(path: &str, ctx: &ConnCtx) -> Optio
     match path {
         "/metrics" => ctx.metrics_handle.clone().map(InternalRoute::Metrics),
         "/health" => ctx
-            .health_state
+            .resources
             .as_ref()
             .map(|hs| InternalRoute::Health(hs.clone())),
         _ => None,
@@ -121,55 +121,87 @@ pub(super) fn build_internal_handler(route: InternalRoute) -> Handler {
     })
 }
 
-/// Build a JSON health response from the health state array.
-/// Returns 200 if all resources are healthy, 503 if any are unhealthy.
+/// Build the JSON health response from every registered resource's published
+/// state. Returns 200 when all of them are well, 503 when any is not.
 ///
-/// One load per resource, into a snapshot both answers are then derived from.
-/// Reading the flags a second time to summarize them would double the atomic
-/// loads and let the status line describe a health state the resource map does
-/// not — a resource that recovers between the two passes reports `error` beside
-/// an overall `healthy`.
-fn build_health_response(
-    health_state: &[(Box<str>, AtomicBool)],
-) -> Result<Response, RuntimeError> {
-    let snapshot: Box<[(&str, bool)]> = health_state
+/// One read per resource, into a snapshot both answers are then derived from.
+/// Reading each entry a second time to summarize it would let the status line
+/// describe a health state the resource map does not — a resource that recovers
+/// between the two passes reports `error` beside an overall `healthy`.
+fn build_health_response(resources: &[Arc<ResourceEntry>]) -> Result<Response, RuntimeError> {
+    let snapshot: Box<[(&str, ResourceStatus)]> = resources
         .iter()
-        .map(|(name, healthy)| (name.as_ref(), healthy.load(Ordering::Acquire)))
-        .collect();
-
-    let all_healthy = snapshot.iter().all(|(_, healthy)| *healthy);
-
-    let resources: serde_json::Map<String, serde_json::Value> = snapshot
-        .iter()
-        .map(|(name, healthy)| {
-            let status = match *healthy {
-                true => "ok",
-                false => "error",
-            };
+        .map(|entry| {
             (
-                (*name).to_owned(),
-                serde_json::Value::String(status.to_owned()),
+                entry.name().as_ref(),
+                ResourceStatus::published(entry.published_failure()),
             )
         })
         .collect();
 
-    let status_label = match all_healthy {
-        true => "healthy",
-        false => "unhealthy",
-    };
+    let all_healthy = snapshot
+        .iter()
+        .all(|(_, status)| matches!(status, ResourceStatus::Ok));
 
-    let status_code = match all_healthy {
-        true => 200,
-        false => 503,
+    let (status, code) = match all_healthy {
+        true => ("healthy", 200),
+        false => ("unhealthy", 503),
     };
 
     Response::json(
-        status_code,
-        &serde_json::json!({
-            "status": status_label,
-            "resources": resources,
-        }),
+        code,
+        &HealthReport {
+            status,
+            resources: ResourceMap(&snapshot),
+        },
     )
+}
+
+/// What `/health` says about one resource.
+///
+/// The failure is the closed name its phase published, never the cause behind
+/// it: a peer reading this body learns which of the five outcomes happened, and
+/// the arbitrary text lives in the operator event the coordinator emitted.
+#[derive(serde::Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+enum ResourceStatus {
+    Ok,
+    Error { failure: &'static str },
+}
+
+impl ResourceStatus {
+    /// Name what one resource's published state is reported as.
+    const fn published(failure: Option<&'static str>) -> Self {
+        match failure {
+            None => Self::Ok,
+            Some(failure) => Self::Error { failure },
+        }
+    }
+}
+
+/// The whole `/health` body.
+#[derive(serde::Serialize)]
+struct HealthReport<'a> {
+    status: &'static str,
+    resources: ResourceMap<'a>,
+}
+
+/// The resource map, serialized in registration order.
+///
+/// Written by hand because `serde_json`'s own map orders its keys, and the
+/// order an operator reads has to be the order the resources were registered
+/// in — the same order their callbacks are invoked in.
+struct ResourceMap<'a>(&'a [(&'a str, ResourceStatus)]);
+
+impl serde::Serialize for ResourceMap<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (name, status) in self.0 {
+            map.serialize_entry(name, status)?;
+        }
+        map.end()
+    }
 }
 
 /// How long the peer asked to be profiled for, inside the allowed window.

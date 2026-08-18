@@ -1569,3 +1569,198 @@ fn completion_labels_exclude_unbounded_identity_and_diagnostics() {
         })
         .expect("the completion label fixture runtime ran to completion");
 }
+
+// ---------------------------------------------------------------------------
+// 17.T4
+// ---------------------------------------------------------------------------
+
+/// The fixed sentence every failed resource callback is reported under.
+const RESOURCE_FAILURE_EVENT: &str = "resource callback failed";
+
+/// The resources one periodic pass publishes, in registration order.
+///
+/// Deliberately not in alphabetical order. A projection that sorted its keys
+/// would answer with a different sequence, so the order alone tells the
+/// coordinator's own visit order from a serializer's.
+const PUBLISHED_RESOURCES: [&str; 6] = [
+    "zulu-well",
+    "alpha-returned",
+    "mike-panicked",
+    "bravo-deadline",
+    "yankee-lost",
+    "charlie-blocked",
+];
+
+/// What `/health` says once every resource has reached its scripted state.
+const PUBLISHED_HEALTH: &str = concat!(
+    r#"{"status":"unhealthy","resources":{"#,
+    r#""zulu-well":{"status":"ok"},"#,
+    r#""alpha-returned":{"status":"error","failure":"returned"},"#,
+    r#""mike-panicked":{"status":"error","failure":"panicked"},"#,
+    r#""bravo-deadline":{"status":"error","failure":"deadline"},"#,
+    r#""yankee-lost":{"status":"error","failure":"lost-worker"},"#,
+    r#""charlie-blocked":{"status":"error","failure":"blocked"}}}"#,
+);
+
+#[test]
+fn periodic_resource_failures_reach_live_health_and_events() {
+    let capture = common::capture_events(RESOURCE_FAILURE_EVENT);
+    let controller = camber::runtime_test_support::runtime_schedule();
+    let log = std::sync::Arc::new(common::CallbackLog::default());
+
+    let blocked = common::ScriptedResource::new("charlie-blocked", &log)
+        .health(common::Behavior::ParkFrom(2));
+    let deadline =
+        common::ScriptedResource::new("bravo-deadline", &log).health(common::Behavior::ParkFrom(3));
+    let gates = [blocked.gate(), deadline.gate()];
+    let witnesses = [blocked.drop_witness(), deadline.drop_witness()];
+
+    let published = publish_resource_states(&controller, &log, blocked, deadline, gates.clone());
+
+    assert_eq!(
+        &*published.health, PUBLISHED_HEALTH,
+        "the live health projection did not name every resource's closed outcome in order"
+    );
+    assert_eq!(
+        published.status, 503,
+        "a projection carrying five failures answered as if the service were well"
+    );
+    assert_causes_stay_in_operator_fields(&capture, &published);
+    assert_no_resource_names_in_metrics(&published.metrics);
+
+    for gate in &gates {
+        gate.open();
+    }
+    common::wait_until("every released worker to let its resource go", || {
+        witnesses
+            .iter()
+            .all(|w| w.load(std::sync::atomic::Ordering::Acquire))
+    });
+}
+
+/// What one live read of a running service's operator surfaces returned.
+struct PublishedState {
+    status: u16,
+    health: Box<str>,
+    metrics: Box<str>,
+}
+
+/// Serve the six scripted resources and read the operator surfaces once every
+/// one of them has reached its scripted state.
+fn publish_resource_states(
+    controller: &camber::runtime_test_support::RuntimeController,
+    log: &std::sync::Arc<common::CallbackLog>,
+    blocked: common::ScriptedResource,
+    deadline: common::ScriptedResource,
+    gates: [std::sync::Arc<common::Gate>; 2],
+) -> PublishedState {
+    runtime::builder()
+        .with_test_schedule(controller)
+        .with_metrics()
+        .with_tracing()
+        .shutdown_timeout(SHUTDOWN_BOUND)
+        .health_interval(common::TICK)
+        .resource_budget(common::short_resource_budget())
+        .resource(common::ScriptedResource::new("zulu-well", log))
+        .resource(
+            common::ScriptedResource::new("alpha-returned", log)
+                .health(common::Behavior::FailFrom(2)),
+        )
+        .resource(
+            common::ScriptedResource::new("mike-panicked", log)
+                .health(common::Behavior::PanicFrom(2)),
+        )
+        .resource(deadline)
+        .resource(common::ScriptedResource::new("yankee-lost", log))
+        .resource(blocked)
+        .run(|| {
+            // Refused only now: the readiness pass has already run, and a
+            // refusal standing through it would have stopped the service before
+            // any periodic state existed to publish.
+            controller.refuse_resource_worker("yankee-lost");
+            let addr = common::spawn_server(camber::http::Router::new());
+            let published = read_until_published(addr);
+            // Released before teardown, so this row's claim about a live
+            // projection is not also a claim about what a still-parked worker
+            // does to the returned aggregate — 17.T5 owns that.
+            for gate in &gates {
+                gate.open();
+            }
+            controller.admit_resource_worker("yankee-lost");
+            runtime::request_shutdown();
+            published
+        })
+        .expect("the published resource fixture runtime ran to completion")
+}
+
+/// Read `/health` until every resource has published its scripted state, then
+/// read the operator surfaces the row asserts on.
+///
+/// Polled rather than slept on: the six states settle across two periodic
+/// passes, and the last of them is a resource whose callback never runs, so
+/// there is nothing else for the row to wait on.
+fn read_until_published(addr: std::net::SocketAddr) -> PublishedState {
+    let mut health = health_read(addr);
+    let deadline = std::time::Instant::now() + common::OBSERVATION_BOUND;
+    while health.1.as_ref() != PUBLISHED_HEALTH && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+        health = health_read(addr);
+    }
+    let metrics = body_text(&http_support::send(addr, "GET", "/metrics", &[], b""));
+    PublishedState {
+        status: health.0,
+        health: health.1,
+        metrics,
+    }
+}
+
+/// One live read of the health endpoint: the status it answered and its body.
+fn health_read(addr: std::net::SocketAddr) -> (u16, Box<str>) {
+    let response = http_support::send(addr, "GET", "/health", &[], b"");
+    (response.status, body_text(&response))
+}
+
+/// One answer's body, as the text an operator reads.
+fn body_text(response: &http_support::HttpResponse) -> Box<str> {
+    String::from_utf8_lossy(&response.body)
+        .into_owned()
+        .into_boxed_str()
+}
+
+/// Every arbitrary cause reaches an operator event, and none of them reaches
+/// the body a peer reads.
+fn assert_causes_stay_in_operator_fields(
+    capture: &common::TraceCapture,
+    published: &PublishedState,
+) {
+    let events = capture.events();
+    for (resource, failure, cause) in [
+        ("alpha-returned", "returned", common::SCRIPTED_REFUSAL),
+        ("mike-panicked", "panicked", common::SCRIPTED_PANIC),
+    ] {
+        let reported = events
+            .iter()
+            .find(|event| event.contains(&format!("resource={resource}")))
+            .unwrap_or_else(|| panic!("no operator event named {resource}: {events:?}"));
+        common::assert_field_value(reported, "failure", failure, resource);
+        assert!(
+            reported.contains(cause),
+            "{resource}: the event dropped the callback's own cause: {reported}"
+        );
+        assert!(
+            !published.health.contains(cause),
+            "{resource}: an arbitrary cause reached the health body: {}",
+            published.health
+        );
+    }
+}
+
+/// No resource name became a metric label.
+fn assert_no_resource_names_in_metrics(metrics: &str) {
+    for resource in PUBLISHED_RESOURCES {
+        assert!(
+            !metrics.contains(resource),
+            "{resource} appeared in the metrics exposition: {metrics}"
+        );
+    }
+}

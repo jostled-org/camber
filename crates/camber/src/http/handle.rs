@@ -28,7 +28,7 @@ use super::streaming::{
 #[cfg(feature = "ws")]
 use super::ws_proxy::{self, WsUpgrade};
 use super::{BufferConfig, Request, Response};
-use crate::resource::HealthState;
+use crate::resource::registry::ResourceRegistry;
 use crate::runtime_state::RuntimeInner;
 use std::convert::identity;
 use std::sync::Arc;
@@ -44,7 +44,7 @@ pub(super) struct ConnCtx {
     pub(super) sse_buffer_size: usize,
     #[cfg(feature = "ws")]
     pub(super) ws_buffer_size: usize,
-    pub(super) health_state: Option<HealthState>,
+    pub(super) resources: Option<ResourceRegistry>,
     pub(super) is_tls: bool,
     /// The bounds this server serves under, already narrowed against the
     /// runtime that contains it. Every request this connection carries resolves
@@ -68,7 +68,7 @@ impl ConnCtx {
             sse_buffer_size: buffers.sse_buffer_size,
             #[cfg(feature = "ws")]
             ws_buffer_size: buffers.ws_buffer_size,
-            health_state: rt.health_state.clone(),
+            resources: rt.resources.clone(),
             is_tls,
             policy,
         }

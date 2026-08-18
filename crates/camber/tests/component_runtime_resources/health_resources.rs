@@ -103,20 +103,6 @@ impl Resource for HealthyResource {
     }
 }
 
-struct UnhealthyResource(&'static str);
-
-impl Resource for UnhealthyResource {
-    fn name(&self) -> &str {
-        self.0
-    }
-    fn health_check(&self) -> Result<(), RuntimeError> {
-        Err(RuntimeError::InvalidArgument("connection refused".into()))
-    }
-    fn shutdown(&self) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-}
-
 fn auth_middleware(req: &Request, next: Next) -> Pin<Box<dyn Future<Output = Response> + Send>> {
     let has_auth = req
         .headers()
@@ -261,9 +247,20 @@ fn proxy_health_checker_reports_via_health_endpoint() {
 
 #[test]
 fn proxy_health_checker_still_controls_routing() {
+    // Well for the readiness probe, unwell from the next one onward. A backend
+    // that was already down at readiness refuses the run rather than letting
+    // the routing flag be observed at all.
+    let probes = Arc::new(AtomicUsize::new(0));
+    let backend_probes = Arc::clone(&probes);
     let mut backend = Router::new();
-    backend.get("/up", |_req: &Request| async {
-        Response::text(500, "down")
+    backend.get("/up", move |_req: &Request| {
+        let answered = backend_probes.fetch_add(1, Ordering::Relaxed);
+        async move {
+            match answered {
+                0 => Response::text(200, "up"),
+                _ => Response::text(500, "down"),
+            }
+        }
     });
     backend.get("/hello", |_req: &Request| async {
         Response::text(200, "from-backend")
@@ -318,17 +315,12 @@ fn health_endpoint_returns_200_when_all_resources_healthy() {
 
 #[test]
 fn health_endpoint_returns_503_when_any_resource_unhealthy() {
-    common::test_runtime()
-        .resource(HealthyResource("db"))
-        .resource(UnhealthyResource("cache"))
-        .run(|| {
-            let addr = common::spawn_server(Router::new());
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
-            assert_eq!(resp.status(), 503);
-            assert!(resp.body().contains(r#""status":"unhealthy""#));
-            runtime::request_shutdown();
-        })
-        .unwrap();
+    let (status, body) = degraded_health_projection();
+    assert_eq!(status, 503, "an unwell resource did not reach the status");
+    assert!(
+        body.contains(r#""status":"unhealthy""#),
+        "expected an unhealthy summary in {body}"
+    );
 }
 
 #[test]
@@ -379,21 +371,37 @@ fn health_check_runs_on_configured_interval() {
 
 #[test]
 fn health_endpoint_lists_individual_resource_status() {
+    let (_, body) = degraded_health_projection();
+    // Registration order, not alphabetical: the map an operator reads is the
+    // order the coordinator visits the resources in.
+    assert_eq!(
+        &*body,
+        r#"{"status":"unhealthy","resources":{"db":{"status":"ok"},"cache":{"status":"error","failure":"returned"}}}"#,
+        "the health projection did not name each resource's closed outcome in order"
+    );
+}
+
+/// Serve two resources, one of which reports itself unwell from its first
+/// periodic probe onward, and read the projection that pass publishes.
+///
+/// The unwell state arrives on a later pass because the readiness pass refuses
+/// the run outright: a resource that was already unwell at startup never gets a
+/// service to be projected through.
+fn degraded_health_projection() -> (u16, Box<str>) {
+    let log = Arc::new(common::CallbackLog::default());
+    let degrading =
+        common::ScriptedResource::new("cache", &log).health(common::Behavior::FailFrom(2));
     common::test_runtime()
-        .resource(HealthyResource("db"))
-        .resource(UnhealthyResource("cache"))
+        .health_interval(common::TICK)
+        .resource(common::ScriptedResource::new("db", &log))
+        .resource(degrading)
         .run(|| {
             let addr = common::spawn_server(Router::new());
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
-            let body = resp.body();
-            assert!(body.contains(r#""db":"ok""#), "expected db:ok in {body}");
-            assert!(
-                body.contains(r#""cache":"error""#),
-                "expected cache:error in {body}"
-            );
+            let answer = common::health_until(addr, |status, _| status == 503);
             runtime::request_shutdown();
+            answer
         })
-        .unwrap();
+        .unwrap()
 }
 
 #[test]

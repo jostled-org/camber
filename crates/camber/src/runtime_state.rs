@@ -1,4 +1,4 @@
-use crate::resource::HealthState;
+use crate::resource::registry::ResourceRegistry;
 use crate::runtime_test_support::{RuntimeCheckpoint, RuntimeSchedule};
 use crate::tls::CertStore;
 use std::collections::{HashMap, HashSet};
@@ -96,7 +96,7 @@ pub(crate) struct RuntimeInner {
     pub(crate) config: RuntimeConfig,
     pub(crate) metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
     pub(crate) tokio_handle: Option<tokio::runtime::Handle>,
-    pub(crate) health_state: Option<HealthState>,
+    pub(crate) resources: Option<ResourceRegistry>,
 }
 
 struct CancelWatcherState {
@@ -283,7 +283,7 @@ impl RuntimeInner {
             config,
             metrics_handle: None,
             tokio_handle: None,
-            health_state: None,
+            resources: None,
         }
     }
 
@@ -450,6 +450,19 @@ impl RuntimeInner {
         if let Some(schedule) = self.test_schedule.as_ref() {
             schedule.pause(checkpoint);
         }
+    }
+
+    /// Whether this runtime has been told to admit no worker for `resource`'s
+    /// next lifecycle callback.
+    ///
+    /// The one scheduling decision a resource coordinator asks about. A worker
+    /// the operating system refuses and a worker the seam refuses are the same
+    /// absence, and production — not the seam — is what names the resource that
+    /// lost one as having lost its worker.
+    pub(crate) fn resource_worker_refused(&self, resource: &str) -> bool {
+        self.test_schedule
+            .as_ref()
+            .is_some_and(|schedule| schedule.refuses_resource_worker(resource))
     }
 
     /// Watch an external cancellation future, requesting shutdown once it

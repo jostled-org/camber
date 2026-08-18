@@ -12,6 +12,8 @@ pub mod lifecycle_kinds;
 #[path = "component_runtime_concurrency/scope_builders.rs"]
 pub mod scope_builders;
 
+#[path = "component_runtime_resources/bounded_resources.rs"]
+mod bounded_resources;
 #[path = "component_runtime_resources/circuit_breaker.rs"]
 mod circuit_breaker;
 #[path = "component_runtime_resources/health_closing.rs"]

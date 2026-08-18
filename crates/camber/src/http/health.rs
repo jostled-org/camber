@@ -137,10 +137,8 @@ impl Resource for ProxyHealthResource {
             // context first, so the bridge is legal from a poll. Called directly
             // rather than through `crate::task::block_in_place`, because this
             // match is already the flavor guard that wrapper exists to apply.
-            // On the two paths that already worked — the startup probe's
-            // blocking worker and `run_health_task`'s own outer
-            // `block_in_place` — the thread holds a handle but has not entered
-            // the runtime, and tokio's own detection runs the closure inline.
+            // A resource callback worker holds a handle but has not entered the
+            // runtime, so tokio's own detection runs the closure inline there.
             tokio::runtime::RuntimeFlavor::MultiThread => {
                 tokio::task::block_in_place(|| handle.block_on(probe_url(client, url)))
             }

@@ -16,6 +16,8 @@ mod rejection;
 mod rejection_kinds;
 #[path = "../support/rejection_metrics.rs"]
 mod rejection_metrics;
+#[path = "../support/resource_scripts.rs"]
+mod resource_scripts;
 #[path = "../support/runtime.rs"]
 mod runtime;
 #[path = "../support/service_operation.rs"]
@@ -48,6 +50,7 @@ pub use process::*;
 pub use rejection::*;
 pub use rejection_kinds::*;
 pub use rejection_metrics::*;
+pub use resource_scripts::*;
 pub use runtime::*;
 pub use service_operation::*;
 pub use stream::*;
