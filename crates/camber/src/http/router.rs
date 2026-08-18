@@ -31,7 +31,7 @@ pub use super::dispatch::GrpcRouter;
 #[cfg(feature = "ws")]
 pub(super) use super::dispatch::WsHandler;
 pub(super) use super::dispatch::{
-    DispatchResult, FrozenRouter, GateCheck, Handler, ServerDispatch, SseHandler, gate_result,
+    DispatchResult, FrozenRouter, GateCheck, Handler, ServerDispatch, SseHandler,
 };
 
 /// The transfer policy an SSE registration that names none is bounded by.

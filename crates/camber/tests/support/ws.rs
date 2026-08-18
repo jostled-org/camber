@@ -48,7 +48,21 @@ pub fn ws_upgrade_request_to(host: &str, path: &str) -> Box<str> {
 /// request no client sends. Only the added headers are spliced in, ahead of the
 /// blank line that ends the head.
 pub fn ws_upgrade_request_with(path: &str, extra: &[(&str, &str)]) -> Box<str> {
-    let head = ws_upgrade_request(path);
+    spliced(&ws_upgrade_request(path), extra)
+}
+
+/// [`ws_upgrade_request_with`], addressed to one named authority.
+///
+/// A host-routed case that also carries a credential needs both, and neither of
+/// the two forms above can give it: one names the authority and one splices the
+/// headers. Both reach the same splice below, so a handshake addressed to a host
+/// is the same handshake either way.
+pub fn ws_upgrade_request_to_with(host: &str, path: &str, extra: &[(&str, &str)]) -> Box<str> {
+    spliced(&ws_upgrade_request_to(host, path), extra)
+}
+
+/// Splice `extra` into a built head, ahead of the blank line that ends it.
+fn spliced(head: &str, extra: &[(&str, &str)]) -> Box<str> {
     let mut request = head
         .strip_suffix("\r\n")
         .expect("the shared upgrade request no longer ends with its blank line")

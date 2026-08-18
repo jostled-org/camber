@@ -641,6 +641,24 @@ impl ObservedPort {
         })
     }
 
+    /// Serve a host table on this reservation under the policy the case names.
+    ///
+    /// [`ObservedPort::serve_with_policy`]'s counterpart for a host-routed
+    /// fixture. A case whose claim is its own shutdown deadline cannot take the
+    /// server's default, and the plain host helper below names no policy.
+    pub fn serve_hosts_with_policy(
+        self,
+        hosts: HostRouter,
+        policy: ServerPolicy,
+    ) -> ObservedServer {
+        self.serve_with(move |listener| {
+            http::server_hosts(hosts)
+                .policy(policy)
+                .serve_background(listener)
+                .expect("owned server requires a Tokio runtime")
+        })
+    }
+
     pub fn serve_hosts(self, hosts: HostRouter) -> ObservedServer {
         self.serve_with(move |listener| {
             http::serve_background_hosts(listener, hosts)

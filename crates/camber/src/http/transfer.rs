@@ -292,6 +292,8 @@ pub(super) struct Transfer<S> {
     observer: Option<Arc<LifecycleScript>>,
 }
 
+/// The source accessor the gRPC handoff needs, and no other owner does.
+#[cfg(feature = "grpc")]
 impl<S> Transfer<S> {
     /// The source this transfer owns.
     ///

@@ -4,6 +4,7 @@ use super::disconnect::{ConnectionLiveness, ResponseLifetime};
 use super::dispatch::{
     AsyncDispatch, Classified, FrozenRouter, HeadUpgrade, PreBodyScope, RouteClass, Routed,
 };
+use super::head_projection::{self, Gated, HeadProjection};
 #[cfg(feature = "profiling")]
 use super::internal_routes::match_profiling_route;
 use super::internal_routes::{
@@ -17,7 +18,7 @@ use super::rejection::{
     HANDLER, Rejected, RejectionProtocol, RejectionScope, RequestId, RequestIdentity,
 };
 use super::request::{RequestHead, RequestOrigin};
-use super::router::{DispatchResult, GateCheck, ServerDispatch, gate_result};
+use super::router::{DispatchResult, GateCheck, ServerDispatch};
 use super::server_lifecycle::ConnectionLifecycle;
 use super::streaming::{
     dispatch_streaming_proxy, handle_proxy_stream_response, handle_sse, handle_stream_response,
@@ -869,29 +870,43 @@ async fn dispatch_built_request<'a>(
     let gate = pending_middleware_gate(&result, router, &scope);
     operation.observe(script.as_deref(), OperationStage::Middleware);
     // Refused as it stands: this class declared no payload it leaves unread.
-    let answering = gate_within_total(gate_outcome(gate), request_dispatch, &scope, identity);
-    if let Some(answered) = answering.await {
-        return Ok(answered);
-    }
+    let answering = gate_within_total(
+        gate_outcome(gate, &scope),
+        request_dispatch,
+        &scope,
+        identity,
+    );
+    let projection = match answering.await {
+        Gated::Answered(answered) => return Ok(answered),
+        Gated::Admitted(projection) => projection,
+    };
 
     #[cfg(feature = "ws")]
-    if let Some(rejected) = result
+    let refused_origin = result
         .is_websocket()
         .then(|| ws_proxy::check_ws_origin(result.request_ref()))
-        .flatten()
-    {
-        return Ok(answer_rejected(ctx, &scope, rejected, start));
-    }
+        .flatten();
+    #[cfg(not(feature = "ws"))]
+    let refused_origin: Option<Rejected> = None;
 
     operation.observe(script.as_deref(), OperationStage::ResponseHead);
-    finish_dispatched(
-        result,
-        #[cfg(feature = "ws")]
-        ws_upgrade,
-        &scope,
-        request_dispatch,
-    )
-    .await
+    // One merge for every class this dispatch answers, whichever owner produced
+    // the head: the chain ran once, so its metadata reaches the real answer once
+    // — including a refusal raised after the chain admitted the request.
+    let answered = match refused_origin {
+        Some(rejected) => answer_rejected(ctx, &scope, rejected, start),
+        None => {
+            finish_dispatched(
+                result,
+                #[cfg(feature = "ws")]
+                ws_upgrade,
+                &scope,
+                request_dispatch,
+            )
+            .await?
+        }
+    };
+    Ok(projection.merged_into(answered))
 }
 
 /// Answer one dispatched result under the scope and operation it resolved to.
@@ -1027,17 +1042,18 @@ fn inbound_failure<T>(
 /// middleware refused at the total on `router.get` and unbounded on
 /// `router.get_stream`.
 ///
-/// `Some` is the answer that finishes this request: the chain's own refusal, or
-/// the total's when the chain outlives it. `None` is a pass. What a refusal owes
-/// the transport is the caller's to say through `refuse` — a class that declared
-/// a payload it never read has to close the connection the next request would
-/// otherwise be framed out of, and a class that declared none does not.
+/// `Answered` is what finishes this request: the chain's own refusal, or the
+/// total's when the chain outlives it. `Admitted` carries what a passing chain
+/// stated over the provisional head. What a refusal owes the transport is the
+/// caller's to say through `refuse` — a class that declared a payload it never
+/// read has to close the connection the next request would otherwise be framed
+/// out of, and a class that declared none does not.
 pub(super) async fn gate_within_total(
-    gate: impl std::future::Future<Output = Option<Response>>,
+    gate: impl std::future::Future<Output = Gated<Response>>,
     request_dispatch: &RequestDispatch<'_>,
     scope: &RejectionScope,
     refuse: impl FnOnce(Response) -> Response,
-) -> Option<hyper::Response<HyperResponseBody>> {
+) -> Gated<hyper::Response<HyperResponseBody>> {
     let &RequestDispatch {
         ctx,
         start,
@@ -1045,9 +1061,9 @@ pub(super) async fn gate_within_total(
         ..
     } = request_dispatch;
     match within_total(gate, operation).await {
-        Ok(None) => None,
-        Ok(Some(blocked)) => Some(answer(ctx, refuse(blocked), start, scope)),
-        Err(rejected) => Some(answer_rejected(ctx, scope, rejected, start)),
+        Ok(Gated::Admitted(projection)) => Gated::Admitted(projection),
+        Ok(Gated::Answered(blocked)) => Gated::Answered(answer(ctx, refuse(blocked), start, scope)),
+        Err(rejected) => Gated::Answered(answer_rejected(ctx, scope, rejected, start)),
     }
 }
 
@@ -1435,18 +1451,20 @@ async fn dispatch_grpc_inner(
     // The chain is admitted work before the committed head, so it spends the
     // one total this operation carries — the same rule every other gated class
     // follows.
-    match within_total(gate, &operation).await {
+    let projection = match within_total(gate, &operation).await {
         // Answered under the scope this class established, not a rebuilt
         // built-in one: a middleware response the wire cannot carry recovers
         // through the router's own mapper, the same one every other refusal on
         // this path reaches.
-        Ok(Some(refusal)) => Ok(answer(ctx, refusal, start, &scope)),
-        Err(rejected) => Ok(answer_rejected(ctx, &scope, rejected, start)),
-        Ok(None) => {
-            drop(head);
-            Ok(handoff_grpc(hyper_req, grpc_router, &operation, conn, &scope).await)
-        }
-    }
+        Ok(Gated::Answered(refusal)) => return Ok(answer(ctx, refusal, start, &scope)),
+        Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, start)),
+        Ok(Gated::Admitted(projection)) => projection,
+    };
+    drop(head);
+    // Merged after tonic has committed, so what a chain stated reaches the head
+    // tonic actually produced without displacing anything tonic decided.
+    let answered = handoff_grpc(hyper_req, grpc_router, &operation, conn, &scope).await;
+    Ok(projection.merged_into(answered))
 }
 
 /// Resolve the policy, router, and budgets one gRPC head runs under.
@@ -1564,31 +1582,38 @@ async fn handoff_grpc(
 /// host-table search on every one of their requests.
 ///
 /// An authority no router can be resolved from is still a refusal, not a pass:
-/// both callers forward upstream on `None`, so an unresolvable authority read
-/// as a pass would reach the upstream with the chain never run. That refusal is
-/// now answered at the single resolution each caller makes, before this gate is
-/// reached at all.
+/// both callers forward upstream on an admitted gate, so an unresolvable
+/// authority read as a pass would reach the upstream with the chain never run.
+/// That refusal is now answered at the single resolution each caller makes,
+/// before this gate is reached at all.
 pub(super) async fn run_head_gate(
     head: &RequestHead<'_>,
     router: Option<&FrozenRouter>,
     params: Option<super::request::Params>,
     scope: &RejectionScope,
-) -> Option<Response> {
-    gate_outcome(router.and_then(|router| router.middleware_gate_head(head, params, scope))).await
+) -> Gated<Response> {
+    gate_outcome(
+        router.and_then(|router| router.middleware_gate_head(head, params, scope)),
+        scope,
+    )
+    .await
 }
 
 /// What one gate check answers with, for every caller that runs one.
 ///
-/// `None` is a pass, either because the chain passed the request through or
-/// because there was no chain to run. Written once because a caller that read a
-/// pass as a short-circuit would answer a request the chain admitted, and one
-/// that read a short-circuit as a pass would run a handler the chain refused.
-/// Which request a gate is given is each caller's own decision — the streaming
-/// classes gate borrowed head metadata, the multipart class gates the very
-/// request its handler receives — and this is the one part they share.
-pub(super) async fn gate_outcome(gate: Option<GateCheck>) -> Option<Response> {
+/// An absent chain is admitted with nothing projected, which is what a class
+/// that registered no middleware has to say. Written once because a caller that
+/// read a pass as a short-circuit would answer a request the chain admitted, and
+/// one that read a short-circuit as a pass would run a handler the chain
+/// refused. Which request a gate is given is each caller's own decision — the
+/// streaming classes gate borrowed head metadata, the multipart class gates the
+/// very request its handler receives — and this is the one part they share.
+pub(super) async fn gate_outcome(
+    gate: Option<GateCheck>,
+    scope: &RejectionScope,
+) -> Gated<Response> {
     match gate {
-        Some(gate) => gate_result(gate.await),
-        None => None,
+        Some(gate) => head_projection::decided(gate.await, scope),
+        None => Gated::Admitted(HeadProjection::none()),
     }
 }

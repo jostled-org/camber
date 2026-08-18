@@ -359,7 +359,7 @@ impl GrpcFixture {
         let server = port.serve_with_policy(
             router,
             ServerPolicy::default()
-                .shutdown_timeout(Duration::from_millis(500))
+                .shutdown_timeout(FORCED_AFTER)
                 .expect("a finite aggregate deadline"),
         );
         Self {
@@ -1149,4 +1149,802 @@ async fn assert_websocket_post_101_reaches_no_mapper() {
     server
         .shutdown_bounded(BOUND)
         .expect("the WebSocket owner fixture tore down");
+}
+
+// ---------------------------------------------------------------------------
+// 14.T2
+// ---------------------------------------------------------------------------
+
+/// The authority the matrix child is registered under.
+const MATRIX_HOST: &str = "matrix.test";
+
+/// A second authority, whose own child is what proves selection happened once.
+const OTHER_HOST: &str = "other.test";
+
+/// The header one admitted request carries, and the value the chain admits on.
+const CREDENTIAL_HEADER: &str = "Authorization";
+const CREDENTIAL: &str = "matrix-credential";
+
+/// The metadata a passing chain states, which every real head must carry.
+const MATRIX_PROJECTED: &str = "X-Camber-Projected";
+const MATRIX_PROJECTED_VALUE: &str = "applied";
+const MATRIX_ORIGIN_HEADER: &str = "Access-Control-Allow-Origin";
+const MATRIX_ORIGIN: &str = "https://matrix.test";
+
+/// The representation a passing chain states, which every protocol that owns
+/// one of its own must override.
+const MATRIX_TYPE: &str = "text/x-projected";
+
+/// The representation the proxied upstream states for its own head.
+const MATRIX_UPSTREAM_TYPE: &str = "text/x-upstream";
+
+/// The answer a chain that never reaches its terminal gives.
+const MATRIX_REFUSED: u16 = 401;
+
+/// The paths the matrix child serves each class under.
+const MATRIX_HTTP: &str = "/http";
+const MATRIX_STREAM: &str = "/stream";
+const MATRIX_SSE: &str = "/sse";
+const MATRIX_BUFFERED: &str = "/buffered/echo";
+const MATRIX_STREAMED: &str = "/streamed/echo";
+const MATRIX_DEAD: &str = "/dead/echo";
+/// The route the second authority's own child answers, with no chain over it.
+const MATRIX_OPEN: &str = "/open";
+#[cfg(feature = "ws")]
+const MATRIX_WS: &str = "/ws";
+#[cfg(feature = "ws")]
+const MATRIX_WS_PROXY: &str = "/wsproxy/ws";
+
+/// A backend nothing listens on, for the pre-commit refusal row.
+const DEAD_BACKEND: &str = "http://127.0.0.1:1";
+
+/// What the matrix fixture's own producers, upstream, and service recorded.
+///
+/// One counter per claim rather than one shared total: a row that says nothing
+/// specialized ran is only saying so because the class it drove has a counter of
+/// its own, and a row that says a producer saw its peer leave needs that
+/// distinct from a producer that merely started.
+#[derive(Default)]
+struct MatrixWork {
+    /// Producers, upstream routes, and services entered.
+    entered: std::sync::atomic::AtomicUsize,
+    /// Event producers that stopped because their peer had gone.
+    ended: std::sync::atomic::AtomicUsize,
+}
+
+impl MatrixWork {
+    fn entered(&self) -> usize {
+        self.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn ended(&self) -> usize {
+        self.ended.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn enter(&self) {
+        self.entered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn end(&self) {
+        self.ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The whole matrix service: a host-routed server, its upstream, and the one
+/// class no host table can carry.
+///
+/// gRPC is served beside the host-routed classes rather than under them because
+/// `ServerDispatch::Host` resolves no gRPC router: a host table has no gRPC
+/// class today. It runs the identical chain, so the row it answers is still the
+/// same chain's, at the boundary tonic owns.
+struct MatrixFixture {
+    server: http_support::ObservedServer,
+    controller: Arc<LifecycleController>,
+    grpc: http_support::ObservedServer,
+    upstream: http_support::ObservedServer,
+    journal: common::Journal,
+    work: Arc<MatrixWork>,
+}
+
+impl MatrixFixture {
+    fn serve() -> Self {
+        let work = Arc::new(MatrixWork::default());
+        let journal = common::journal();
+        let upstream = http_support::reserve_observed().serve(matrix_upstream(&work));
+        let backend = format!("http://{}", upstream.addr());
+
+        let mut hosts = camber::http::HostRouter::new();
+        hosts.add(MATRIX_HOST, matrix_child(&work, &journal, &backend));
+        hosts.add(OTHER_HOST, other_child());
+        let port = http_support::reserve_observed();
+        let controller = port.controller();
+        // Served through the builder rather than through the host helper: the
+        // shutdown row needs the aggregate deadline this matrix names, and the
+        // helper takes the server's own default.
+        let server = port.serve_hosts_with_policy(hosts, matrix_policy());
+
+        Self {
+            server,
+            controller,
+            grpc: http_support::reserve_observed()
+                .serve_with_policy(matrix_grpc_router(&work, &journal), matrix_policy()),
+            upstream,
+            journal,
+            work,
+        }
+    }
+
+    fn addr(&self) -> std::net::SocketAddr {
+        self.server.addr()
+    }
+
+    fn grpc_addr(&self) -> std::net::SocketAddr {
+        self.grpc.addr()
+    }
+
+    /// Everything the matrix child's mapper was handed, taken once.
+    fn mapped(&self) -> Box<[common::Observed]> {
+        common::drain(&self.journal)
+    }
+}
+
+/// The aggregate deadline every matrix server names.
+///
+/// Short on purpose: the shutdown row holds one upgrade open, and what it reads
+/// is that the service ends on its own deadline rather than waiting on a peer
+/// that never leaves.
+const FORCED_AFTER: Duration = Duration::from_millis(500);
+
+/// The bounds every matrix server serves under.
+fn matrix_policy() -> ServerPolicy {
+    ServerPolicy::default()
+        .shutdown_timeout(FORCED_AFTER)
+        .expect("a finite aggregate deadline")
+}
+
+/// The upstream both proxy classes and the proxied upgrade forward to.
+fn matrix_upstream(work: &Arc<MatrixWork>) -> Router {
+    let mut upstream = Router::new();
+    let entered = Arc::clone(work);
+    upstream.get("/echo", move |_req: &camber::http::Request| {
+        entered.enter();
+        async {
+            camber::http::Response::text(200, "upstream")
+                .map(|resp| resp.with_content_type(MATRIX_UPSTREAM_TYPE))
+        }
+    });
+    register_matrix_upstream_upgrade(&mut upstream, work);
+    upstream
+}
+
+/// The upgrade the proxied WebSocket class forwards to.
+#[cfg(feature = "ws")]
+fn register_matrix_upstream_upgrade(upstream: &mut Router, work: &Arc<MatrixWork>) {
+    let entered = Arc::clone(work);
+    upstream.ws(
+        "/ws",
+        move |_req: &camber::http::Request, conn: camber::http::WsConn| {
+            entered.enter();
+            let (_sender, mut receiver) = conn.split();
+            // Held until the peer or the bridge ends it, so the session is live
+            // while the shutdown row runs.
+            while let camber::http::WsReceive::Message(_) = receiver.recv()? {}
+            Ok(())
+        },
+    );
+}
+
+#[cfg(not(feature = "ws"))]
+fn register_matrix_upstream_upgrade(_upstream: &mut Router, _work: &Arc<MatrixWork>) {}
+
+/// The child the matrix authority selects: one chain over every class.
+fn matrix_child(work: &Arc<MatrixWork>, journal: &common::Journal, backend: &str) -> Router {
+    let mut child = Router::new();
+    gate_on_credential(&mut child);
+    register_matrix_classes(&mut child, work, backend);
+    child.rejection_mapper(common::recording_mapper(journal, "matrix-child"))
+}
+
+/// The second authority's child: a route, and no chain at all.
+fn other_child() -> Router {
+    let mut child = Router::new();
+    child.get(MATRIX_OPEN, |_req: &camber::http::Request| async {
+        camber::http::Response::text(200, OTHER_HOST)
+    });
+    child
+}
+
+/// The single-router service carrying the same chain over the gRPC class.
+fn matrix_grpc_router(work: &Arc<MatrixWork>, journal: &common::Journal) -> Router {
+    let mut router = Router::new();
+    gate_on_credential(&mut router);
+    let (head_dropped, _dropped) = tokio::sync::mpsc::unbounded_channel();
+    router.grpc(
+        GrpcRouter::new().add_service(streamer_server::StreamerServer::new(MatrixService {
+            work: Arc::clone(work),
+            inner: EchoService {
+                plan: EchoPlan::Echo,
+                log: Arc::new(EchoLog::default()),
+                head_dropped,
+            },
+        })),
+    );
+    router.rejection_mapper(common::recording_mapper(journal, "matrix-grpc"))
+}
+
+/// The fixture service, counted as entered by the matrix's own work record.
+struct MatrixService {
+    work: Arc<MatrixWork>,
+    inner: EchoService,
+}
+
+#[tonic::async_trait]
+impl streamer_server::Streamer for MatrixService {
+    type EchoStream = HeadWitness;
+
+    async fn echo(
+        &self,
+        request: tonic::Request<tonic::Streaming<HelloRequest>>,
+    ) -> Result<tonic::Response<Self::EchoStream>, tonic::Status> {
+        self.work.enter();
+        self.inner.echo(request).await
+    }
+}
+
+/// Register the one frame every matrix class runs under.
+///
+/// A request without the credential is refused before the terminal, the way
+/// authentication is. One that carries it reaches the terminal and has the
+/// chain's own response metadata stated over whatever it answered with.
+fn gate_on_credential(router: &mut Router) {
+    router.use_middleware(|req: &camber::http::Request, next: camber::http::Next| {
+        let entered = (req.header(CREDENTIAL_HEADER) == Some(CREDENTIAL)).then(|| next.call(req));
+        async move {
+            match entered {
+                None => camber::http::Response::text(MATRIX_REFUSED, "unauthenticated"),
+                Some(entered) => Ok(entered
+                    .await
+                    .with_header(MATRIX_PROJECTED, MATRIX_PROJECTED_VALUE)
+                    .with_header(MATRIX_ORIGIN_HEADER, MATRIX_ORIGIN)
+                    .with_content_type(MATRIX_TYPE)),
+            }
+        }
+    });
+}
+
+/// Register every class the matrix child serves.
+fn register_matrix_classes(child: &mut Router, work: &Arc<MatrixWork>, backend: &str) {
+    let entered = Arc::clone(work);
+    child.get(MATRIX_HTTP, move |_req: &camber::http::Request| {
+        entered.enter();
+        async { camber::http::Response::text(200, "buffered") }
+    });
+    register_matrix_stream(child, work);
+    register_matrix_sse(child, work);
+    register_matrix_upgrade(child, work, backend);
+    child.proxy("/buffered", backend);
+    child.proxy_stream("/streamed", backend);
+    child.proxy_stream("/dead", DEAD_BACKEND);
+}
+
+/// The generic streaming class, which states a representation of its own.
+fn register_matrix_stream(child: &mut Router, work: &Arc<MatrixWork>) {
+    let entered = Arc::clone(work);
+    child.get_stream(MATRIX_STREAM, move |_req: &camber::http::Request| {
+        let entered = Arc::clone(&entered);
+        Box::pin(async move {
+            entered.enter();
+            let (streamed, sender) = camber::http::StreamResponse::new(200);
+            tokio::spawn(async move {
+                let _sent = sender.send("streamed").await;
+            });
+            streamed.with_header("Content-Type", "text/x-stream")
+        })
+            as std::pin::Pin<
+                Box<dyn std::future::Future<Output = camber::http::StreamResponse> + Send>,
+            >
+    });
+}
+
+/// The SSE class, whose producer reports the peer that went away.
+fn register_matrix_sse(child: &mut Router, work: &Arc<MatrixWork>) {
+    let work = Arc::clone(work);
+    child.get_sse(
+        MATRIX_SSE,
+        move |_req: &camber::http::Request, writer: &mut camber::http::SseWriter| {
+            work.enter();
+            // Until the peer is gone: the send that fails is this producer's own
+            // report that its response ended, which is what the disconnect row
+            // reads rather than inferring from a closed socket.
+            while writer.event("tick", "matrix").is_ok() {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            work.end();
+            Ok(())
+        },
+    );
+}
+
+/// The direct upgrade class, and the proxy prefix a proxied one travels over.
+#[cfg(feature = "ws")]
+fn register_matrix_upgrade(child: &mut Router, work: &Arc<MatrixWork>, backend: &str) {
+    let work = Arc::clone(work);
+    child.ws(
+        MATRIX_WS,
+        move |_req: &camber::http::Request, conn: camber::http::WsConn| {
+            work.enter();
+            let (_sender, mut receiver) = conn.split();
+            while let camber::http::WsReceive::Message(_) = receiver.recv()? {}
+            work.end();
+            Ok(())
+        },
+    );
+    child.proxy("/wsproxy", backend);
+}
+
+#[cfg(not(feature = "ws"))]
+fn register_matrix_upgrade(_child: &mut Router, _work: &Arc<MatrixWork>, _backend: &str) {}
+
+/// Every class answered over ordinary HTTP framing, and the label it reports
+/// under.
+const MATRIX_HTTP_CLASSES: [(&str, &str); 5] = [
+    ("ordinary http", MATRIX_HTTP),
+    ("generic stream", MATRIX_STREAM),
+    ("sse", MATRIX_SSE),
+    ("buffered proxy", MATRIX_BUFFERED),
+    ("streaming proxy", MATRIX_STREAMED),
+];
+
+/// The headers a matrix request carries, with or without its credential.
+fn matrix_headers(credentialed: bool) -> Box<[(&'static str, &'static str)]> {
+    match credentialed {
+        true => Box::new([("Connection", "close"), (CREDENTIAL_HEADER, CREDENTIAL)]),
+        false => Box::new([("Connection", "close")]),
+    }
+}
+
+/// Drive one matrix class over ordinary HTTP framing.
+async fn matrix_exchange(
+    addr: std::net::SocketAddr,
+    path: &'static str,
+    credentialed: bool,
+) -> http_support::HttpResponse {
+    tokio::task::spawn_blocking(move || {
+        http_support::send_to_host_with(
+            addr,
+            "GET",
+            path,
+            MATRIX_HOST,
+            &matrix_headers(credentialed),
+        )
+    })
+    .await
+    .expect("the matrix peer settled")
+}
+
+/// Whether one raw head carries `name: value`, however the wire cased it.
+///
+/// A handshake answer is read as text rather than as parsed pairs, and HTTP/2
+/// lowercases every name it writes: a case-sensitive search would report a
+/// header the peer was given as one it was not.
+fn head_carries(head: &str, name: &str, value: &str) -> bool {
+    head.to_ascii_lowercase().contains(&format!(
+        "{}: {}",
+        name.to_ascii_lowercase(),
+        value.to_ascii_lowercase()
+    ))
+}
+
+/// Assert one answered head carries the metadata a passing chain stated.
+fn assert_matrix_projected(head: &http_support::HttpResponse, label: &str) {
+    assert_eq!(
+        head.header(MATRIX_PROJECTED),
+        Some(MATRIX_PROJECTED_VALUE),
+        "{label}: the chain's own metadata never reached the real head",
+    );
+    assert_eq!(
+        head.header(MATRIX_ORIGIN_HEADER),
+        Some(MATRIX_ORIGIN),
+        "{label}: the chain's cross-origin metadata never reached the real head",
+    );
+}
+
+/// 14.T2
+///
+/// One host-routed service, every supported class, and one chain over all of
+/// them. Host selection runs once and the selected child's policy governs; a
+/// chain that refuses answers before any upstream, producer, upgrade, or
+/// service begins; a chain that passes has its metadata carried into every real
+/// head under the protocol's own corrections; a pre-commit refusal is mapped by
+/// the child that owns it; a peer that leaves ends the producer it was reading;
+/// and shutdown releases every protocol owner within its own deadline.
+#[test]
+fn cross_protocol_policy_matrix_reaches_every_supported_head() {
+    camber::runtime::builder()
+        .run(|| {
+            camber::runtime::block_on(async {
+                let fixture = MatrixFixture::serve();
+                assert_host_selection_precedes_child_policy(&fixture).await;
+                assert_short_circuit_precedes_every_protocol(&fixture).await;
+                assert_success_metadata_reaches_every_head(&fixture).await;
+                assert_precommit_refusal_is_mapped_by_its_owner(&fixture).await;
+                assert_disconnect_ends_the_producer_it_was_read_by(&fixture).await;
+                assert_shutdown_releases_every_protocol_owner(fixture).await;
+            });
+        })
+        .expect("the cross-protocol matrix ran to completion");
+}
+
+/// Host selection happens once, and the child it selected owns the policy.
+async fn assert_host_selection_precedes_child_policy(fixture: &MatrixFixture) {
+    let label = "host selection";
+    let addr = fixture.addr();
+    let open = tokio::task::spawn_blocking(move || {
+        http_support::send_to_host(addr, "GET", MATRIX_OPEN, OTHER_HOST)
+    })
+    .await
+    .expect("the second authority's peer settled");
+    assert_eq!(
+        open.status, 200,
+        "{label}: the second authority's own child answered under its own policy",
+    );
+    assert_eq!(
+        open.header(MATRIX_PROJECTED),
+        None,
+        "{label}: a child that registered no chain projected nothing",
+    );
+
+    let unclaimed = tokio::task::spawn_blocking(move || {
+        http_support::send_to_host(addr, "GET", MATRIX_HTTP, "unclaimed.test")
+    })
+    .await
+    .expect("the unclaimed authority's peer settled");
+    assert_eq!(
+        unclaimed.status, 404,
+        "{label}: an authority no child claims reaches no child chain",
+    );
+    assert!(
+        fixture.mapped().is_empty(),
+        "{label}: no child mapper answers for an authority no child claims",
+    );
+}
+
+/// A chain that refuses before its terminal answers every class, and nothing
+/// specialized runs behind it.
+async fn assert_short_circuit_precedes_every_protocol(fixture: &MatrixFixture) {
+    let label = "short circuit";
+    for (class, path) in MATRIX_HTTP_CLASSES {
+        let refused = matrix_exchange(fixture.addr(), path, false).await;
+        assert_eq!(
+            refused.status, MATRIX_REFUSED,
+            "{label}: {class} is answered by the chain, not by its producer",
+        );
+        assert_eq!(
+            refused.header(MATRIX_PROJECTED),
+            None,
+            "{label}: {class} projected metadata from a chain that never passed",
+        );
+    }
+    assert_short_circuited_upgrades(fixture).await;
+    assert_short_circuited_grpc(fixture).await;
+    assert_eq!(
+        fixture.work.entered(),
+        0,
+        "{label}: a producer, an upstream, an upgrade, or a service ran behind a refused chain",
+    );
+}
+
+/// Both upgrade classes are refused before any `101`.
+#[cfg(feature = "ws")]
+async fn assert_short_circuited_upgrades(fixture: &MatrixFixture) {
+    for (class, path) in [
+        ("direct upgrade", MATRIX_WS),
+        ("proxied upgrade", MATRIX_WS_PROXY),
+    ] {
+        let head = matrix_handshake(fixture.addr(), path, false).await;
+        assert!(
+            head.starts_with(&format!("HTTP/1.1 {MATRIX_REFUSED}")),
+            "short circuit: {class} was upgraded by a chain that refused it: {head}",
+        );
+    }
+}
+
+#[cfg(not(feature = "ws"))]
+async fn assert_short_circuited_upgrades(_fixture: &MatrixFixture) {}
+
+/// The gRPC class is refused before tonic is handed anything.
+async fn assert_short_circuited_grpc(fixture: &MatrixFixture) {
+    let refused = matrix_rpc(fixture.grpc_addr(), false).await;
+    assert_eq!(
+        refused.status, MATRIX_REFUSED,
+        "short circuit: gRPC was handed to tonic by a chain that refused it",
+    );
+}
+
+/// A passing chain's metadata reaches every real head, and each protocol's own
+/// corrections still win the names it owns.
+async fn assert_success_metadata_reaches_every_head(fixture: &MatrixFixture) {
+    let label = "success metadata";
+    let expected_types = [
+        ("ordinary http", MATRIX_TYPE),
+        ("generic stream", "text/x-stream"),
+        ("sse", "text/event-stream"),
+        ("buffered proxy", MATRIX_TYPE),
+        ("streaming proxy", MATRIX_UPSTREAM_TYPE),
+    ];
+    for ((class, path), (_, representation)) in MATRIX_HTTP_CLASSES.iter().zip(expected_types) {
+        // The SSE producer runs until its peer goes away, so this class is read
+        // by the disconnect row rather than by a whole-body exchange here.
+        if *class == "sse" {
+            continue;
+        }
+        let answered = matrix_exchange(fixture.addr(), path, true).await;
+        assert_eq!(answered.status, 200, "{label}: {class} wire status");
+        assert_matrix_projected(&answered, class);
+        assert_eq!(
+            answered.header("Content-Type"),
+            Some(representation),
+            "{label}: {class} answered under the wrong owner's representation",
+        );
+    }
+    assert_upgrade_heads_projected(fixture).await;
+    assert_grpc_head_projected(fixture).await;
+}
+
+/// Both upgrade classes commit a `101` carrying the chain's metadata beside the
+/// handshake's own corrections.
+#[cfg(feature = "ws")]
+async fn assert_upgrade_heads_projected(fixture: &MatrixFixture) {
+    for (class, path) in [
+        ("direct upgrade", MATRIX_WS),
+        ("proxied upgrade", MATRIX_WS_PROXY),
+    ] {
+        let head = matrix_handshake(fixture.addr(), path, true).await;
+        assert!(
+            head.starts_with("HTTP/1.1 101"),
+            "success metadata: {class} never committed its upgrade: {head}",
+        );
+        assert!(
+            head_carries(&head, MATRIX_PROJECTED, MATRIX_PROJECTED_VALUE),
+            "success metadata: {class} lost the chain's metadata: {head}",
+        );
+        assert!(
+            head_carries(&head, MATRIX_ORIGIN_HEADER, MATRIX_ORIGIN),
+            "success metadata: {class} lost the chain's cross-origin metadata: {head}",
+        );
+        assert!(
+            head.to_ascii_lowercase().contains("sec-websocket-accept:"),
+            "success metadata: {class} lost the handshake's own correction: {head}",
+        );
+    }
+}
+
+#[cfg(not(feature = "ws"))]
+async fn assert_upgrade_heads_projected(_fixture: &MatrixFixture) {}
+
+/// Tonic's committed head carries the chain's metadata under its own type.
+async fn assert_grpc_head_projected(fixture: &MatrixFixture) {
+    let label = "success metadata";
+    let answered = matrix_rpc(fixture.grpc_addr(), true).await;
+    assert_eq!(answered.status, 200, "{label}: grpc wire status");
+    assert_matrix_projected(&answered, "grpc");
+    assert_eq!(
+        answered.header("content-type"),
+        Some("application/grpc"),
+        "{label}: grpc answered under the wrong owner's representation",
+    );
+}
+
+/// A refusal raised before commitment is mapped by the child that owns it, and
+/// carries the chain's metadata like any other pre-commit answer.
+async fn assert_precommit_refusal_is_mapped_by_its_owner(fixture: &MatrixFixture) {
+    let label = "pre-commit refusal";
+    let _drained = fixture.mapped();
+    let refused = matrix_exchange(fixture.addr(), MATRIX_DEAD, true).await;
+    assert_eq!(
+        refused.status, 502,
+        "{label}: an unreachable upstream is refused before commitment",
+    );
+    assert_matrix_projected(&refused, label);
+    let mapped = fixture.mapped();
+    assert_eq!(
+        mapped.len(),
+        1,
+        "{label}: the child that owns this boundary maps it exactly once: {mapped:?}",
+    );
+    assert_eq!(
+        mapped[0].protocol,
+        Some(RejectionProtocol::Proxy),
+        "{label}: the refusal keeps the class the proxied route established",
+    );
+}
+
+/// A peer that goes away ends the producer that was being read for it.
+async fn assert_disconnect_ends_the_producer_it_was_read_by(fixture: &MatrixFixture) {
+    let label = "disconnect";
+    let addr = fixture.addr();
+    let before = fixture.controller.transfers_observed().download.releases;
+    let head = tokio::task::spawn_blocking(move || {
+        let mut peer = http_support::connect(addr).expect("the SSE peer connected");
+        let head = format!(
+            "GET {MATRIX_SSE} HTTP/1.1\r\nHost: {MATRIX_HOST}\r\n{CREDENTIAL_HEADER}: \
+             {CREDENTIAL}\r\n\r\n"
+        );
+        std::io::Write::write_all(&mut peer, head.as_bytes()).expect("the SSE request was sent");
+        let answered = common::read_until_double_crlf(&mut peer);
+        // Dropped here, inside the blocking owner: the peer is gone from this
+        // point, and everything after it is what the service did about that.
+        drop(peer);
+        answered
+    })
+    .await
+    .expect("the SSE peer settled");
+
+    assert!(
+        head.starts_with("HTTP/1.1 200"),
+        "{label}: the event stream never committed its head: {head}",
+    );
+    assert!(
+        head_carries(&head, MATRIX_PROJECTED, MATRIX_PROJECTED_VALUE),
+        "{label}: the committed event-stream head lost the chain's metadata: {head}",
+    );
+    assert!(
+        head_carries(&head, "Content-Type", "text/event-stream"),
+        "{label}: the event stream answered under the wrong representation: {head}",
+    );
+
+    let ended = http_support::poll_until(BOUND, || fixture.work.ended() >= 1);
+    assert!(
+        ended,
+        "{label}: the event producer outlived the peer it was being read by",
+    );
+    let released = http_support::poll_until(BOUND, || {
+        fixture.controller.transfers_observed().download.releases > before
+    });
+    assert!(
+        released,
+        "{label}: the download owner was never released for a peer that left",
+    );
+}
+
+/// Shutdown ends every protocol owner within the deadline the service names.
+///
+/// Both halves of the contract, in the order they can be read: a service with
+/// nothing open ends gracefully, and one holding a live session ends on its own
+/// aggregate deadline instead of waiting for a peer that never leaves. The
+/// owner is released either way.
+async fn assert_shutdown_releases_every_protocol_owner(fixture: MatrixFixture) {
+    let label = "shutdown";
+    let MatrixFixture {
+        server,
+        grpc,
+        upstream,
+        work,
+        ..
+    } = fixture;
+    assert!(
+        work.entered() > 0,
+        "{label}: nothing had been admitted for shutdown to release",
+    );
+    grpc.shutdown_bounded(BOUND)
+        .unwrap_or_else(|error| panic!("{label}: a quiet service did not end gracefully: {error}"));
+
+    assert_forced_shutdown_ends_the_held_upgrade(server, &work).await;
+
+    upstream
+        .shutdown_bounded(BOUND)
+        .unwrap_or_else(|error| panic!("{label}: the upstream did not end gracefully: {error}"));
+}
+
+/// The host-routed service ends on its own deadline with a session still open.
+#[cfg(feature = "ws")]
+async fn assert_forced_shutdown_ends_the_held_upgrade(
+    server: http_support::ObservedServer,
+    work: &Arc<MatrixWork>,
+) {
+    let label = "shutdown";
+    let peer = held_upgrade(server.addr()).await;
+    let forced = server.shutdown_bounded(BOUND);
+    assert!(
+        matches!(
+            forced,
+            Err(http_support::FixtureError::Runtime(
+                camber::RuntimeError::Timeout
+            ))
+        ),
+        "{label}: a service holding a live session ended on something other than its own \
+         aggregate deadline: {forced:?}",
+    );
+    // Released after the teardown it was held across, by the one owner that has
+    // it: what ended the bridge was the shutdown, not a peer that left first.
+    drop(peer);
+    let ended = http_support::poll_until(BOUND, || work.ended() >= 1);
+    assert!(
+        ended,
+        "{label}: an upgrade owner outlived the service that admitted it",
+    );
+}
+
+/// Without upgrades there is no session to hold, so the service ends gracefully.
+#[cfg(not(feature = "ws"))]
+async fn assert_forced_shutdown_ends_the_held_upgrade(
+    server: http_support::ObservedServer,
+    _work: &Arc<MatrixWork>,
+) {
+    server
+        .shutdown_bounded(BOUND)
+        .expect("shutdown: a quiet service did not end gracefully");
+}
+
+/// Commit one upgrade and hand its peer back, still open.
+///
+/// The socket travels to the caller rather than being forgotten here: the
+/// shutdown row holds it across the teardown it is asserting about, and one
+/// owner then drops it. A forgotten socket would leave the claim resting on a
+/// descriptor nothing releases.
+#[cfg(feature = "ws")]
+async fn held_upgrade(addr: std::net::SocketAddr) -> std::net::TcpStream {
+    let (peer, head) = tokio::task::spawn_blocking(move || {
+        let mut peer = common::start_upgrade_with(
+            addr,
+            &common::ws_upgrade_request_to_with(
+                MATRIX_HOST,
+                MATRIX_WS,
+                &[(CREDENTIAL_HEADER, CREDENTIAL)],
+            ),
+        );
+        let head = common::read_until_double_crlf(&mut peer);
+        (peer, head)
+    })
+    .await
+    .expect("the held upgrade peer settled");
+    assert!(
+        head.starts_with("HTTP/1.1 101"),
+        "shutdown: the held upgrade never committed: {head}",
+    );
+    peer
+}
+
+/// Drive one matrix upgrade handshake and read the head it answered with.
+#[cfg(feature = "ws")]
+async fn matrix_handshake(
+    addr: std::net::SocketAddr,
+    path: &'static str,
+    credentialed: bool,
+) -> Box<str> {
+    tokio::task::spawn_blocking(move || {
+        let head = match credentialed {
+            true => common::ws_upgrade_request_to_with(
+                MATRIX_HOST,
+                path,
+                &[(CREDENTIAL_HEADER, CREDENTIAL)],
+            ),
+            false => common::ws_upgrade_request_to(MATRIX_HOST, path),
+        };
+        let mut peer = common::start_upgrade_with(addr, &head);
+        common::read_until_double_crlf(&mut peer)
+    })
+    .await
+    .expect("the matrix upgrade peer settled")
+}
+
+/// Drive one matrix gRPC call and read the head it answered with.
+async fn matrix_rpc(addr: std::net::SocketAddr, credentialed: bool) -> http_support::HttpResponse {
+    let headers: Box<[(&str, &str)]> = grpc_headers()
+        .into_iter()
+        .chain(credentialed.then_some((CREDENTIAL_HEADER, CREDENTIAL)))
+        .collect();
+    let mut client = common::PersistentH2Client::connect(addr, BOUND).await;
+    let answered = client
+        .send_complete(
+            "POST",
+            ECHO_PATH,
+            MATRIX_HOST,
+            &headers,
+            &grpc_message("matrix"),
+        )
+        .await;
+    client.close().await;
+    answered
 }

@@ -4,6 +4,9 @@ pub mod http;
 pub mod rejection_support;
 #[path = "support/runtime.rs"]
 pub mod runtime_support;
+#[cfg(feature = "ws")]
+#[path = "support/ws.rs"]
+pub mod ws_support;
 
 #[path = "component_middleware/cross_origin.rs"]
 mod cross_origin;
@@ -17,3 +20,5 @@ mod rate_limiting;
 mod request_validation;
 #[path = "component_middleware/response_compression.rs"]
 mod response_compression;
+#[path = "component_middleware/service_operation.rs"]
+mod service_operation;

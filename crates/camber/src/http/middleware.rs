@@ -47,9 +47,12 @@ pub(super) enum Terminal<'a> {
     Rejected(Rejected),
     /// Passthrough terminal for middleware gating.
     ///
-    /// Answers with a value marked as its own, which is what lets the caller
-    /// tell a chain that passed from one that replaced the answer — including a
-    /// frame that refused only after the terminal had already been reached.
+    /// Answers with the provisional head a gated class shows its chain, marked
+    /// as this terminal's own. The mark is what lets the caller tell a chain
+    /// that passed from one that replaced the answer — including a frame that
+    /// refused only after the terminal had already been reached — and what a
+    /// passing chain states over the provisional head becomes the projection the
+    /// real head is merged with.
     Gate,
     /// Proxy terminal — forwards the request to a backend without boxing a closure.
     ///
@@ -78,7 +81,9 @@ impl Terminal<'_> {
                 Box::pin(async move { scope.resolve(outcome.await, HANDLER) })
             }
             Self::Rejected(rejected) => Box::pin(async move { scope.map(rejected) }),
-            Self::Gate => Box::pin(async { Response::empty_raw(200).mark_gate() }),
+            Self::Gate => Box::pin(async {
+                Response::empty_raw(super::head_projection::PROVISIONAL_STATUS).mark_gate()
+            }),
             Self::Proxy {
                 backend,
                 prefix,

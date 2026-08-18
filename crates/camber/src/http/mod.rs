@@ -129,6 +129,7 @@ mod grpc_handoff;
 #[cfg(feature = "grpc")]
 mod grpc_support;
 mod handle;
+mod head_projection;
 mod health;
 mod host_router;
 mod internal_routes;

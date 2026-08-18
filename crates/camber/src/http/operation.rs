@@ -659,6 +659,10 @@ pub(super) struct PreCommitCause {
 
 impl PreCommitCause {
     /// The cause a local owner reported, with the refusal it minted.
+    ///
+    /// Only the gRPC handoff reports one: every other pre-commit source is
+    /// observed by this operation itself, through [`Self::observed`].
+    #[cfg(feature = "grpc")]
     pub(super) const fn reported(terminal: InboundTerminal, wire: Option<Rejected>) -> Self {
         Self { terminal, wire }
     }

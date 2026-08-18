@@ -2,6 +2,7 @@ use super::Request;
 use super::async_proxy::UploadDisposition;
 use super::body::{HyperResponseBody, StreamBody};
 use super::handle::{ConnCtx, answer_rejected, run_head_gate};
+use super::head_projection::Gated;
 use super::operation::{OperationEnvelope, OperationStage};
 use super::record::record_scoped;
 use super::rejection::{Rejected, RejectionScope, RequestIdentity};
@@ -389,11 +390,12 @@ pub(super) async fn dispatch_streaming_proxy(
     let answering = super::handle::gate_within_total(gate, request_dispatch, &scope, |blocked| {
         scope.closing(blocked)
     });
-    if let Some(answered) = answering.await {
-        return Ok(answered);
-    }
+    let projection = match answering.await {
+        Gated::Answered(answered) => return Ok(answered),
+        Gated::Admitted(projection) => projection,
+    };
     let (proxy_parts, body) = outbound_parts(hyper_req, method, &origin);
-    Ok(forwarded_stream(
+    let answered = forwarded_stream(
         proxy_parts,
         body,
         admitted,
@@ -407,7 +409,10 @@ pub(super) async fn dispatch_streaming_proxy(
             request_dispatch,
         },
     )
-    .await)
+    .await;
+    // Merged onto the head the upstream committed, so what a passing chain
+    // stated survives without displacing anything the upstream decided.
+    Ok(projection.merged_into(answered))
 }
 
 /// Where one streaming forward sends its payload, and under what.

@@ -21,6 +21,7 @@ use super::dispatch::{FrozenRouter, PreBodyScope, StreamingMultipartTarget};
 use super::handle::{
     RequestDispatch, answer, answer_inbound_failure, answer_rejected, gate_outcome,
 };
+use super::head_projection::Gated;
 use super::mock::{LifecycleCheckpoint, LifecycleScript};
 use super::multipart::{
     MultipartCompletion, MultipartRevocation, MultipartSessionDriver, MultipartTerminal,
@@ -94,15 +95,16 @@ pub(super) async fn dispatch_streaming_multipart(
     let answering = super::handle::gate_within_total(gate, request_dispatch, &scope, |blocked| {
         scope.closing(blocked)
     });
-    if let Some(answered) = answering.await {
-        return Ok(answered);
-    }
+    let projection = match answering.await {
+        Gated::Answered(answered) => return Ok(answered),
+        Gated::Admitted(projection) => projection,
+    };
     let boundary =
         match request_boundary(request.header("content-type"), limits.max_boundary_bytes()) {
             Ok(boundary) => boundary,
             Err(refused) => {
                 let response = Settled::framework(refused).respond(&scope);
-                return Ok(answer(ctx, response, start, &scope));
+                return Ok(projection.merged_into(answer(ctx, response, start, &scope)));
             }
         };
 
@@ -114,24 +116,47 @@ pub(super) async fn dispatch_streaming_multipart(
             admitted,
             boundary: &boundary,
             limits,
-            observer: observer.clone(),
+            observer,
             operation,
         },
     );
+    // The chain ran as a gate over a head this session had not produced yet, so
+    // what it stated is merged onto whichever head the session settled on.
+    Ok(projection.merged_into(settled_answer(session, &scope, request_dispatch).await))
+}
+
+/// Run one opened session inside its request total, and answer what it settled
+/// on.
+///
+/// The three ways a session can end are one decision — the handler's own
+/// response, the upload owner's cause, and the total that outlived both — so
+/// they are read here rather than beside the open that produced the session.
+async fn settled_answer(
+    session: impl Future<Output = Answered>,
+    scope: &RejectionScope,
+    request_dispatch: &RequestDispatch<'_>,
+) -> hyper::Response<HyperResponseBody> {
+    let &RequestDispatch {
+        ctx,
+        lifecycle,
+        start,
+        operation,
+        ..
+    } = request_dispatch;
     // The session reads this operation's request payload and produces its
     // response head, so the whole of it spends the one request total the
     // admitted head minted.
     let settled = match super::handle::within_total(session, operation).await {
         Ok(settled) => settled,
-        Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, start)),
+        Err(rejected) => return answer_rejected(ctx, scope, rejected, start),
     };
-    operation.observe(observer.as_deref(), OperationStage::ResponseHead);
-    Ok(match settled {
-        Answered::Settled(settled) => answer(ctx, settled.respond(&scope), start, &scope),
+    operation.observe(lifecycle.script().as_deref(), OperationStage::ResponseHead);
+    match settled {
+        Answered::Settled(settled) => answer(ctx, settled.respond(scope), start, scope),
         // The upload owner's cause carries its own disposition: a mapped one owes
         // the peer this route's mapper once, and a silent one owes it nothing.
-        Answered::Ended(failure) => answer_inbound_failure(ctx, &scope, failure, start),
-    })
+        Answered::Ended(failure) => answer_inbound_failure(ctx, scope, failure, start),
+    }
 }
 
 /// What one session is opened over, beside the body and the handler.
@@ -209,8 +234,12 @@ async fn gated(
     request: &Request,
     router: Option<&FrozenRouter>,
     scope: &RejectionScope,
-) -> Option<Response> {
-    gate_outcome(router.and_then(|router| router.middleware_gate(request, scope))).await
+) -> Gated<Response> {
+    gate_outcome(
+        router.and_then(|router| router.middleware_gate(request, scope)),
+        scope,
+    )
+    .await
 }
 
 /// One running multipart request: its handler, its driver, and the revocation

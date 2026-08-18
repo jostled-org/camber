@@ -1,3 +1,4 @@
+use super::Request;
 use super::body_admission::{BodyPolicy, ConfiguredCeiling, RequestBodyMode, ResolvedBodyPlan};
 use super::host_router::FrozenHostRouter;
 use super::method::Method;
@@ -17,7 +18,6 @@ use super::trie::{
     FrozenNode, MultipartRegistration, PATH_SEGMENT_LIMIT, RouteHandler, RouteLookup, Selected,
     split_path_segments,
 };
-use super::{Request, Response};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -811,20 +811,6 @@ fn dispatch_proxy_through_middleware(
     let next = Next::new(&router.middleware, terminal, scope.clone());
     let fut = next.call(&req);
     AsyncDispatch { fut, req }
-}
-
-/// Convert a gate check result into `Option<Response>`.
-///
-/// `None` means the chain passed the request through; `Some` is the answer it
-/// gave instead. Read off the response's own provenance rather than a flag the
-/// terminal sets: a frame that refuses after the terminal has already been
-/// reached replaces the terminal's value, and a reached-flag cannot tell that
-/// from a pass — it would forward a request its own gate had just refused.
-pub(super) fn gate_result(resp: Response) -> Option<Response> {
-    match resp.provenance().is_gate_passthrough() {
-        true => None,
-        false => Some(resp),
-    }
 }
 
 /// A routed request, and the router that answered it.
