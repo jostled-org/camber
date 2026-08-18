@@ -139,8 +139,8 @@ pub mod dns01;
 /// Common runtime error type.
 pub mod error;
 pub mod http;
-/// Tracing subscriber setup helpers.
 pub(crate) mod lifecycle;
+/// Tracing subscriber setup helpers.
 pub mod logging;
 #[cfg(any(feature = "nats", feature = "sqs"))]
 /// Message queue integrations.
