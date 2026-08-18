@@ -730,3 +730,48 @@ fn profiling_output_requires_a_limit_or_explicit_unbounded_name() {
         );
     }
 }
+
+/// 13.1: the exact public spelling `GrpcRouter::add_service` now names.
+///
+/// A gRPC request's payload reaches tonic behind Camber's upload owner, so the
+/// services the router accepts are services over `hyper::Request<GrpcRequestBody>`
+/// rather than over `hyper::Request<Incoming>`. A tonic-generated server is
+/// already generic over its request body and needs no change; a hand-written
+/// `tower` service must name the new type, which is why it is exported.
+///
+/// Compile-only, and deliberately so: this is the migration inventory's own
+/// row. It states the spelling a caller must write, and it fails at build time
+/// if the exported path or the bound behind it ever moves.
+#[cfg(feature = "grpc")]
+#[test]
+fn grpc_services_are_registered_over_the_public_request_body_spelling() {
+    use camber::http::{GrpcRequestBody, GrpcRouter};
+    use std::convert::Infallible;
+    use std::pin::Pin;
+    use tonic::codegen::Service;
+
+    /// The hand-written `tower` service the break is about.
+    #[derive(Clone)]
+    struct BareService;
+
+    impl Service<hyper::Request<GrpcRequestBody>> for BareService {
+        type Response = hyper::Response<tonic::body::Body>;
+        type Error = Infallible;
+        type Future =
+            Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
+
+        fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _request: hyper::Request<GrpcRequestBody>) -> Self::Future {
+            Box::pin(async { Ok(hyper::Response::new(tonic::body::Body::empty())) })
+        }
+    }
+
+    impl tonic::server::NamedService for BareService {
+        const NAME: &'static str = "camber.contract.Bare";
+    }
+
+    let _: GrpcRouter = GrpcRouter::new().add_service(BareService);
+}

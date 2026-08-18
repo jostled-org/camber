@@ -4,9 +4,17 @@
 //!
 //! Observed through the production middleware gate, which arms a watcher that
 //! outlives the service future Hyper drops. The RPC is parked inside tonic's
-//! handler first, so the watcher is armed while tonic still owes every byte;
-//! releasing it and reading the reply is what makes the resolved cause the
-//! body's own, and not a transition taken before the answer existed.
+//! handler first, and the row reads the signal twice against that park: it must
+//! still be unresolved while tonic owes every frame and every trailer, and it
+//! must be `Completed` once the answer is on the wire. One reading alone would
+//! not pin the terminal — a transition taken at the handoff passes the second
+//! check, and the first is what rejects it.
+//!
+//! The first of those two windows opens before the park rather than inside it,
+//! so it also spans the handoff. A signal resolved there never reaches a tonic
+//! handler to park at all — the pre-head coordinator reads the same signal and
+//! ends the request — so a window opened only from the park would watch a
+//! transition it can no longer see.
 
 use super::fixture::bounded;
 use super::probes::{EntryBarrier, Report, StageReceiver, Stages, entry_barrier, staged};
@@ -139,7 +147,27 @@ fn grpc_request_signal_resolves_completed_via_middleware_gate() {
         // has taken the stage receiver, and nothing advances that stage until
         // the release below. The gate's watcher is therefore armed while tonic
         // still owes every frame and every trailer.
+        // The first window spans the handoff itself. It opens with the call in
+        // flight and the gate's watcher arming inside it, and it closes with
+        // tonic's handler already parked — so a transition taken on the way
+        // into tonic falls inside this row rather than outside it. Reading only
+        // from the park would miss it: that defect never reaches a tonic
+        // handler at all, because the pre-head coordinator reads the same
+        // signal and ends the request the moment anything resolves it.
+        assert!(
+            gate.still_unresolved(),
+            "the gRPC signal resolved on the way into tonic, before its handler had entered"
+        );
         park.await_entry();
+        // The second window opens inside a production pause that provably
+        // cannot advance: tonic's handler is holding, so no frame and no
+        // trailer of this answer exists yet. A signal resolved here would be
+        // one resolved at the handoff rather than at the body it now belongs
+        // to.
+        assert!(
+            gate.still_unresolved(),
+            "the gRPC signal resolved while tonic still owed every frame and every trailer"
+        );
 
         park.release();
         let message =

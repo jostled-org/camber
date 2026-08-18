@@ -50,7 +50,11 @@ fn next_starts_new_word(iter: &mut std::iter::Peekable<std::str::Chars<'_>>) -> 
 }
 
 /// Build the function signature for a unary RPC method.
-/// Returns `None` for streaming methods (not yet supported).
+///
+/// Returns `None` for a streaming method. The async wrapper has one shape —
+/// take a request, answer with a response — and a streaming method has no
+/// spelling in it, so the wrapper covers the unary services and stands aside
+/// for the rest. See [`generate_service_wrapper`].
 fn unary_signature(method: &prost_build::Method) -> Option<String> {
     match (method.client_streaming, method.server_streaming) {
         (false, false) => {
@@ -83,23 +87,52 @@ fn emit_bridge_method(method: &prost_build::Method, buf: &mut String) {
     }
 }
 
-/// Whether every method on one service has the shape the async wrapper covers.
-///
-/// The wrapper exists to spare a unary service tonic's own trait. It has no
-/// spelling for a streaming method, so a service with one gets no wrapper at
-/// all and is implemented through tonic's generated trait directly. Emitting a
-/// `compile_error!` into the wrapper instead made a single streaming RPC
-/// anywhere in a proto file fail the whole generated module — including for
-/// callers that only ever wanted the tonic server.
-fn is_fully_unary(service: &prost_build::Service) -> bool {
+/// The methods on one service the async wrapper has no shape for.
+fn streaming_methods(service: &prost_build::Service) -> Vec<&str> {
     service
         .methods
         .iter()
-        .all(|method| unary_signature(method).is_some())
+        .filter(|method| unary_signature(method).is_none())
+        .map(|method| method.name.as_str())
+        .collect()
 }
 
+/// Emit the empty, documented module that stands in for a skipped wrapper.
+///
+/// A skipped service used to emit `compile_error!` into its wrapper instead,
+/// which failed the whole generated module — every other service in the proto
+/// with it, and every caller that only ever wanted tonic's own server. Nothing
+/// replaces a diagnostic the compiler prints, so the reason is left where the
+/// wrapper would have been: the module still exists under the name a caller
+/// reaches for, reaching into it names the item that is missing rather than the
+/// module, and its documentation states which method ruled the wrapper out and
+/// which tonic trait to implement instead.
+///
+/// A plain comment would not survive: `prost-build` formats its output through
+/// `prettyplease`, which parses the file and keeps only documentation.
+fn note_absent_wrapper(service: &prost_build::Service, streaming: &[&str], buf: &mut String) {
+    let trait_name = &service.name;
+    let base = snake_case(trait_name);
+    buf.push_str(&format!(
+        "/// No async wrapper for the {trait_name} service.\n"
+    ));
+    buf.push_str("///\n");
+    buf.push_str("/// The wrapper takes one request and answers with one response.\n");
+    buf.push_str(&format!(
+        "/// Streaming method(s) `{}` have no shape in it.\n",
+        streaming.join("`, `")
+    ));
+    buf.push_str(&format!(
+        "/// Implement `{base}_server::{trait_name}` directly.\n"
+    ));
+    buf.push_str(&format!("pub mod {base}_service {{}}\n"));
+}
+
+/// Emit the async wrapper for one service, or the note saying why it has none.
 fn generate_service_wrapper(service: &prost_build::Service, buf: &mut String) {
-    if !is_fully_unary(service) {
+    let streaming = streaming_methods(service);
+    if !streaming.is_empty() {
+        note_absent_wrapper(service, &streaming, buf);
         return;
     }
     let trait_name = &service.name;

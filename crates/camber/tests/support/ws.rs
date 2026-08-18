@@ -140,6 +140,32 @@ pub fn write_ws_close_frame(stream: &mut TcpStream) {
     }
 }
 
+/// Send one text frame with the mask bit clear.
+///
+/// A frame a client sends must be masked, so this is a frame the server's own
+/// parser refuses. It is here for the cases whose claim is a failure *after*
+/// `101`: the transport is committed and nothing but the bridge owns it, and
+/// what ends it is the protocol rather than a close frame or a dropped socket.
+///
+/// A peer that has already gone is accepted, and every other failure is not,
+/// for the reason [`write_ws_close_frame`] gives.
+pub fn write_unmasked_text_frame(stream: &mut TcpStream, text: &str) {
+    let payload = text.as_bytes();
+    assert!(
+        payload.len() < 126,
+        "the unmasked fixture frame writes one length byte"
+    );
+    let mut frame = Vec::with_capacity(payload.len() + 2);
+    frame.push(0x81);
+    frame.push(u8::try_from(payload.len()).expect("the unmasked fixture frame is short"));
+    frame.extend_from_slice(payload);
+    match with_write_timeout(stream, |stream| stream.write_all(&frame)) {
+        Ok(()) => {}
+        Err(error) if super::http::is_closed_connection_error(&error) => {}
+        Err(error) => panic!("the unmasked WebSocket frame could not be sent: {error}"),
+    }
+}
+
 /// One frame's opcode and its unmasked payload.
 ///
 /// The payload is built mutably — unmasking rewrites every byte — and handed

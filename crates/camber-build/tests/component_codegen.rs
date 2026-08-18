@@ -151,10 +151,114 @@ message StreamReply {
 }
 "#;
 
+/// Implements the tonic-generated trait for a service that has no wrapper.
+///
+/// Naming `streamer_server::Streamer` is the claim: the module a streaming
+/// service lands in is whole, and tonic's own server for it is generated and
+/// implementable. `tonic::Streaming` is the response stream because it already
+/// satisfies the generated bound, which spares the fixture crate a dependency
+/// on a stream library it would otherwise resolve over the network.
 const STREAMING_VERIFIER: &str = r#"
 include!(concat!(env!("CAMBER_GENERATED_DIR"), "/contract.rs"));
 
-fn main() {}
+struct ChatService;
+
+#[tonic::async_trait]
+impl streamer_server::Streamer for ChatService {
+    type ChatStream = tonic::Streaming<StreamReply>;
+
+    async fn chat(
+        &self,
+        _request: tonic::Request<tonic::Streaming<StreamRequest>>,
+    ) -> Result<tonic::Response<Self::ChatStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("the codegen contract never answers"))
+    }
+}
+
+fn requires_tonic_service<T: streamer_server::Streamer>() {}
+
+fn main() {
+    requires_tonic_service::<ChatService>();
+}
+"#;
+
+/// One unary service and one streaming service in a single proto file.
+///
+/// The shape that made the old `compile_error!` untenable: the diagnostic went
+/// into the streaming service's wrapper and failed the module the unary service
+/// was in as well.
+const MIXED_PROTO: &str = r#"
+syntax = "proto3";
+package contract;
+
+service Greeter {
+  rpc SayHello (HelloRequest) returns (HelloReply);
+}
+
+service Streamer {
+  rpc Chat (stream StreamRequest) returns (stream StreamReply);
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloReply {
+  string message = 1;
+}
+
+message StreamRequest {
+  bytes payload = 1;
+}
+
+message StreamReply {
+  bytes payload = 1;
+}
+"#;
+
+const MIXED_VERIFIER: &str = r#"
+include!(concat!(env!("CAMBER_GENERATED_DIR"), "/contract.rs"));
+
+struct GreetingService;
+
+#[tonic::async_trait]
+impl greeter_service::Greeter for GreetingService {
+    async fn say_hello(
+        &self,
+        request: tonic::Request<HelloRequest>,
+    ) -> Result<tonic::Response<HelloReply>, tonic::Status> {
+        let name = request.into_inner().name;
+        Ok(tonic::Response::new(HelloReply {
+            message: format!("hello {name}"),
+        }))
+    }
+}
+
+struct ChatService;
+
+#[tonic::async_trait]
+impl streamer_server::Streamer for ChatService {
+    type ChatStream = tonic::Streaming<StreamReply>;
+
+    async fn chat(
+        &self,
+        _request: tonic::Request<tonic::Streaming<StreamRequest>>,
+    ) -> Result<tonic::Response<Self::ChatStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("the codegen contract never answers"))
+    }
+}
+
+fn requires_tonic_service<T: greeter_server::Greeter>() {}
+fn requires_streaming_service<T: streamer_server::Streamer>() {}
+
+fn main() {
+    // The unary wrapper is still generated, and still bridges to tonic, with a
+    // streaming service beside it in the same file.
+    requires_tonic_service::<greeter_service::Bridge<GreetingService>>();
+    let _: greeter_server::GreeterServer<greeter_service::Bridge<GreetingService>> =
+        greeter_service::serve(GreetingService);
+    requires_streaming_service::<ChatService>();
+}
 "#;
 
 const INVALID_PROTO: &str = r#"
@@ -168,7 +272,8 @@ fn phase6_codegen_contracts() -> io::Result<()> {
     let started = Instant::now();
     let fixture = Fixture::new()?;
 
-    streaming_rpc_is_rejected_with_context(&fixture)?;
+    streaming_service_keeps_its_module_and_names_the_absent_wrapper(&fixture)?;
+    unary_wrapper_survives_a_streaming_service_in_the_same_proto(&fixture)?;
     invalid_proto_returns_an_explicit_error(&fixture)?;
     successful_unary_generation_and_paths(&fixture)?;
     repeated_generation_replaces_bridge_output(&fixture)?;
@@ -383,7 +488,15 @@ fn repeated_generation_replaces_bridge_output(fixture: &Fixture) -> io::Result<(
     Ok(())
 }
 
-fn streaming_rpc_is_rejected_with_context(fixture: &Fixture) -> io::Result<()> {
+/// A streaming service gets no async wrapper, and says so where the wrapper
+/// would have been.
+///
+/// The whole generated module still compiles and tonic's own server for the
+/// service is still implementable, which is what the previous `compile_error!`
+/// denied every caller of a proto with one streaming RPC in it.
+fn streaming_service_keeps_its_module_and_names_the_absent_wrapper(
+    fixture: &Fixture,
+) -> io::Result<()> {
     let started = Instant::now();
     fixture.write_proto(STREAMING_PROTO)?;
     fixture.write_verifier("verify_streaming", STREAMING_VERIFIER)?;
@@ -392,22 +505,53 @@ fn streaming_rpc_is_rejected_with_context(fixture: &Fixture) -> io::Result<()> {
     let generation = fixture.generate(&descriptor)?;
     assert!(generation.status.success(), "{generation}");
 
+    let generated = fs::read_to_string(fixture.output.join(GENERATED_FILE))?;
+    assert!(
+        generated.contains("pub mod streamer_service {}"),
+        "a streaming service was given an async wrapper it has no shape for\n{generated}"
+    );
+    assert!(
+        generated.contains("Streaming method(s) `chat` have no shape in it."),
+        "the absent wrapper did not name the method that ruled it out\n{generated}"
+    );
+    assert!(
+        generated.contains("Implement `streamer_server::Streamer` directly."),
+        "the absent wrapper did not name the tonic trait to implement\n{generated}"
+    );
+
     let compilation = fixture.check("verify_streaming")?;
-    println!(
-        "Red proof — streaming verifier status: {}",
-        compilation.status
-    );
     assert!(
-        !compilation.status.success(),
-        "streaming bridge unexpectedly compiled\n{compilation}"
+        compilation.status.success(),
+        "a streaming service's generated module did not compile\n{compilation}"
     );
+    println!("streaming service module: {:?}", started.elapsed());
+    Ok(())
+}
+
+/// A unary service keeps its async wrapper with a streaming service beside it.
+///
+/// This is the shape the old diagnostic could not express: the `compile_error!`
+/// belonged to `Streamer` and failed `Greeter`'s module with it.
+fn unary_wrapper_survives_a_streaming_service_in_the_same_proto(
+    fixture: &Fixture,
+) -> io::Result<()> {
+    let started = Instant::now();
+    fixture.write_proto(MIXED_PROTO)?;
+    fixture.write_verifier("verify_mixed", MIXED_VERIFIER)?;
+
+    let descriptor = fixture.artifacts.join("mixed_descriptor.bin");
+    let generation = fixture.generate(&descriptor)?;
+    assert!(generation.status.success(), "{generation}");
+
+    let generated = fs::read_to_string(fixture.output.join(GENERATED_FILE))?;
     assert!(
-        compilation.stderr.contains(
-            "camber-build: streaming RPCs are not yet supported (method `chat` in service `Streamer`)"
-        ),
-        "streaming rejection omitted the method/service diagnostic\n{compilation}"
+        generated.contains("pub mod greeter_service"),
+        "the unary wrapper was dropped because a streaming service shared its file\n{generated}"
     );
-    println!("streaming rejection diagnostic: {:?}", started.elapsed());
+
+    let compilation = fixture.check("verify_mixed")?;
+    assert!(compilation.status.success(), "{compilation}");
+    println!("mixed unary and streaming proto: {:?}", started.elapsed());
     Ok(())
 }
 
