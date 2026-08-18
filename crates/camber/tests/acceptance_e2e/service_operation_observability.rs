@@ -445,6 +445,12 @@ const DURATION_COUNT_METRIC: &str = "http_request_duration_seconds_count";
 /// The sentence one completed operation is recorded under.
 const COMPLETION_EVENT: &str = "message=request completed";
 
+/// The sentence one refused operation is recorded under.
+const REJECTION_EVENT: &str = "message=request rejected";
+
+/// The field a refusal states its private cause in.
+const CAUSE_FIELD: &str = "cause=";
+
 /// How long any completion row's exchange, read, or rendezvous may take.
 const COMPLETION_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -472,6 +478,15 @@ const ABSENT_PATH: &str = "/completion/absent";
 const UPGRADE_PATH: &str = "/completion/upgrade";
 const LIMITED_PATH: &str = "/completion/limited";
 const UNANSWERED_PATH: &str = "/completion/unanswered";
+const DEAD_PREFIX: &str = "/completion/dead";
+const DEAD_PATH: &str = "/completion/dead/echo";
+
+/// A backend nothing listens on.
+///
+/// The row that forwards here is refused with the upstream's own diagnostic,
+/// which is text production holds while it records and a label must never
+/// carry.
+const DEAD_BACKEND: &str = "http://127.0.0.1:1";
 
 /// The methods the ordinary-HTTP rows drive.
 ///
@@ -483,6 +498,13 @@ const BUFFERED_METHOD: &str = "PATCH";
 const ABSENT_METHOD: &str = "DELETE";
 const LIMITED_METHOD: &str = "PUT";
 const UNANSWERED_METHOD: &str = "POST";
+
+/// The method the failing-upstream row forwards with.
+///
+/// `GET` is safe here where the ordinary-HTTP rows above could not use it: this
+/// row is answered on the proxy class under a refusal status, so its whole
+/// label set is shared with nothing else this process records.
+const DEAD_METHOD: &str = "GET";
 
 /// What one row must have been recorded as, once.
 struct Expected<'a> {
@@ -656,6 +678,69 @@ fn register_held_sse(router: &mut camber::http::Router, path: &'static str) -> R
     Release(release)
 }
 
+/// What production handed the fixture's own mapper.
+///
+/// 15.T2 reads its forbidden values off this rather than writing them down
+/// beside it. A diagnostic or a peer address the test invented is a string
+/// production never held, and searching labels for one of those passes whatever
+/// the recorder does; a string the recorder was holding when it wrote its
+/// labels is the only kind this claim can be made about.
+#[derive(Default)]
+struct MapperRecord {
+    held: std::sync::Mutex<Vec<Box<str>>>,
+}
+
+impl MapperRecord {
+    /// Keep what one refusal was handed, exactly as production spelled it.
+    fn observe(&self, diagnostic: &str, peer: Option<std::net::IpAddr>) {
+        let mut held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+        held.push(diagnostic.into());
+        match peer {
+            Some(peer) => held.push(peer.to_string().into()),
+            None => {}
+        }
+    }
+
+    /// Everything production has handed this mapper so far.
+    fn taken(&self) -> Box<[Box<str>]> {
+        self.held
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+/// The mapper the completion fixture states its own detail through.
+///
+/// It answers under the status its producer chose, so every row that declared
+/// an answer keeps it, and it names the request the way Camber's own built-in
+/// answer would, because a configured policy owns every header of what it
+/// returns. What it adds is one operator-only detail beside the diagnostic it
+/// was handed — two values production is holding at the moment it records.
+fn detailing_mapper(
+    record: &std::sync::Arc<MapperRecord>,
+) -> impl Fn(
+    &camber::http::Rejection,
+    &camber::http::RejectionContext,
+) -> Result<Response, camber::RuntimeError>
++ Send
++ Sync
++ 'static {
+    let record = std::sync::Arc::clone(record);
+    move |rejection: &camber::http::Rejection, context: &camber::http::RejectionContext| {
+        record.observe(rejection.message(), context.remote_addr());
+        common::naming(
+            Response::text(
+                rejection.status(),
+                &format!("{MAPPER_DETAIL}: {}", rejection.message()),
+            ),
+            context,
+        )
+    }
+}
+
 /// The whole completion service: every class, and the upstream one of them
 /// forwards to.
 struct CompletionFixture {
@@ -664,6 +749,7 @@ struct CompletionFixture {
     stream: Release,
     sse: Release,
     upstream_stream: Release,
+    mapper: std::sync::Arc<MapperRecord>,
 }
 
 impl CompletionFixture {
@@ -672,6 +758,7 @@ impl CompletionFixture {
         let upstream_stream = register_held_stream(&mut upstream_routes, HELD_UPSTREAM_PATH);
         let upstream = http_support::reserve_observed().serve(upstream_routes);
 
+        let mapper = std::sync::Arc::new(MapperRecord::default());
         let mut routes = camber::http::Router::new();
         routes.patch(BUFFERED_PATH, |_req: &Request| async {
             Response::text(200, "buffered")
@@ -679,6 +766,10 @@ impl CompletionFixture {
         let stream = register_held_stream(&mut routes, STREAM_PATH);
         let sse = register_held_sse(&mut routes, SSE_PATH);
         routes.proxy_stream(PROXY_PREFIX, &format!("http://{}", upstream.addr()));
+        // Nothing listens on this backend, so the row that forwards here is
+        // refused with the upstream's own diagnostic and the fixture's mapper
+        // states its detail over it.
+        routes.proxy_stream(DEAD_PREFIX, DEAD_BACKEND);
         routes.put(LIMITED_PATH, |_req: &Request| async {
             Response::text(200, "admitted")
         });
@@ -691,17 +782,21 @@ impl CompletionFixture {
         register_completion_grpc(&mut routes);
         register_completion_upgrade(&mut routes);
 
-        let routes = routes.max_request_body(COMPLETION_MAX_BODY).request_budget(
-            camber::http::RequestBudget::unbounded()
-                .with_total(COMPLETION_TOTAL)
-                .expect("the fixture's request lifetime is accepted"),
-        );
+        let routes = routes
+            .max_request_body(COMPLETION_MAX_BODY)
+            .request_budget(
+                camber::http::RequestBudget::unbounded()
+                    .with_total(COMPLETION_TOTAL)
+                    .expect("the fixture's request lifetime is accepted"),
+            )
+            .rejection_mapper(detailing_mapper(&mapper));
         Self {
             server: http_support::reserve_observed().serve(routes),
             upstream,
             stream,
             sse,
             upstream_stream,
+            mapper,
         }
     }
 
@@ -1126,15 +1221,70 @@ fn completion_metrics_and_events_emit_once_at_true_terminal() {
 /// scraped and compares them against this as it stands.
 const COMPLETION_LABELS: [&str; 5] = ["boundary", "method", "protocol", "status", "terminal"];
 
-/// The paths the label row drives, each varying something a label must not
-/// carry.
-const VARIED_PATHS: [&str; 3] = [BUFFERED_PATH, ABSENT_PATH, LIMITED_PATH];
-
 /// A request identifier a peer supplies, which Camber must not adopt.
 const SUPPLIED_REQUEST_ID: &str = "peer-supplied-identity-0123456789";
 
 /// A diagnostic the fixture's own mapper states for the operator alone.
 const MAPPER_DETAIL: &str = "completion-mapper-detail";
+
+/// One journey the label row drives, and what that journey varies.
+struct Varied {
+    label: &'static str,
+    method: &'static str,
+    path: &'static str,
+    /// How many payload bytes the peer sends.
+    payload: usize,
+    status: u16,
+}
+
+impl Varied {
+    /// Whether Camber's own answer to this row names the request.
+    ///
+    /// A refusal is answered through the fixture's mapper, which names the
+    /// request the way the built-in answer would; a handler's own `200` is the
+    /// application's response and carries nothing Camber added.
+    const fn names_its_identity(&self) -> bool {
+        self.status != 200
+    }
+}
+
+/// Every journey the label row drives.
+///
+/// Between them they vary a peer-chosen identifier, four raw paths, a crossed
+/// bound, an unreachable upstream, and the detail the fixture's own mapper
+/// states. Each of those is something production is holding when it writes this
+/// row's labels, which is what makes the exclusion below a claim about this
+/// service rather than a search for a string nothing ever had.
+const VARIED_ROWS: [Varied; 4] = [
+    Varied {
+        label: "varied buffered",
+        method: BUFFERED_METHOD,
+        path: BUFFERED_PATH,
+        payload: 2,
+        status: 200,
+    },
+    Varied {
+        label: "varied absent",
+        method: ABSENT_METHOD,
+        path: ABSENT_PATH,
+        payload: 0,
+        status: 404,
+    },
+    Varied {
+        label: "varied limited",
+        method: LIMITED_METHOD,
+        path: LIMITED_PATH,
+        payload: COMPLETION_MAX_BODY * 4,
+        status: 413,
+    },
+    Varied {
+        label: "varied dead upstream",
+        method: DEAD_METHOD,
+        path: DEAD_PATH,
+        payload: 0,
+        status: 502,
+    },
+];
 
 /// Assert one sample is labelled with exactly the closed set of names.
 fn assert_closed_label_names(sample: &common::Sample) {
@@ -1187,13 +1337,107 @@ fn assert_bounded_values(sample: &common::Sample, forbidden: &[&str]) {
     }
 }
 
-/// Everything a completion label must never carry, taken from one journey.
-fn varying_values<'a>(request_id: &'a str) -> Box<[&'a str]> {
-    [request_id, "127.0.0.1", SUPPLIED_REQUEST_ID, MAPPER_DETAIL]
+/// Everything a completion label must never carry, taken from one drive.
+///
+/// `recorded` is what this drive read back out of production's own records —
+/// the identifier it minted for each row and the private cause it stated for
+/// each refusal — and `held` is what production handed its own mapper, the safe
+/// message and the peer address it reported. None of that is written down here:
+/// a value the test chose is a value production may never have had, and a label
+/// search for one of those cannot fail.
+fn varying_values<'a>(recorded: &'a [Box<str>], held: &'a [Box<str>]) -> Box<[&'a str]> {
+    assert!(
+        !recorded.is_empty() && !held.is_empty(),
+        "the drive produced no recorded identity or nothing production held, so the \
+         exclusion below would search for nothing this service had: {recorded:?} / {held:?}",
+    );
+    [SUPPLIED_REQUEST_ID, MAPPER_DETAIL]
         .into_iter()
-        .chain(VARIED_PATHS)
+        .chain(recorded.iter().map(Box::as_ref))
+        .chain(held.iter().map(Box::as_ref))
+        .chain(VARIED_ROWS.iter().map(|row| row.path))
         .chain([HELD_UPSTREAM_PATH, STREAM_PATH, SSE_PATH, PROXY_PATH])
         .collect()
+}
+
+/// The one completion event this row's raw path produced.
+///
+/// Bounded rather than read once, because the record is written where the
+/// operation ends: for a refused row that is after the peer already has its
+/// answer, so a straight read could ask before production wrote anything.
+fn completion_event_of(capture: &common::TraceCapture, row: &Varied) -> Box<str> {
+    let settled = http_support::poll_until(COMPLETION_BOUND, || !capture.is_empty());
+    assert!(
+        settled,
+        "{}: no completion event was recorded for {}",
+        row.label, row.path,
+    );
+    only_completion(capture, row.label)
+}
+
+/// The private cause one refused row recorded for operators alone.
+///
+/// Read off production's own rejection event rather than out of the mapper: a
+/// configured mapper is deliberately never handed the diagnostic, so this event
+/// is the only place the service states what actually went wrong. The cause is
+/// the last field the event carries, so the whole tail after it is that text —
+/// and it is text no completion label may repeat.
+fn recorded_cause(capture: &common::TraceCapture, row: &Varied) -> Box<str> {
+    let events = capture.events();
+    let event = common::only_event(&events, REJECTION_EVENT, row.label);
+    let at = event.find(CAUSE_FIELD).unwrap_or_else(|| {
+        panic!(
+            "{}: the rejection event states no cause: {event}",
+            row.label
+        )
+    });
+    let cause = &event[at + CAUSE_FIELD.len()..];
+    assert!(
+        !cause.is_empty(),
+        "{}: the rejection event states an empty cause: {event}",
+        row.label,
+    );
+    cause.into()
+}
+
+/// Assert one row's variable data reached the event, and name the identity.
+///
+/// The positive half of what the labels prove the negative of. The identifier
+/// Camber minted and the raw path the peer asked for are both recorded, in the
+/// structured event, which is the one place they are allowed — and the
+/// identifier is Camber's own rather than the one the peer supplied.
+///
+/// Returns the identity production recorded, so the label check below searches
+/// for the exact value the recorder held.
+fn assert_identity_reaches_the_event(
+    event: &str,
+    row: &Varied,
+    answered: &http_support::HttpResponse,
+) -> Box<str> {
+    common::assert_field_value(event, "path", row.path, row.label);
+    common::assert_field_value(event, "status", &row.status.to_string(), row.label);
+    let recorded = common::field_value(event, "request_id").unwrap_or_else(|| {
+        panic!(
+            "{}: the completion event names no request identifier: {event}",
+            row.label,
+        )
+    });
+    common::assert_request_id_shape(Some(recorded), row.label);
+    assert_ne!(
+        recorded, SUPPLIED_REQUEST_ID,
+        "{}: Camber adopted the identifier its peer supplied",
+        row.label,
+    );
+    match row.names_its_identity() {
+        true => assert_eq!(
+            recorded,
+            common::request_id_of(answered, row.label).as_ref(),
+            "{}: the event names a different request than the answer did",
+            row.label,
+        ),
+        false => {}
+    }
+    recorded.into()
 }
 
 /// Assert every scraped completion sample carries only closed vocabularies.
@@ -1241,13 +1485,62 @@ fn assert_required_labels_are_populated(samples: &[common::Sample]) {
     );
 }
 
+/// Drive every varied journey and report the identities production recorded.
+///
+/// Each row is captured on its own raw path, so the event read back is that
+/// row's own record rather than the first of several. The crossed bound and the
+/// unreachable upstream are rows here rather than extras beside the loop: the
+/// boundary label needs a populated value, and the mapper needs a real upstream
+/// diagnostic to state its detail over.
+fn drive_varied_rows(addr: std::net::SocketAddr) -> Box<[Box<str>]> {
+    let mut recorded = Vec::new();
+    for row in &VARIED_ROWS {
+        // One needle for both records: a rejection event names this row's raw
+        // path in `raw_path`, which carries the completion event's own `path`
+        // field inside it, so the two arrive in one capture and are told apart
+        // by the sentence each states.
+        let capture = common::capture_events(&format!("path={}", row.path));
+        let answered = http_support::send(
+            addr,
+            row.method,
+            row.path,
+            &[("X-Request-Id", SUPPLIED_REQUEST_ID)],
+            &vec![b'x'; row.payload],
+        );
+        assert_eq!(
+            answered.status, row.status,
+            "{}: unexpected wire status",
+            row.label,
+        );
+        let event = completion_event_of(&capture, row);
+        recorded.push(assert_identity_reaches_the_event(&event, row, &answered));
+        match row.names_its_identity() {
+            // The mapper's detail is stated on the wire, so the value the
+            // labels are then searched for is one this service demonstrably
+            // held rather than one this row wrote down and never gave away.
+            true => {
+                assert!(
+                    String::from_utf8_lossy(&answered.body).contains(MAPPER_DETAIL),
+                    "{}: the fixture's mapper never stated its detail: {:?}",
+                    row.label,
+                    String::from_utf8_lossy(&answered.body),
+                );
+                recorded.push(recorded_cause(&capture, row));
+            }
+            false => {}
+        }
+    }
+    recorded.into_boxed_slice()
+}
+
 /// 15.T2
 ///
-/// Varied request identifiers, raw paths, peer addresses, and mapper detail
-/// reach a live service. What its completion counters carry is only the closed
-/// method, status, dispatch-class, terminal, and boundary vocabularies
-/// production itself publishes; everything a request can vary appears in the
-/// structured event and nowhere near a label.
+/// Varied request identifiers, raw paths, peer addresses, upstream diagnostics,
+/// and mapper detail reach a live service. Every one of them is recorded in the
+/// structured event, which is where variable data is allowed. What the
+/// completion counters carry is only the closed method, status, dispatch-class,
+/// terminal, and boundary vocabularies production itself publishes, and no
+/// value this drive proved production was holding reaches a label.
 #[test]
 fn completion_labels_exclude_unbounded_identity_and_diagnostics() {
     common::test_runtime()
@@ -1258,41 +1551,17 @@ fn completion_labels_exclude_unbounded_identity_and_diagnostics() {
             let fixture = CompletionFixture::serve();
             let addr = fixture.addr();
 
-            // Taken before the measured drive, and taken off a refusal: the
-            // identifier Camber minted reaches the wire on the answers whose
-            // policy states it, and this row needs a real one to look for.
-            let named = exchange(addr, ABSENT_METHOD, ABSENT_PATH, b"");
-            let request_id = common::request_id_of(&named, "completion labels");
-
-            for path in VARIED_PATHS {
-                let answered = http_support::send(
-                    addr,
-                    "PATCH",
-                    path,
-                    &[("X-Request-Id", SUPPLIED_REQUEST_ID)],
-                    b"ok",
-                );
-                assert!(
-                    answered.status > 0,
-                    "completion labels: {path} produced no answer",
-                );
-            }
-            // One crossed bound, so the boundary label has a populated value to
-            // be checked rather than only the stated absence.
-            let limited = exchange(
-                addr,
-                LIMITED_METHOD,
-                LIMITED_PATH,
-                &vec![b'x'; COMPLETION_MAX_BODY * 4],
-            );
-            assert_eq!(
-                limited.status, 413,
-                "completion labels: the bound was crossed"
-            );
+            let recorded = drive_varied_rows(addr);
+            // Taken after the drive: these are the diagnostic and the peer
+            // address production handed its own mapper, so the exclusion below
+            // searches for what the recorder was holding rather than for text
+            // this row wrote down.
+            let held = fixture.mapper.taken();
+            let forbidden = varying_values(&recorded, &held);
 
             let scraped = Recorded::scraped(addr);
-            assert_bounded_completion_labels(&scraped.completions, &varying_values(&request_id));
-            assert_bounded_completion_labels(&scraped.durations, &varying_values(&request_id));
+            assert_bounded_completion_labels(&scraped.completions, &forbidden);
+            assert_bounded_completion_labels(&scraped.durations, &forbidden);
             assert_required_labels_are_populated(&scraped.completions);
 
             fixture.tear_down("completion labels");

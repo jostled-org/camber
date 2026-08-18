@@ -15,8 +15,8 @@ use crate::http as http_support;
 
 use camber::http::mock::{InboundTerminal, LifecycleCheckpoint, LifecycleController};
 use camber::http::{
-    GrpcRouter, RejectionKind, RejectionProtocol, RequestBudget, Router, ServerPolicy,
-    TransferBudget,
+    BodyAdmission, BodyAdmissionContext, GrpcRouter, RejectionKind, RejectionProtocol,
+    RequestBudget, Router, ServerPolicy, TransferBudget,
 };
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -1404,12 +1404,33 @@ fn register_matrix_upstream_upgrade(upstream: &mut Router, work: &Arc<MatrixWork
 #[cfg(not(feature = "ws"))]
 fn register_matrix_upstream_upgrade(_upstream: &mut Router, _work: &Arc<MatrixWork>) {}
 
+/// How many payload bytes the matrix admits on any one request.
+///
+/// Far above anything this matrix drives. The policy below exists to hand out a
+/// permit, not to bound a body.
+const MATRIX_BODY_CEILING: usize = 64 * 1024;
+
+/// Hand every admitted request a permit of its own.
+///
+/// Without one there is nothing for a terminal to release, so the release count
+/// 15.T3 reads would stand at zero however production behaved. The permit value
+/// itself is inert: what is under observation is the single owner Camber wraps
+/// it in and the one drop that owner reaches on every terminal path —
+/// completion, refusal, disconnect, and cancellation alike.
+fn permitting_body_admission(router: Router) -> Router {
+    router.body_admission(|_context: &BodyAdmissionContext<'_>| {
+        Ok(BodyAdmission::with_permit(MATRIX_BODY_CEILING, ()))
+    })
+}
+
 /// The child the matrix authority selects: one chain over every class.
 fn matrix_child(work: &Arc<MatrixWork>, journal: &common::Journal, backend: &str) -> Router {
     let mut child = Router::new();
     gate_on_credential(&mut child);
     register_matrix_classes(&mut child, work, backend);
-    child.rejection_mapper(common::recording_mapper(journal, "matrix-child"))
+    permitting_body_admission(
+        child.rejection_mapper(common::recording_mapper(journal, "matrix-child")),
+    )
 }
 
 /// The second authority's child: a route, and no chain at all.
@@ -1442,7 +1463,9 @@ fn matrix_grpc_router(work: &Arc<MatrixWork>, journal: &common::Journal) -> Rout
             },
         })),
     );
-    router.rejection_mapper(common::recording_mapper(journal, "matrix-grpc"))
+    permitting_body_admission(
+        router.rejection_mapper(common::recording_mapper(journal, "matrix-grpc")),
+    )
 }
 
 /// The fixture service, counted as entered by the matrix's own work record.
@@ -2400,6 +2423,40 @@ async fn matrix_rpc(addr: std::net::SocketAddr, credentialed: bool) -> http_supp
 // 15.T3: one envelope, one chain, one account, per admitted row
 // ---------------------------------------------------------------------------
 
+/// The counter one completed operation is recorded under.
+const COMPLETION_METRIC: &str = "http_requests_total";
+
+/// The sentence one completed operation is recorded under.
+const COMPLETION_EVENT: &str = "message=request completed";
+
+/// The method this row scrapes the live endpoint with.
+///
+/// Deliberately not `GET`: a scrape is itself an admitted operation, recorded
+/// under a label set of its own, and a scrape sharing one with a row under
+/// measurement would be counted as that row's second account. No matrix class is
+/// driven with `OPTIONS`, so this label set belongs to the scrape alone.
+const SCRAPE_METHOD: &str = "OPTIONS";
+
+/// How long between re-scrapes while a row's record is still owed.
+const RECORDED_POLL: Duration = Duration::from_millis(20);
+
+/// How many permit owners a chain that refused before its terminal releases.
+///
+/// One: route-aware body admission is resolved from the matched route before
+/// the chain over it runs, so a request the chain then refuses is already
+/// holding the permit that admission handed it — and every terminal path,
+/// refusal included, releases it exactly once.
+const SHORT_CIRCUIT_PERMITS: usize = 1;
+
+/// How many permit owners a handshake Camber refused releases.
+///
+/// None: an upgrade is dispatched head-only, so no body plan resolves and no
+/// permit is ever handed out to be returned.
+const FAILED_UPGRADE_PERMITS: usize = 0;
+
+/// The answer a handshake Camber cannot complete is refused with.
+const REFUSED_HANDSHAKE: u16 = 400;
+
 /// What one row's own listener published while that row ran.
 ///
 /// Deltas rather than totals: the observations are cumulative per listener, and
@@ -2415,48 +2472,134 @@ struct OwnedOnce {
 }
 
 impl OwnedOnce {
-    /// What `controller` published between `before` and now.
-    fn between(
-        before: &camber::http::mock::OperationObservation,
-        controller: &LifecycleController,
-    ) -> Self {
+    /// What `controller` published since `baseline` was taken.
+    fn since(baseline: &Baseline, controller: &LifecycleController) -> Self {
         let after = controller.operations_observed();
+        let before = &baseline.observed;
         Self {
             envelopes: after.admitted - before.admitted,
             identities: after.distinct_identities - before.distinct_identities,
             middleware: after.middleware - before.middleware,
             staged: after.completions_staged - before.completions_staged,
             recorded: after.completions_recorded - before.completions_recorded,
-            permits: controller.body_permit_owners_dropped(),
+            permits: controller.body_permit_owners_dropped() - baseline.permits,
         }
     }
 }
 
-/// Wait until one row's account has been recorded, and report what it owned.
+/// Everything one row is measured against, taken before that row is driven.
 ///
-/// The record is written where the operation ends, which for several of these
-/// classes is after the peer already has its answer. The wait is bounded and its
-/// expiry is the failure, so a row that never records fails here rather than
-/// reading a zero it cannot explain.
+/// The scrape belongs here rather than beside the row because it has to be
+/// taken first and settled first: a scrape is an admitted operation of its own,
+/// and its record is written where it ends — after its body already reached the
+/// peer. A row baselined while that record was still owed would read the
+/// scrape's account as its own.
+struct Baseline {
+    observed: camber::http::mock::OperationObservation,
+    permits: usize,
+    scraped: Box<[common::Sample]>,
+}
+
+impl Baseline {
+    /// Take everything one row on `addr` is measured against.
+    async fn take(addr: std::net::SocketAddr, controller: &LifecycleController) -> Self {
+        let before = controller.operations_observed();
+        let scraped = scrape_completions(addr).await;
+        let settled = http_support::poll_until(BOUND, || {
+            controller.operations_observed().completions_recorded > before.completions_recorded
+        });
+        assert!(
+            settled,
+            "baseline: the scrape's own account was never recorded, so no row after it \
+             can be told apart from it",
+        );
+        Self {
+            observed: controller.operations_observed(),
+            permits: controller.body_permit_owners_dropped(),
+            scraped,
+        }
+    }
+}
+
+/// Scrape one live listener's completion counter through the chain gating it.
+///
+/// The credential is carried because an internal route still runs the selected
+/// child's middleware, and the authority is named because the host table selects
+/// on it.
+async fn scrape_completions(addr: std::net::SocketAddr) -> Box<[common::Sample]> {
+    let scrape = tokio::task::spawn_blocking(move || {
+        http_support::send_to_host_with(
+            addr,
+            SCRAPE_METHOD,
+            "/metrics",
+            MATRIX_HOST,
+            &matrix_headers(true),
+        )
+    })
+    .await
+    .expect("the scrape peer settled");
+    common::scraped_samples(&scrape, COMPLETION_METRIC)
+}
+
+/// Re-scrape `addr` until this row's own label set has moved, and report by how
+/// far.
+///
+/// Bounded rather than read once: the record is written where the operation
+/// ends, which for several of these classes is after the peer already has its
+/// answer. `expected` is what the caller is waiting for rather than what it
+/// accepts — the reading is handed back whole, so a row that moved further than
+/// it declared fails at the caller instead of being waited past. Every
+/// re-scrape is an `OPTIONS` operation, so none of them can move the label set
+/// being waited on.
+async fn moved_on_the_wire(
+    addr: std::net::SocketAddr,
+    before: &[common::Sample],
+    labels: &[(&str, &str)],
+    expected: u64,
+) -> u64 {
+    let deadline = std::time::Instant::now() + BOUND;
+    loop {
+        let moved = common::delta(before, &scrape_completions(addr).await, labels);
+        match moved >= expected || std::time::Instant::now() >= deadline {
+            true => return moved,
+            false => tokio::time::sleep(RECORDED_POLL).await,
+        }
+    }
+}
+
+/// Wait until one row's account has been recorded and its permit returned.
+///
+/// The record is written where the operation ends, and the permit the request
+/// held goes back when the owner holding it drops, which can be later still.
+/// Both waits are bounded and their expiry is the failure, so a row that never
+/// records or never releases fails here rather than reading a zero it cannot
+/// explain.
+///
+/// `permits` is what this row is owed: a class that consumes a request body
+/// holds one, and a head-only class — an upgrade, an event stream — is never
+/// offered one to hold.
 fn owned_once(
-    before: &camber::http::mock::OperationObservation,
+    baseline: &Baseline,
     controller: &LifecycleController,
+    permits: usize,
     label: &str,
 ) -> OwnedOnce {
     let settled = http_support::poll_until(BOUND, || {
-        OwnedOnce::between(before, controller).recorded >= 1
+        let owned = OwnedOnce::since(baseline, controller);
+        owned.recorded >= 1 && owned.permits >= permits
     });
-    let owned = OwnedOnce::between(before, controller);
+    let owned = OwnedOnce::since(baseline, controller);
     assert!(
         settled,
-        "{label}: no account was recorded within {BOUND:?}: staged {}, recorded {}",
-        owned.staged, owned.recorded,
+        "{label}: no account was recorded and released within {BOUND:?}: staged {}, \
+         recorded {}, permits {} of {permits}",
+        owned.staged, owned.recorded, owned.permits,
     );
     owned
 }
 
-/// Assert one admitted row owned exactly one of each.
-fn assert_owned_once(owned: &OwnedOnce, label: &str) {
+/// Assert one admitted row owned exactly one of each, and released what it held.
+fn assert_owned_once(owned: &OwnedOnce, permits: usize, label: &str) {
     assert_eq!(owned.envelopes, 1, "{label}: envelopes minted");
     assert_eq!(owned.identities, 1, "{label}: distinct identities read");
     assert_eq!(owned.middleware, 1, "{label}: middleware executions");
@@ -2468,6 +2611,7 @@ fn assert_owned_once(owned: &OwnedOnce, label: &str) {
         owned.recorded, 1,
         "{label}: accounts recorded at a terminal"
     );
+    assert_eq!(owned.permits, permits, "{label}: permit owners released");
 }
 
 /// Assert one row that never reached a Camber owner left nothing behind.
@@ -2476,38 +2620,229 @@ fn assert_owned_nothing(owned: &OwnedOnce, label: &str) {
     assert_eq!(owned.middleware, 0, "{label}: a chain ran");
     assert_eq!(owned.staged, 0, "{label}: an account was staged");
     assert_eq!(owned.recorded, 0, "{label}: an account was recorded");
+    assert_eq!(owned.permits, 0, "{label}: a permit owner was released");
 }
 
-/// The classes 15.T3 drives over the host-routed matrix and reads one account
-/// for.
+/// One admitted class 15.T3 drives, and everything its one account names.
 ///
-/// The SSE feed is not among them: its producer runs until its peer goes away,
-/// so the row that owns it is the disconnect row in 14.T2 rather than a whole
-/// exchange here.
-const OWNED_HTTP_CLASSES: [(&str, &str); 4] = [
-    ("ordinary http", MATRIX_HTTP),
-    ("generic stream", MATRIX_STREAM),
-    ("buffered proxy", MATRIX_BUFFERED),
-    ("streaming proxy", MATRIX_STREAMED),
+/// The class label and the terminal are stated rather than read back off the
+/// record: a row that took production's own answer as its expectation would
+/// agree with whatever the recorder wrote.
+struct Admitted {
+    class: &'static str,
+    method: &'static str,
+    path: &'static str,
+    status: u16,
+    protocol: &'static str,
+    terminal: &'static str,
+    /// How many permit owners this class releases.
+    ///
+    /// One for a class that consumes a request body, and none for a head-only
+    /// class: an upgrade and an event stream are dispatched without a body
+    /// plan at all, so production never offers them a permit to hold. Stated
+    /// per row rather than assumed, because "released what it held" is only a
+    /// claim where something was held.
+    permits: usize,
+    /// How many records this row's whole journey writes under that label set.
+    ///
+    /// One per admitted operation, and a proxied row drives two of them in this
+    /// process: the peer's, served by the matrix, and the forwarded leg the
+    /// upstream served for it. The counter is process-wide, so a row whose two
+    /// operations are answered on the same class sees both. The per-listener
+    /// account beside it is what says each of those was recorded once.
+    records: u64,
+}
+
+impl Admitted {
+    /// The whole label set this row's record carries.
+    ///
+    /// Built as one value because it is one claim: a delta taken over a subset
+    /// of the labels would count a record another class produced. No row here
+    /// crosses a configured bound, so every one of them names the absence.
+    fn labels<'a>(&'a self, status: &'a str) -> [(&'a str, &'a str); 5] {
+        [
+            ("method", self.method),
+            ("status", status),
+            ("protocol", self.protocol),
+            ("terminal", self.terminal),
+            ("boundary", "none"),
+        ]
+    }
+
+    /// The fields this row's completion event must carry.
+    fn stated(&self) -> [String; 4] {
+        [
+            format!("status={}", self.status),
+            format!("protocol={}", self.protocol),
+            format!("terminal={}", self.terminal),
+            "boundary=none".to_owned(),
+        ]
+    }
+}
+
+/// Every class answered over ordinary HTTP framing that this row drives whole.
+const OWNED_EXCHANGE_CLASSES: [Admitted; 4] = [
+    Admitted {
+        class: "ordinary http",
+        method: "GET",
+        path: MATRIX_HTTP,
+        status: 200,
+        protocol: "ordinary_http",
+        terminal: "completed",
+        permits: 1,
+        records: 1,
+    },
+    Admitted {
+        class: "generic stream",
+        method: "GET",
+        path: MATRIX_STREAM,
+        status: 200,
+        protocol: "streaming_http",
+        terminal: "completed",
+        permits: 1,
+        records: 1,
+    },
+    Admitted {
+        class: "buffered proxy",
+        method: "GET",
+        path: MATRIX_BUFFERED,
+        status: 200,
+        // The forwarded leg the upstream serves for this row is answered as
+        // ordinary HTTP, so it lands under a label set that is not this one.
+        protocol: "proxy",
+        terminal: "completed",
+        permits: 1,
+        records: 1,
+    },
+    Admitted {
+        class: "streaming proxy",
+        method: "GET",
+        path: MATRIX_STREAMED,
+        status: 200,
+        protocol: "proxy",
+        terminal: "completed",
+        permits: 1,
+        records: 1,
+    },
 ];
+
+/// The event stream, whose producer runs until the peer reading it is gone.
+///
+/// Driven as a row of its own rather than folded into the exchange loop above,
+/// because its terminal is the peer's departure rather than a body that ended.
+const OWNED_SSE_CLASS: Admitted = Admitted {
+    class: "sse",
+    method: "GET",
+    path: MATRIX_SSE,
+    status: 200,
+    protocol: "server_sent_events",
+    terminal: "disconnect",
+    permits: 0,
+    records: 1,
+};
+
+/// The gRPC class, answered on its own listener at the boundary tonic owns.
+const OWNED_GRPC_CLASS: Admitted = Admitted {
+    class: "grpc",
+    method: "POST",
+    path: ECHO_PATH,
+    status: 200,
+    protocol: "grpc",
+    terminal: "completed",
+    permits: 0,
+    records: 1,
+};
+
+/// Both upgrade classes, whose HTTP operation ends at the handoff it committed.
+#[cfg(feature = "ws")]
+const OWNED_UPGRADE_CLASSES: [Admitted; 2] = [
+    Admitted {
+        class: "direct upgrade",
+        method: "GET",
+        path: MATRIX_WS,
+        status: 101,
+        protocol: "websocket",
+        terminal: "completed",
+        permits: 0,
+        records: 1,
+    },
+    Admitted {
+        class: "proxied upgrade",
+        method: "GET",
+        path: MATRIX_WS_PROXY,
+        status: 101,
+        // The handshake establishes the class, not the registration: a proxied
+        // upgrade is answered as an upgrade, whichever route forwarded it.
+        protocol: "websocket",
+        terminal: "completed",
+        permits: 0,
+        // Two operations, on one class: the peer's upgrade, committed by the
+        // matrix, and the forwarded upgrade the upstream committed for it.
+        records: 2,
+    },
+];
+
+/// The one completion event this row's raw path produced.
+fn completion_event_of(capture: &common::TraceCapture, label: &str) -> Box<str> {
+    let settled = http_support::poll_until(BOUND, || !capture.is_empty());
+    assert!(settled, "{label}: no completion event was recorded");
+    common::only_event(&capture.events(), COMPLETION_EVENT, label).into()
+}
+
+/// Assert this row's own account reached the operator, in both channels, once.
+///
+/// The event and the counter are read together because production writes them
+/// from one account: a row that moved one and not the other would be a request
+/// no operator can correlate between the two.
+async fn assert_recorded_for_the_operator(
+    addr: std::net::SocketAddr,
+    baseline: &Baseline,
+    capture: &common::TraceCapture,
+    row: &Admitted,
+) {
+    let event = completion_event_of(capture, row.class);
+    let stated = row.stated();
+    let stated: Box<[&str]> = stated.iter().map(String::as_str).collect();
+    common::assert_fields(&event, &stated, row.class);
+
+    let status = row.status.to_string();
+    assert_eq!(
+        moved_on_the_wire(addr, &baseline.scraped, &row.labels(&status), row.records).await,
+        row.records,
+        "{}: unexpected records under this row's whole label set",
+        row.class,
+    );
+}
+
+/// Capture only what this row's own raw path records.
+fn capture_for(row: &Admitted) -> common::TraceCapture {
+    common::capture_events(&format!("path={}", row.path))
+}
 
 /// 15.T3
 ///
 /// Every admitted class over the same public matrix 14.T2 serves owns exactly
 /// one envelope, one middleware execution, one staged account, one recorded
-/// account, and the wire status its own owner committed. The two rows that
-/// reach no Camber owner at all — a chain that refused before its terminal, and
-/// a head Hyper never admitted — are read the same way and prove the absent
-/// owners stay absent.
+/// account, one released permit, and the wire status its own owner committed —
+/// and that account reaches the operator once, in the event and in the counter
+/// alike. The three rows that reach no owner they might have had — a chain that
+/// refused before its terminal, a handshake that never committed, and a head
+/// Hyper never admitted — are read the same way and prove the absent owners
+/// stay absent.
 #[test]
 fn cross_protocol_operation_owns_one_envelope_middleware_and_completion() {
     camber::runtime::builder()
+        .with_metrics()
+        .with_tracing()
         .run(|| {
             camber::runtime::block_on(async {
                 let fixture = MatrixFixture::serve();
                 assert_each_admitted_class_owns_one_account(&fixture).await;
+                assert_event_stream_owns_one_account(&fixture).await;
+                assert_upgrades_own_one_account(&fixture).await;
                 assert_grpc_owns_one_account(&fixture).await;
                 assert_short_circuit_owns_its_account_and_nothing_else(&fixture).await;
+                assert_failed_upgrade_owns_only_its_refusal(&fixture).await;
                 assert_unadmitted_head_owns_nothing(&fixture).await;
                 fixture.tear_down("owned once");
             });
@@ -2515,26 +2850,105 @@ fn cross_protocol_operation_owns_one_envelope_middleware_and_completion() {
         .expect("the owned-account matrix ran to completion");
 }
 
-/// Each admitted HTTP class owns one of everything, and releases its permit.
+/// Each class driven whole owns one of everything, and releases its permit.
 async fn assert_each_admitted_class_owns_one_account(fixture: &MatrixFixture) {
-    for (class, path) in OWNED_HTTP_CLASSES {
-        let before = fixture.controller.operations_observed();
-        let answered = matrix_exchange(fixture.addr(), path, true).await;
-        assert_eq!(answered.status, 200, "{class}: wire status");
+    for row in &OWNED_EXCHANGE_CLASSES {
+        let baseline = Baseline::take(fixture.addr(), &fixture.controller).await;
+        let capture = capture_for(row);
+        let answered = matrix_exchange(fixture.addr(), row.path, true).await;
+        assert_eq!(answered.status, row.status, "{}: wire status", row.class);
 
-        let owned = owned_once(&before, &fixture.controller, class);
-        assert_owned_once(&owned, class);
-        http_support::assert_owners_released(&fixture.controller, owned.permits, class);
+        let owned = owned_once(&baseline, &fixture.controller, row.permits, row.class);
+        assert_owned_once(&owned, row.permits, row.class);
+        assert_recorded_for_the_operator(fixture.addr(), &baseline, &capture, row).await;
     }
 }
 
+/// The event stream owns one account, written when its peer goes away.
+///
+/// The producer runs until the peer reading it is gone, so this row's terminal
+/// is that departure rather than a body that ended. It is read here rather than
+/// left to 14.T2's disconnect row: that row asserts what the producer did, and
+/// nothing there says the operation was accounted for exactly once.
+async fn assert_event_stream_owns_one_account(fixture: &MatrixFixture) {
+    let row = &OWNED_SSE_CLASS;
+    let baseline = Baseline::take(fixture.addr(), &fixture.controller).await;
+    let capture = capture_for(row);
+    let ended_before = fixture.work.ended();
+    let addr = fixture.addr();
+
+    let head = tokio::task::spawn_blocking(move || {
+        let mut peer = http_support::connect(addr).expect("the event-stream peer connected");
+        let head = format!(
+            "GET {MATRIX_SSE} HTTP/1.1\r\nHost: {MATRIX_HOST}\r\n{CREDENTIAL_HEADER}: \
+             {CREDENTIAL}\r\n\r\n"
+        );
+        std::io::Write::write_all(&mut peer, head.as_bytes())
+            .expect("the event-stream request was sent");
+        let answered = common::read_until_double_crlf(&mut peer);
+        // Dropped inside the blocking owner: the peer is gone from here, and
+        // the account that follows is what the service made of that.
+        drop(peer);
+        answered
+    })
+    .await
+    .expect("the event-stream peer settled");
+    assert!(
+        head.starts_with("HTTP/1.1 200"),
+        "{}: the event stream never committed its head: {head}",
+        row.class,
+    );
+    let ended = http_support::poll_until(BOUND, || fixture.work.ended() > ended_before);
+    assert!(
+        ended,
+        "{}: the event producer outlived the peer it was being read by",
+        row.class,
+    );
+
+    let owned = owned_once(&baseline, &fixture.controller, row.permits, row.class);
+    assert_owned_once(&owned, row.permits, row.class);
+    assert_recorded_for_the_operator(addr, &baseline, &capture, row).await;
+}
+
+/// Both upgrade classes own one account, written at the handoff they committed.
+///
+/// An upgrade has no body to end: its HTTP operation ends the moment the
+/// transport passes on, and the session past that point reports through its own
+/// terminals rather than through this account.
+#[cfg(feature = "ws")]
+async fn assert_upgrades_own_one_account(fixture: &MatrixFixture) {
+    for row in &OWNED_UPGRADE_CLASSES {
+        let baseline = Baseline::take(fixture.addr(), &fixture.controller).await;
+        let capture = capture_for(row);
+        let head = matrix_handshake(fixture.addr(), row.path, true).await;
+        assert!(
+            head.starts_with("HTTP/1.1 101"),
+            "{}: the upgrade never committed: {head}",
+            row.class,
+        );
+
+        let owned = owned_once(&baseline, &fixture.controller, row.permits, row.class);
+        assert_owned_once(&owned, row.permits, row.class);
+        assert_recorded_for_the_operator(fixture.addr(), &baseline, &capture, row).await;
+    }
+}
+
+#[cfg(not(feature = "ws"))]
+async fn assert_upgrades_own_one_account(_fixture: &MatrixFixture) {}
+
 /// The gRPC class owns the same one of everything, at the boundary tonic owns.
 async fn assert_grpc_owns_one_account(fixture: &MatrixFixture) {
+    let row = &OWNED_GRPC_CLASS;
     let controller = fixture.grpc.controller();
-    let before = controller.operations_observed();
-    let answered = matrix_rpc(fixture.grpc_addr(), true).await;
-    assert_eq!(answered.status, 200, "grpc: wire status");
-    assert_owned_once(&owned_once(&before, controller, "grpc"), "grpc");
+    let addr = fixture.grpc_addr();
+    let baseline = Baseline::take(addr, controller).await;
+    let capture = capture_for(row);
+    let answered = matrix_rpc(addr, true).await;
+    assert_eq!(answered.status, row.status, "{}: wire status", row.class);
+
+    let owned = owned_once(&baseline, controller, row.permits, row.class);
+    assert_owned_once(&owned, row.permits, row.class);
+    assert_recorded_for_the_operator(addr, &baseline, &capture, row).await;
 }
 
 /// A chain that refused still owns one envelope, one execution, and one account.
@@ -2545,11 +2959,12 @@ async fn assert_grpc_owns_one_account(fixture: &MatrixFixture) {
 async fn assert_short_circuit_owns_its_account_and_nothing_else(fixture: &MatrixFixture) {
     let label = "short-circuited";
     let entered = fixture.work.entered();
-    let before = fixture.controller.operations_observed();
+    let baseline = Baseline::take(fixture.addr(), &fixture.controller).await;
     let refused = matrix_exchange(fixture.addr(), MATRIX_STREAM, false).await;
     assert_eq!(refused.status, MATRIX_REFUSED, "{label}: wire status");
 
-    assert_owned_once(&owned_once(&before, &fixture.controller, label), label);
+    let owned = owned_once(&baseline, &fixture.controller, SHORT_CIRCUIT_PERMITS, label);
+    assert_owned_once(&owned, SHORT_CIRCUIT_PERMITS, label);
     assert_eq!(
         fixture.work.entered(),
         entered,
@@ -2557,11 +2972,70 @@ async fn assert_short_circuit_owns_its_account_and_nothing_else(fixture: &Matrix
     );
 }
 
+/// A handshake Camber refused owns its refusal and no session at all.
+///
+/// The head carries the credential, so the chain passes and the refusal is the
+/// handshake's own rather than the chain's. Nothing about it is a `101`, so the
+/// upgrade owner behind it is one that never ran — and the account this row
+/// recorded is the refusal Camber answered with, not a session it never had.
+#[cfg(feature = "ws")]
+async fn assert_failed_upgrade_owns_only_its_refusal(fixture: &MatrixFixture) {
+    let label = "failed upgrade";
+    let addr = fixture.addr();
+    let entered = fixture.work.entered();
+    let upgrades_ended = fixture.work.upgrades_ended();
+    let baseline = Baseline::take(addr, &fixture.controller).await;
+
+    let head = tokio::task::spawn_blocking(move || {
+        let mut peer = http_support::connect(addr).expect("the broken-handshake peer connected");
+        // Everything an upgrade needs except the key it must be answered
+        // against, so Camber refuses the handshake it cannot complete.
+        let head = format!(
+            "GET {MATRIX_WS} HTTP/1.1\r\nHost: {MATRIX_HOST}\r\n{CREDENTIAL_HEADER}: \
+             {CREDENTIAL}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Version: 13\r\n\r\n"
+        );
+        std::io::Write::write_all(&mut peer, head.as_bytes())
+            .expect("the broken handshake was sent");
+        let answered = common::read_until_double_crlf(&mut peer);
+        drop(peer);
+        answered
+    })
+    .await
+    .expect("the broken-handshake peer settled");
+    assert!(
+        head.starts_with(&format!("HTTP/1.1 {REFUSED_HANDSHAKE}")),
+        "{label}: a handshake carrying no key was answered as something other than \
+         {REFUSED_HANDSHAKE}: {head}",
+    );
+
+    let owned = owned_once(
+        &baseline,
+        &fixture.controller,
+        FAILED_UPGRADE_PERMITS,
+        label,
+    );
+    assert_owned_once(&owned, FAILED_UPGRADE_PERMITS, label);
+    assert_eq!(
+        fixture.work.entered(),
+        entered,
+        "{label}: a session owner ran behind a handshake that never committed",
+    );
+    assert_eq!(
+        fixture.work.upgrades_ended(),
+        upgrades_ended,
+        "{label}: a session owner returned for a handshake that never committed",
+    );
+}
+
+#[cfg(not(feature = "ws"))]
+async fn assert_failed_upgrade_owns_only_its_refusal(_fixture: &MatrixFixture) {}
+
 /// A head Hyper never admitted reaches no envelope, no chain, and no account.
 async fn assert_unadmitted_head_owns_nothing(fixture: &MatrixFixture) {
     let label = "unadmitted head";
     let addr = fixture.addr();
-    let before = fixture.controller.operations_observed();
+    let baseline = Baseline::take(addr, &fixture.controller).await;
     let answered = tokio::task::spawn_blocking(move || {
         let mut peer = http_support::connect(addr).expect("the unadmitted peer connected");
         // A request line Hyper's parser refuses outright: the head never becomes
@@ -2577,5 +3051,5 @@ async fn assert_unadmitted_head_owns_nothing(fixture: &MatrixFixture) {
         !answered.starts_with("HTTP/1.1 200"),
         "{label}: the parser admitted a head it should have refused: {answered}",
     );
-    assert_owned_nothing(&OwnedOnce::between(&before, &fixture.controller), label);
+    assert_owned_nothing(&OwnedOnce::since(&baseline, &fixture.controller), label);
 }
