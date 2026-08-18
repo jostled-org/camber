@@ -108,14 +108,22 @@ fn resource_row(name: &str, phase: ResourcePhase, kind: ResourceFailureKind) -> 
     )
 }
 
-fn drain_row(participant: LifecycleParticipant, kind: LifecycleFailureKind) -> Row {
-    (participant, LifecyclePhase::GracefulDrain, kind)
+fn phase_row(
+    participant: LifecycleParticipant,
+    phase: LifecyclePhase,
+    kind: LifecycleFailureKind,
+) -> Row {
+    (participant, phase, kind)
 }
 
-/// The aggregate orders entries by owner, whatever order teardown recorded
-/// them in, and keeps recording order inside one owner class.
-fn assert_owner_order_is_independent_of_recording_order() {
-    let failures = aggregate_of([
+fn drain_row(participant: LifecycleParticipant, kind: LifecycleFailureKind) -> Row {
+    phase_row(participant, LifecyclePhase::GracefulDrain, kind)
+}
+
+/// One row per owner class, recorded in an order no owner rank would produce,
+/// with two servers and two resources to hold recording order inside a class.
+fn rows_recorded_out_of_owner_order() -> [Row; 10] {
+    [
         drain_row(
             LifecycleParticipant::Executor,
             LifecycleFailureKind::JoinLost(Arc::from("executor")),
@@ -158,7 +166,35 @@ fn assert_owner_order_is_independent_of_recording_order() {
             LifecycleParticipant::Server,
             LifecycleFailureKind::JoinLost(Arc::from("server-later")),
         ),
-    ]);
+    ]
+}
+
+/// Recording order survives inside one owner class: the two servers keep the
+/// sequence teardown admitted them in, and the two resources keep the order
+/// their phase invoked them in.
+fn assert_recording_order_survives_within_one_class(failures: &LifecycleFailures) {
+    let join_lost: Vec<&str> = failures
+        .iter()
+        .filter_map(|failure| match failure.kind() {
+            LifecycleFailureKind::JoinLost(name) => Some(name.as_ref()),
+            LifecycleFailureKind::DeadlineExceeded(_)
+            | LifecycleFailureKind::Cancelled
+            | LifecycleFailureKind::TaskPanicked(_)
+            | LifecycleFailureKind::ScopeDrainTimeout { .. }
+            | LifecycleFailureKind::Resource(_)
+            | LifecycleFailureKind::Operation(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        join_lost,
+        ["server-late", "server-later", "exporter", "executor"]
+    );
+}
+
+/// The aggregate orders entries by owner, whatever order teardown recorded
+/// them in, and keeps recording order inside one owner class.
+fn assert_owner_order_is_independent_of_recording_order() {
+    let failures = aggregate_of(rows_recorded_out_of_owner_order());
 
     let ordered: Vec<String> = failures.iter().map(entry_identity).collect();
     assert_eq!(
@@ -179,25 +215,130 @@ fn assert_owner_order_is_independent_of_recording_order() {
     assert_eq!(failures.len(), 10);
     assert_eq!(failures.iter().len(), failures.len());
 
-    // Recording order survives inside one owner class: the two servers keep the
-    // sequence teardown admitted them in, and the two resources keep the order
-    // their phase invoked them in.
-    let join_lost: Vec<&str> = failures
+    assert_recording_order_survives_within_one_class(&failures);
+}
+
+/// One row for every stage the closed vocabulary spells, recorded in an order
+/// no stage rank would produce.
+fn rows_covering_every_stage() -> [Row; 7] {
+    [
+        phase_row(
+            LifecycleParticipant::Server,
+            LifecyclePhase::Finalize,
+            LifecycleFailureKind::JoinLost(Arc::from("server-finalize")),
+        ),
+        resource_row(
+            "db",
+            ResourcePhase::Shutdown,
+            ResourceFailureKind::LostWorker,
+        ),
+        phase_row(
+            LifecycleParticipant::RootScope,
+            LifecyclePhase::Startup,
+            LifecycleFailureKind::Operation(Arc::new(RuntimeError::Database(Box::from(
+                "startup probe refused",
+            )))),
+        ),
+        phase_row(
+            LifecycleParticipant::BackgroundTask,
+            LifecyclePhase::ForcedJoin,
+            LifecycleFailureKind::TaskPanicked(Arc::from("child unwound past the deadline")),
+        ),
+        phase_row(
+            LifecycleParticipant::Connection,
+            LifecyclePhase::GracefulDrain,
+            LifecycleFailureKind::DeadlineExceeded(DeadlineBoundary::AggregateShutdown),
+        ),
+        resource_row(
+            "cache",
+            ResourcePhase::PeriodicHealth,
+            ResourceFailureKind::DeadlineExceeded,
+        ),
+        resource_row(
+            "db",
+            ResourcePhase::StartupHealth,
+            ResourceFailureKind::LostWorker,
+        ),
+    ]
+}
+
+/// Owner order first, and beside each entry the stage text production itself
+/// renders — the name an operator reads the failure under.
+fn assert_every_stage_is_named_in_owner_order(failures: &LifecycleFailures) {
+    let staged: Vec<(String, String)> = failures
         .iter()
-        .filter_map(|failure| match failure.kind() {
-            LifecycleFailureKind::JoinLost(name) => Some(name.as_ref()),
-            LifecycleFailureKind::DeadlineExceeded(_)
-            | LifecycleFailureKind::Cancelled
-            | LifecycleFailureKind::TaskPanicked(_)
-            | LifecycleFailureKind::ScopeDrainTimeout { .. }
-            | LifecycleFailureKind::Resource(_)
-            | LifecycleFailureKind::Operation(_) => None,
-        })
+        .map(|failure| (entry_identity(failure), failure.phase().to_string()))
         .collect();
     assert_eq!(
-        join_lost,
-        ["server-late", "server-later", "exporter", "executor"]
+        staged,
+        [
+            ("root-scope|startup|operation", "startup"),
+            ("server|finalize|join-lost", "finalize"),
+            ("connection|graceful-drain|deadline", "graceful-drain"),
+            ("background-task|forced-join|panicked", "forced-join"),
+            ("resource:db|resource:shutdown|resource", "shutdown"),
+            (
+                "resource:cache|resource:periodic-health|resource",
+                "periodic-health"
+            ),
+            (
+                "resource:db|resource:startup-health|resource",
+                "startup-health"
+            ),
+        ]
+        .map(|(identity, stage)| (identity.to_owned(), stage.to_owned()))
     );
+}
+
+/// Every stage the closed vocabulary spells is one of the recorded rows, so a
+/// stage that stopped being carried is caught here and not by the step that
+/// first records it.
+fn assert_no_stage_stopped_being_carried(failures: &LifecycleFailures) {
+    let mut stages: Vec<String> = failures
+        .iter()
+        .map(|failure| phase_name(failure.phase()))
+        .collect();
+    stages.sort();
+    stages.dedup();
+    assert_eq!(
+        stages,
+        [
+            "finalize",
+            "forced-join",
+            "graceful-drain",
+            "resource:periodic-health",
+            "resource:shutdown",
+            "resource:startup-health",
+            "startup",
+        ]
+    );
+}
+
+/// The rendered failure carries the stage too: an operator line that named no
+/// stage would leave the reader unable to tell a refused startup from a
+/// teardown that ran out of time.
+fn assert_rendered_failures_state_their_stage(failures: &LifecycleFailures) {
+    for failure in failures.iter() {
+        let rendered = failure.to_string();
+        assert!(
+            rendered.contains(&failure.phase().to_string()),
+            "a rendered failure dropped its stage: {rendered}"
+        );
+    }
+}
+
+/// Every stage a runtime can fail in reaches the aggregate as a recorded row,
+/// and each row states the stage under the name production renders it as.
+///
+/// Steps 17 and 18 record startup refusals, forced joins, and finalize failures
+/// against this vocabulary and add no stage of their own, so every stage is
+/// carried and named here rather than the first time a coordinator emits one.
+fn assert_every_phase_is_recorded_and_rendered() {
+    let failures = aggregate_of(rows_covering_every_stage());
+
+    assert_every_stage_is_named_in_owner_order(&failures);
+    assert_no_stage_stopped_being_carried(&failures);
+    assert_rendered_failures_state_their_stage(&failures);
 }
 
 /// Every row of the primary precedence, read off aggregates that each drop the
@@ -445,6 +586,7 @@ fn assert_aggregate_ownership() {
 #[test]
 fn lifecycle_aggregate_accessors_order_and_primary_are_deterministic() {
     assert_owner_order_is_independent_of_recording_order();
+    assert_every_phase_is_recorded_and_rendered();
     assert_primary_precedence();
     assert_owner_order_breaks_class_ties();
     assert_causes_are_typed_and_closed();
