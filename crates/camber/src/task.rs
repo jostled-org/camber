@@ -541,8 +541,8 @@ where
 /// The runtime's own setup holds the `Arc` it just established, so it names it
 /// instead of re-reading a task-local that resolves to the same runtime only by
 /// coincidence. Every subsystem that setup owns — the signal watcher, ACME and
-/// DNS-01 renewal, and each per-resource health loop — is admitted through
-/// here.
+/// DNS-01 renewal, and the one resource health coordinator — is admitted
+/// through here.
 ///
 /// The doc-hidden test seams enter here too. A seam drives a runtime it did not
 /// build, but it can still NAME one: it resolves the ambient context itself and

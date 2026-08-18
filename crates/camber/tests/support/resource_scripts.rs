@@ -204,9 +204,7 @@ impl ScriptedResource {
             }
             Behavior::PanicFrom(first) if call >= first => panic!("{SCRIPTED_PANIC}"),
             Behavior::ParkFrom(first) if call >= first => {
-                if let Some(entered) = self.entered.as_ref() {
-                    entered.send(()).ok();
-                }
+                self.report_parking();
                 self.gate.wait();
                 Ok(())
             }
@@ -214,6 +212,16 @@ impl ScriptedResource {
             | Behavior::FailFrom(_)
             | Behavior::PanicFrom(_)
             | Behavior::ParkFrom(_) => Ok(()),
+        }
+    }
+
+    /// Tell the row this callback has parked, when the row asked to be told.
+    ///
+    /// The send is dropped rather than reported: a row that stopped listening
+    /// has already left the park behind, and this is the callback's own thread.
+    fn report_parking(&self) {
+        if let Some(entered) = self.entered.as_ref() {
+            drop(entered.send(()));
         }
     }
 }

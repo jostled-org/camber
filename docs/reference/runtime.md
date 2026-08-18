@@ -232,8 +232,8 @@ Camber-owned background work observes two distinct events:
 
 - **Scope closing** fires when the user closure returns, and also whenever
   shutdown is requested. It is what stops perpetual background children —
-  interval and cron schedules, per-resource health loops, the proxy health
-  checker, ACME/DNS-01 renewal, and the signal watcher.
+  interval and cron schedules, the resource health coordinator, the proxy
+  health checker, ACME/DNS-01 renewal, and the signal watcher.
 - **Runtime shutdown** (`runtime::request_shutdown`, `on_cancel` completion, an
   OS signal) is *not* fired by closure return. The owned HTTP server observes
   only this one, which is why returning from the closure does not stop a server

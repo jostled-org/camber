@@ -9,6 +9,8 @@ use crate::lifecycle_kinds;
 
 use camber::runtime_test_support::{RuntimeController, runtime_schedule};
 use camber::{LifecycleFailure, LifecycleFailureKind, LifecycleParticipant, RuntimeError, runtime};
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, sync_channel};
@@ -143,7 +145,7 @@ fn held_callback_blocks_its_successors() -> (Arc<CallbackLog>, RuntimeError) {
             });
             runtime::request_shutdown();
         })
-        .unwrap_err();
+        .expect_err("a resource that could not enter teardown was not reported");
 
     assert!(
         !witness.load(Ordering::Acquire),
@@ -198,7 +200,7 @@ fn timed_out_startup() -> Box<[Box<str>]> {
         .resource_budget(short_resource_budget())
         .resource(parked)
         .run(|| ())
-        .unwrap_err();
+        .expect_err("an abandoned readiness probe was not reported");
 
     assert!(
         !witness.load(Ordering::Acquire),
@@ -230,7 +232,7 @@ fn timed_out_periodic() -> (Arc<CallbackLog>, Box<[Box<str>]>) {
             parked_rx.recv_timeout(OBSERVATION_BOUND).unwrap();
             runtime::request_shutdown();
         })
-        .unwrap_err();
+        .expect_err("teardown found an abandoned probe's resource free to enter");
 
     assert!(
         !witness.load(Ordering::Acquire),
@@ -255,7 +257,7 @@ fn timed_out_shutdown() -> Box<[Box<str>]> {
         .resource_budget(short_resource_budget())
         .resource(parked)
         .run(|| runtime::request_shutdown())
-        .unwrap_err();
+        .expect_err("an abandoned teardown callback was not reported");
 
     assert!(
         !witness.load(Ordering::Acquire),
@@ -282,13 +284,18 @@ fn startup_resource_failures_prevent_admission_and_aggregate_every_cause() {
     let parked = ScriptedResource::new("parked", &log).health(Behavior::ParkFrom(1));
     let gate = parked.gate();
     let witness = parked.drop_witness();
+    let listener = ListenerWitness::bound();
 
-    let outcome = refused_startup(&log, &served, &controller, parked);
+    let result = refused_startup(&log, &served, &controller, parked, listener.share());
 
+    // Admission first: it is the half of this row's claim a run that answered
+    // its peer has already broken, whatever it went on to return.
+    listener.assert_unadmitted();
     assert!(
         !served.load(Ordering::Acquire),
         "the user closure served traffic behind a failed readiness pass"
     );
+    let outcome = result.expect_err("a failed readiness pass let the run report success");
     assert_eq!(
         &*names(&log.phase("health")),
         ["returning", "panicking", "parked"].as_slice(),
@@ -320,7 +327,8 @@ fn refused_startup(
     served: &Arc<AtomicBool>,
     controller: &RuntimeController,
     parked: ScriptedResource,
-) -> RuntimeError {
+    listener: Arc<TcpListener>,
+) -> Result<(), RuntimeError> {
     let served = Arc::clone(served);
     runtime::builder()
         .with_test_schedule(controller)
@@ -330,8 +338,83 @@ fn refused_startup(
         .resource(ScriptedResource::new("panicking", log).health(Behavior::PanicFrom(1)))
         .resource(parked)
         .resource(ScriptedResource::new("lost", log))
-        .run(move || served.store(true, Ordering::Release))
-        .unwrap_err()
+        .run(move || {
+            served.store(true, Ordering::Release);
+            admit_and_answer(&listener);
+        })
+}
+
+/// Accept the peer already queued on the witness listener and answer it.
+///
+/// The one thing in this fixture that can admit traffic. It returns at once
+/// either way: the peer connected before the run, so a closure that reaches
+/// this has a connection waiting rather than a wait with no end.
+fn admit_and_answer(listener: &TcpListener) {
+    if let Ok((mut peer, _)) = listener.accept() {
+        drop(peer.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"));
+    }
+}
+
+/// How long the queued peer is given to be answered before the row calls it
+/// unanswered.
+const UNSERVED_BOUND: Duration = Duration::from_millis(250);
+
+/// The listener the user closure would have served on, with one real peer
+/// already queued on it.
+///
+/// The peer connects BEFORE the run, so admission is observed rather than
+/// inferred: a closure that gets to serve accepts a connection that is already
+/// waiting and answers it. Nothing here reserves a port by binding and
+/// rebinding — one listener is bound once, shared with the closure, and
+/// outlived by the row that owns it.
+struct ListenerWitness {
+    listener: Arc<TcpListener>,
+    peer: TcpStream,
+}
+
+impl ListenerWitness {
+    fn bound() -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind the witness listener");
+        let addr = listener
+            .local_addr()
+            .expect("the witness listener's address");
+        let peer = TcpStream::connect(addr).expect("queue a peer on the witness listener");
+        Self {
+            listener: Arc::new(listener),
+            peer,
+        }
+    }
+
+    /// The handle the user closure would serve through.
+    fn share(&self) -> Arc<TcpListener> {
+        Arc::clone(&self.listener)
+    }
+
+    /// The queued peer was never answered, and its connection is still waiting
+    /// to be accepted.
+    ///
+    /// Two readings, because either alone is weaker than the claim: an
+    /// unanswered peer could have been accepted and abandoned, and a connection
+    /// still in the queue says nothing about what a peer received.
+    fn assert_unadmitted(mut self) {
+        self.peer
+            .set_read_timeout(Some(UNSERVED_BOUND))
+            .expect("bound the witness peer's read");
+        let mut answer = [0_u8; 1];
+        let read = self.peer.read(&mut answer);
+        assert!(
+            !matches!(read, Ok(1..)),
+            "a peer queued on the witness listener was answered behind a failed \
+             readiness pass: {read:?}"
+        );
+        self.listener
+            .set_nonblocking(true)
+            .expect("read the witness listener's accept queue");
+        assert!(
+            self.listener.accept().is_ok(),
+            "the queued connection was admitted behind a failed readiness pass"
+        );
+    }
 }
 
 /// The aggregate's primary names `resource`, read through the public accessor.
@@ -432,5 +515,5 @@ fn failing_shutdown(
             controller.refuse_resource_worker("lost");
             runtime::request_shutdown();
         })
-        .unwrap_err()
+        .expect_err("a failing teardown pass reported the run as clean")
 }

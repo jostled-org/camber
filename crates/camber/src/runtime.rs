@@ -202,10 +202,10 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Register a resource for lifecycle management. Resources are shut down
-    /// concurrently during runtime teardown — one thread each, all joined
-    /// before `run` returns — so a resource must not depend on another still
-    /// being up while it shuts down.
+    /// Register a resource for lifecycle management. One coordinator shuts
+    /// resources down in reverse registration order, one at a time, before
+    /// `run` returns — so a resource may depend on anything registered before
+    /// it still being up while it shuts down.
     pub fn resource(mut self, r: impl Resource) -> Self {
         self.resources.push(Box::new(r));
         self
@@ -430,7 +430,7 @@ where
 ///
 /// The config is the only thing they share. `test` runs through
 /// `run_inner_impl` and gets that path's owned subsystems — the signal watcher
-/// and the per-resource health loops — while the async entry admits no
+/// and the resource health coordinator — while the async entry admits no
 /// background subsystem at all; a test that wants one opts in through the
 /// doc-hidden seam.
 /// The server envelope a test runtime serves under.

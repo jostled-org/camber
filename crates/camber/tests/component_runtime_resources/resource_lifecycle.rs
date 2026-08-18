@@ -152,7 +152,7 @@ fn resource_shutdown_error_is_logged_but_does_not_block_others() {
     );
     // The error is no longer disposed of in a log line: it reaches the caller
     // through the aggregate, named against the resource that returned it.
-    let error = outcome.unwrap_err();
+    let error = outcome.expect_err("a returned teardown error did not reach the caller");
     assert!(
         matches!(&error, RuntimeError::Lifecycle(failures) if failures.len() == 1),
         "one returned teardown error must be the whole aggregate: {error:?}"
