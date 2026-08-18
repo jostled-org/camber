@@ -6,6 +6,10 @@
 //! caller matches on. A test that assembled its own `LifecycleFailures` would
 //! prove its own ordering, not the one teardown returns.
 
+use crate::lifecycle_kinds::{
+    entry_identity, kind_name, participant_name, phase_name, resource_kind_name,
+    resource_phase_name,
+};
 use camber::__private::LifecycleFailureLog;
 use camber::http::DeadlineBoundary;
 use camber::{
@@ -30,74 +34,6 @@ fn aggregate_of(rows: impl IntoIterator<Item = Row>) -> Arc<LifecycleFailures> {
         Some(RuntimeError::Lifecycle(failures)) => failures,
         other => panic!("expected RuntimeError::Lifecycle, got {other:?}"),
     }
-}
-
-/// Every closed participant, matched without a wildcard.
-fn participant_name(participant: &LifecycleParticipant) -> String {
-    match participant {
-        LifecycleParticipant::RootScope => "root-scope".to_owned(),
-        LifecycleParticipant::Server => "server".to_owned(),
-        LifecycleParticipant::Connection => "connection".to_owned(),
-        LifecycleParticipant::Upgrade => "upgrade".to_owned(),
-        LifecycleParticipant::BackgroundTask => "background-task".to_owned(),
-        LifecycleParticipant::Resource(name) => format!("resource:{name}"),
-        LifecycleParticipant::Exporter => "exporter".to_owned(),
-        LifecycleParticipant::Executor => "executor".to_owned(),
-    }
-}
-
-/// Every closed lifecycle phase, matched without a wildcard.
-fn phase_name(phase: LifecyclePhase) -> String {
-    match phase {
-        LifecyclePhase::Startup => "startup".to_owned(),
-        LifecyclePhase::GracefulDrain => "graceful-drain".to_owned(),
-        LifecyclePhase::ForcedJoin => "forced-join".to_owned(),
-        LifecyclePhase::Resource(resource) => format!("resource:{}", resource_phase_name(resource)),
-        LifecyclePhase::Finalize => "finalize".to_owned(),
-    }
-}
-
-/// Every closed resource phase, matched without a wildcard.
-fn resource_phase_name(phase: ResourcePhase) -> &'static str {
-    match phase {
-        ResourcePhase::StartupHealth => "startup-health",
-        ResourcePhase::PeriodicHealth => "periodic-health",
-        ResourcePhase::Shutdown => "shutdown",
-    }
-}
-
-/// Every closed lifecycle failure kind, matched without a wildcard.
-fn kind_name(kind: &LifecycleFailureKind) -> &'static str {
-    match kind {
-        LifecycleFailureKind::DeadlineExceeded(_) => "deadline",
-        LifecycleFailureKind::Cancelled => "cancelled",
-        LifecycleFailureKind::TaskPanicked(_) => "panicked",
-        LifecycleFailureKind::ScopeDrainTimeout { .. } => "scope-drain",
-        LifecycleFailureKind::Resource(_) => "resource",
-        LifecycleFailureKind::JoinLost(_) => "join-lost",
-        LifecycleFailureKind::Operation(_) => "operation",
-    }
-}
-
-/// Every closed resource failure kind, matched without a wildcard.
-fn resource_kind_name(kind: &ResourceFailureKind) -> &'static str {
-    match kind {
-        ResourceFailureKind::Returned(_) => "returned",
-        ResourceFailureKind::Panicked(_) => "panicked",
-        ResourceFailureKind::DeadlineExceeded => "deadline",
-        ResourceFailureKind::LostWorker => "lost-worker",
-        ResourceFailureKind::BlockedByActiveCallback => "blocked",
-    }
-}
-
-/// How one entry reads for an order assertion: who, in which phase, over what.
-fn entry_identity(failure: &LifecycleFailure) -> String {
-    format!(
-        "{}|{}|{}",
-        participant_name(failure.participant()),
-        phase_name(failure.phase()),
-        kind_name(failure.kind())
-    )
 }
 
 fn resource_row(name: &str, phase: ResourcePhase, kind: ResourceFailureKind) -> Row {

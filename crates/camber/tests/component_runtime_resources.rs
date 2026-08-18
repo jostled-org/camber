@@ -1,5 +1,11 @@
 pub mod common;
 
+// The closed lifecycle and resource vocabularies, shared with the focused root
+// that reads the same phase names. One definition keeps a new variant from
+// being named in one root and left stale in the other.
+#[path = "support/lifecycle_kinds.rs"]
+pub mod lifecycle_kinds;
+
 // The runtime-scope builder, mounted from the root that owns it. One edit to
 // the worker count it names has to reach the cases in both binaries, so the
 // file is shared rather than restated here.

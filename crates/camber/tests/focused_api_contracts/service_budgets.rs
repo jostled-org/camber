@@ -1,5 +1,6 @@
 //! 1.T1: the public service-budget vocabulary validates and composes.
 
+use crate::lifecycle_kinds::resource_phase_name;
 #[cfg(feature = "profiling")]
 use camber::__private::{DEFAULT_PROFILING_RESPONSE_LIMIT, frozen_profiling_response_limit};
 use camber::__private::{
@@ -853,15 +854,6 @@ fn run_named_resources(names: &[&'static str]) -> (Result<(), RuntimeError>, (us
     let ran = Arc::clone(&counts.closure_ran);
     let result = builder.run(move || ran.store(true, Ordering::Release));
     (result, counts.totals())
-}
-
-/// Every closed resource phase, matched without a wildcard.
-fn resource_phase_name(phase: ResourcePhase) -> &'static str {
-    match phase {
-        ResourcePhase::StartupHealth => "startup-health",
-        ResourcePhase::PeriodicHealth => "periodic-health",
-        ResourcePhase::Shutdown => "shutdown",
-    }
 }
 
 fn assert_resource_budget_values() {

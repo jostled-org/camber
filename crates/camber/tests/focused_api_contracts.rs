@@ -1,3 +1,5 @@
+#[path = "support/lifecycle_kinds.rs"]
+pub mod lifecycle_kinds;
 #[path = "support/rejection_kinds.rs"]
 pub mod rejection_kinds;
 #[path = "support/temp.rs"]
