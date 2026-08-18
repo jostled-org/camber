@@ -1210,6 +1210,15 @@ struct MatrixWork {
     entered: std::sync::atomic::AtomicUsize,
     /// Event producers that stopped because their peer had gone.
     ended: std::sync::atomic::AtomicUsize,
+    /// Upgrade owners that returned, however their session ended.
+    ///
+    /// Counted apart from the producers above because the two rows that read
+    /// these counters make different claims about different owners, and every
+    /// one of them is monotonic across the whole matrix: a shared count already
+    /// driven past a threshold by an earlier row is a predicate that cannot
+    /// fail. Each row baselines the counter it reads, and reads the one whose
+    /// owner it is actually asking about.
+    upgrades_ended: std::sync::atomic::AtomicUsize,
 }
 
 impl MatrixWork {
@@ -1221,6 +1230,11 @@ impl MatrixWork {
         self.ended.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    fn upgrades_ended(&self) -> usize {
+        self.upgrades_ended
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn enter(&self) {
         self.entered
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1228,6 +1242,11 @@ impl MatrixWork {
 
     fn end(&self) {
         self.ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn end_upgrade(&self) {
+        self.upgrades_ended
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -1249,6 +1268,19 @@ struct MatrixFixture {
 
 impl MatrixFixture {
     fn serve() -> Self {
+        Self::serve_under(matrix_policy)
+    }
+
+    /// The same matrix, admitting one transport at a time.
+    ///
+    /// The permit row's own fixture: what it reads is a peer parked on the one
+    /// permit a live transport holds, which no unbounded listener can show.
+    fn serve_limited() -> Self {
+        Self::serve_under(limited_matrix_policy)
+    }
+
+    /// Serve every matrix owner under the bounds `policy` names.
+    fn serve_under(policy: fn() -> ServerPolicy) -> Self {
         let work = Arc::new(MatrixWork::default());
         let journal = common::journal();
         let upstream = http_support::reserve_observed().serve(matrix_upstream(&work));
@@ -1262,16 +1294,33 @@ impl MatrixFixture {
         // Served through the builder rather than through the host helper: the
         // shutdown row needs the aggregate deadline this matrix names, and the
         // helper takes the server's own default.
-        let server = port.serve_hosts_with_policy(hosts, matrix_policy());
+        let server = port.serve_hosts_with_policy(hosts, policy());
 
         Self {
             server,
             controller,
             grpc: http_support::reserve_observed()
-                .serve_with_policy(matrix_grpc_router(&work, &journal), matrix_policy()),
+                .serve_with_policy(matrix_grpc_router(&work, &journal), policy()),
             upstream,
             journal,
             work,
+        }
+    }
+
+    /// Stop every owner this fixture serves, in bounded order.
+    ///
+    /// The permit row holds nothing open past its own assertions, so each of
+    /// the three ends gracefully; a row that left a transport behind reports it
+    /// here rather than in whichever row ran next.
+    fn tear_down(self, label: &str) {
+        for (owner, name) in [
+            (self.server, "host-routed"),
+            (self.grpc, "grpc"),
+            (self.upstream, "upstream"),
+        ] {
+            owner.shutdown_bounded(BOUND).unwrap_or_else(|error| {
+                panic!("{label}: the {name} owner did not end gracefully: {error}")
+            });
         }
     }
 
@@ -1303,6 +1352,23 @@ fn matrix_policy() -> ServerPolicy {
         .expect("a finite aggregate deadline")
 }
 
+/// How many transports a limited matrix server admits at once.
+const MATRIX_PERMITS: usize = 1;
+
+/// The bounds the permit row's matrix serves under.
+///
+/// One transport at a time, and a pre-head boundary no holder reaches: the row
+/// keeps each protocol's transport open with no further request on it while a
+/// second peer waits, and a short header boundary would end the holder rather
+/// than the row.
+fn limited_matrix_policy() -> ServerPolicy {
+    matrix_policy()
+        .connection_limit(MATRIX_PERMITS)
+        .expect("one transport at a time")
+        .header_timeout(UNREACHED)
+        .expect("a pre-head boundary no permit row reaches")
+}
+
 /// The upstream both proxy classes and the proxied upgrade forward to.
 fn matrix_upstream(work: &Arc<MatrixWork>) -> Router {
     let mut upstream = Router::new();
@@ -1326,11 +1392,11 @@ fn register_matrix_upstream_upgrade(upstream: &mut Router, work: &Arc<MatrixWork
         "/ws",
         move |_req: &camber::http::Request, conn: camber::http::WsConn| {
             entered.enter();
-            let (_sender, mut receiver) = conn.split();
             // Held until the peer or the bridge ends it, so the session is live
             // while the shutdown row runs.
-            while let camber::http::WsReceive::Message(_) = receiver.recv()? {}
-            Ok(())
+            let ended = held_session(conn);
+            entered.end_upgrade();
+            ended
         },
     );
 }
@@ -1359,6 +1425,12 @@ fn other_child() -> Router {
 fn matrix_grpc_router(work: &Arc<MatrixWork>, journal: &common::Journal) -> Router {
     let mut router = Router::new();
     gate_on_credential(&mut router);
+    // The route the peer parked on this listener's permit is answered by. It
+    // records no work: what the permit row reads is the transport a gRPC call
+    // held, and this peer exists only to observe when that permit came back.
+    router.get(MATRIX_HTTP, |_req: &camber::http::Request| async {
+        camber::http::Response::text(200, "grpc host")
+    });
     let (head_dropped, _dropped) = tokio::sync::mpsc::unbounded_channel();
     router.grpc(
         GrpcRouter::new().add_service(streamer_server::StreamerServer::new(MatrixService {
@@ -1474,13 +1546,30 @@ fn register_matrix_upgrade(child: &mut Router, work: &Arc<MatrixWork>, backend: 
         MATRIX_WS,
         move |_req: &camber::http::Request, conn: camber::http::WsConn| {
             work.enter();
-            let (_sender, mut receiver) = conn.split();
-            while let camber::http::WsReceive::Message(_) = receiver.recv()? {}
-            work.end();
-            Ok(())
+            let ended = held_session(conn);
+            work.end_upgrade();
+            ended
         },
     );
     child.proxy("/wsproxy", backend);
+}
+
+/// Read one upgrade until its session ends, and report how it ended.
+///
+/// The owner's return is recorded by its caller whatever this hands back: an
+/// upgrade the peer closed and one the service ended under it are both this
+/// owner finishing, and a count that only rose on the graceful spelling would
+/// leave the shutdown row unable to say the owner returned at all.
+#[cfg(feature = "ws")]
+fn held_session(conn: camber::http::WsConn) -> Result<(), camber::RuntimeError> {
+    let (_sender, mut receiver) = conn.split();
+    loop {
+        match receiver.recv() {
+            Ok(camber::http::WsReceive::Message(_)) => continue,
+            Ok(_) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 #[cfg(not(feature = "ws"))]
@@ -1568,8 +1657,10 @@ fn cross_protocol_policy_matrix_reaches_every_supported_head() {
                 assert_host_selection_precedes_child_policy(&fixture).await;
                 assert_short_circuit_precedes_every_protocol(&fixture).await;
                 assert_success_metadata_reaches_every_head(&fixture).await;
+                assert_the_same_chain_decides_over_tls(&fixture.work).await;
                 assert_precommit_refusal_is_mapped_by_its_owner(&fixture).await;
                 assert_disconnect_ends_the_producer_it_was_read_by(&fixture).await;
+                assert_permit_returns_at_each_protocol_boundary().await;
                 assert_shutdown_releases_every_protocol_owner(fixture).await;
             });
         })
@@ -1736,6 +1827,119 @@ async fn assert_grpc_head_projected(fixture: &MatrixFixture) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// 14.T2: the same chain, past a real handshake
+// ---------------------------------------------------------------------------
+
+/// The name the matrix's TLS peer verifies the fixture certificate under.
+///
+/// Distinct from the authority the host table selects on: the certificate names
+/// what the transport is, and `Host` names which child answers over it.
+const TLS_SERVER_NAME: &str = "localhost";
+
+/// The chain's decisions hold over a real TLS transport, not only a plaintext
+/// one.
+///
+/// The gated class is what makes this worth serving twice: its head is the
+/// producer's, committed after the chain has already passed, and TLS is the one
+/// transport where an answer is written through another owner entirely.
+async fn assert_the_same_chain_decides_over_tls(work: &Arc<MatrixWork>) {
+    let label = "tls";
+    let (server_config, connector) = common::self_signed_server_and_connector();
+    let journal = common::journal();
+    let upstream = http_support::reserve_observed().serve(matrix_upstream(work));
+    let backend = format!("http://{}", upstream.addr());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the TLS matrix listener");
+    let addr = listener.local_addr().expect("the TLS matrix address");
+    let mut hosts = camber::http::HostRouter::new();
+    hosts.add(MATRIX_HOST, matrix_child(work, &journal, &backend));
+    let handle = camber::http::server_hosts(hosts)
+        .policy(matrix_policy())
+        .tls(server_config)
+        .serve_background(listener)
+        .expect("owned TLS serving requires a Tokio runtime");
+    let server = http_support::ReadyServer::adopt(addr, handle);
+
+    let refused = tls_exchange(&connector, addr, MATRIX_STREAM, false).await;
+    assert!(
+        refused.starts_with(&format!("HTTP/1.1 {MATRIX_REFUSED}")),
+        "{label}: a chain that refuses is answered past the handshake too: {refused}",
+    );
+    assert!(
+        !head_carries(&refused, MATRIX_PROJECTED, MATRIX_PROJECTED_VALUE),
+        "{label}: a refused chain projected its metadata over TLS: {refused}",
+    );
+
+    let answered = tls_exchange(&connector, addr, MATRIX_STREAM, true).await;
+    assert!(
+        answered.starts_with("HTTP/1.1 200"),
+        "{label}: the generic stream never committed its head over TLS: {answered}",
+    );
+    assert!(
+        head_carries(&answered, MATRIX_PROJECTED, MATRIX_PROJECTED_VALUE),
+        "{label}: the head committed over TLS lost the chain's metadata: {answered}",
+    );
+    assert!(
+        head_carries(&answered, MATRIX_ORIGIN_HEADER, MATRIX_ORIGIN),
+        "{label}: the head committed over TLS lost the chain's cross-origin metadata: {answered}",
+    );
+    assert!(
+        head_carries(&answered, "Content-Type", "text/x-stream"),
+        "{label}: the producer's own representation was displaced over TLS: {answered}",
+    );
+
+    server
+        .shutdown_bounded(BOUND)
+        .expect("the TLS matrix fixture tore down");
+    upstream
+        .shutdown_bounded(BOUND)
+        .expect("the TLS matrix upstream tore down");
+}
+
+/// Drive one exchange past a real handshake and read everything it answered.
+///
+/// The transport is closed by the service rather than by a length the peer
+/// counts: a streamed answer is framed by its producer, and reading to close is
+/// what a peer with no framing of its own can do.
+async fn tls_exchange(
+    connector: &tokio_rustls::TlsConnector,
+    addr: std::net::SocketAddr,
+    path: &str,
+    credentialed: bool,
+) -> Box<str> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("the TLS peer connected");
+    let name = rustls::pki_types::ServerName::try_from(TLS_SERVER_NAME).expect("a server name");
+    let mut tls = connector
+        .connect(name, stream)
+        .await
+        .expect("the TLS handshake completed");
+    let credential = match credentialed {
+        true => format!("{CREDENTIAL_HEADER}: {CREDENTIAL}\r\n"),
+        false => String::new(),
+    };
+    tls.write_all(
+        format!(
+            "GET {path} HTTP/1.1\r\nHost: {MATRIX_HOST}\r\n{credential}Connection: close\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .await
+    .expect("the TLS request was sent");
+    tls.flush().await.expect("the TLS request was flushed");
+
+    let mut answered = Vec::new();
+    tokio::time::timeout(BOUND, tls.read_to_end(&mut answered))
+        .await
+        .expect("the TLS answer arrived within the bound")
+        .expect("the TLS answer was readable");
+    String::from_utf8_lossy(&answered).into_owned().into()
+}
+
 /// A refusal raised before commitment is mapped by the child that owns it, and
 /// carries the chain's metadata like any other pre-commit answer.
 async fn assert_precommit_refusal_is_mapped_by_its_owner(fixture: &MatrixFixture) {
@@ -1765,6 +1969,10 @@ async fn assert_disconnect_ends_the_producer_it_was_read_by(fixture: &MatrixFixt
     let label = "disconnect";
     let addr = fixture.addr();
     let before = fixture.controller.transfers_observed().download.releases;
+    // Baselined for the same reason the release count beside it is: every one
+    // of these counters is monotonic across the whole matrix, so the claim is
+    // what this row's own peer caused, not what the count already stood at.
+    let ended_before = fixture.work.ended();
     let head = tokio::task::spawn_blocking(move || {
         let mut peer = http_support::connect(addr).expect("the SSE peer connected");
         let head = format!(
@@ -1794,7 +2002,7 @@ async fn assert_disconnect_ends_the_producer_it_was_read_by(fixture: &MatrixFixt
         "{label}: the event stream answered under the wrong representation: {head}",
     );
 
-    let ended = http_support::poll_until(BOUND, || fixture.work.ended() >= 1);
+    let ended = http_support::poll_until(BOUND, || fixture.work.ended() > ended_before);
     assert!(
         ended,
         "{label}: the event producer outlived the peer it was being read by",
@@ -1806,6 +2014,241 @@ async fn assert_disconnect_ends_the_producer_it_was_read_by(fixture: &MatrixFixt
         released,
         "{label}: the download owner was never released for a peer that left",
     );
+}
+
+// ---------------------------------------------------------------------------
+// 14.T2: the permit each protocol's transport holds
+// ---------------------------------------------------------------------------
+
+/// The transport one class holds while a second peer waits for its permit.
+#[derive(Clone, Copy, Debug)]
+enum Held {
+    /// A committed head whose transport the peer keeps open.
+    Exchange(&'static str),
+    /// A committed upgrade.
+    #[cfg(feature = "ws")]
+    Upgrade(&'static str),
+}
+
+impl Held {
+    /// What the head this transport committed begins with.
+    fn committed(self) -> &'static str {
+        match self {
+            Self::Exchange(_) => "HTTP/1.1 200",
+            #[cfg(feature = "ws")]
+            Self::Upgrade(_) => "HTTP/1.1 101",
+        }
+    }
+}
+
+/// Every class whose own transport is what holds the service's one permit.
+///
+/// The event stream and both upgrades are the classes that keep a transport
+/// alive past their head; the rest hold one open after theirs. Each is here
+/// because the boundary that returns the permit is a different owner's — a
+/// producer's, a bridge's, a forwarded leg's — and a merge of them into one row
+/// could not name which one failed.
+fn permit_classes() -> Box<[(&'static str, Held)]> {
+    [
+        ("ordinary http", Held::Exchange(MATRIX_HTTP)),
+        ("generic stream", Held::Exchange(MATRIX_STREAM)),
+        ("sse", Held::Exchange(MATRIX_SSE)),
+        ("buffered proxy", Held::Exchange(MATRIX_BUFFERED)),
+        ("streaming proxy", Held::Exchange(MATRIX_STREAMED)),
+    ]
+    .into_iter()
+    .chain(permit_upgrades())
+    .collect()
+}
+
+#[cfg(feature = "ws")]
+fn permit_upgrades() -> Box<[(&'static str, Held)]> {
+    Box::new([
+        ("direct upgrade", Held::Upgrade(MATRIX_WS)),
+        ("proxied upgrade", Held::Upgrade(MATRIX_WS_PROXY)),
+    ])
+}
+
+#[cfg(not(feature = "ws"))]
+fn permit_upgrades() -> Box<[(&'static str, Held)]> {
+    Box::new([])
+}
+
+/// Every protocol holds the service's one connection permit for the whole of
+/// its own transport, and returns it at that transport's own boundary.
+async fn assert_permit_returns_at_each_protocol_boundary() {
+    for (class, held) in permit_classes() {
+        assert_permit_returns_after_the_transport(class, held).await;
+    }
+    assert_permit_returns_after_the_grpc_transport().await;
+}
+
+/// One class, on a fixture of its own that admits one transport at a time.
+///
+/// A fixture per class rather than one shared across them: the claim is what a
+/// waiting peer was given while exactly one transport lived, and a transport
+/// another row had not finished releasing would be a second answer to that
+/// question.
+async fn assert_permit_returns_after_the_transport(class: &'static str, held: Held) {
+    let fixture = MatrixFixture::serve_limited();
+    let addr = fixture.addr();
+    let holder = hold_transport(addr, held, class).await;
+    let parked = park_on_permit(&fixture.controller, addr, class).await;
+    let parked = assert_still_waiting(parked, class).await;
+    // The transport's own boundary: the peer that owned it is gone, so the
+    // producer, bridge, or forwarded leg reading for it ends and the permit it
+    // held goes back.
+    drop(holder);
+    assert_admitted_on_the_returned_permit(parked, class).await;
+    fixture.tear_down(class);
+}
+
+/// The gRPC class, whose transport is an HTTP/2 connection tonic answered on.
+async fn assert_permit_returns_after_the_grpc_transport() {
+    let class = "grpc";
+    let fixture = MatrixFixture::serve_limited();
+    let addr = fixture.grpc_addr();
+    let mut client = common::PersistentH2Client::connect(addr, BOUND).await;
+    let answered = client
+        .send_complete(
+            "POST",
+            ECHO_PATH,
+            MATRIX_HOST,
+            &grpc_headers()
+                .into_iter()
+                .chain(std::iter::once((CREDENTIAL_HEADER, CREDENTIAL)))
+                .collect::<Box<[(&str, &str)]>>(),
+            &grpc_message("permit"),
+        )
+        .await;
+    assert_eq!(
+        answered.status, 200,
+        "{class}: the call that holds the permit was never answered",
+    );
+
+    // The gRPC class is served on a listener of its own, so the permit under
+    // observation is that listener's rather than the host-routed one's.
+    let parked = park_on_permit(fixture.grpc.controller(), addr, class).await;
+    let parked = assert_still_waiting(parked, class).await;
+    // tonic's answer did not end the transport; closing the connection does,
+    // and that is the boundary the permit comes back at.
+    client.close().await;
+    assert_admitted_on_the_returned_permit(parked, class).await;
+    fixture.tear_down(class);
+}
+
+/// Open one class's transport, read the head it committed, and hand the peer
+/// back still open.
+async fn hold_transport(
+    addr: std::net::SocketAddr,
+    held: Held,
+    class: &'static str,
+) -> std::net::TcpStream {
+    tokio::task::spawn_blocking(move || {
+        let mut peer = match held {
+            Held::Exchange(path) => credentialed_peer(addr, path),
+            #[cfg(feature = "ws")]
+            Held::Upgrade(path) => common::start_upgrade_with(
+                addr,
+                &common::ws_upgrade_request_to_with(
+                    MATRIX_HOST,
+                    path,
+                    &[(CREDENTIAL_HEADER, CREDENTIAL)],
+                ),
+            ),
+        };
+        let head = common::read_until_double_crlf(&mut peer);
+        assert!(
+            head.starts_with(held.committed()),
+            "{class}: the transport that must hold the permit never committed its head: {head}",
+        );
+        peer
+    })
+    .await
+    .expect("the permit-holding peer settled")
+}
+
+/// Connect a second peer and leave it parked on the permit the holder owns.
+///
+/// The production checkpoint is what makes this a wait rather than a guess: the
+/// peer has reached the permit wait and been let go of the checkpoint, so the
+/// silence that follows is the limit holding.
+async fn park_on_permit(
+    controller: &LifecycleController,
+    addr: std::net::SocketAddr,
+    class: &'static str,
+) -> std::net::TcpStream {
+    controller
+        .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+        .unwrap_or_else(|error| panic!("{class}: arming the permit wait failed: {error}"));
+    let parked = tokio::task::spawn_blocking(move || credentialed_peer(addr, MATRIX_HTTP))
+        .await
+        .expect("the waiting peer settled");
+    tokio::time::timeout(
+        BOUND,
+        controller.wait_until_paused(LifecycleCheckpoint::ConnectionPermitWaitPending),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{class}: the second peer never reached the permit wait"))
+    .unwrap_or_else(|error| panic!("{class}: waiting for the permit wait failed: {error}"));
+    controller
+        .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+        .unwrap_or_else(|error| panic!("{class}: releasing the permit wait failed: {error}"));
+    parked
+}
+
+/// Require the parked peer to still be given nothing, and hand it back.
+async fn assert_still_waiting(
+    parked: std::net::TcpStream,
+    class: &'static str,
+) -> std::net::TcpStream {
+    tokio::task::spawn_blocking(move || {
+        let mut parked = parked;
+        parked
+            .set_read_timeout(Some(STAGED_QUIET))
+            .expect("arm the quiet observation");
+        let mut answered = [0u8; 1];
+        match std::io::Read::read(&mut parked, &mut answered) {
+            Err(error) if http_support::is_deadline_expiry(&error) => parked,
+            other => panic!(
+                "{class}: a peer waiting on a permit another transport holds was answered: \
+                 {other:?}",
+            ),
+        }
+    })
+    .await
+    .expect("the waiting peer settled")
+}
+
+/// Require the parked peer to enter now that the permit has come back.
+async fn assert_admitted_on_the_returned_permit(parked: std::net::TcpStream, class: &'static str) {
+    let head = tokio::task::spawn_blocking(move || {
+        let mut parked = parked;
+        common::read_until_double_crlf(&mut parked)
+    })
+    .await
+    .expect("the admitted peer settled");
+    assert!(
+        head.starts_with("HTTP/1.1 200"),
+        "{class}: the waiting peer never entered on the permit its transport returned: {head}",
+    );
+}
+
+/// Connect one credentialed peer, send its request, and leave the transport
+/// open.
+///
+/// Keep-alive framing on purpose: a permit is the transport's, not the
+/// response's, so the peer that holds it is one that has its answer and has not
+/// gone away.
+fn credentialed_peer(addr: std::net::SocketAddr, path: &str) -> std::net::TcpStream {
+    let mut peer = http_support::connect(addr).expect("the permit row's peer connected");
+    let head = format!(
+        "GET {path} HTTP/1.1\r\nHost: {MATRIX_HOST}\r\n{CREDENTIAL_HEADER}: {CREDENTIAL}\r\n\r\n"
+    );
+    std::io::Write::write_all(&mut peer, head.as_bytes())
+        .expect("the permit row's request was sent");
+    std::io::Write::flush(&mut peer).expect("the permit row's request was flushed");
+    peer
 }
 
 /// Shutdown ends every protocol owner within the deadline the service names.
@@ -1844,6 +2287,10 @@ async fn assert_forced_shutdown_ends_the_held_upgrade(
     work: &Arc<MatrixWork>,
 ) {
     let label = "shutdown";
+    // Taken before this row's own upgrade is committed: the projection row
+    // already opened and dropped two of them, so what proves the service ended
+    // this owner is the count rising past where that left it.
+    let ended_before = work.upgrades_ended();
     let peer = held_upgrade(server.addr()).await;
     let forced = server.shutdown_bounded(BOUND);
     assert!(
@@ -1859,7 +2306,7 @@ async fn assert_forced_shutdown_ends_the_held_upgrade(
     // Released after the teardown it was held across, by the one owner that has
     // it: what ended the bridge was the shutdown, not a peer that left first.
     drop(peer);
-    let ended = http_support::poll_until(BOUND, || work.ended() >= 1);
+    let ended = http_support::poll_until(BOUND, || work.upgrades_ended() > ended_before);
     assert!(
         ended,
         "{label}: an upgrade owner outlived the service that admitted it",

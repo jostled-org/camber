@@ -68,10 +68,22 @@ const STREAM_PATH: &str = "/stream";
 const SSE_PATH: &str = "/sse";
 const BUFFERED_PATH: &str = "/buffered/echo";
 const STREAMED_PATH: &str = "/streamed/echo";
+const MULTIPART_PATH: &str = "/upload";
 #[cfg(feature = "ws")]
 const WS_PATH: &str = "/ws";
 #[cfg(feature = "ws")]
 const WS_PROXY_PATH: &str = "/wsproxy/ws";
+
+/// The multipart payload every upload row sends, and the boundary framing it.
+const MULTIPART_BOUNDARY: &str = "CamberProjection";
+const MULTIPART_FIELD: &str = "payload";
+
+/// A declaration naming no boundary at all.
+///
+/// The one refusal a multipart route raises after its chain has already passed:
+/// the head it answers with is the framework's, and what the chain stated over
+/// the provisional head has to reach that one too.
+const MULTIPART_WITHOUT_BOUNDARY: &str = "multipart/form-data";
 
 // ---------------------------------------------------------------------------
 // The one registered middleware frame
@@ -147,25 +159,65 @@ fn fail_on_unwind(router: &mut Router) {
 // The served fixture
 // ---------------------------------------------------------------------------
 
+/// What ran behind the one frame, split by who owns the head it ran under.
+///
+/// Two counters rather than one total, because the two halves of the matrix
+/// make opposite claims. A gated class produces nothing until the chain has
+/// passed, so a refusal row's zero is the whole proof. A wrapped class has no
+/// gate at all — its middleware wraps the answer its handler already produced —
+/// so the same refusal reaches it only after that handler ran, and a shared
+/// total would make each half's claim unreadable.
+#[derive(Default)]
+struct Work {
+    /// Producers, sessions, upgrades, forwarded legs, and services that begin
+    /// only once a gate has admitted the request.
+    gated: AtomicUsize,
+    /// Handlers and forwarded legs whose answer the chain wraps.
+    wrapped: AtomicUsize,
+}
+
+impl Work {
+    fn gated(&self) -> usize {
+        self.gated.load(Ordering::SeqCst)
+    }
+
+    fn wrapped(&self) -> usize {
+        self.wrapped.load(Ordering::SeqCst)
+    }
+
+    fn enter_gated(&self) {
+        self.gated.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn enter_wrapped(&self) {
+        self.wrapped.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 /// One served fixture: the classes under test, and what actually ran.
 struct Fixture {
     addr: SocketAddr,
     /// Every specialized producer, handler, upstream route, and gRPC service
-    /// this fixture serves increments this as it is entered.
-    work: Arc<AtomicUsize>,
+    /// this fixture serves records itself here as it is entered.
+    work: Arc<Work>,
     journal: Journal,
 }
 
 impl Fixture {
     /// Serve every class under one router carrying one frame.
+    ///
+    /// Two upstreams, not one: the buffered proxy's forwarded leg is wrapped
+    /// work and the streaming proxy's is gated, and a single upstream route
+    /// could not tell a reader which class had entered it.
     fn serve(policy: Policy) -> Self {
-        let work = Arc::new(AtomicUsize::new(0));
+        let work = Arc::new(Work::default());
         let journal = observed::journal();
-        let upstream = common::spawn_server(upstream_router(&work));
+        let wrapped_upstream = common::spawn_server(wrapped_upstream_router(&work));
+        let gated_upstream = common::spawn_server(gated_upstream_router(&work));
 
         let mut router = Router::new();
         project(&mut router, policy);
-        register_classes(&mut router, &work, upstream);
+        register_classes(&mut router, &work, wrapped_upstream, gated_upstream);
         let addr = common::spawn_server(router.rejection_mapper(observed::collapsing_mapper(
             &journal,
             "projection",
@@ -178,9 +230,14 @@ impl Fixture {
         }
     }
 
-    /// How many producers, handlers, upstream routes, and services have run.
-    fn entered(&self) -> usize {
-        self.work.load(Ordering::SeqCst)
+    /// How much gated work — producers, sessions, upgrades, services — ran.
+    fn gated(&self) -> usize {
+        self.work.gated()
+    }
+
+    /// How much wrapped work — the two classes with no gate — ran.
+    fn wrapped(&self) -> usize {
+        self.work.wrapped()
     }
 
     /// The category the mapper recorded for this row's one refusal.
@@ -189,12 +246,23 @@ impl Fixture {
     }
 }
 
-/// The upstream both proxy classes and the proxied upgrade forward to.
-fn upstream_router(work: &Arc<AtomicUsize>) -> Router {
+/// The upstream the buffered proxy forwards to, whose leg is wrapped work.
+fn wrapped_upstream_router(work: &Arc<Work>) -> Router {
     let mut upstream = Router::new();
     let entered = Arc::clone(work);
     upstream.get("/echo", move |_req: &Request| {
-        entered.fetch_add(1, Ordering::SeqCst);
+        entered.enter_wrapped();
+        async { Response::text(200, "upstream").map(|resp| resp.with_content_type(UPSTREAM_TYPE)) }
+    });
+    upstream
+}
+
+/// The upstream the streaming proxy and the proxied upgrade forward to.
+fn gated_upstream_router(work: &Arc<Work>) -> Router {
+    let mut upstream = Router::new();
+    let entered = Arc::clone(work);
+    upstream.get("/echo", move |_req: &Request| {
+        entered.enter_gated();
         async { Response::text(200, "upstream").map(|resp| resp.with_content_type(UPSTREAM_TYPE)) }
     });
     register_upstream_upgrade(&mut upstream, work);
@@ -203,42 +271,72 @@ fn upstream_router(work: &Arc<AtomicUsize>) -> Router {
 
 /// Register the upgrade the proxied WebSocket class forwards to.
 #[cfg(feature = "ws")]
-fn register_upstream_upgrade(upstream: &mut Router, work: &Arc<AtomicUsize>) {
+fn register_upstream_upgrade(upstream: &mut Router, work: &Arc<Work>) {
     let entered = Arc::clone(work);
     upstream.ws("/ws", move |_req: &Request, _conn: camber::http::WsConn| {
-        entered.fetch_add(1, Ordering::SeqCst);
+        entered.enter_gated();
         Ok(())
     });
 }
 
 /// Without the feature, no upgrade class is served and none is registered.
 #[cfg(not(feature = "ws"))]
-fn register_upstream_upgrade(_upstream: &mut Router, _work: &Arc<AtomicUsize>) {}
+fn register_upstream_upgrade(_upstream: &mut Router, _work: &Arc<Work>) {}
 
 /// Register every class the projection matrix covers.
-fn register_classes(router: &mut Router, work: &Arc<AtomicUsize>, upstream: SocketAddr) {
-    let backend = format!("http://{upstream}");
+fn register_classes(
+    router: &mut Router,
+    work: &Arc<Work>,
+    wrapped_upstream: SocketAddr,
+    gated_upstream: SocketAddr,
+) {
+    let wrapped_backend = format!("http://{wrapped_upstream}");
+    let gated_backend = format!("http://{gated_upstream}");
     let entered = Arc::clone(work);
     router.get(HTTP_PATH, move |_req: &Request| {
-        entered.fetch_add(1, Ordering::SeqCst);
+        entered.enter_wrapped();
         async { Response::text(200, "buffered") }
     });
     register_stream(router, work);
     register_sse(router, work);
-    register_upgrades(router, work, &backend);
+    register_multipart(router, work);
+    register_upgrades(router, work, &gated_backend);
     register_grpc(router, work);
-    router.proxy("/buffered", &backend);
-    router.proxy_stream("/streamed", &backend);
+    router.proxy("/buffered", &wrapped_backend);
+    router.proxy_stream("/streamed", &gated_backend);
+}
+
+/// Register the multipart class, whose head its own session settles on.
+fn register_multipart(router: &mut Router, work: &Arc<Work>) {
+    let entered = Arc::clone(work);
+    router.multipart(
+        camber::http::Method::Post,
+        MULTIPART_PATH,
+        camber::http::MultipartLimits::default(),
+        move |_req: &Request, mut stream: camber::http::MultipartStream| {
+            let entered = Arc::clone(&entered);
+            async move {
+                entered.enter_gated();
+                let mut received = 0;
+                while let Some(mut field) = stream.next_field().await? {
+                    while let Some(chunk) = field.next_chunk().await? {
+                        received += chunk.len();
+                    }
+                }
+                Response::text(200, &format!("received {received}"))
+            }
+        },
+    );
 }
 
 /// Register the generic streaming class, which states a representation of its
 /// own for the merge to leave alone.
-fn register_stream(router: &mut Router, work: &Arc<AtomicUsize>) {
+fn register_stream(router: &mut Router, work: &Arc<Work>) {
     let entered = Arc::clone(work);
     router.get_stream(STREAM_PATH, move |_req: &Request| {
         let entered = Arc::clone(&entered);
         Box::pin(async move {
-            entered.fetch_add(1, Ordering::SeqCst);
+            entered.enter_gated();
             let (response, sender) = StreamResponse::new(200);
             tokio::spawn(async move {
                 let _sent = sender.send("streamed").await;
@@ -249,22 +347,22 @@ fn register_stream(router: &mut Router, work: &Arc<AtomicUsize>) {
 }
 
 /// Register the SSE class, whose representation the protocol owns outright.
-fn register_sse(router: &mut Router, work: &Arc<AtomicUsize>) {
+fn register_sse(router: &mut Router, work: &Arc<Work>) {
     let entered = Arc::clone(work);
     router.get_sse(SSE_PATH, move |_req: &Request, writer: &mut SseWriter| {
-        entered.fetch_add(1, Ordering::SeqCst);
+        entered.enter_gated();
         writer.event("tick", "event")
     });
 }
 
 /// Register the direct and proxied upgrade classes.
 #[cfg(feature = "ws")]
-fn register_upgrades(router: &mut Router, work: &Arc<AtomicUsize>, backend: &str) {
+fn register_upgrades(router: &mut Router, work: &Arc<Work>, backend: &str) {
     let entered = Arc::clone(work);
     router.ws(
         WS_PATH,
         move |_req: &Request, _conn: camber::http::WsConn| {
-            entered.fetch_add(1, Ordering::SeqCst);
+            entered.enter_gated();
             Ok(())
         },
     );
@@ -273,11 +371,11 @@ fn register_upgrades(router: &mut Router, work: &Arc<AtomicUsize>, backend: &str
 
 /// Without the feature, neither upgrade class exists.
 #[cfg(not(feature = "ws"))]
-fn register_upgrades(_router: &mut Router, _work: &Arc<AtomicUsize>, _backend: &str) {}
+fn register_upgrades(_router: &mut Router, _work: &Arc<Work>, _backend: &str) {}
 
 /// Register the gRPC class, whose head tonic owns.
 #[cfg(feature = "grpc")]
-fn register_grpc(router: &mut Router, work: &Arc<AtomicUsize>) {
+fn register_grpc(router: &mut Router, work: &Arc<Work>) {
     router.grpc(
         camber::http::GrpcRouter::new().add_service(proto::greeter_service::serve(Greeter {
             entered: Arc::clone(work),
@@ -287,12 +385,12 @@ fn register_grpc(router: &mut Router, work: &Arc<AtomicUsize>) {
 
 /// Without the feature, no gRPC class is served.
 #[cfg(not(feature = "grpc"))]
-fn register_grpc(_router: &mut Router, _work: &Arc<AtomicUsize>) {}
+fn register_grpc(_router: &mut Router, _work: &Arc<Work>) {}
 
 /// The unary service the gRPC class dispatches to.
 #[cfg(feature = "grpc")]
 struct Greeter {
-    entered: Arc<AtomicUsize>,
+    entered: Arc<Work>,
 }
 
 #[cfg(feature = "grpc")]
@@ -302,7 +400,7 @@ impl proto::greeter_service::Greeter for Greeter {
         &self,
         request: tonic::Request<proto::HelloRequest>,
     ) -> Result<tonic::Response<proto::HelloReply>, tonic::Status> {
-        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.entered.enter_gated();
         Ok(tonic::Response::new(proto::HelloReply {
             message: format!("Hello, {}!", request.into_inner().name),
         }))
@@ -370,6 +468,40 @@ fn assert_cookies(head: &wire::HttpResponse, label: &str) {
 /// Drive one ordinary HTTP exchange and read the head it answered with.
 fn exchange(addr: SocketAddr, path: &str) -> wire::HttpResponse {
     wire::request(addr, "GET", path, &[], &[], BOUND).expect("the fixture answered the exchange")
+}
+
+/// The body one multipart upload declares and sends.
+fn multipart_body() -> Box<[u8]> {
+    format!(
+        "--{MULTIPART_BOUNDARY}\r\nContent-Disposition: form-data; \
+         name=\"field\"\r\n\r\n{MULTIPART_FIELD}\r\n--{MULTIPART_BOUNDARY}--\r\n"
+    )
+    .into_bytes()
+    .into_boxed_slice()
+}
+
+/// Drive one multipart upload under `declared`, and read the head it answered
+/// with.
+///
+/// The declaration is a parameter because the two multipart rows differ in
+/// exactly that: a well-framed upload reaches the session that settles its own
+/// head, and one naming no boundary is refused after the same chain has already
+/// passed.
+fn upload(addr: SocketAddr, declared: &str) -> wire::HttpResponse {
+    wire::request(
+        addr,
+        "POST",
+        MULTIPART_PATH,
+        &[("Content-Type", declared)],
+        &multipart_body(),
+        BOUND,
+    )
+    .expect("the fixture answered the upload")
+}
+
+/// The declaration a well-framed upload sends.
+fn multipart_declaration() -> Box<str> {
+    format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}").into()
 }
 
 /// Drive one upgrade handshake and read the head it answered with.
@@ -466,13 +598,18 @@ fn specialized_head_projection_preserves_short_circuit_and_success_metadata() {
 /// runs behind it.
 fn assert_short_circuit_precedes_every_class() {
     let fixture = Fixture::serve(Policy::ShortCircuit);
-    for (label, head) in refusable_heads(&fixture) {
+    for (label, class) in driven_classes() {
+        let head = drive(&fixture, class);
         assert_eq!(
             head.status, REFUSED_STATUS,
             "{label}: a short-circuit is the answer the peer gets",
         );
         assert_unprojected(&head, label);
     }
+    assert!(
+        observed::drain(&fixture.journal).is_empty(),
+        "short-circuit: a chain that answered for itself reached no rejection mapper",
+    );
     assert_no_specialized_work(&fixture, "short-circuit");
     assert_grpc_refused(&fixture, "short-circuit");
 }
@@ -509,29 +646,70 @@ fn assert_pass_through_metadata_reaches_every_head() {
     assert_content_type(&streaming, UPSTREAM_TYPE, "streaming proxy");
     assert_cookies(&streaming, "streaming proxy");
 
+    assert_multipart_heads_projected(&fixture);
     assert_upgrades_projected(&fixture);
     assert_grpc_projected(&fixture);
     assert!(
-        fixture.entered() >= EXPECTED_PRODUCERS,
-        "pass-through: only {} of the {EXPECTED_PRODUCERS} producers this row drives ran",
-        fixture.entered(),
+        fixture.gated() >= EXPECTED_GATED,
+        "pass-through: only {} of the {EXPECTED_GATED} gated producers this row drives ran",
+        fixture.gated(),
+    );
+    assert_eq!(
+        fixture.wrapped(),
+        EXPECTED_WRAPPED,
+        "pass-through: the two classes with no gate each answered exactly once",
     );
 }
 
-/// How many producers, upstream routes, upgrades, and services a passing row
-/// enters.
+/// How much gated work — producers, sessions, upgrades, forwarded legs, and
+/// services — a passing row enters.
 ///
 /// The floor rather than the exact count: it is what makes the refusal rows'
 /// zero load-bearing, because a matrix that quietly stopped driving a class
 /// would satisfy "nothing ran" for free.
 #[cfg(all(feature = "ws", feature = "grpc"))]
-const EXPECTED_PRODUCERS: usize = 8;
+const EXPECTED_GATED: usize = 7;
 #[cfg(all(feature = "ws", not(feature = "grpc")))]
-const EXPECTED_PRODUCERS: usize = 7;
+const EXPECTED_GATED: usize = 6;
 #[cfg(all(not(feature = "ws"), feature = "grpc"))]
-const EXPECTED_PRODUCERS: usize = 6;
+const EXPECTED_GATED: usize = 5;
 #[cfg(all(not(feature = "ws"), not(feature = "grpc")))]
-const EXPECTED_PRODUCERS: usize = 5;
+const EXPECTED_GATED: usize = 4;
+
+/// The ordinary HTTP handler and the buffered proxy's forwarded leg: the two
+/// classes whose answer the chain wraps rather than gates.
+const EXPECTED_WRAPPED: usize = 2;
+
+/// Both heads a multipart route can answer with carry the projected metadata.
+///
+/// A multipart request has two of them, and the chain passes before either
+/// exists: the head its own session settles on, and the framework refusal a
+/// declaration naming no boundary earns after that same chain has passed. A
+/// merge wired onto only one of the two leaves the other bare.
+fn assert_multipart_heads_projected(fixture: &Fixture) {
+    let settled = upload(fixture.addr, &multipart_declaration());
+    assert_eq!(settled.status, 200, "multipart: wire status");
+    assert_projected(&settled, "multipart");
+    assert_cookies(&settled, "multipart");
+
+    let entered_before = fixture.gated();
+    let refused = upload(fixture.addr, MULTIPART_WITHOUT_BOUNDARY);
+    assert_eq!(
+        refused.status, COLLAPSED_STATUS,
+        "multipart refusal: the mapper answers a declaration naming no boundary",
+    );
+    assert_projected(&refused, "multipart refusal");
+    assert_eq!(
+        fixture.refused_kind("multipart refusal"),
+        camber::http::RejectionKind::Multipart,
+        "multipart refusal: the category names the framing that could not be read",
+    );
+    assert_eq!(
+        fixture.gated(),
+        entered_before,
+        "multipart refusal: no session ran for a body that could never be framed",
+    );
+}
 
 /// Both upgrade classes commit a `101` carrying the projected metadata beside
 /// the accept value the handshake owns.
@@ -569,88 +747,126 @@ fn assert_grpc_projected(fixture: &Fixture) {
 #[cfg(not(feature = "grpc"))]
 fn assert_grpc_projected(_fixture: &Fixture) {}
 
-/// A frame that fails on the unwind answers through the mapper, and the
-/// terminal it passed through authorized no specialized work.
+/// A frame that fails on the unwind answers through the mapper for every class,
+/// and the terminal it passed through authorized no specialized work.
 fn assert_unwound_failure_answers_without_specialized_work() {
-    let fixture = Fixture::serve(Policy::Mapped);
-    let streamed = exchange(fixture.addr, STREAM_PATH);
-    assert_eq!(
-        streamed.status, COLLAPSED_STATUS,
-        "unwound failure: the mapper answers",
-    );
-    assert_unprojected(&streamed, "unwound failure");
-    assert_eq!(
-        fixture.refused_kind("unwound failure"),
+    assert_every_class_refused_by_its_mapper(
+        Policy::Mapped,
+        "unwound failure",
         camber::http::RejectionKind::Middleware,
-        "unwound failure: the frame's own category",
-    );
-    assert_eq!(
-        fixture.entered(),
-        0,
-        "unwound failure: the gate terminal is not permission to produce",
     );
 }
 
 /// Metadata the wire cannot carry is refused where it was stated, before any
-/// specialized work begins.
+/// specialized work begins, for every class.
 fn assert_unrepresentable_projection_is_refused_before_work() {
-    let fixture = Fixture::serve(Policy::Unrepresentable);
-    let streamed = exchange(fixture.addr, STREAM_PATH);
-    assert_eq!(
-        streamed.status, COLLAPSED_STATUS,
-        "unrepresentable projection: the mapper answers",
-    );
-    assert_unprojected(&streamed, "unrepresentable projection");
-    assert_eq!(
-        fixture.refused_kind("unrepresentable projection"),
+    assert_every_class_refused_by_its_mapper(
+        Policy::Unrepresentable,
+        "unrepresentable projection",
         camber::http::RejectionKind::InvalidHeader,
-        "unrepresentable projection: the category names the head that could not be built",
     );
+}
+
+/// Drive every class under one refusing policy and read what each answered.
+///
+/// Class by class rather than in one sweep, because the mapper claim is a
+/// per-request one: each class refuses once, under the category that names what
+/// went wrong, and nothing behind any of them runs.
+fn assert_every_class_refused_by_its_mapper(
+    policy: Policy,
+    label: &str,
+    kind: camber::http::RejectionKind,
+) {
+    let fixture = Fixture::serve(policy);
+    for (class, driven) in driven_classes() {
+        let head = drive(&fixture, driven);
+        assert_eq!(
+            head.status, COLLAPSED_STATUS,
+            "{label}: {class}: the mapper answers",
+        );
+        assert_unprojected(&head, class);
+        assert_eq!(
+            fixture.refused_kind(class),
+            kind,
+            "{label}: {class}: the category the refusal was raised under",
+        );
+    }
+    assert_grpc_refused(&fixture, label);
     assert_eq!(
-        fixture.entered(),
+        fixture.gated(),
         0,
-        "unrepresentable projection: no producer ran for a head that was never built",
+        "{label}: a producer, an upstream, an upgrade, or a service ran behind a refused chain",
+    );
+    // The contrast, asserted rather than left implicit: a frame that reached
+    // its terminal ran the two ungated handlers, and the refusal it raised on
+    // the way back out is still what the peer was given.
+    assert_eq!(
+        fixture.wrapped(),
+        EXPECTED_WRAPPED,
+        "{label}: the classes with no gate answered their handler before the frame refused",
     );
 }
 
-/// Every class that answers over ordinary HTTP framing, and its label.
-fn refusable_heads(fixture: &Fixture) -> Box<[(&'static str, wire::HttpResponse)]> {
+/// How a row drives one class.
+#[derive(Clone, Copy, Debug)]
+enum Driven {
+    /// A GET whose answer is framed as ordinary HTTP.
+    Get(&'static str),
+    /// A well-framed multipart upload.
+    Upload,
+    /// An upgrade handshake.
+    #[cfg(feature = "ws")]
+    Handshake(&'static str),
+}
+
+/// Every class this fixture serves over a real transport, and its label.
+///
+/// gRPC is absent because it is the one class no HTTP framing reads: it is
+/// driven through tonic's own client beside every row that uses this table.
+fn driven_classes() -> Box<[(&'static str, Driven)]> {
     [
-        ("ordinary http", HTTP_PATH),
-        ("generic stream", STREAM_PATH),
-        ("sse", SSE_PATH),
-        ("buffered proxy", BUFFERED_PATH),
-        ("streaming proxy", STREAMED_PATH),
+        ("ordinary http", Driven::Get(HTTP_PATH)),
+        ("generic stream", Driven::Get(STREAM_PATH)),
+        ("sse", Driven::Get(SSE_PATH)),
+        ("buffered proxy", Driven::Get(BUFFERED_PATH)),
+        ("streaming proxy", Driven::Get(STREAMED_PATH)),
+        ("multipart", Driven::Upload),
     ]
     .into_iter()
-    .map(|(label, path)| (label, exchange(fixture.addr, path)))
-    .chain(refusable_upgrades(fixture))
+    .chain(driven_upgrades())
     .collect()
 }
 
-/// Both upgrade classes, answered as the refusals they earned.
+/// Both upgrade classes, as this table drives them.
 #[cfg(feature = "ws")]
-fn refusable_upgrades(fixture: &Fixture) -> Box<[(&'static str, wire::HttpResponse)]> {
-    [
-        ("direct upgrade", WS_PATH),
-        ("proxied upgrade", WS_PROXY_PATH),
-    ]
-    .into_iter()
-    .map(|(label, path)| (label, handshake(fixture.addr, path)))
-    .collect()
+fn driven_upgrades() -> Box<[(&'static str, Driven)]> {
+    Box::new([
+        ("direct upgrade", Driven::Handshake(WS_PATH)),
+        ("proxied upgrade", Driven::Handshake(WS_PROXY_PATH)),
+    ])
 }
 
 #[cfg(not(feature = "ws"))]
-fn refusable_upgrades(_fixture: &Fixture) -> Box<[(&'static str, wire::HttpResponse)]> {
+fn driven_upgrades() -> Box<[(&'static str, Driven)]> {
     Box::new([])
+}
+
+/// Drive one class and read the head it answered with.
+fn drive(fixture: &Fixture, class: Driven) -> wire::HttpResponse {
+    match class {
+        Driven::Get(path) => exchange(fixture.addr, path),
+        Driven::Upload => upload(fixture.addr, &multipart_declaration()),
+        #[cfg(feature = "ws")]
+        Driven::Handshake(path) => handshake(fixture.addr, path),
+    }
 }
 
 /// Assert nothing behind any gate ran for this fixture.
 fn assert_no_specialized_work(fixture: &Fixture, label: &str) {
     assert_eq!(
-        fixture.entered(),
-        0,
-        "{label}: a producer, an upstream, or an upgrade ran behind a refused chain",
+        (fixture.gated(), fixture.wrapped()),
+        (0, 0),
+        "{label}: a producer, an upstream, a handler, or an upgrade ran behind a refused chain",
     );
 }
 
@@ -663,7 +879,7 @@ fn assert_grpc_refused(fixture: &Fixture, label: &str) {
         "{label}: the gRPC call was answered by the service the chain refused",
     );
     assert_eq!(
-        fixture.entered(),
+        fixture.gated(),
         0,
         "{label}: the gRPC service ran behind a refused chain",
     );

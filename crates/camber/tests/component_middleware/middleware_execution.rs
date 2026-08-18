@@ -187,19 +187,73 @@ async fn middleware_ordering_preserved() {
     runtime::request_shutdown();
 }
 
+/// The metadata a passing chain states over a specialized route's provisional
+/// head, and the values it states them with.
+const PROJECTED: &str = "X-Camber-Projected";
+const PROJECTED_VALUE: &str = "applied";
+const FIRST_COOKIE: &str = "first=1";
+const SECOND_COOKIE: &str = "second=2";
+
+/// The representation a passing chain states, which every protocol owning one
+/// of its own must override.
+const PROJECTED_TYPE: &str = "text/x-projected";
+
+/// Register a frame that counts its runs and states metadata over whatever
+/// head it is shown.
+///
+/// A specialized route has no real head while the chain runs, so what this
+/// states is retained and merged into the head its producer commits. Both
+/// specialized rows below register exactly this frame, and differ only in the
+/// class behind it.
+fn project_over_provisional_head(router: &mut Router, invocations: &Arc<AtomicUsize>) {
+    let mw_counter = Arc::clone(invocations);
+    router.use_middleware(move |req: &Request, next| {
+        mw_counter.fetch_add(1, Ordering::SeqCst);
+        let entered = next.call(req);
+        async move {
+            entered
+                .await
+                .with_header(PROJECTED, PROJECTED_VALUE)
+                .with_header("Set-Cookie", FIRST_COOKIE)
+                .with_header("Set-Cookie", SECOND_COOKIE)
+                .with_content_type(PROJECTED_TYPE)
+        }
+    });
+}
+
+/// Assert one specialized head carries everything the chain stated over the
+/// provisional head it was shown.
+///
+/// Both values under the one name it holds alone: a merge keyed by name that
+/// kept only the first would answer a peer half of what the chain set.
+fn assert_projected(response: &crate::http::HttpResponse, label: &str) {
+    assert_eq!(
+        response.header(PROJECTED),
+        Some(PROJECTED_VALUE),
+        "{label}: the metadata the chain stated never reached the real head",
+    );
+    assert_eq!(
+        response.header_values("Set-Cookie").as_ref(),
+        [FIRST_COOKIE, SECOND_COOKIE],
+        "{label}: a chain that stated two values under one name lost one",
+    );
+}
+
+/// 14.T1 specialized projection.
+///
+/// The chain runs over a provisional head, because the event stream's own head
+/// does not exist until the producer commits it. What the chain stated there
+/// reaches that committed head, and the representation SSE owns outright is the
+/// one the peer is given.
 #[test]
 fn middleware_runs_for_sse_route() {
     common::test_runtime()
         .shutdown_timeout(std::time::Duration::from_secs(2))
         .run(|| {
             let invocations = Arc::new(AtomicUsize::new(0));
-            let mw_counter = Arc::clone(&invocations);
 
             let mut router = Router::new();
-            router.use_middleware(move |req: &Request, next| {
-                mw_counter.fetch_add(1, Ordering::SeqCst);
-                next.call(req)
-            });
+            project_over_provisional_head(&mut router, &invocations);
             router.get_sse(
                 "/events",
                 |_req: &Request, writer: &mut camber::http::SseWriter| {
@@ -214,10 +268,18 @@ fn middleware_runs_for_sse_route() {
                 crate::http::request(addr, "GET", "/events", &[], &[], Duration::from_secs(5))
                     .unwrap();
             assert_eq!(response.status, 200);
-            assert_eq!(response.header("content-type"), Some("text/event-stream"));
+            // Every value under the name, not the first: a merge that appended
+            // beside the protocol's own correction reads identically through a
+            // first-value lookup.
+            assert_eq!(
+                response.header_values("content-type").as_ref(),
+                ["text/event-stream"],
+                "the chain's representation displaced the one SSE owns",
+            );
             assert_eq!(response.header("cache-control"), Some("no-cache"));
             assert_eq!(response.header("transfer-encoding"), Some("chunked"));
             assert_eq!(response.body.as_ref(), b"event: message\ndata: hello\n\n");
+            assert_projected(&response, "sse");
 
             assert!(
                 invocations.load(Ordering::SeqCst) > 0,
@@ -229,26 +291,27 @@ fn middleware_runs_for_sse_route() {
         .unwrap();
 }
 
+/// 14.T1 specialized projection.
+///
+/// The same frame over a generic stream, whose producer names a representation
+/// of its own on the head it commits. The chain's metadata reaches that head
+/// and the producer's own name stands.
 #[test]
 fn middleware_runs_for_stream_route() {
     common::test_runtime()
         .shutdown_timeout(std::time::Duration::from_secs(2))
         .run(|| {
             let invocations = Arc::new(AtomicUsize::new(0));
-            let mw_counter = Arc::clone(&invocations);
 
             let mut router = Router::new();
-            router.use_middleware(move |req: &Request, next| {
-                mw_counter.fetch_add(1, Ordering::SeqCst);
-                next.call(req)
-            });
+            project_over_provisional_head(&mut router, &invocations);
             router.get_stream("/download", |_req: &Request| {
                 Box::pin(async {
                     let (stream_resp, sender) = camber::http::StreamResponse::new(200);
                     tokio::spawn(async move {
                         let _ = sender.send("data").await;
                     });
-                    stream_resp
+                    stream_resp.with_header("Content-Type", "text/x-stream")
                 })
             });
 
@@ -259,6 +322,12 @@ fn middleware_runs_for_stream_route() {
                     .unwrap();
             assert_eq!(response.status, 200);
             assert_eq!(response.body.as_ref(), b"data");
+            assert_eq!(
+                response.header_values("content-type").as_ref(),
+                ["text/x-stream"],
+                "the chain's representation displaced the producer's own",
+            );
+            assert_projected(&response, "generic stream");
 
             assert!(
                 invocations.load(Ordering::SeqCst) > 0,

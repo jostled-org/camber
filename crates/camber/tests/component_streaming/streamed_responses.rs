@@ -346,12 +346,32 @@ fn assert_budgeted_download(controller: &LifecycleController, row: &str, maximum
     );
 }
 
+/// 14.T1 provisional head projection.
+///
+/// A stream route has two owners of its head, and this row reads both. The
+/// producer names what it commits, and a chain that ran over the provisional
+/// head it was shown before that commit has its own metadata carried onto it —
+/// every value under a name the producer left alone, and nothing at all under
+/// a name the producer claimed.
 #[test]
 fn stream_response_with_custom_headers() {
     common::test_runtime()
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
+            router.use_middleware(|req: &Request, next: camber::http::Next| {
+                let entered = next.call(req);
+                async move {
+                    entered
+                        .await
+                        .with_header("X-Projected", "applied")
+                        .with_header("Set-Cookie", "first=1")
+                        .with_header("Set-Cookie", "second=2")
+                        // The name the producer commits for itself: what the
+                        // chain states over it must not displace it.
+                        .with_header("X-Custom", "projected")
+                }
+            });
             router.get_stream("/stream", |_req: &Request| {
                 Box::pin(async {
                     let (stream_resp, sender) = StreamResponse::new(200);
@@ -371,7 +391,24 @@ fn stream_response_with_custom_headers() {
                 crate::http::request(addr, "GET", "/stream", &[], &[], Duration::from_secs(5))
                     .unwrap();
             assert_eq!(response.status, 200);
-            assert_eq!(response.header("x-custom"), Some("value"));
+            // Every value under the name, not the first: a merge that appended
+            // beside the producer's own header rather than standing aside reads
+            // identically through a first-value lookup.
+            assert_eq!(
+                response.header_values("x-custom").as_ref(),
+                ["value"],
+                "the chain's value displaced the one the producer committed",
+            );
+            assert_eq!(
+                response.header("x-projected"),
+                Some("applied"),
+                "the metadata the chain stated never reached the committed head",
+            );
+            assert_eq!(
+                response.header_values("set-cookie").as_ref(),
+                ["first=1", "second=2"],
+                "a chain that stated two values under one name lost one",
+            );
             assert_eq!(response.body.as_ref(), b"hello");
 
             runtime::request_shutdown();
