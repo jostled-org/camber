@@ -59,6 +59,12 @@ pub(crate) struct RuntimeConfig {
     #[cfg(feature = "profiling")]
     pub(crate) profiling_enabled: bool,
     pub(crate) health_interval: Duration,
+    /// The deadline each registered resource's lifecycle callbacks run under.
+    ///
+    /// Held beside the health interval rather than inside it: the interval says
+    /// how often a probe starts, and this says how long any one callback may
+    /// take, which is the bound the runtime's aggregate shutdown then narrows.
+    pub(crate) resource_budget: crate::ResourceBudget,
     pub(crate) tls_config: Option<TlsConfig>,
     pub(crate) cert_store: Option<CertStore>,
 }
@@ -73,6 +79,7 @@ impl Default for RuntimeConfig {
             #[cfg(feature = "profiling")]
             profiling_enabled: false,
             health_interval: DEFAULT_HEALTH_INTERVAL,
+            resource_budget: crate::ResourceBudget::default(),
             tls_config: None,
             cert_store: None,
         }

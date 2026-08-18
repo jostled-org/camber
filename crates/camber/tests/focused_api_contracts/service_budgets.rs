@@ -3,17 +3,18 @@
 #[cfg(feature = "profiling")]
 use camber::__private::{DEFAULT_PROFILING_RESPONSE_LIMIT, frozen_profiling_response_limit};
 use camber::__private::{
-    DEFAULT_STATIC_FILE_LIMIT, frozen_buffered_response_limit, frozen_static_file_limit,
+    DEFAULT_RESOURCE_PHASE_DEADLINE, DEFAULT_STATIC_FILE_LIMIT, frozen_buffered_response_limit,
+    frozen_static_file_limit,
 };
-use camber::RuntimeError;
 use camber::http::{
     ByteBoundary, DeadlineBoundary, HostRouter, ProxyPolicy, RequestBudget, Router, ServerPolicy,
     TransferBudget,
 };
+use camber::{ResourceBudget, ResourcePhase, RuntimeError};
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -774,4 +775,231 @@ fn grpc_services_are_registered_over_the_public_request_body_spelling() {
     }
 
     let _: GrpcRouter = GrpcRouter::new().add_service(BareService);
+}
+
+/// A resource that counts every lifecycle callback it is asked to run.
+///
+/// The counters are the negative control 16.T1 turns on: a registration the
+/// runtime refuses must refuse it before any of them can move, so "no callback
+/// started" is read off the resource itself rather than off the absence of a
+/// log line.
+struct CountingResource {
+    label: &'static str,
+    probes: Arc<AtomicUsize>,
+    shutdowns: Arc<AtomicUsize>,
+}
+
+impl camber::Resource for CountingResource {
+    fn name(&self) -> &str {
+        self.label
+    }
+
+    fn health_check(&self) -> Result<(), RuntimeError> {
+        self.probes.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+
+    fn shutdown(&self) -> Result<(), RuntimeError> {
+        self.shutdowns.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+}
+
+/// One registry's shared callback counters, so a refused registration and an
+/// accepted one are read the same way.
+struct CallbackCounts {
+    probes: Arc<AtomicUsize>,
+    shutdowns: Arc<AtomicUsize>,
+    closure_ran: Arc<AtomicBool>,
+}
+
+impl CallbackCounts {
+    fn new() -> Self {
+        Self {
+            probes: Arc::new(AtomicUsize::new(0)),
+            shutdowns: Arc::new(AtomicUsize::new(0)),
+            closure_ran: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn resource(&self, label: &'static str) -> CountingResource {
+        CountingResource {
+            label,
+            probes: Arc::clone(&self.probes),
+            shutdowns: Arc::clone(&self.shutdowns),
+        }
+    }
+
+    fn totals(&self) -> (usize, usize, bool) {
+        (
+            self.probes.load(Ordering::Acquire),
+            self.shutdowns.load(Ordering::Acquire),
+            self.closure_ran.load(Ordering::Acquire),
+        )
+    }
+}
+
+/// Run a registry of named resources and report what the runtime did with it.
+///
+/// One definition for the refused rows and the accepted one: a helper that
+/// built the accepted registry differently would prove the refusals happen
+/// somewhere the accepted path never reaches.
+fn run_named_resources(names: &[&'static str]) -> (Result<(), RuntimeError>, (usize, usize, bool)) {
+    let counts = CallbackCounts::new();
+    let mut builder = camber::runtime::builder().shutdown_timeout(Duration::from_secs(1));
+    for name in names {
+        builder = builder.resource(counts.resource(name));
+    }
+    let ran = Arc::clone(&counts.closure_ran);
+    let result = builder.run(move || ran.store(true, Ordering::Release));
+    (result, counts.totals())
+}
+
+/// Every closed resource phase, matched without a wildcard.
+fn resource_phase_name(phase: ResourcePhase) -> &'static str {
+    match phase {
+        ResourcePhase::StartupHealth => "startup-health",
+        ResourcePhase::PeriodicHealth => "periodic-health",
+        ResourcePhase::Shutdown => "shutdown",
+    }
+}
+
+fn assert_resource_budget_values() {
+    assert_policy_value::<ResourceBudget>();
+
+    let budget = ResourceBudget::bounded(SHORT, LONG, SHORT + LONG).expect("finite phase budget");
+    assert_eq!(budget.startup_health(), SHORT);
+    assert_eq!(budget.periodic_health(), LONG);
+    assert_eq!(budget.shutdown(), SHORT + LONG);
+
+    // The named accessors and the phase dispatch are one answer, so a
+    // coordinator that reaches a phase by value cannot read a different
+    // deadline from the one a caller configured by name.
+    assert_eq!(budget.phase(ResourcePhase::StartupHealth), SHORT);
+    assert_eq!(budget.phase(ResourcePhase::PeriodicHealth), LONG);
+    assert_eq!(budget.phase(ResourcePhase::Shutdown), SHORT + LONG);
+
+    let default = ResourceBudget::default();
+    assert_eq!(default.startup_health(), DEFAULT_RESOURCE_PHASE_DEADLINE);
+    assert_eq!(default.periodic_health(), DEFAULT_RESOURCE_PHASE_DEADLINE);
+    assert_eq!(default.shutdown(), DEFAULT_RESOURCE_PHASE_DEADLINE);
+
+    // Each phase spells its own operator-facing name, and the vocabulary is
+    // closed: a new phase is an API change, not a silent addition.
+    let phases = [
+        ResourcePhase::StartupHealth,
+        ResourcePhase::PeriodicHealth,
+        ResourcePhase::Shutdown,
+    ];
+    for phase in phases {
+        assert_eq!(phase.to_string(), resource_phase_name(phase));
+    }
+}
+
+fn assert_resource_budget_refusals() {
+    // Zero is never a spelling of "unbounded" for a resource phase: every
+    // dimension is finite by construction, and each refusal names itself.
+    expect_invalid(
+        ResourceBudget::bounded(ZERO, LONG, LONG),
+        "resource startup_health",
+    );
+    expect_invalid(
+        ResourceBudget::bounded(SHORT, ZERO, LONG),
+        "resource periodic_health",
+    );
+    expect_invalid(
+        ResourceBudget::bounded(SHORT, LONG, ZERO),
+        "resource shutdown",
+    );
+
+    let past = MAX_SERVABLE_DEADLINE + Duration::from_secs(1);
+    expect_invalid(
+        ResourceBudget::bounded(past, LONG, LONG),
+        "resource startup_health",
+    );
+    expect_invalid(
+        ResourceBudget::bounded(SHORT, past, LONG),
+        "resource periodic_health",
+    );
+    expect_invalid(
+        ResourceBudget::bounded(SHORT, LONG, past),
+        "resource shutdown",
+    );
+    ResourceBudget::bounded(
+        MAX_SERVABLE_DEADLINE,
+        MAX_SERVABLE_DEADLINE,
+        MAX_SERVABLE_DEADLINE,
+    )
+    .expect("the ceiling itself remains servable");
+}
+
+fn assert_resource_budget_outer_narrowing() {
+    let budget = ResourceBudget::bounded(SHORT, SHORT, LONG).expect("finite phase budget");
+
+    // The aggregate shutdown deadline is an outer ceiling: a callback receives
+    // the smaller of its phase duration and the time the aggregate has left.
+    assert_eq!(budget.phase_deadline(ResourcePhase::Shutdown, SHORT), SHORT);
+    assert_eq!(
+        budget.phase_deadline(ResourcePhase::Shutdown, LONG + SHORT),
+        LONG
+    );
+    assert_eq!(
+        budget.phase_deadline(ResourcePhase::StartupHealth, ZERO),
+        ZERO
+    );
+    assert_eq!(
+        budget.phase_deadline(ResourcePhase::PeriodicHealth, LONG),
+        SHORT
+    );
+
+    // A runtime freezes the budget it was handed, and the default when none was
+    // named, so the coordinator Step 17 adds reads a configured value rather
+    // than a second copy of these defaults.
+    let configured = camber::__private::frozen_resource_budget(
+        &camber::runtime::builder().resource_budget(budget),
+    );
+    assert_eq!(configured, budget);
+    assert_eq!(
+        camber::__private::frozen_resource_budget(&camber::runtime::builder()),
+        ResourceBudget::default()
+    );
+}
+
+fn assert_resource_names_are_refused_before_establishment() {
+    // A name that cannot identify its resource is refused before the executor
+    // exists, so no probe, no shutdown, and no user closure runs.
+    for registry in [
+        [""].as_slice(),
+        ["ready", ""].as_slice(),
+        ["   "].as_slice(),
+    ] {
+        let (result, totals) = run_named_resources(registry);
+        expect_invalid(result, "resource name");
+        assert_eq!(totals, (0, 0, false), "refused registry {registry:?} ran");
+    }
+
+    for registry in [["db", "db"].as_slice(), ["db", "cache", "db"].as_slice()] {
+        let (result, totals) = run_named_resources(registry);
+        expect_invalid(result, "db");
+        assert_eq!(totals, (0, 0, false), "refused registry {registry:?} ran");
+    }
+}
+
+fn assert_valid_resource_names_still_run() {
+    let (result, (probes, shutdowns, closure_ran)) = run_named_resources(&["db", "cache"]);
+    result.expect("distinct non-empty resource names are registrable");
+    assert!(closure_ran, "the user closure never ran");
+    assert_eq!(probes, 2, "each resource is probed once at startup");
+    assert_eq!(shutdowns, 2, "each resource is shut down once");
+}
+
+/// 16.T1: every resource phase budget and every registered resource name is
+/// validated before the runtime that would consume it exists.
+#[test]
+fn resource_budget_validates_phase_bounds_and_names_before_runtime_establishment() {
+    assert_resource_budget_values();
+    assert_resource_budget_refusals();
+    assert_resource_budget_outer_narrowing();
+    assert_resource_names_are_refused_before_establishment();
+    assert_valid_resource_names_still_run();
 }

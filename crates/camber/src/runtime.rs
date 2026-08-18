@@ -42,6 +42,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("tracing_enabled", &self.config.tracing_enabled)
             .field("metrics_enabled", &self.config.metrics_enabled)
             .field("health_interval", &self.config.health_interval)
+            .field("resource_budget", &self.config.resource_budget)
             .field("resource_count", &self.resources.len())
             .field("has_tls", &self.has_manual_tls())
             .finish_non_exhaustive()
@@ -143,6 +144,19 @@ impl RuntimeBuilder {
         self.set_policy_field(|policy| {
             policy.header_timeout(crate::time::clamp_duration(timeout, MIN, "header_timeout"))
         });
+        self
+    }
+
+    /// Set how long each registered resource's lifecycle callbacks may run.
+    ///
+    /// Replaces the complete budget: its three phase deadlines are validated
+    /// when the budget is built, so this setter cannot be handed an invalid
+    /// one. The runtime's aggregate `shutdown_timeout` stays an outer ceiling
+    /// above all three — a callback receives the smaller of its phase deadline
+    /// and the time the aggregate has left.
+    #[must_use]
+    pub fn resource_budget(mut self, budget: crate::ResourceBudget) -> Self {
+        self.config.resource_budget = budget;
         self
     }
 
@@ -288,6 +302,7 @@ impl RuntimeBuilder {
         if let Some(error) = self.invalid_policy {
             return Err(error);
         }
+        crate::resource::validate_registry(&self.resources)?;
 
         let mut config = self.config;
 
@@ -368,6 +383,20 @@ impl RuntimeBuilder {
 /// Create a RuntimeBuilder for configuring the runtime before running.
 pub fn builder() -> RuntimeBuilder {
     RuntimeBuilder::new()
+}
+
+/// The resource budget `builder` froze, whether it was configured or defaulted.
+///
+/// The single reader of that dimension before a runtime exists: the coordinator
+/// that runs a callback reads the same field off the established runtime, and a
+/// focused contract reads it here rather than restating the documented default
+/// as a duration of its own.
+///
+/// Pure: one field out, no allocation and no state.
+#[doc(hidden)]
+#[must_use]
+pub const fn frozen_resource_budget(builder: &RuntimeBuilder) -> crate::ResourceBudget {
+    builder.config.resource_budget
 }
 
 /// Run a closure within a test-optimized runtime.

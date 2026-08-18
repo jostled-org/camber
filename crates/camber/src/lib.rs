@@ -140,6 +140,7 @@ pub mod dns01;
 pub mod error;
 pub mod http;
 /// Tracing subscriber setup helpers.
+pub(crate) mod lifecycle;
 pub mod logging;
 #[cfg(any(feature = "nats", feature = "sqs"))]
 /// Message queue integrations.
@@ -174,6 +175,10 @@ pub mod tls;
 pub use acme::AcmeConfig;
 pub use camber_macros::test;
 pub use error::RuntimeError;
+pub use lifecycle::{
+    LifecycleFailure, LifecycleFailureKind, LifecycleFailures, LifecycleParticipant,
+    LifecyclePhase, ResourceBudget, ResourceFailure, ResourceFailureKind, ResourcePhase,
+};
 pub use resource::Resource;
 pub use runtime::RuntimeBuilder;
 pub use runtime::on_cancel;

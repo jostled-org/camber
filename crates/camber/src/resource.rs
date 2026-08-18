@@ -12,6 +12,33 @@ pub(crate) const MIN_HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 /// the `/health` endpoint reads it. Zero allocation at request time.
 pub(crate) type HealthState = Arc<[(Box<str>, AtomicBool)]>;
 
+/// Accept a resource registry whose every entry can be told apart, or refuse it.
+///
+/// A registered name is the only identity a health entry, an operator event,
+/// and a lifecycle failure have for the resource behind them. A blank name
+/// identifies nothing and a repeated one identifies two things, so both are
+/// refused before the runtime that would report under them is established —
+/// while refusing still costs nothing but the caller's registration.
+pub(crate) fn validate_registry(resources: &[Box<dyn Resource>]) -> Result<(), RuntimeError> {
+    let mut seen = std::collections::HashSet::with_capacity(resources.len());
+    for resource in resources {
+        match resource.name().trim() {
+            "" => {
+                return Err(RuntimeError::InvalidArgument(
+                    "resource name must not be blank".into(),
+                ));
+            }
+            name if seen.insert(name) => {}
+            name => {
+                return Err(RuntimeError::InvalidArgument(
+                    format!("resource name {name:?} is registered more than once").into_boxed_str(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A managed external resource that participates in the runtime lifecycle.
 ///
 /// Implement this trait on database pools, caches, message brokers, or any

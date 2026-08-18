@@ -43,6 +43,23 @@ pub use crate::http::server_policy::{
     DEFAULT_PROFILING_RESPONSE_LIMIT, frozen_profiling_response_limit,
 };
 
+/// The exact default every resource phase deadline starts at, and the exact
+/// log one lifecycle freezes its aggregate through.
+///
+/// Re-exported for the reason the accessors above are: a contract that built
+/// its own `LifecycleFailures` would prove its own ordering and its own
+/// precedence, not the ones a teardown returns, and a contract that restated
+/// the documented default would prove nothing about the deadline a callback
+/// actually runs under.
+pub use crate::lifecycle::{DEFAULT_RESOURCE_PHASE_DEADLINE, LifecycleFailureLog};
+
+/// The exact resource budget a configured runtime froze.
+///
+/// Re-exported for the reason the limit accessors above are: a contract that
+/// read its own copy of a budget would prove nothing about the value the
+/// coordinator running a callback reads.
+pub use crate::runtime::frozen_resource_budget;
+
 #[cfg(feature = "sqs")]
 #[doc(hidden)]
 pub fn sqs_message_id(message_id: Option<&str>) -> Result<Box<str>, crate::RuntimeError> {

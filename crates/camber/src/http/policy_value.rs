@@ -7,6 +7,11 @@
 //! enforcing it could not carry. And an inner layer narrows an outer one
 //! through [`narrow`] alone, so runtime, server, host, and router precedence
 //! cannot drift apart per dimension.
+//!
+//! The resource budget lives outside `http` and still reads
+//! [`finite_duration`] from here: a resource phase deadline reaches the same
+//! clock a request deadline does, so it is refused by the same rule rather than
+//! by a second copy of it.
 
 use crate::RuntimeError;
 use std::time::Duration;
@@ -27,7 +32,7 @@ const MAX_POLICY_DEADLINE: Duration = Duration::from_secs(86_400 * 365 * 30);
 /// The name reaches the caller because the argument alone does not say which
 /// bound was rejected when a builder chain sets several. Both refusals arrive
 /// here, before the value reaches a clock that would panic on it.
-pub(super) fn finite_duration(value: Duration, name: &str) -> Result<Duration, RuntimeError> {
+pub(crate) fn finite_duration(value: Duration, name: &str) -> Result<Duration, RuntimeError> {
     match value {
         deadline if deadline.is_zero() => Err(RuntimeError::InvalidArgument(
             format!("{name} must be greater than zero").into_boxed_str(),

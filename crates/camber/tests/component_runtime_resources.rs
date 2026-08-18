@@ -12,6 +12,8 @@ mod circuit_breaker;
 mod health_closing;
 #[path = "component_runtime_resources/health_resources.rs"]
 mod health_resources;
+#[path = "component_runtime_resources/lifecycle_aggregate.rs"]
+mod lifecycle_aggregate;
 #[path = "component_runtime_resources/resource_lifecycle.rs"]
 mod resource_lifecycle;
 #[path = "component_runtime_resources/runtime_builder.rs"]

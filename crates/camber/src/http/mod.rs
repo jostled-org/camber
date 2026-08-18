@@ -144,7 +144,7 @@ mod operation;
 #[cfg(feature = "otel")]
 /// OpenTelemetry request propagation and tracing hooks.
 pub mod otel;
-mod policy_value;
+pub(crate) mod policy_value;
 #[cfg(feature = "profiling")]
 mod profiling;
 pub(crate) mod proxy_policy;

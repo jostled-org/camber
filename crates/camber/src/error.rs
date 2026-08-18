@@ -82,6 +82,19 @@ pub enum RuntimeError {
     #[error("scope drain timed out; children outstanding: {0}")]
     ScopeDrainTimeout(usize),
 
+    /// Every framework-owned participant that failed during one startup or one
+    /// teardown, as one immutable aggregate.
+    ///
+    /// The sole result of an aggregate lifecycle. The flat variants above stay
+    /// for operations outside one: a single timed-out call still answers
+    /// [`RuntimeError::Timeout`], and a caller matching on a teardown reads
+    /// [`LifecycleFailures::primary`] instead of guessing which participant a
+    /// flattened variant came from.
+    ///
+    /// [`LifecycleFailures::primary`]: crate::LifecycleFailures::primary
+    #[error("lifecycle failed: {0}")]
+    Lifecycle(Arc<crate::LifecycleFailures>),
+
     /// An HTTP client, server, or protocol-level failure occurred.
     #[error("http error: {0}")]
     Http(Arc<str>),
