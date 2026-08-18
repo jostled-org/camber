@@ -294,6 +294,29 @@ impl ResponseGuard {
         self.state.resolve(DisconnectCause::Completed);
     }
 
+    /// Resolve this response's lifetime now, and answer with what it resolved to.
+    ///
+    /// The body that owns this guard has to name the terminal it ended on while
+    /// it still holds the guard, and the cause table is what names it. Calling
+    /// this early rather than reading the table twice keeps one owner of that
+    /// decision: the drop below then finds the lifetime already resolved and
+    /// leaves it alone, exactly as it does for a completed response.
+    pub(super) fn settle(&self) -> DisconnectCause {
+        match self.state.cause.get() {
+            Some(cause) => *cause,
+            None => {
+                let proposed = self.cause();
+                self.state.resolve(proposed);
+                // Read back rather than returned from the table: `resolve` is
+                // first-wins, so a completion landing between the check above
+                // and this write is the cause this response actually has. The
+                // cell is set by then, and the value proposed is what it was
+                // set to whenever this call is the one that won.
+                self.state.cause.get().copied().unwrap_or(proposed)
+            }
+        }
+    }
+
     /// Rows 3 through 5: shutdown, then a dying transport, then a stream that
     /// ended early on a connection that is still live.
     fn cause(&self) -> DisconnectCause {

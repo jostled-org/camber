@@ -1,11 +1,48 @@
 use super::Method;
 use super::Response;
+use super::boundary::CrossedBound;
+use super::completion::CompletionTerminal;
+use super::method::RequestMethod;
 pub use super::operation::{InboundTerminal, OperationStage};
+use super::rejection::RejectionProtocol;
 use super::response::HeaderPair;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::RuntimeError;
+
+/// Every name a completion label may carry, as production spells them.
+///
+/// A test seam, not API, on the same footing as [`LifecycleCheckpoint`]. It is
+/// published from the closed vocabularies themselves rather than transcribed
+/// beside them: a case that checked a scraped label against a hand-written list
+/// would go on passing after production gained a name that list has never
+/// heard of.
+///
+/// Read-only. Nothing here selects a terminal, crosses a bound, or records
+/// anything.
+#[doc(hidden)]
+pub struct CompletionVocabulary {
+    /// Every method name a completion can be recorded under.
+    pub methods: Box<[&'static str]>,
+    /// Every dispatch class a completion can be recorded under.
+    pub protocols: Box<[&'static str]>,
+    /// Every terminal class one completed operation can be recorded under.
+    pub terminals: Box<[&'static str]>,
+    /// Every configured bound a completion can name, including stated absence.
+    pub boundaries: Box<[&'static str]>,
+}
+
+/// The closed vocabulary production records completions under.
+#[doc(hidden)]
+pub fn completion_vocabulary() -> CompletionVocabulary {
+    CompletionVocabulary {
+        methods: RequestMethod::vocabulary(),
+        protocols: RejectionProtocol::vocabulary(),
+        terminals: CompletionTerminal::vocabulary(),
+        boundaries: CrossedBound::vocabulary(),
+    }
+}
 
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -552,6 +589,14 @@ struct OperationObservations {
     middleware: AtomicUsize,
     body: AtomicUsize,
     response_head: AtomicUsize,
+    /// Accounts this listener's exits staged, whether or not they were kept.
+    ///
+    /// Every offer, not every keeper: "one answer, one account" is a claim a
+    /// case has to be able to read, and a second exit answering one request
+    /// shows up here rather than as a silence the set-once slot swallowed.
+    completions_staged: AtomicUsize,
+    /// Accounts this listener's terminal owners actually recorded.
+    completions_recorded: AtomicUsize,
 }
 
 /// What one streaming direction's owner published about itself.
@@ -778,6 +823,10 @@ pub struct OperationObservation {
     pub body: usize,
     /// How many times the response-head handoff read an identity.
     pub response_head: usize,
+    /// How many accounts this listener's answering exits staged.
+    pub completions_staged: usize,
+    /// How many accounts this listener's terminal owners recorded.
+    pub completions_recorded: usize,
 }
 
 /// What one listener's direct WebSocket bridges reported about their two
@@ -966,6 +1015,34 @@ impl LifecycleScript {
                     &operation.distinct_identities,
                     id.value(),
                 );
+            },
+        );
+    }
+
+    /// Record that one answering exit staged this request's account.
+    ///
+    /// Inert with no controller registered.
+    pub(in crate::http) fn observe_completion_staged(script: Option<&Self>) {
+        Self::observe(
+            script,
+            |script| &script.operation,
+            |operation| {
+                operation.completions_staged.fetch_add(1, Ordering::Release);
+            },
+        );
+    }
+
+    /// Record that one terminal owner wrote this request's account.
+    ///
+    /// Inert with no controller registered.
+    pub(in crate::http) fn observe_completion_recorded(script: Option<&Self>) {
+        Self::observe(
+            script,
+            |script| &script.operation,
+            |operation| {
+                operation
+                    .completions_recorded
+                    .fetch_add(1, Ordering::Release);
             },
         );
     }
@@ -1657,6 +1734,8 @@ impl LifecycleController {
             middleware: operation.middleware.load(Ordering::Acquire),
             body: operation.body.load(Ordering::Acquire),
             response_head: operation.response_head.load(Ordering::Acquire),
+            completions_staged: operation.completions_staged.load(Ordering::Acquire),
+            completions_recorded: operation.completions_recorded.load(Ordering::Acquire),
         }
     }
 

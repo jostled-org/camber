@@ -1103,8 +1103,28 @@ async fn serve_request(
 ) -> Result<hyper::Response<GuardedBody>, std::convert::Infallible> {
     let bodyless_request = request.method() == hyper::Method::HEAD;
     let (lifetime, guard) = liveness.begin_response();
-    let response = handle_request(request, router, ctx, remote_addr, lifecycle, lifetime).await?;
-    Ok(GuardedBody::attach(response, guard, bodyless_request))
+    // The request clock starts here, before dispatch reads the head, and its
+    // account is read back after the answer has been built. It is the only clock
+    // every route class shares: one per class put three meanings of "request
+    // duration" into one histogram, and one started after the body was read left
+    // out the inbound time a slow or large upload is made of.
+    let account = super::completion::RequestAccount::begin(ctx, lifecycle);
+    let response = handle_request(
+        request,
+        router,
+        ctx,
+        remote_addr,
+        lifecycle,
+        lifetime,
+        &account,
+    )
+    .await?;
+    Ok(GuardedBody::attach(
+        response,
+        guard,
+        bodyless_request,
+        account.into_completion(),
+    ))
 }
 
 fn connection_builder(

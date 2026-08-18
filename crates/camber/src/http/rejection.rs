@@ -13,7 +13,7 @@
 //! below that is private to the crate.
 
 use super::async_proxy::ProxyFailure;
-use super::boundary::{ByteBoundary, DeadlineBoundary};
+use super::boundary::{ByteBoundary, CrossedBound, DeadlineBoundary};
 use super::method::RequestMethod;
 use super::request::Request;
 use super::response::{
@@ -459,6 +459,9 @@ impl Rejection {
     }
 }
 
+/// The name a head that established no dispatch class is recorded under.
+const UNCLASSIFIED_PROTOCOL: &str = "unclassified";
+
 /// Which dispatch class had been selected when a refusal was found.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum RejectionProtocol {
@@ -477,6 +480,26 @@ pub enum RejectionProtocol {
 }
 
 impl RejectionProtocol {
+    /// Every dispatch class, plus the name a head that established none is
+    /// recorded under.
+    ///
+    /// Published from the enum rather than transcribed beside it, so a class
+    /// added here reaches the vocabulary a completion label is checked against.
+    pub(super) fn vocabulary() -> Box<[&'static str]> {
+        [
+            Self::OrdinaryHttp,
+            Self::StreamingHttp,
+            Self::ServerSentEvents,
+            Self::WebSocket,
+            Self::Grpc,
+            Self::Proxy,
+        ]
+        .map(Self::label)
+        .into_iter()
+        .chain([UNCLASSIFIED_PROTOCOL])
+        .collect()
+    }
+
     /// The bounded name this dispatch class is recorded under.
     fn label(self) -> &'static str {
         match self {
@@ -767,6 +790,14 @@ pub(super) struct Rejected {
     diagnostic: Diagnostic,
     disposition: Disposition,
     protected: Option<ProtectedHeader>,
+    /// The configured bound whose crossing produced this refusal.
+    ///
+    /// Carried as the closed vocabulary rather than left inside the diagnostic
+    /// sentence, because the completion record has to name it as a label: text
+    /// an operator reads and text a counter is keyed by are not the same thing,
+    /// and parsing the first to produce the second is how a diagnostic becomes
+    /// unbounded cardinality.
+    crossed: CrossedBound,
 }
 
 impl Rejected {
@@ -781,7 +812,19 @@ impl Rejected {
             diagnostic,
             disposition: Disposition::Reusable,
             protected: None,
+            crossed: CrossedBound::None,
         }
+    }
+
+    /// The configured bound whose crossing produced this refusal.
+    pub(super) const fn crossed(&self) -> CrossedBound {
+        self.crossed
+    }
+
+    /// The same refusal, naming the bound its producer measured.
+    #[must_use]
+    fn over(self, crossed: CrossedBound) -> Self {
+        Self { crossed, ..self }
     }
 
     /// A refusal whose cause is a decision rather than a failed operation.
@@ -856,6 +899,7 @@ impl Rejected {
             Rejection::body_limit(),
             format!("body exceeds the {limit}-byte limit"),
         )
+        .over(CrossedBound::Bytes(ByteBoundary::RequestBody))
     }
 
     /// A streaming consumer measured its payload past the maximum it was
@@ -867,6 +911,7 @@ impl Rejected {
     /// total or one field's — and the peer is told neither.
     fn body_limit_crossed(error: RuntimeError) -> Self {
         Self::plain_closing(Rejection::body_limit(), Arc::new(error))
+            .over(CrossedBound::Bytes(ByteBoundary::RequestBody))
     }
 
     /// A streaming consumer's transport stopped delivering the payload.
@@ -966,6 +1011,7 @@ impl Rejected {
             Rejection::body_limit(),
             format!("{boundary} exceeds the {limit}-byte maximum"),
         )
+        .over(CrossedBound::Bytes(boundary))
     }
 
     /// One streaming direction crossed a configured transfer deadline.
@@ -1034,6 +1080,7 @@ impl Rejected {
             rejection,
             Arc::new(CrossedDeadline::new(boundary, configured)),
         )
+        .over(CrossedBound::Deadline(boundary))
     }
 
     /// No host and no route claims this request target.
@@ -1456,6 +1503,18 @@ impl RequestIdentity {
         self.method.label()
     }
 
+    /// The bounded dispatch class this request is recorded under.
+    ///
+    /// A head answered before any owner established a class has none, and it is
+    /// named rather than left empty: a completion counter whose class label is
+    /// sometimes absent splits one time series into two.
+    fn protocol_label(&self) -> &'static str {
+        match self.protocol {
+            Some(protocol) => protocol.label(),
+            None => UNCLASSIFIED_PROTOCOL,
+        }
+    }
+
     /// Whether the wire answer to this request carries no body.
     fn is_head(&self) -> bool {
         self.method
@@ -1545,6 +1604,11 @@ impl RejectionScope {
     /// The label this request is recorded under.
     pub(super) fn method_label(&self) -> &'static str {
         self.identity.method_label()
+    }
+
+    /// The bounded dispatch class this request is recorded under.
+    pub(super) fn protocol_label(&self) -> &'static str {
+        self.identity.protocol_label()
     }
 
     /// The accepted URI path this request is recorded under.

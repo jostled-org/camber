@@ -1,10 +1,10 @@
 use super::Request;
 use super::async_proxy::UploadDisposition;
 use super::body::{HyperResponseBody, StreamBody};
+use super::completion::RequestAccount;
 use super::handle::{ConnCtx, answer_rejected, run_head_gate};
 use super::head_projection::Gated;
 use super::operation::{OperationEnvelope, OperationStage};
-use super::record::record_scoped;
 use super::rejection::{Rejected, RejectionScope, RequestIdentity};
 use super::request::{RequestHead, RequestOrigin};
 use super::response::HeaderPair;
@@ -156,12 +156,12 @@ fn finish_upstream_stream(
     >,
     ctx: &ConnCtx,
     scope: &RejectionScope,
-    start: std::time::Instant,
+    account: &RequestAccount,
     download: super::transfer::TransferOwner,
 ) -> hyper::Response<HyperResponseBody> {
     let upstream = match forwarded {
         Ok(upstream) => upstream,
-        Err(failure) => return answer_rejected(ctx, scope, refused_forward(failure), start),
+        Err(failure) => return answer_rejected(ctx, scope, refused_forward(failure), account),
     };
     // Recorded from the built response, not from the upstream's status: a
     // response that could not be built answers with its own status, and the
@@ -174,10 +174,10 @@ fn finish_upstream_stream(
     ) {
         Ok(response) => response,
         Err(error) => {
-            return answer_rejected(ctx, scope, Rejected::unrepresentable(error), start);
+            return answer_rejected(ctx, scope, Rejected::unrepresentable(error), account);
         }
     };
-    record_scoped(ctx, scope, response.status().as_u16(), start);
+    account.commit(scope, response.status().as_u16());
     response
 }
 
@@ -237,7 +237,7 @@ pub(super) fn handle_stream_response(
     held_request: Request,
     ctx: &ConnCtx,
     scope: &RejectionScope,
-    start: std::time::Instant,
+    account: &RequestAccount,
     download: super::transfer::TransferOwner,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let parts = stream_resp.into_parts();
@@ -253,11 +253,11 @@ pub(super) fn handle_stream_response(
                 ctx,
                 scope,
                 Rejected::unrepresentable(error),
-                start,
+                account,
             ));
         }
     };
-    record_scoped(ctx, scope, response.status().as_u16(), start);
+    account.commit(scope, response.status().as_u16());
     drop(held_request);
 
     Ok(response)
@@ -269,14 +269,14 @@ pub(super) async fn handle_proxy_stream_response(
     target: &super::async_proxy::ProxyTarget<'_>,
     ctx: &ConnCtx,
     scope: &RejectionScope,
-    start: std::time::Instant,
+    account: &RequestAccount,
     download: super::transfer::TransferOwner,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let proxy_req = super::async_proxy::ProxyRequest::from_request(&req);
 
     let forwarded = super::async_proxy::forward_request_streaming(proxy_req, target).await;
     Ok(finish_upstream_stream(
-        forwarded, ctx, scope, start, download,
+        forwarded, ctx, scope, account, download,
     ))
 }
 
@@ -321,8 +321,8 @@ fn outbound_parts(
 /// is one Camber routes on, and parsing it again would only re-derive what the
 /// head already proved.
 ///
-/// `start` comes from `handle_request`, not from here. One clock per request
-/// means every route class reports the same span into
+/// The account arrives from the served request, not from here. One clock per
+/// request means every route class reports the same span into
 /// `http_request_duration_seconds`; a second `Instant::now()` at this entry
 /// would leave this class's buckets incomparable with all the others.
 ///
@@ -341,7 +341,7 @@ pub(super) async fn dispatch_streaming_proxy(
         ctx,
         origin,
         lifecycle,
-        start,
+        account,
         operation,
         ..
     } = request_dispatch;
@@ -368,7 +368,7 @@ pub(super) async fn dispatch_streaming_proxy(
     // gate that refuses afterwards releases the permit it granted.
     let admitted = match super::body_admission::admit(&plan, &head, script.as_ref()).await {
         Ok(admitted) => admitted,
-        Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, start)),
+        Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, account)),
     };
 
     // Middleware gate check using a lightweight Request (empty body). The gate
@@ -446,7 +446,7 @@ async fn forwarded_stream(
     let &super::handle::RequestDispatch {
         ctx,
         lifecycle,
-        start,
+        account,
         operation,
         ..
     } = request_dispatch;
@@ -467,9 +467,9 @@ async fn forwarded_stream(
     let forwarded = match super::handle::pre_commit(forwarding, operation, script.as_deref()).await
     {
         Ok(forwarded) => forwarded,
-        Err(failure) => return super::handle::answer_inbound_failure(ctx, scope, failure, start),
+        Err(failure) => return super::handle::answer_inbound_failure(ctx, scope, failure, account),
     };
     operation.observe(script.as_deref(), OperationStage::ResponseHead);
     let download = operation.download(target.upstream.download(), script);
-    finish_upstream_stream(forwarded, ctx, scope, start, download)
+    finish_upstream_stream(forwarded, ctx, scope, account, download)
 }

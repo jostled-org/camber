@@ -1,3 +1,4 @@
+use super::completion::Completion;
 use super::disconnect::ResponseGuard;
 use super::operation::InboundTerminal;
 use super::transfer::{ChannelSource, Transfer, TransferOwner, UpstreamSource};
@@ -21,22 +22,34 @@ pub(super) enum BodyError {
     },
 }
 
-/// Response body that owns this response's disconnect guard.
+/// Response body that owns this response's disconnect guard and its account.
 ///
 /// The guard moves here from the per-request service future, so the body is
 /// its final holder: a service future dropped after handing off a response can
 /// no longer resolve anything. The body establishes `Completed` when its
 /// content has been produced to Hyper.
+///
+/// It is therefore also this operation's true terminal, which is why the
+/// account the answering exit staged is recorded from here and nowhere else. A
+/// record written at the head would name a streaming, proxied, gRPC, or
+/// upgraded request as finished while every byte of it was still owed.
 pub(super) struct GuardedBody {
     inner: HyperResponseBody,
     guard: ResponseGuard,
     /// Bytes left to produce when the length is known before the first poll.
     /// `None` for a body whose length only its end-of-stream can report.
     remaining: Option<u64>,
+    /// The account this response owes, until its terminal writes it.
+    ///
+    /// `None` once recorded, and `None` from the start for a response no Camber
+    /// exit answered.
+    completion: Option<Completion>,
+    /// The terminal this body itself fixed, if a bound ended it.
+    fixed: Option<InboundTerminal>,
 }
 
 impl GuardedBody {
-    /// Move the armed guard into the response's body.
+    /// Move the armed guard and the staged account into the response's body.
     ///
     /// `bodyless_request` is the one fact about the request the body cannot
     /// read off itself: a `HEAD` gets a response Hyper refuses to write a body
@@ -45,6 +58,7 @@ impl GuardedBody {
         response: hyper::Response<HyperResponseBody>,
         guard: ResponseGuard,
         bodyless_request: bool,
+        completion: Option<Completion>,
     ) -> hyper::Response<Self> {
         use hyper::body::Body;
         let (parts, inner) = response.into_parts();
@@ -56,6 +70,8 @@ impl GuardedBody {
             inner,
             guard,
             remaining,
+            completion,
+            fixed: None,
         };
         // Both halves of "Hyper will not poll this body". The report is asked
         // of the wrapper, which forwards it, so it is the exact report Hyper
@@ -121,6 +137,33 @@ impl GuardedBody {
             Some(_) => {}
         }
     }
+
+    /// Keep the typed terminal a bound this body enforced ended it on.
+    ///
+    /// Read off the error the transport is about to be given, so an operator's
+    /// record and the peer's transport disposition name the same cause. Only a
+    /// transfer terminal is one: an upstream read that failed is the source's
+    /// own account, and the settled response lifetime names that row.
+    fn ended_on(&mut self, error: &BodyError) {
+        match error {
+            BodyError::Transfer { terminal, .. } => self.fixed = Some(*terminal),
+            BodyError::UpstreamProxy(_) => {}
+        }
+    }
+}
+
+impl Drop for GuardedBody {
+    /// Record this operation's one account, at the terminal it actually reached.
+    ///
+    /// The lifetime is settled here rather than left to the guard's own drop,
+    /// because the account has to name the cause: the guard below then finds it
+    /// already resolved and leaves it alone, so one cause table still decides.
+    fn drop(&mut self) {
+        match self.completion.take() {
+            Some(completion) => completion.record(self.guard.settle(), self.fixed),
+            None => {}
+        }
+    }
 }
 
 impl hyper::body::Body for GuardedBody {
@@ -139,7 +182,8 @@ impl hyper::body::Body for GuardedBody {
                 this.produced(frame);
                 this.last_frame();
             }
-            _ => {}
+            std::task::Poll::Ready(Some(Err(error))) => this.ended_on(error),
+            std::task::Poll::Pending => {}
         }
         outcome
     }

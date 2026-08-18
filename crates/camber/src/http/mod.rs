@@ -115,6 +115,7 @@ mod boundary;
 mod buffer_config;
 mod checked_collect;
 mod client;
+mod completion;
 /// Response compression helpers.
 pub mod compression;
 mod conn;

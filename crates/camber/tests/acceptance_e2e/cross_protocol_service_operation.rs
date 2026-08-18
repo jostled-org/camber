@@ -2395,3 +2395,187 @@ async fn matrix_rpc(addr: std::net::SocketAddr, credentialed: bool) -> http_supp
     client.close().await;
     answered
 }
+
+// ---------------------------------------------------------------------------
+// 15.T3: one envelope, one chain, one account, per admitted row
+// ---------------------------------------------------------------------------
+
+/// What one row's own listener published while that row ran.
+///
+/// Deltas rather than totals: the observations are cumulative per listener, and
+/// the whole claim is per row. A row read against a total already driven past
+/// its threshold by an earlier row is a predicate that cannot fail.
+struct OwnedOnce {
+    envelopes: usize,
+    identities: usize,
+    middleware: usize,
+    staged: usize,
+    recorded: usize,
+    permits: usize,
+}
+
+impl OwnedOnce {
+    /// What `controller` published between `before` and now.
+    fn between(
+        before: &camber::http::mock::OperationObservation,
+        controller: &LifecycleController,
+    ) -> Self {
+        let after = controller.operations_observed();
+        Self {
+            envelopes: after.admitted - before.admitted,
+            identities: after.distinct_identities - before.distinct_identities,
+            middleware: after.middleware - before.middleware,
+            staged: after.completions_staged - before.completions_staged,
+            recorded: after.completions_recorded - before.completions_recorded,
+            permits: controller.body_permit_owners_dropped(),
+        }
+    }
+}
+
+/// Wait until one row's account has been recorded, and report what it owned.
+///
+/// The record is written where the operation ends, which for several of these
+/// classes is after the peer already has its answer. The wait is bounded and its
+/// expiry is the failure, so a row that never records fails here rather than
+/// reading a zero it cannot explain.
+fn owned_once(
+    before: &camber::http::mock::OperationObservation,
+    controller: &LifecycleController,
+    label: &str,
+) -> OwnedOnce {
+    let settled = http_support::poll_until(BOUND, || {
+        OwnedOnce::between(before, controller).recorded >= 1
+    });
+    let owned = OwnedOnce::between(before, controller);
+    assert!(
+        settled,
+        "{label}: no account was recorded within {BOUND:?}: staged {}, recorded {}",
+        owned.staged, owned.recorded,
+    );
+    owned
+}
+
+/// Assert one admitted row owned exactly one of each.
+fn assert_owned_once(owned: &OwnedOnce, label: &str) {
+    assert_eq!(owned.envelopes, 1, "{label}: envelopes minted");
+    assert_eq!(owned.identities, 1, "{label}: distinct identities read");
+    assert_eq!(owned.middleware, 1, "{label}: middleware executions");
+    assert_eq!(
+        owned.staged, 1,
+        "{label}: accounts staged by an answering exit"
+    );
+    assert_eq!(
+        owned.recorded, 1,
+        "{label}: accounts recorded at a terminal"
+    );
+}
+
+/// Assert one row that never reached a Camber owner left nothing behind.
+fn assert_owned_nothing(owned: &OwnedOnce, label: &str) {
+    assert_eq!(owned.envelopes, 0, "{label}: an envelope was minted");
+    assert_eq!(owned.middleware, 0, "{label}: a chain ran");
+    assert_eq!(owned.staged, 0, "{label}: an account was staged");
+    assert_eq!(owned.recorded, 0, "{label}: an account was recorded");
+}
+
+/// The classes 15.T3 drives over the host-routed matrix and reads one account
+/// for.
+///
+/// The SSE feed is not among them: its producer runs until its peer goes away,
+/// so the row that owns it is the disconnect row in 14.T2 rather than a whole
+/// exchange here.
+const OWNED_HTTP_CLASSES: [(&str, &str); 4] = [
+    ("ordinary http", MATRIX_HTTP),
+    ("generic stream", MATRIX_STREAM),
+    ("buffered proxy", MATRIX_BUFFERED),
+    ("streaming proxy", MATRIX_STREAMED),
+];
+
+/// 15.T3
+///
+/// Every admitted class over the same public matrix 14.T2 serves owns exactly
+/// one envelope, one middleware execution, one staged account, one recorded
+/// account, and the wire status its own owner committed. The two rows that
+/// reach no Camber owner at all — a chain that refused before its terminal, and
+/// a head Hyper never admitted — are read the same way and prove the absent
+/// owners stay absent.
+#[test]
+fn cross_protocol_operation_owns_one_envelope_middleware_and_completion() {
+    camber::runtime::builder()
+        .run(|| {
+            camber::runtime::block_on(async {
+                let fixture = MatrixFixture::serve();
+                assert_each_admitted_class_owns_one_account(&fixture).await;
+                assert_grpc_owns_one_account(&fixture).await;
+                assert_short_circuit_owns_its_account_and_nothing_else(&fixture).await;
+                assert_unadmitted_head_owns_nothing(&fixture).await;
+                fixture.tear_down("owned once");
+            });
+        })
+        .expect("the owned-account matrix ran to completion");
+}
+
+/// Each admitted HTTP class owns one of everything, and releases its permit.
+async fn assert_each_admitted_class_owns_one_account(fixture: &MatrixFixture) {
+    for (class, path) in OWNED_HTTP_CLASSES {
+        let before = fixture.controller.operations_observed();
+        let answered = matrix_exchange(fixture.addr(), path, true).await;
+        assert_eq!(answered.status, 200, "{class}: wire status");
+
+        let owned = owned_once(&before, &fixture.controller, class);
+        assert_owned_once(&owned, class);
+        http_support::assert_owners_released(&fixture.controller, owned.permits, class);
+    }
+}
+
+/// The gRPC class owns the same one of everything, at the boundary tonic owns.
+async fn assert_grpc_owns_one_account(fixture: &MatrixFixture) {
+    let controller = fixture.grpc.controller();
+    let before = controller.operations_observed();
+    let answered = matrix_rpc(fixture.grpc_addr(), true).await;
+    assert_eq!(answered.status, 200, "grpc: wire status");
+    assert_owned_once(&owned_once(&before, controller, "grpc"), "grpc");
+}
+
+/// A chain that refused still owns one envelope, one execution, and one account.
+///
+/// The negative half is what makes it a control: no specialized owner ran behind
+/// the refusal, so the account this row recorded is the chain's own answer and
+/// not a producer's.
+async fn assert_short_circuit_owns_its_account_and_nothing_else(fixture: &MatrixFixture) {
+    let label = "short-circuited";
+    let entered = fixture.work.entered();
+    let before = fixture.controller.operations_observed();
+    let refused = matrix_exchange(fixture.addr(), MATRIX_STREAM, false).await;
+    assert_eq!(refused.status, MATRIX_REFUSED, "{label}: wire status");
+
+    assert_owned_once(&owned_once(&before, &fixture.controller, label), label);
+    assert_eq!(
+        fixture.work.entered(),
+        entered,
+        "{label}: a producer ran behind a chain that refused",
+    );
+}
+
+/// A head Hyper never admitted reaches no envelope, no chain, and no account.
+async fn assert_unadmitted_head_owns_nothing(fixture: &MatrixFixture) {
+    let label = "unadmitted head";
+    let addr = fixture.addr();
+    let before = fixture.controller.operations_observed();
+    let answered = tokio::task::spawn_blocking(move || {
+        let mut peer = http_support::connect(addr).expect("the unadmitted peer connected");
+        // A request line Hyper's parser refuses outright: the head never becomes
+        // a request, so no Camber owner is ever created for it.
+        std::io::Write::write_all(&mut peer, b"GET / HTTP/9.9\r\nHost: matrix.test\r\n\r\n")
+            .expect("the unadmitted head was written");
+        http_support::drain_to_close(&mut peer, BOUND)
+    })
+    .await
+    .expect("the unadmitted peer settled")
+    .expect("the unadmitted peer read its answer");
+    assert!(
+        !answered.starts_with("HTTP/1.1 200"),
+        "{label}: the parser admitted a head it should have refused: {answered}",
+    );
+    assert_owned_nothing(&OwnedOnce::between(&before, &fixture.controller), label);
+}

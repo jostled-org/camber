@@ -42,12 +42,36 @@ pub enum DeadlineBoundary {
 }
 
 impl DeadlineBoundary {
+    /// Every deadline this vocabulary declares.
+    ///
+    /// Named exhaustively so an operator-facing vocabulary can be published
+    /// from the enum rather than transcribed beside it: a name a label may
+    /// carry and a name this enum spells are the same list or they are two
+    /// lists that drift.
+    pub(super) const ALL: [Self; 15] = [
+        Self::Header,
+        Self::RequestBodyIdle,
+        Self::RequestTotal,
+        Self::TransferIdle,
+        Self::TransferTotal,
+        Self::ProxyConnect,
+        Self::ProxyRequest,
+        Self::ProxyUpstreamIdle,
+        Self::ClientConnect,
+        Self::ClientRequest,
+        Self::ClientResponseIdle,
+        Self::ResourceStartupHealth,
+        Self::ResourcePeriodicHealth,
+        Self::ResourceShutdown,
+        Self::AggregateShutdown,
+    ];
+
     /// The bounded name this deadline is reported and counted under.
     ///
     /// A closed vocabulary of static text. An operator's error message and, in
     /// time, an operator's metric label both read it, so it can never become a
     /// value derived from a request.
-    pub(crate) const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Header => "header",
             Self::RequestBodyIdle => "request_body_idle",
@@ -94,14 +118,25 @@ pub enum ByteBoundary {
 }
 
 impl ByteBoundary {
+    /// Every byte maximum this vocabulary declares, for the reason
+    /// [`DeadlineBoundary::ALL`] exists.
+    pub(super) const ALL: [Self; 7] = [
+        Self::RequestBody,
+        Self::TransferUpload,
+        Self::TransferDownload,
+        Self::ClientResponse,
+        Self::ProxyBufferedResponse,
+        Self::StaticFile,
+        Self::ProfilingResponse,
+    ];
+
     /// The bounded name this maximum is reported and counted under.
     ///
     /// A closed vocabulary of static text, for the reason
-    /// [`DeadlineBoundary::label`] is one: an operator's error message reads
-    /// it, so it can never become a value derived from a request. Private
-    /// until an owner outside this module reports one, which is the same rule
-    /// that would widen it.
-    const fn label(self) -> &'static str {
+    /// [`DeadlineBoundary::label`] is one: an operator's error message and an
+    /// operator's completion label both read it, so it can never become a value
+    /// derived from a request.
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::RequestBody => "request_body",
             Self::TransferUpload => "transfer_upload",
@@ -117,5 +152,43 @@ impl ByteBoundary {
 impl std::fmt::Display for ByteBoundary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
+    }
+}
+
+/// Which configured bound one service operation crossed, over both vocabularies.
+///
+/// A deadline and a byte maximum are different policies, but "which bound ended
+/// this work" is one question, and the owners that answer it — a refusal, a
+/// selected terminal, a completion record — each answer it once. Absence is a
+/// name of its own rather than a missing value: a counter whose boundary label
+/// is sometimes absent splits one time series into two.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(super) enum CrossedBound {
+    /// This operation crossed no configured bound.
+    #[default]
+    None,
+    Deadline(DeadlineBoundary),
+    Bytes(ByteBoundary),
+}
+
+impl CrossedBound {
+    /// Every name a crossed-bound label may carry, over both vocabularies.
+    ///
+    /// Built from the two declared lists and the stated absence, so a published
+    /// vocabulary and the bounds production can actually name are one list.
+    pub(super) fn vocabulary() -> Box<[&'static str]> {
+        std::iter::once(Self::None.label())
+            .chain(DeadlineBoundary::ALL.map(|deadline| Self::Deadline(deadline).label()))
+            .chain(ByteBoundary::ALL.map(|bytes| Self::Bytes(bytes).label()))
+            .collect()
+    }
+
+    /// The bounded name this bound is reported and counted under.
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Deadline(deadline) => deadline.label(),
+            Self::Bytes(bytes) => bytes.label(),
+        }
     }
 }

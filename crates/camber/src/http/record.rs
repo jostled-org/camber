@@ -1,5 +1,7 @@
+use super::boundary::CrossedBound;
+use super::completion::{CompletionTerminal, Telemetry};
 use super::handle::ConnCtx;
-use super::rejection::{RejectionKind, RejectionScope, RequestId};
+use super::rejection::{RejectionKind, RejectionScope};
 
 fn build_status_text_table() -> Box<[Box<str>]> {
     (100u16..600)
@@ -11,76 +13,66 @@ fn build_status_text_table() -> Box<[Box<str>]> {
 ///
 /// Grouped rather than passed one value at a time, because every field is read
 /// by both the event and the counters: a caller that supplied the status of one
-/// response and the path of another would be describing a request that never
-/// happened.
+/// response and the terminal of another would be describing a request that
+/// never happened.
+///
+/// The identity is the scope every exit already names the request by, borrowed
+/// rather than unpacked: the request identifier and the raw path are the two
+/// values this record carries into an event and deliberately never into a
+/// label, and reading them off one owner is what keeps that split in one place.
 pub(super) struct Completed<'a> {
-    pub(super) request_id: RequestId,
-    pub(super) method: &'static str,
-    pub(super) path: &'a str,
+    pub(super) scope: &'a RejectionScope,
     pub(super) status: u16,
+    pub(super) terminal: CompletionTerminal,
+    pub(super) boundary: CrossedBound,
 }
 
 /// Record a completed request as a tracing event and Prometheus metrics.
-pub(super) fn record_request(ctx: &ConnCtx, completed: Completed<'_>, start: std::time::Instant) {
-    let elapsed = start.elapsed();
-    let Completed {
-        request_id,
-        method,
-        path,
+///
+/// The elapsed time is handed in rather than measured here: the clock belongs
+/// to the request, and the owner that watched it end is the only one that can
+/// say how long the whole head-to-terminal span was.
+pub(super) fn record_request(
+    telemetry: Telemetry,
+    completed: &Completed<'_>,
+    elapsed: std::time::Duration,
+) {
+    let &Completed {
+        scope,
         status,
+        terminal,
+        boundary,
     } = completed;
 
-    if ctx.tracing_enabled {
+    if telemetry.events() {
         tracing::info!(
-            request_id = request_id.as_str(),
-            method,
-            path,
+            request_id = scope.request_id().as_str(),
+            method = scope.method_label(),
+            path = scope.path(),
             status,
+            protocol = scope.protocol_label(),
+            terminal = terminal.label(),
+            boundary = boundary.label(),
             latency_ms = elapsed.as_millis(),
             "request completed"
         );
     }
 
-    if ctx.metrics_handle.is_some() {
-        let status_label = status_to_label(status);
-        metrics::counter!(
-            "http_requests_total",
-            "method" => method,
-            "status" => status_label,
-        )
-        .increment(1);
-        metrics::histogram!(
-            "http_request_duration_seconds",
-            "method" => method,
-            "status" => status_label,
-        )
-        .record(elapsed.as_secs_f64());
+    if telemetry.metrics() {
+        // Built once and read by both instruments. Two spellings of one label
+        // set are two things that can disagree, and a counter and a histogram
+        // that disagree about how a request is labelled cannot be read together.
+        let labels = [
+            metrics::Label::from_static_parts("method", scope.method_label()),
+            metrics::Label::from_static_parts("status", status_to_label(status)),
+            metrics::Label::from_static_parts("protocol", scope.protocol_label()),
+            metrics::Label::from_static_parts("terminal", terminal.label()),
+            metrics::Label::from_static_parts("boundary", boundary.label()),
+        ];
+        metrics::counter!("http_requests_total", labels.iter()).increment(1);
+        metrics::histogram!("http_request_duration_seconds", labels.iter())
+            .record(elapsed.as_secs_f64());
     }
-}
-
-/// Record one request answered through its rejection scope.
-///
-/// The scope is what names a request at the boundary every answer leaves
-/// through, so the identity it recorded is read off the scope rather than
-/// rebuilt beside it. Stated once because the buffered exit and the streaming
-/// proxy exit both answer that way, and two copies are two things that can
-/// disagree about what names a request.
-pub(super) fn record_scoped(
-    ctx: &ConnCtx,
-    scope: &RejectionScope,
-    status: u16,
-    start: std::time::Instant,
-) {
-    record_request(
-        ctx,
-        Completed {
-            request_id: scope.request_id(),
-            method: scope.method_label(),
-            path: scope.path(),
-            status,
-        },
-        start,
-    );
 }
 
 /// Count one refusal under its category and the status the peer was given.

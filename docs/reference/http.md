@@ -437,9 +437,25 @@ Each request also records one `request completed` event carrying the same identi
 and the same sent status. For a replaced refusal that event, and `http_requests_total`,
 report the answer the peer actually got.
 
+That record is written where the operation actually ends, not where its head is built.
+A buffered answer ends when Hyper has written its body; a stream, an SSE feed, a proxied
+download, and a gRPC answer end when their bodies do; a WebSocket upgrade ends at the
+committed `101`, after which the session reports through its own terminals. So the
+duration covers the whole span from admitted head to terminal, and a request that is
+still streaming has not been counted yet.
+
+Two fields name how it ended. `terminal` is the class the operation ended on —
+`completed`, `disconnect`, `stream_reset`, `server_shutdown`, or the deadline,
+cancellation, and byte-limit terminals. `boundary` is the configured bound that ended
+it, drawn from the same `DeadlineBoundary` and `ByteBoundary` vocabularies every typed
+failure names, or `none` when the operation crossed no bound. The highest-precedence
+terminal any owner fixed is the one recorded.
+
 With metrics enabled, `http_rejections_total` counts refusals under two labels: `kind`
-and `status`. Both vocabularies are closed. A request identifier, a path, a route, a
-peer address, and an error string are never labels.
+and `status`. `http_requests_total` and `http_request_duration_seconds` carry five:
+`method`, `status`, `protocol`, `terminal`, and `boundary`. Every vocabulary is closed.
+A request identifier, a path, a route, a peer address, and an error string are never
+labels — they appear in the structured events, where cardinality is not a cost.
 
 ## Cookies
 

@@ -57,6 +57,19 @@ impl RequestMethod {
         }
     }
 
+    /// Every name a method label may carry.
+    ///
+    /// The routable methods plus the one sentinel every other method is
+    /// recorded under, so the label vocabulary stays closed however many
+    /// methods a peer invents.
+    pub(super) fn vocabulary() -> Box<[&'static str]> {
+        Method::ALL
+            .map(Method::as_str)
+            .into_iter()
+            .chain([UNNAMEABLE_METHOD])
+            .collect()
+    }
+
     /// The bounded label this method is recorded and counted under.
     pub(super) fn label(&self) -> &'static str {
         match self {
@@ -112,6 +125,20 @@ impl std::str::FromStr for Method {
 }
 
 impl Method {
+    /// Every method Camber routes on.
+    ///
+    /// Named exhaustively so the recorded label vocabulary is published from
+    /// the enum rather than transcribed beside it.
+    pub(super) const ALL: [Self; 7] = [
+        Self::Get,
+        Self::Post,
+        Self::Put,
+        Self::Delete,
+        Self::Patch,
+        Self::Head,
+        Self::Options,
+    ];
+
     /// Number of HTTP method variants.
     pub(super) const COUNT: usize = 7;
 
