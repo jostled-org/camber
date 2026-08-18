@@ -1,11 +1,12 @@
-//! gRPC: tonic owns the response body, so the handoff is Camber's last
-//! observation of the request and is where `Completed` is established.
+//! gRPC: Camber owns the body around tonic's answer, so `Completed` is
+//! established where every other response establishes it — at the body's own
+//! terminal, once tonic's last frame and its trailers have been produced.
 //!
-//! Observed through the production middleware gate, with the RPC parked inside
-//! tonic's handler: the signal must already be `Completed` while tonic still
-//! owes every byte of the response. Drop the handoff transition and nothing can
-//! resolve at that point — the guard is still alive in the response body — so
-//! the observation times out instead of passing on a drained body's frames.
+//! Observed through the production middleware gate, which arms a watcher that
+//! outlives the service future Hyper drops. The RPC is parked inside tonic's
+//! handler first, so the watcher is armed while tonic still owes every byte;
+//! releasing it and reading the reply is what makes the resolved cause the
+//! body's own, and not a transition taken before the answer existed.
 
 use super::fixture::bounded;
 use super::probes::{EntryBarrier, Report, StageReceiver, Stages, entry_barrier, staged};
@@ -136,14 +137,17 @@ fn grpc_request_signal_resolves_completed_via_middleware_gate() {
         // The entry barrier is the proof that the RPC is outstanding, so no
         // timer re-proves it: `await_entry` returns only once tonic's handler
         // has taken the stage receiver, and nothing advances that stage until
-        // the release below. Tonic therefore still owes every frame and every
-        // trailer while the cause is read.
+        // the release below. The gate's watcher is therefore armed while tonic
+        // still owes every frame and every trailer.
         park.await_entry();
-        let (watched, cause) = gate.watched_cause();
 
         park.release();
         let message =
             bounded("the gRPC call to return", call).expect("the gRPC call task did not return");
+        // Read after the answer, because Camber's own body is what resolves it:
+        // the guard lives in the response body around tonic's, and that body
+        // completes on the trailer set tonic wrote.
+        let (watched, cause) = gate.watched_cause();
         GrpcOutcome {
             watched,
             cause,
@@ -160,6 +164,6 @@ fn grpc_request_signal_resolves_completed_via_middleware_gate() {
     assert_eq!(
         observed.cause,
         DisconnectCause::Completed,
-        "a gRPC request whose response tonic had not begun did not resolve Completed at the handoff"
+        "a gRPC response Camber produced in full did not resolve Completed at its body's terminal"
     );
 }

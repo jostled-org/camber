@@ -66,15 +66,9 @@ fn unary_signature(method: &prost_build::Method) -> Option<String> {
     }
 }
 
-fn emit_trait_method(method: &prost_build::Method, trait_name: &str, buf: &mut String) {
-    match unary_signature(method) {
-        Some(sig) => buf.push_str(&format!("        {sig};\n")),
-        None => {
-            let method_name = &method.name;
-            buf.push_str(&format!(
-                "        compile_error!(\"camber-build: streaming RPCs are not yet supported (method `{method_name}` in service `{trait_name}`)\");\n"
-            ));
-        }
+fn emit_trait_method(method: &prost_build::Method, buf: &mut String) {
+    if let Some(sig) = unary_signature(method) {
+        buf.push_str(&format!("        {sig};\n"));
     }
 }
 
@@ -89,7 +83,25 @@ fn emit_bridge_method(method: &prost_build::Method, buf: &mut String) {
     }
 }
 
+/// Whether every method on one service has the shape the async wrapper covers.
+///
+/// The wrapper exists to spare a unary service tonic's own trait. It has no
+/// spelling for a streaming method, so a service with one gets no wrapper at
+/// all and is implemented through tonic's generated trait directly. Emitting a
+/// `compile_error!` into the wrapper instead made a single streaming RPC
+/// anywhere in a proto file fail the whole generated module — including for
+/// callers that only ever wanted the tonic server.
+fn is_fully_unary(service: &prost_build::Service) -> bool {
+    service
+        .methods
+        .iter()
+        .all(|method| unary_signature(method).is_some())
+}
+
 fn generate_service_wrapper(service: &prost_build::Service, buf: &mut String) {
+    if !is_fully_unary(service) {
+        return;
+    }
     let trait_name = &service.name;
     let base = snake_case(trait_name);
     let mod_name = format!("{base}_service");
@@ -113,7 +125,7 @@ fn generate_service_wrapper(service: &prost_build::Service, buf: &mut String) {
     ));
 
     for method in &service.methods {
-        emit_trait_method(method, trait_name, buf);
+        emit_trait_method(method, buf);
     }
     buf.push_str("    }\n\n");
 

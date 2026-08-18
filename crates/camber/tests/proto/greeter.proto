@@ -6,6 +6,15 @@ service Greeter {
   rpc SayHello (HelloRequest) returns (HelloReply);
 }
 
+// The full-duplex service the gRPC handoff proofs drive.
+//
+// Held apart from Greeter rather than added to it: a method on Greeter would
+// force every existing fixture that implements that trait to grow a body it
+// never exercises.
+service Streamer {
+  rpc Echo (stream HelloRequest) returns (stream HelloReply);
+}
+
 message HelloRequest {
   string name = 1;
 }

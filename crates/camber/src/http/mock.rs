@@ -57,6 +57,22 @@ pub enum LifecycleCheckpoint {
     StreamingUpstreamHeadReady,
     StreamingUploadQuiesced,
     BeforeStreamingResponseCommit,
+    /// Tonic has produced a response head Camber has not committed.
+    ///
+    /// Held here, a case makes a local upload or operation cause ready in the
+    /// same scheduling turn as the head, which is the tie the declared
+    /// precedence decides. The streaming proxy's counterpart is
+    /// [`Self::StreamingUpstreamHeadReady`].
+    #[cfg(feature = "grpc")]
+    GrpcHeadReady,
+    /// Camber committed tonic's response head and now owns only the two bodies
+    /// around it.
+    ///
+    /// The post-handoff boundary: past it no Camber cause reaches a rejection
+    /// mapper, tonic owns status and trailers, and each direction ends its own
+    /// body.
+    #[cfg(feature = "grpc")]
+    GrpcHandoffCommitted,
     SseBufferConfigured(usize),
     WebSocketOutgoingBufferConfigured(usize),
     WebSocketIncomingBufferConfigured(usize),

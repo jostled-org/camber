@@ -66,16 +66,7 @@ async fn try_read_answer(
 ) -> Result<HttpResponse, h2::Error> {
     let response = bounded(response, remaining(deadline), "HTTP/2 response head").await?;
     let status = response.status().as_u16();
-    let headers = response
-        .headers()
-        .iter()
-        .map(|(name, value)| {
-            (
-                Box::from(name.as_str()),
-                Box::from(String::from_utf8_lossy(value.as_bytes()).as_ref()),
-            )
-        })
-        .collect();
+    let headers = header_pairs(response.headers());
     let body = drain_h2_body(
         response.into_body(),
         "HTTP/2 response body frame",
@@ -430,6 +421,144 @@ impl H2RequestStream {
             .expect("this HTTP/2 stream's answer was already read");
         read_answer(response, Instant::now() + self.bound).await
     }
+
+    /// Read this stream's committed head, leaving its body unread.
+    ///
+    /// [`Self::answer`] reads the head and drains the body in one call, which
+    /// no case whose request half outlives the head can use: a full-duplex
+    /// exchange still owes request frames while the answer is already on the
+    /// wire. This hands the read half back instead, so a case can commit the
+    /// head, send more payload, and settle the download afterwards.
+    pub async fn commit(&mut self) -> H2ReadHalf {
+        let response = self
+            .response
+            .take()
+            .expect("this HTTP/2 stream's answer was already read");
+        let response = bounded(response, self.bound, "HTTP/2 response head")
+            .await
+            .expect("no HTTP/2 response head");
+        let status = response.status().as_u16();
+        let headers = header_pairs(response.headers());
+        H2ReadHalf {
+            status,
+            headers,
+            body: response.into_body(),
+            bound: self.bound,
+        }
+    }
+}
+
+/// The read half of one committed exchange, and what it ended on.
+///
+/// Held apart from the sending half because a full-duplex exchange's two
+/// directions end independently: the answer can be settled while the request
+/// body is still open, and the request body can fail after the answer's head is
+/// already on the wire.
+pub struct H2ReadHalf {
+    status: u16,
+    headers: Box<[(Box<str>, Box<str>)]>,
+    body: h2::RecvStream,
+    bound: Duration,
+}
+
+/// What one settled download carried, down to the trailers behind it.
+///
+/// The trailers are read rather than folded into the headers: a gRPC status
+/// lives in exactly one of the two, and a case proving which owner produced it
+/// cannot be written against a map that merged them.
+#[derive(Debug)]
+pub struct H2Settled {
+    pub status: u16,
+    pub headers: Box<[(Box<str>, Box<str>)]>,
+    pub bytes: usize,
+    /// Whether the stream was reset under its committed head rather than ended.
+    pub reset: bool,
+    pub trailers: Box<[(Box<str>, Box<str>)]>,
+}
+
+impl H2Settled {
+    /// The first value one trailer name carries, if the peer sent it.
+    pub fn trailer(&self, name: &str) -> Option<&str> {
+        pair_value(&self.trailers, name)
+    }
+
+    /// The first value one response-header name carries, if the peer sent it.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        pair_value(&self.headers, name)
+    }
+}
+
+impl H2ReadHalf {
+    /// This exchange's committed status.
+    pub const fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Read what is left of this download: its payload, its end, and its
+    /// trailers.
+    ///
+    /// A reset under an answered head is this half's answer rather than a
+    /// fault: the status is already on the wire and no later owner can replace
+    /// it. Trailers are read only for a stream that ended, because a reset
+    /// stream has none to carry.
+    pub async fn settle(mut self) -> H2Settled {
+        let deadline = Instant::now() + self.bound;
+        let mut bytes = 0;
+        let mut reset = false;
+        while let Some(chunk) =
+            bounded(self.body.data(), remaining(deadline), "HTTP/2 answer body").await
+        {
+            match chunk {
+                Ok(chunk) => {
+                    self.body
+                        .flow_control()
+                        .release_capacity(chunk.len())
+                        .expect("the HTTP/2 reader could not release its capacity");
+                    bytes += chunk.len();
+                }
+                Err(_) => {
+                    reset = true;
+                    break;
+                }
+            }
+        }
+        let trailers = match reset {
+            true => Box::default(),
+            false => bounded(self.body.trailers(), remaining(deadline), "HTTP/2 trailers")
+                .await
+                .ok()
+                .flatten()
+                .map_or_else(Box::default, |trailers| header_pairs(&trailers)),
+        };
+        H2Settled {
+            status: self.status,
+            headers: self.headers,
+            bytes,
+            reset,
+            trailers,
+        }
+    }
+}
+
+/// Read one header map into the owned pairs every answer here carries.
+fn header_pairs(headers: &::http::HeaderMap) -> Box<[(Box<str>, Box<str>)]> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                Box::from(name.as_str()),
+                Box::from(String::from_utf8_lossy(value.as_bytes()).as_ref()),
+            )
+        })
+        .collect()
+}
+
+/// The first value one name carries in a set of wire pairs.
+fn pair_value<'a>(pairs: &'a [(Box<str>, Box<str>)], name: &str) -> Option<&'a str> {
+    pairs
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_ref())
 }
 
 /// Read one accepted push as the offer outcome it is.

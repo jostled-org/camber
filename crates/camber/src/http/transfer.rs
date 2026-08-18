@@ -161,7 +161,7 @@ fn frame_step(frame: hyper::body::Frame<Bytes>) -> SourceStep {
 }
 
 /// Name one read frame by whether it carried payload.
-fn step_of(data: Bytes) -> SourceStep {
+pub(super) fn step_of(data: Bytes) -> SourceStep {
     match data.is_empty() {
         true => SourceStep::Empty,
         false => SourceStep::Data(data),
@@ -290,6 +290,17 @@ pub(super) struct Transfer<S> {
     /// of a decision cannot change which sources that decision was made over.
     selecting: Option<InboundReady>,
     observer: Option<Arc<LifecycleScript>>,
+}
+
+impl<S> Transfer<S> {
+    /// The source this transfer owns.
+    ///
+    /// For the one consumer whose source carries something a transfer never
+    /// does: tonic's response body ends with a trailer set, which carries no
+    /// payload byte and so never crosses this owner as a frame.
+    pub(super) const fn source(&self) -> &S {
+        &self.source
+    }
 }
 
 impl<S: TransferSource> Transfer<S> {

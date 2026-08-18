@@ -1,4 +1,4 @@
-use super::body::{GrpcBody, HyperResponseBody};
+use super::grpc_handoff::GrpcRequestBody;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
@@ -11,7 +11,9 @@ use std::sync::{Arc, LazyLock};
 /// begins with `/`, so this identity cannot read as one of them.
 static GRPC_ROUTE: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from("grpc"));
 
-type GrpcRequest = hyper::Request<hyper::body::Incoming>;
+/// The request tonic is handed: the peer's payload under the upload owner that
+/// bounds it, not the raw incoming body.
+type GrpcRequest = hyper::Request<GrpcRequestBody>;
 type GrpcResponse = hyper::Response<tonic::body::Body>;
 type GrpcFuture =
     Pin<Box<dyn Future<Output = Result<GrpcResponse, std::convert::Infallible>> + Send>>;
@@ -88,26 +90,20 @@ impl GrpcRouter {
     }
 
     /// Dispatch a gRPC request to the matching service.
-    pub(super) async fn dispatch(
-        &self,
-        req: GrpcRequest,
-    ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    ///
+    /// The answer leaves as tonic produced it. Committing it — and taking its
+    /// body under this operation's download owner — belongs to the handoff
+    /// coordinator, which is the one stage that knows whether a local cause
+    /// beat this head.
+    pub(super) async fn dispatch(&self, req: GrpcRequest) -> GrpcResponse {
         let path = req.uri().path();
         for (prefix, svc) in &self.services {
             if path.starts_with(prefix.as_ref()) {
-                let resp = svc.call(req).await?;
-                let (parts, body) = resp.into_parts();
-                return Ok(hyper::Response::from_parts(
-                    parts,
-                    HyperResponseBody::Grpc(GrpcBody {
-                        inner: body,
-                        finished: false,
-                    }),
-                ));
+                return answered(svc.call(req).await);
             }
         }
 
-        Ok(grpc_unimplemented())
+        grpc_unimplemented()
     }
 }
 
@@ -115,6 +111,16 @@ impl Default for GrpcRouter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A tonic service's error is `Infallible`, so an answer is its only outcome.
+fn answered(result: Result<GrpcResponse, std::convert::Infallible>) -> GrpcResponse {
+    result.unwrap_or_else(impossible_answer)
+}
+
+/// `Infallible` holds no value, so this arm is unreachable by construction.
+fn impossible_answer(never: std::convert::Infallible) -> GrpcResponse {
+    match never {}
 }
 
 /// The pattern the gRPC dispatch class establishes for every request it takes.
@@ -133,10 +139,8 @@ pub(super) fn is_grpc_request(req: &hyper::Request<hyper::body::Incoming>) -> bo
         .is_some_and(|ct| ct.starts_with("application/grpc"))
 }
 
-fn grpc_unimplemented() -> hyper::Response<HyperResponseBody> {
-    let mut resp = hyper::Response::new(HyperResponseBody::Full(http_body_util::Full::new(
-        bytes::Bytes::new(),
-    )));
+fn grpc_unimplemented() -> GrpcResponse {
+    let mut resp = hyper::Response::new(tonic::body::Body::empty());
     *resp.status_mut() = hyper::StatusCode::OK;
     resp.headers_mut()
         .insert("grpc-status", hyper::header::HeaderValue::from_static("12"));

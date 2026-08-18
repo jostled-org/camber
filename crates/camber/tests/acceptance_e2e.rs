@@ -50,6 +50,8 @@ pub mod async_server_and_scheduling;
 pub mod body_admission;
 #[path = "acceptance_e2e/concurrent_routes_and_keepalive.rs"]
 pub mod concurrent_routes_and_keepalive;
+#[path = "acceptance_e2e/cross_protocol_service_operation.rs"]
+pub mod cross_protocol_service_operation;
 #[path = "acceptance_e2e/framework_rejections.rs"]
 pub mod framework_rejections;
 #[path = "acceptance_e2e/host_routing_and_outbound_proxy.rs"]

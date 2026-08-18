@@ -942,6 +942,29 @@ impl ServerDispatch {
         }
     }
 
+    /// The budgets a class selected without a trie match runs under.
+    ///
+    /// gRPC is that class: it is selected by content type against the router a
+    /// head resolved, so it has no matched route carrying a narrower policy of
+    /// its own. What contains it is the same chain a matched route narrows
+    /// under — the runtime's policy, the server's, the host router's, and the
+    /// resolved child router's — read from the resolution the caller already
+    /// made rather than from a second one.
+    #[cfg(feature = "grpc")]
+    pub(super) fn resolved_budgets(
+        &self,
+        resolved: &Resolution<'_>,
+        policy: super::ServerPolicy,
+    ) -> RouteBudgets {
+        let outer = self.outer_budgets(policy);
+        resolved
+            .as_ref()
+            .ok()
+            .copied()
+            .flatten()
+            .map_or(outer, |router| router.budgets.narrowed_by(outer))
+    }
+
     /// Find the router a built request names, or the refusal it earned.
     pub(super) fn resolve(&self, req: &Request) -> Resolution<'_> {
         match self {

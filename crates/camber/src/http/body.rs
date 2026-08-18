@@ -85,6 +85,22 @@ impl GuardedBody {
         }
     }
 
+    /// Resolve a frame the wrapped body has declared to be its last.
+    ///
+    /// The third way Hyper can stop polling, beside a trailing `None` and an
+    /// exhausted content length: a body that reports end of stream alongside
+    /// its final frame is not polled again. A gRPC answer is that shape — its
+    /// last frame is tonic's trailer set, and the HTTP/2 encoder ends the
+    /// stream on it — so without this the response produced in full would fall
+    /// through to the cause table.
+    fn last_frame(&mut self) {
+        use hyper::body::Body;
+        match self.inner.is_end_stream() {
+            true => self.finished(),
+            false => {}
+        }
+    }
+
     /// Resolve an end of stream against what the body still owed.
     ///
     /// End of stream completes only a body that owed nothing more. A body that
@@ -119,7 +135,10 @@ impl hyper::body::Body for GuardedBody {
         let outcome = std::pin::Pin::new(&mut this.inner).poll_frame(cx);
         match &outcome {
             std::task::Poll::Ready(None) => this.finished(),
-            std::task::Poll::Ready(Some(Ok(frame))) => this.produced(frame),
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                this.produced(frame);
+                this.last_frame();
+            }
             _ => {}
         }
         outcome
@@ -322,8 +341,14 @@ impl hyper::body::Body for StreamBody {
 pub(super) enum HyperResponseBody {
     Full(http_body_util::Full<bytes::Bytes>),
     Streaming(StreamBody),
+    /// One committed gRPC answer, under the download owner bounding it.
+    ///
+    /// Held behind one allocation for the reason [`StreamBody`]'s variants are:
+    /// the owner carries a guard, a peer-lifetime wait, and a deadline wake,
+    /// which inline would set the width of every response body this server
+    /// builds — including the buffered ones that stream nothing.
     #[cfg(feature = "grpc")]
-    Grpc(GrpcBody),
+    Grpc(Box<super::grpc_handoff::GrpcDownload>),
 }
 
 impl hyper::body::Body for HyperResponseBody {
@@ -340,9 +365,7 @@ impl hyper::body::Body for HyperResponseBody {
             }
             HyperResponseBody::Streaming(body) => std::pin::Pin::new(body).poll_frame(cx),
             #[cfg(feature = "grpc")]
-            HyperResponseBody::Grpc(body) => {
-                map_infallible_frame(std::pin::Pin::new(body).poll_frame(cx))
-            }
+            HyperResponseBody::Grpc(body) => std::pin::Pin::new(body.as_mut()).poll_frame(cx),
         }
     }
 
@@ -363,71 +386,4 @@ impl hyper::body::Body for HyperResponseBody {
             HyperResponseBody::Grpc(body) => body.is_end_stream(),
         }
     }
-}
-
-/// Body wrapper for gRPC responses (tonic's UnsyncBoxBody).
-#[cfg(feature = "grpc")]
-pub(super) struct GrpcBody {
-    pub(super) inner: tonic::body::Body,
-    pub(super) finished: bool,
-}
-
-/// The same trait [`HyperResponseBody`] forwards to, not a private set of
-/// look-alike methods.
-///
-/// Inherent methods left the forwarding hand-maintained: the wrapper called
-/// whatever this type happened to define, so a report this type did not define
-/// was silently answered by the trait's default instead of by tonic's body.
-/// A trait impl makes each missing forward a compile error.
-#[cfg(feature = "grpc")]
-impl hyper::body::Body for GrpcBody {
-    type Data = bytes::Bytes;
-    type Error = std::convert::Infallible;
-
-    fn poll_frame(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
-        let this = self.get_mut();
-        if this.finished {
-            return std::task::Poll::Ready(None);
-        }
-
-        match std::pin::Pin::new(&mut this.inner).poll_frame(cx) {
-            std::task::Poll::Ready(Some(Ok(frame))) => std::task::Poll::Ready(Some(Ok(frame))),
-            std::task::Poll::Ready(Some(Err(status))) => {
-                this.finished = true;
-                std::task::Poll::Ready(Some(Ok(grpc_error_frame(&status))))
-            }
-            std::task::Poll::Ready(None) => {
-                this.finished = true;
-                std::task::Poll::Ready(None)
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
-
-    fn size_hint(&self) -> hyper::body::SizeHint {
-        self.inner.size_hint()
-    }
-
-    /// Ended once tonic's body has produced its last frame, or once tonic's
-    /// own body says so.
-    fn is_end_stream(&self) -> bool {
-        match self.finished {
-            true => true,
-            false => self.inner.is_end_stream(),
-        }
-    }
-}
-
-#[cfg(feature = "grpc")]
-fn grpc_error_frame(status: &tonic::Status) -> hyper::body::Frame<bytes::Bytes> {
-    let mut trailers = hyper::HeaderMap::with_capacity(2);
-    let code = status.code() as i32;
-    trailers.insert("grpc-status", hyper::header::HeaderValue::from(code));
-    if let Ok(message) = hyper::header::HeaderValue::from_str(status.message()) {
-        trailers.insert("grpc-message", message);
-    }
-    hyper::body::Frame::trailers(trailers)
 }

@@ -195,6 +195,47 @@ impl InboundReady {
         }
     }
 
+    /// Record one terminal a local source outside this turn already fixed.
+    ///
+    /// The gRPC pre-head coordinator is the owner this exists for: tonic holds
+    /// the upload body, so the terminal that upload fixes is reported to the
+    /// coordinator rather than observed by it. Folding the report into the turn
+    /// is what lets the one declared precedence resolve it against a tonic head
+    /// that became ready alongside it.
+    ///
+    /// Wildcard-free for the same reason [`Self::holds`] is: a terminal a later
+    /// step adds fails to compile here until it names its source.
+    const fn with_local(self, terminal: InboundTerminal) -> Self {
+        match terminal {
+            InboundTerminal::ShutdownDeadline => Self {
+                shutdown_deadline: true,
+                ..self
+            },
+            InboundTerminal::ForcedCancellation => Self {
+                forced_cancellation: true,
+                ..self
+            },
+            InboundTerminal::RouteBodyLimit => self.with_route_body_limit(),
+            InboundTerminal::TransferBytes => self.with_transfer_bytes(),
+            InboundTerminal::BodyIdle => Self {
+                body_idle: true,
+                ..self
+            },
+            InboundTerminal::TransferIdle => self.with_transfer_idle(),
+            InboundTerminal::TransferTotal => self.with_transfer_total(),
+            InboundTerminal::RequestTotal => Self {
+                request_total: true,
+                ..self
+            },
+            InboundTerminal::Disconnect => Self {
+                disconnect: true,
+                ..self
+            },
+            InboundTerminal::SourceFailure => self.with_source_failure(),
+            InboundTerminal::ResponseHead => self.with_response_head(),
+        }
+    }
+
     /// The one terminal this turn selects, or `None` while the request runs on.
     pub(super) fn select(self) -> Option<InboundTerminal> {
         InboundTerminal::ORDER
@@ -311,6 +352,28 @@ impl OperationEnvelope {
         )
     }
 
+    /// The narrow upload owner one gRPC request body takes.
+    ///
+    /// The request total is deliberately absent, unlike [`Self::upload`]. The
+    /// gRPC pre-head coordinator weighs that deadline itself against tonic's
+    /// head, and tonic keeps this body after the head commits — where
+    /// request-total enforcement has already ended. What travels with it is the
+    /// request's quiet interval, which stays this payload's own bound for as
+    /// long as tonic reads it.
+    #[cfg(feature = "grpc")]
+    pub(super) fn handoff_upload(
+        &self,
+        registration: TransferBudget,
+        observer: Option<Arc<LifecycleScript>>,
+    ) -> TransferOwner {
+        TransferOwner::new(
+            TransferDirection::Upload,
+            registration.narrowed_by(self.budgets.upload()),
+            InboundWatch::over(self.guard(self.budgets.request().body_idle(), None)),
+            observer,
+        )
+    }
+
     /// The narrow download owner one streaming response body takes.
     ///
     /// The request deadlines are deliberately absent. A download begins at a
@@ -354,14 +417,34 @@ impl OperationEnvelope {
         &self,
         producing: impl Future<Output = T>,
         observer: Option<&LifecycleScript>,
-    ) -> Result<T, InboundTerminal> {
-        let selected = self.select_pre_commit(producing).await;
+    ) -> Result<T, PreCommitCause> {
+        self.pre_commit_beside(producing, std::future::pending(), observer)
+            .await
+    }
+
+    /// Run one pre-commit producer beside a local source of the caller's own.
+    ///
+    /// [`Self::pre_commit`] with one more source in the turn. `local` is a
+    /// terminal some other owner already fixed and reported — the gRPC upload
+    /// body tonic holds is the owner this exists for, because a body inside
+    /// tonic cannot be observed from here and its terminal must still be
+    /// weighed against tonic's head in the one turn both became ready in.
+    ///
+    /// A `local` that never resolves is exactly [`Self::pre_commit`], so the
+    /// two share one selector rather than one deciding a tie the other cannot.
+    pub(super) async fn pre_commit_beside<T>(
+        &self,
+        producing: impl Future<Output = T>,
+        local: impl Future<Output = PreCommitCause>,
+        observer: Option<&LifecycleScript>,
+    ) -> Result<T, PreCommitCause> {
+        let selected = self.select_pre_commit(producing, local).await;
         match &selected {
             Ok(_) => {}
-            Err(terminal) => {
+            Err(cause) => {
                 LifecycleScript::pause_at(
                     observer,
-                    super::mock::LifecycleCheckpoint::InboundTerminalSelected(*terminal),
+                    super::mock::LifecycleCheckpoint::InboundTerminalSelected(cause.terminal),
                 )
                 .await;
             }
@@ -373,17 +456,24 @@ impl OperationEnvelope {
     async fn select_pre_commit<T>(
         &self,
         producing: impl Future<Output = T>,
-    ) -> Result<T, InboundTerminal> {
+        local: impl Future<Output = PreCommitCause>,
+    ) -> Result<T, PreCommitCause> {
         let mut watch = InboundWatch::over(self.guard(None, self.total));
         let mut producing = std::pin::pin!(producing);
+        let mut local = std::pin::pin!(local);
         let mut produced = None;
+        let mut reported: Option<PreCommitCause> = None;
         std::future::poll_fn(|cx| {
             // Read first, weigh second — the one order every coordinator here
             // shares. A producer that answered in this turn is what makes the
             // turn a tie at all, and reading it after the carried sources would
             // decide the tie by poll order instead of by the declared one.
             produced = produced.take().or_else(|| answered(producing.as_mut(), cx));
-            let ready = weighed(&mut watch, cx, produced.is_some());
+            reported = reported.take().or_else(|| answered(local.as_mut(), cx));
+            let carried = weighed(&mut watch, cx, produced.is_some());
+            let ready = reported
+                .as_ref()
+                .map_or(carried, |cause| carried.with_local(cause.terminal));
             match (ready.select(), produced.take()) {
                 (Some(InboundTerminal::ResponseHead), Some(value)) => {
                     std::task::Poll::Ready(Ok(value))
@@ -396,7 +486,9 @@ impl OperationEnvelope {
                 // cause selected in the same turn ends this request, and
                 // committing the answer first would commit one to a request
                 // this service has already ended.
-                (Some(terminal), _) => std::task::Poll::Ready(Err(terminal)),
+                (Some(terminal), _) => {
+                    std::task::Poll::Ready(Err(selected_cause(terminal, reported.take())))
+                }
             }
         })
         .await
@@ -551,6 +643,53 @@ impl InboundGuard {
         .into_iter()
         .flatten()
         .min()
+    }
+}
+
+/// The cause one pre-commit turn ended an admitted request on.
+///
+/// It carries the refusal the owner that measured the bound already minted, so
+/// no later stage restates a maximum or a deadline it did not enforce. A cause
+/// this operation observed itself has none: the shared failure table names it
+/// from the request policy the operation carries.
+pub(super) struct PreCommitCause {
+    terminal: InboundTerminal,
+    wire: Option<Rejected>,
+}
+
+impl PreCommitCause {
+    /// The cause a local owner reported, with the refusal it minted.
+    pub(super) const fn reported(terminal: InboundTerminal, wire: Option<Rejected>) -> Self {
+        Self { terminal, wire }
+    }
+
+    /// The cause this operation's own carried sources produced.
+    const fn observed(terminal: InboundTerminal) -> Self {
+        Self {
+            terminal,
+            wire: None,
+        }
+    }
+
+    pub(super) const fn terminal(&self) -> InboundTerminal {
+        self.terminal
+    }
+
+    /// The refusal the measuring owner minted, given up to the failure table.
+    pub(super) fn wire(self) -> Option<Rejected> {
+        self.wire
+    }
+}
+
+/// The cause one selected terminal is answered with.
+///
+/// A local owner's report is used only for the terminal it actually named: a
+/// carried source that outranked it is this operation's own cause, and the
+/// refusal the upload minted for a different bound has nothing to say about it.
+fn selected_cause(terminal: InboundTerminal, reported: Option<PreCommitCause>) -> PreCommitCause {
+    match reported {
+        Some(cause) if cause.terminal == terminal => cause,
+        Some(_) | None => PreCommitCause::observed(terminal),
     }
 }
 

@@ -125,6 +125,8 @@ mod disconnect;
 mod dispatch;
 mod encoding;
 #[cfg(feature = "grpc")]
+mod grpc_handoff;
+#[cfg(feature = "grpc")]
 mod grpc_support;
 mod handle;
 mod health;
@@ -187,6 +189,8 @@ pub use client::{
 };
 pub use cookie::{CookieOptions, SameSite};
 pub use disconnect::{DisconnectCause, DisconnectSignal};
+#[cfg(feature = "grpc")]
+pub use grpc_handoff::GrpcRequestBody;
 pub use health::{ProxyHealthResource, spawn_health_checker};
 pub use host_router::HostRouter;
 pub use method::{Method, ParseMethodError};

@@ -983,10 +983,39 @@ pub(super) async fn pre_commit<T>(
     operation: &OperationEnvelope,
     observer: Option<&super::mock::LifecycleScript>,
 ) -> Result<T, InboundFailure> {
-    operation
-        .pre_commit(producing, observer)
-        .await
-        .map_err(|terminal| InboundFailure::of(terminal, operation.budget(), None))
+    inbound_failure(operation.pre_commit(producing, observer).await, operation)
+}
+
+/// [`pre_commit`], with one local source weighed beside the producer.
+///
+/// The gRPC handoff is the owner this exists for: tonic holds the upload body,
+/// so that upload reports its terminal rather than being observed, and the
+/// report has to be weighed against tonic's head in the one turn both became
+/// ready in.
+#[cfg(feature = "grpc")]
+pub(super) async fn pre_commit_beside<T>(
+    producing: impl std::future::Future<Output = T>,
+    local: impl std::future::Future<Output = super::operation::PreCommitCause>,
+    operation: &OperationEnvelope,
+    observer: Option<&super::mock::LifecycleScript>,
+) -> Result<T, InboundFailure> {
+    inbound_failure(
+        operation
+            .pre_commit_beside(producing, local, observer)
+            .await,
+        operation,
+    )
+}
+
+/// Read one selected pre-commit cause as the failure its disposition names.
+fn inbound_failure<T>(
+    selected: Result<T, super::operation::PreCommitCause>,
+    operation: &OperationEnvelope,
+) -> Result<T, InboundFailure> {
+    selected.map_err(|cause| {
+        let terminal = cause.terminal();
+        InboundFailure::of(terminal, operation.budget(), cause.wire())
+    })
 }
 
 /// Run one middleware gate inside the request total its operation carries.
@@ -1051,10 +1080,23 @@ pub(super) async fn handle_request(
         disconnect: lifetime.signal(),
     };
 
+    // Built before the gRPC pre-check, because that class mints an operation of
+    // its own: it is the same per-connection authority every other admitted
+    // head runs under, and a second copy assembled for one class could pair a
+    // request with another connection's liveness.
+    let conn = ConnDispatch {
+        dispatch,
+        ctx,
+        origin,
+        lifecycle,
+        connection: lifetime.connection(),
+        start,
+    };
+
     // gRPC bodies are streaming — skip body collection and dispatch directly to tonic.
     // Middleware runs as a gate check on the headers, then forwards to tonic.
     #[cfg(feature = "grpc")]
-    let hyper_req = match try_dispatch_grpc(hyper_req, dispatch, ctx, origin, start).await {
+    let hyper_req = match try_dispatch_grpc(hyper_req, &conn).await {
         GrpcDispatch::Handled(resp) => return resp,
         GrpcDispatch::NotGrpc(req) => req,
     };
@@ -1067,14 +1109,6 @@ pub(super) async fn handle_request(
                 .await;
         }
         PreBodyRoute::Class(classified) => classified,
-    };
-    let conn = ConnDispatch {
-        dispatch,
-        ctx,
-        origin,
-        lifecycle,
-        connection: lifetime.connection(),
-        start,
     };
     dispatch_classified_route(hyper_req, classified, &conn).await
 }
@@ -1318,21 +1352,43 @@ enum GrpcDispatch {
 #[cfg(feature = "grpc")]
 async fn try_dispatch_grpc(
     hyper_req: hyper::Request<hyper::body::Incoming>,
-    dispatch: &ServerDispatch,
-    ctx: &ConnCtx,
-    origin: RequestOrigin<'_>,
-    start: std::time::Instant,
+    conn: &ConnDispatch<'_>,
 ) -> GrpcDispatch {
     // The router is resolved here and carried into the dispatch, so being gRPC
     // and having somewhere to send it is one decision. Re-asking downstream
     // would invent a "no router" state the caller has already ruled out, and
     // that state would need an answer no rejection stage produced.
-    match dispatch.grpc_router() {
-        Some(grpc_router) if is_grpc_request(&hyper_req) => GrpcDispatch::Handled(
-            dispatch_grpc_inner(hyper_req, grpc_router, dispatch, ctx, origin, start).await,
-        ),
+    match conn.dispatch.grpc_router() {
+        Some(grpc_router) if is_grpc_request(&hyper_req) => {
+            GrpcDispatch::Handled(dispatch_grpc_inner(hyper_req, grpc_router, conn).await)
+        }
         _ => GrpcDispatch::NotGrpc(hyper_req),
     }
+}
+
+/// What one gRPC head established before its payload was handed to tonic.
+///
+/// Held together because they are one decision: the policy every refusal on
+/// this class is answered under, the child router whose middleware gates it,
+/// and the budgets the whole chain narrowed to.
+#[cfg(feature = "grpc")]
+struct GrpcClass<'a> {
+    scope: RejectionScope,
+    router: Option<&'a FrozenRouter>,
+    budgets: super::route_budgets::RouteBudgets,
+}
+
+/// What resolving one gRPC head produced.
+///
+/// Two outcomes, not a success and a failure: an authority Camber cannot parse
+/// is a refusal this stage has already answered, and the answer travels rather
+/// than a cause a later stage would have to re-map.
+#[cfg(feature = "grpc")]
+enum GrpcHead<'a> {
+    /// The class this request runs under.
+    Classified(GrpcClass<'a>),
+    /// The answer an unparsable authority already earned.
+    Refused(hyper::Response<HyperResponseBody>),
 }
 
 /// Run the middleware gate and dispatch to tonic. Called only when the request
@@ -1341,28 +1397,86 @@ async fn try_dispatch_grpc(
 async fn dispatch_grpc_inner(
     hyper_req: hyper::Request<hyper::body::Incoming>,
     grpc_router: &super::grpc_support::GrpcRouter,
-    dispatch: &ServerDispatch,
-    ctx: &ConnCtx,
-    origin: RequestOrigin<'_>,
-    start: std::time::Instant,
+    conn: &ConnDispatch<'_>,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    // Build a lightweight Request from headers for the middleware gate check.
-    // The streaming gRPC body is preserved for tonic.
-    //
-    // The pre-check selecting this class is the establishment transition: it
-    // resolved the gRPC router this request dispatches to, so the class carries
-    // both the identity that registration is named by and the class itself.
-    // Tonic owns method routing past the handoff, so the identity is the class's
-    // fixed one rather than a trie pattern.
-    //
-    // The identity borrows the head it names. The request outlives it here, and
-    // the identity takes its own `Bytes`-backed URI handle, so a pair of locals
-    // cloned only to be lent out was a copy nothing read afterwards.
-    //
-    // The child router is resolved once, here, and handed to both the scope and
-    // the gate. Asking separately cost two authority parses and two host-table
-    // searches on every gRPC request.
+    let &ConnDispatch {
+        ctx,
+        origin,
+        lifecycle,
+        connection,
+        start,
+        ..
+    } = conn;
+    let class = match classify_grpc_head(&hyper_req, conn) {
+        GrpcHead::Classified(class) => class,
+        GrpcHead::Refused(refused) => return Ok(refused),
+    };
+    let GrpcClass {
+        scope,
+        router,
+        budgets,
+    } = class;
+    // One envelope per admitted gRPC head, exactly as every other admitted
+    // class mints one. Every pre-head owner below reads it: the gate, the
+    // payload tonic is handed, and the handoff that commits tonic's answer.
+    let script = lifecycle.script();
+    let operation = OperationEnvelope::admit(
+        budgets,
+        lifecycle.control(),
+        connection,
+        origin.disconnect,
+        ctx.policy.shutdown_timeout_value(),
+        script.as_deref(),
+    );
+    operation.observe(script.as_deref(), OperationStage::Dispatch);
     let head = RequestHead::from_hyper_request(&hyper_req, origin);
+    let gate = run_head_gate(&head, router, None, &scope);
+    operation.observe(script.as_deref(), OperationStage::Middleware);
+    // The chain is admitted work before the committed head, so it spends the
+    // one total this operation carries — the same rule every other gated class
+    // follows.
+    match within_total(gate, &operation).await {
+        // Answered under the scope this class established, not a rebuilt
+        // built-in one: a middleware response the wire cannot carry recovers
+        // through the router's own mapper, the same one every other refusal on
+        // this path reaches.
+        Ok(Some(refusal)) => Ok(answer(ctx, refusal, start, &scope)),
+        Err(rejected) => Ok(answer_rejected(ctx, &scope, rejected, start)),
+        Ok(None) => {
+            drop(head);
+            Ok(handoff_grpc(hyper_req, grpc_router, &operation, conn, &scope).await)
+        }
+    }
+}
+
+/// Resolve the policy, router, and budgets one gRPC head runs under.
+///
+/// The pre-check selecting this class is the establishment transition: it
+/// resolved the gRPC router this request dispatches to, so the class carries
+/// both the identity that registration is named by and the class itself. Tonic
+/// owns method routing past the handoff, so the identity is the class's fixed
+/// one rather than a trie pattern.
+///
+/// The child router is resolved once, here, and handed to the scope, the gate,
+/// and the budget chain. Asking separately cost two authority parses and two
+/// host-table searches on every gRPC request.
+///
+/// An authority Camber cannot parse is refused here, not read as a pass: this
+/// class forwards to tonic on a pass, so the chain would never have run for a
+/// request that reached the service.
+#[cfg(feature = "grpc")]
+fn classify_grpc_head<'a>(
+    hyper_req: &hyper::Request<hyper::body::Incoming>,
+    conn: &ConnDispatch<'a>,
+) -> GrpcHead<'a> {
+    let &ConnDispatch {
+        dispatch,
+        ctx,
+        origin,
+        start,
+        ..
+    } = conn;
+    let head = RequestHead::from_hyper_request(hyper_req, origin);
     let resolved = dispatch.resolve_from_head(&head);
     let scope = dispatch
         .resolved_head_scope(
@@ -1370,35 +1484,71 @@ async fn dispatch_grpc_inner(
             RequestIdentity::from_head(&origin, hyper_req.method(), hyper_req.uri()),
         )
         .established(super::grpc_support::grpc_route(), RejectionProtocol::Grpc);
-    // An authority Camber cannot parse is refused before the gate, not read as
-    // a pass: this path forwards to tonic on a pass, so the chain would never
-    // have run for a request that reached the upstream.
-    let router = match resolved {
-        Ok(router) => router,
-        Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, start)),
-    };
-    match run_head_gate(&head, router, None, &scope).await {
-        // Answered under the scope this class established, not a rebuilt
-        // built-in one: a middleware response the wire cannot carry recovers
-        // through the router's own mapper, the same one every other refusal on
-        // this path reaches.
-        Some(refusal) => Ok(answer(ctx, refusal, start, &scope)),
-        None => {
-            // Tonic owns the response body from here, so this handoff is
-            // Camber's last observation of the request's lifetime.
-            origin.disconnect.complete();
-            let response = grpc_router.dispatch(hyper_req).await?;
-            // The head is still Camber's to see, and every other dispatch class
-            // records the answer it gave. Recorded under the same scope this
-            // class established, so a gRPC request is countable and
-            // request-id-keyed like the rest — a class that recorded nothing
-            // was a class an operator could not see at all. What stays outside
-            // is what tonic owns past the head: the trailer status and anything
-            // the body fails with.
-            record_scoped(ctx, &scope, response.status().as_u16(), start);
-            Ok(response)
-        }
+    let budgets = dispatch.resolved_budgets(&resolved, ctx.policy);
+    match resolved {
+        Ok(router) => GrpcHead::Classified(GrpcClass {
+            scope,
+            router,
+            budgets,
+        }),
+        Err(rejected) => GrpcHead::Refused(answer_rejected(ctx, &scope, rejected, start)),
     }
+}
+
+/// Hand this payload to tonic, and commit only a head no local cause beat.
+///
+/// The coordinator weighs four sources under the one declared precedence: the
+/// terminal the upload tonic now holds fixed, this operation's carried request
+/// total, its shutdown and cancellation authority, and tonic's own head. A
+/// local winner cancels tonic — by dropping the future that owns it — and maps
+/// once through this class's mapper. Tonic's head winning alone commits, and
+/// from there the RPC's status and trailers are tonic's.
+#[cfg(feature = "grpc")]
+async fn handoff_grpc(
+    hyper_req: hyper::Request<hyper::body::Incoming>,
+    grpc_router: &super::grpc_support::GrpcRouter,
+    operation: &OperationEnvelope,
+    conn: &ConnDispatch<'_>,
+    scope: &RejectionScope,
+) -> hyper::Response<HyperResponseBody> {
+    let &ConnDispatch {
+        ctx,
+        lifecycle,
+        start,
+        ..
+    } = conn;
+    let script = lifecycle.script();
+    operation.observe(script.as_deref(), OperationStage::Body);
+    let (parts, incoming) = hyper_req.into_parts();
+    let (upload, report) = super::grpc_handoff::GrpcRequestBody::split(
+        incoming,
+        operation.handoff_upload(super::TransferBudget::unbounded(), script.clone()),
+    );
+    let producing = super::grpc_handoff::produced_head(
+        grpc_router.dispatch(hyper::Request::from_parts(parts, upload)),
+        script.as_ref(),
+    );
+    let answered = pre_commit_beside(
+        producing,
+        super::grpc_handoff::reported_terminal(report),
+        operation,
+        script.as_deref(),
+    )
+    .await;
+    let response = match answered {
+        Ok(response) => response,
+        Err(failure) => return answer_inbound_failure(ctx, scope, failure, start),
+    };
+    operation.observe(script.as_deref(), OperationStage::ResponseHead);
+    let committed = super::grpc_handoff::commit(response, operation, script).await;
+    let (parts, body) = committed.into_parts();
+    // The head is still Camber's to see, and every other dispatch class records
+    // the answer it gave. Recorded under the same scope this class established,
+    // so a gRPC request is countable and request-id-keyed like the rest. What
+    // stays outside is what tonic owns past the head: the trailer status and
+    // anything its body fails with.
+    record_scoped(ctx, scope, parts.status.as_u16(), start);
+    hyper::Response::from_parts(parts, HyperResponseBody::Grpc(Box::new(body)))
 }
 
 /// Run middleware as a gate check for a streaming request (gRPC, streaming proxy).

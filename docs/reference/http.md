@@ -219,7 +219,7 @@ The signal is `Send + Sync + Clone`, and every clone resolves to the same cause.
 
 **`Completed` means produced, not delivered.** It fires when Camber has handed the whole response body to Hyper, which is what an in-flight producer needs to know: it can release subprocesses, cursors, permits, and temp files. Hyper exposes frame production, not transport delivery, so "the last byte reached the client" is not observable and is not what this reports.
 
-A response that hands its transport on rather than writing a body still completes at that handoff. A WebSocket upgrade resolves `Completed` when the `101` is committed — the point where the WebSocket subsystem takes over and the HTTP response is over; the upgraded peer's lifetime is the WebSocket close contract, not this signal. Building the `101` is not that point: an upgrade held short of its handoff has not resolved there, and one the server refuses never reaches the handoff at all. A refused upgrade falls back to its own response body, which is an ordinary one — `400` or `426` from handshake validation, `403` for a rejected Origin, and on an owned server `503` when the supervisor rejects the registration or `500` when it is unavailable — so it resolves `Completed` when that body is produced. A peer that abandons the handshake before the `101` resolves `PeerDisconnect`. A gRPC request resolves `Completed` where Camber hands it to tonic, which owns that response body.
+A response that hands its transport on rather than writing a body still completes at that handoff. A WebSocket upgrade resolves `Completed` when the `101` is committed — the point where the WebSocket subsystem takes over and the HTTP response is over; the upgraded peer's lifetime is the WebSocket close contract, not this signal. Building the `101` is not that point: an upgrade held short of its handoff has not resolved there, and one the server refuses never reaches the handoff at all. A refused upgrade falls back to its own response body, which is an ordinary one — `400` or `426` from handshake validation, `403` for a rejected Origin, and on an owned server `503` when the supervisor rejects the registration or `500` when it is unavailable — so it resolves `Completed` when that body is produced. A peer that abandons the handshake before the `101` resolves `PeerDisconnect`. A gRPC request resolves `Completed` when Camber's own body around tonic's answer has produced tonic's last frame and its trailers; see [gRPC handoff](#grpc-handoff).
 
 **Hold the signal somewhere that outlives the handler.** Camber's per-request future is dropped when the peer goes away — that drop is the observation — so a handler awaiting its own signal is cancelled instead of woken. Clone the signal into the task that owns the resource:
 
@@ -1036,6 +1036,41 @@ gRPC requests pass through the middleware gate before reaching tonic. The gate c
 owned `Request` from the hyper request only when middleware is registered — zero overhead when
 there is none. This is a gate-only path: middleware can short-circuit (return 401, 403, 429)
 but cannot wrap or rewrite the streaming response body, which streams directly from tonic.
+
+### gRPC handoff
+
+Camber coordinates a gRPC call only until tonic commits its response head.
+
+Up to that head the call runs under the same admitted operation every other request
+does. Its payload reaches tonic as a `GrpcRequestBody`, which carries the effective
+upload budget — byte maximum, quiet interval, lifetime — and the request's own
+body-idle interval. One coordinator then weighs four sources under the shared
+precedence table: a terminal that body fixed, the request total, the server's
+shutdown or cancellation, and tonic's head. A local winner cancels the tonic future
+and answers through the route's rejection mapper, exactly once. Application work
+inside tonic may already have run; cancellation makes no rollback claim.
+
+A head that wins alone is committed as tonic produced it, and the RPC is tonic's
+from there:
+
+- A later upload failure ends tonic's request stream with the typed `RuntimeError`
+  the owner that measured the bound named. Tonic converts it to an RPC status.
+  Camber maps nothing.
+- A later download byte, idle, total, disconnect, or shutdown terminal comes from
+  Camber's outer response body. It ends or resets that one HTTP/2 stream and
+  records the typed direction terminal. It does not synthesize `grpc-status`,
+  replace tonic's trailers, or call the rejection mapper.
+- The request total is unreachable past the committed head. Response body time
+  belongs to the download `TransferBudget`.
+
+Tonic's response headers and trailers pass through unchanged.
+
+Long-lived streaming RPCs answer to the request policy in force. The server default
+is a 30-second request total, which bounds head acquisition, and a 30-second
+body-idle interval, which bounds a retained upload's quiet time. A service whose
+streams outlive either needs a wider `RequestBudget` on the runtime, server, host,
+or router that serves it, and a download `TransferBudget` wide enough for the
+answers it streams.
 
 ### Streaming RPCs
 
