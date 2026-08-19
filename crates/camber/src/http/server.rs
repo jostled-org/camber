@@ -2,7 +2,8 @@ use super::BufferConfig;
 use super::ServerPolicy;
 use super::router::{Router, ServerDispatch};
 use super::server_lifecycle::{
-    ServerContextSnapshot, ServerControl, ServerSupervisor, SupervisorJoin, poll_supervisor_join,
+    ServerContextSnapshot, ServerControl, ServerSupervisor, StopAuthority, SupervisorJoin,
+    poll_supervisor_join,
 };
 use crate::task::spawn_async;
 use crate::{RuntimeError, net, runtime};
@@ -97,18 +98,17 @@ impl IntoFuture for ServerHandle {
 /// captures, or `WsConn`, nor does it prove runtime teardown after the signal
 /// watcher is gone.
 pub struct ServerHandleFuture {
-    control: Option<tokio::sync::watch::Sender<ServerControl>>,
+    /// Everything a caller's stop needs, or nothing when this future carries no
+    /// authority over the server it joins.
+    stop: Option<StopAuthority>,
     join: SupervisorJoin,
 }
 
 impl ServerHandleFuture {
     /// The join authority is held by value: it exists for as long as this
     /// future does, so there is no absent case to invent a result for.
-    fn new(
-        control: Option<tokio::sync::watch::Sender<ServerControl>>,
-        join: SupervisorJoin,
-    ) -> Self {
-        Self { control, join }
+    fn new(stop: Option<StopAuthority>, join: SupervisorJoin) -> Self {
+        Self { stop, join }
     }
 
     pub(super) fn from_join(join: SupervisorJoin) -> Self {
@@ -116,16 +116,26 @@ impl ServerHandleFuture {
     }
 
     /// Request graceful shutdown while retaining this join future.
+    ///
+    /// The one aggregate deadline is minted before the transition reaches any
+    /// participant, so a connection that observes the shutdown in the very next
+    /// turn reads the instant this call fixed rather than finding none.
     pub fn shutdown(&self) {
-        if let Some(control) = self.control.as_ref() {
-            ServerControl::send_graceful(control);
+        if let Some(stop) = self.stop.as_ref() {
+            stop.request_graceful();
         }
     }
 
     /// Request forced cancellation while retaining this join future.
+    ///
+    /// No fresh grace period is started: this server enters forced termination
+    /// under the fixed forced-join window, whatever the aggregate shutdown had
+    /// left. The latch is set BEFORE the transition is published, so the
+    /// supervisor reading that transition already knows a caller asked for it
+    /// rather than inferring it from an abort an abandoned handle also sends.
     pub fn cancel(&self) {
-        if let Some(control) = self.control.as_ref() {
-            ServerControl::send_abort(control);
+        if let Some(stop) = self.stop.as_ref() {
+            stop.request_cancel();
         }
     }
 }
@@ -138,7 +148,7 @@ impl Future for ServerHandleFuture {
         match result {
             Poll::Pending => Poll::Pending,
             Poll::Ready(result) => {
-                self.control.take();
+                self.stop.take();
                 Poll::Ready(result)
             }
         }
@@ -147,8 +157,8 @@ impl Future for ServerHandleFuture {
 
 impl Drop for ServerHandleFuture {
     fn drop(&mut self) {
-        if let Some(control) = self.control.take() {
-            ServerControl::send_abort(&control);
+        if let Some(stop) = self.stop.take() {
+            stop.abandon();
         }
     }
 }
@@ -358,11 +368,12 @@ impl ServerBuilder {
     ) -> Result<ServerHandle, RuntimeError> {
         refuse_without_tokio()?;
         let (supervisor, control) = self.freeze(net::Listener::from_tcp(listener));
+        let stop = supervisor.stop_authority(control);
         let join = match supervisor.is_camber() {
             true => SupervisorJoin::Camber(spawn_async(supervisor.run()).into_future()),
             false => SupervisorJoin::Tokio(tokio::spawn(supervisor.run())),
         };
-        Ok(ServerHandle(ServerHandleFuture::new(Some(control), join)))
+        Ok(ServerHandle(ServerHandleFuture::new(Some(stop), join)))
     }
 
     /// Freeze routing and capture this server's context at one instant.

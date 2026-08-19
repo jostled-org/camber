@@ -995,3 +995,117 @@ fn resource_budget_validates_phase_bounds_and_names_before_runtime_establishment
     assert_resource_names_are_refused_before_establishment();
     assert_valid_resource_names_still_run();
 }
+
+// ---------------------------------------------------------------------------
+// 18.T5
+// ---------------------------------------------------------------------------
+
+/// Every public surface an operator configures a bounded service through,
+/// compiled through its exact published path.
+///
+/// Compile-only. Nothing here serves, so the claim is the signature closure: a
+/// spelling that moved, a terminal that stopped being fallible, or a policy
+/// dimension that lost its explicit unbounded name fails this at build time.
+fn compile_published_service_surfaces() -> Result<(), RuntimeError> {
+    let policy = ServerPolicy::default()
+        .header_timeout(SHORT)?
+        .shutdown_timeout(SHORT)?
+        .connection_limit(64)?
+        .request_budget(RequestBudget::bounded(SHORT, SHORT)?)
+        .upload_budget(TransferBudget::bounded(4096, SHORT, SHORT)?)
+        .download_budget(TransferBudget::bounded(4096, SHORT, SHORT)?)
+        .request_budget(RequestBudget::unbounded())
+        .upload_budget(TransferBudget::unbounded());
+
+    let mut router = Router::new();
+    router.get("/health", |_req: &camber::http::Request| async {
+        camber::http::Response::text(200, "ok")
+    });
+    let router = router
+        .max_request_body(4096)
+        .request_budget(RequestBudget::bounded(SHORT, SHORT)?)
+        .download_budget(TransferBudget::bounded(4096, SHORT, SHORT)?);
+
+    // The canonical owned path: policy in, terminal call freezes it.
+    let builder = camber::http::server(router).policy(policy);
+    let _refused = builder.serve_background(unbindable_listener()?);
+
+    let mut hosts = HostRouter::new();
+    hosts.add("bounded.example", Router::new());
+    drop(camber::http::server_hosts(hosts).policy(policy));
+
+    // Client, proxy, static-file, and resource budgets, each with its own
+    // explicit unbounded opt-out beside its finite spelling.
+    drop(camber::http::client().response_budget(TransferBudget::bounded(4096, SHORT, SHORT)?));
+    drop(camber::http::client().unbounded_response());
+    let _bounded_proxy = ProxyPolicy::default().buffered_response_limit(4096)?;
+    let _unbounded_proxy = ProxyPolicy::default().unbounded_buffered_response();
+    let _resource = ResourceBudget::bounded(SHORT, SHORT, SHORT)?;
+    Ok(())
+}
+
+/// A listener address nothing can bind, so the terminal call is exercised
+/// without this contract ever owning a port.
+fn unbindable_listener() -> Result<tokio::net::TcpListener, RuntimeError> {
+    Err(RuntimeError::NoRuntime)
+}
+
+/// Every published statement an operator relies on, and the file that carries
+/// it.
+///
+/// The text is asserted verbatim rather than by keyword: the claim is that the
+/// documentation SAYS these things, and a keyword search passes on a page that
+/// mentions the word while stating the opposite.
+const PUBLISHED_CONTRACTS: [(&str, &str); 9] = [
+    (README, "ServerBuilder"),
+    (README, "a production service should set a finite limit"),
+    (
+        HTTP_REFERENCE,
+        "Every `ServerBuilder` dimension has a default",
+    ),
+    (HTTP_REFERENCE, "gRPC handoff"),
+    (HTTP_REFERENCE, "cannot preempt non-yielding async code"),
+    (RUNTIME_REFERENCE, "One aggregate shutdown deadline"),
+    (RUNTIME_REFERENCE, "abandoned synchronous callback"),
+    (RUNTIME_REFERENCE, "Cooperative cancellation cannot"),
+    (
+        ERROR_REFERENCE,
+        "abandoned synchronous callback has returned",
+    ),
+];
+
+const README: &str = include_str!("../../../../README.md");
+const HTTP_REFERENCE: &str = include_str!("../../../../docs/reference/http.md");
+const RUNTIME_REFERENCE: &str = include_str!("../../../../docs/reference/runtime.md");
+const ERROR_REFERENCE: &str = include_str!("../../../../docs/reference/error.md");
+const CLIENT_REFERENCE: &str = include_str!("../../../../docs/reference/client.md");
+
+/// 18.T5
+#[test]
+fn published_service_budget_docs_compile_and_state_every_operator_contract() {
+    // The refusal is the terminal's own: it is reached only because every
+    // policy, router, and budget spelling above compiled and validated.
+    assert!(
+        matches!(
+            compile_published_service_surfaces(),
+            Err(RuntimeError::NoRuntime)
+        ),
+        "a published service surface no longer compiles through its exact path"
+    );
+
+    for (document, statement) in PUBLISHED_CONTRACTS {
+        assert!(
+            document.contains(statement),
+            "the published documentation no longer states {statement:?}"
+        );
+    }
+
+    // Every buffered public surface names its explicit opt-out where an
+    // operator reads about it, so an unbounded choice is never the quiet one.
+    for document in [HTTP_REFERENCE, CLIENT_REFERENCE] {
+        assert!(
+            document.contains("unbounded"),
+            "a buffered reference page stopped naming its explicit unbounded choice"
+        );
+    }
+}

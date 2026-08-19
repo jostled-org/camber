@@ -1,5 +1,11 @@
 use crate::resource::registry::ResourceRegistry;
-use crate::runtime_test_support::{RuntimeCheckpoint, RuntimeSchedule};
+// The one forced-stop window every owner shares. The root scope, the external
+// cancellation watcher, and the server supervisor all give an aborted owner the
+// same grace rather than three that can drift apart.
+use crate::lifecycle::{
+    FORCED_JOIN_GRACE, LifecycleFailureKind, LifecycleParticipant, LifecyclePhase,
+};
+use crate::runtime_test_support::{ParticipantDisposition, RuntimeCheckpoint, RuntimeSchedule};
 use crate::tls::CertStore;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -9,16 +15,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 pub(crate) const DEFAULT_HEALTH_INTERVAL: Duration = Duration::from_secs(10);
-
-/// How long the scope waits for aborted children to join before it stops
-/// waiting.
-///
-/// Abort drops a yielding task at its next `.await`, so its handle resolves
-/// well inside this window. A task that never yields — and every
-/// `spawn_blocking` closure — cannot be dropped at all, so this grace, not the
-/// join, is what ends the wait. It is deliberately small and fixed: it bounds
-/// a forced stop, it is not a second `shutdown_timeout`.
-const FORCED_JOIN_GRACE: Duration = Duration::from_millis(100);
 
 pub(crate) type TlsConfig = Arc<rustls::ServerConfig>;
 
@@ -90,6 +86,13 @@ impl Default for RuntimeConfig {
 /// entry points use thread-local storage.
 pub(crate) struct RuntimeInner {
     shutdown: LatchSignal,
+    /// The one deadline every framework-owned shutdown participant shares.
+    ///
+    /// Held by the runtime rather than by each owner, because that is the
+    /// difference the whole type makes: a server, a connection, a resource, and
+    /// the executor all narrow one expiry instead of each starting its own copy
+    /// of the same grace.
+    shutdown_deadline: Arc<crate::lifecycle::AggregateShutdown>,
     scope: TaskScope,
     test_schedule: Option<Arc<RuntimeSchedule>>,
     cancel_task: Mutex<CancelWatcherState>,
@@ -275,8 +278,13 @@ impl RuntimeInner {
         config: RuntimeConfig,
         test_schedule: Option<Arc<RuntimeSchedule>>,
     ) -> Self {
+        let shutdown_deadline = crate::lifecycle::AggregateShutdown::new(
+            config.server_policy.shutdown_timeout_value(),
+            test_schedule.clone(),
+        );
         Self {
             shutdown: LatchSignal::new(),
+            shutdown_deadline,
             scope: TaskScope::new(),
             test_schedule,
             cancel_task: Mutex::new(CancelWatcherState { current: None }),
@@ -287,6 +295,11 @@ impl RuntimeInner {
         }
     }
 
+    /// The one aggregate shutdown this runtime and its owned servers share.
+    pub(crate) fn shutdown_deadline(&self) -> Arc<crate::lifecycle::AggregateShutdown> {
+        Arc::clone(&self.shutdown_deadline)
+    }
+
     /// Request runtime shutdown. Shutdown implies scope closing, so admission
     /// closes on the same call.
     ///
@@ -295,8 +308,12 @@ impl RuntimeInner {
     /// leaves exactly that window open. Nothing loses a signal by the reorder:
     /// `LifecycleSignals::is_fired` ORs the two, so a child watching for
     /// shutdown stops on whichever of them it observes first.
+    /// The transition is also where the one aggregate deadline is minted. A
+    /// second request reads the first one's expiry back rather than extending
+    /// it.
     pub(crate) fn request_shutdown(&self) {
         self.close_scope();
+        self.shutdown_deadline.mint_at(tokio::time::Instant::now());
         self.shutdown.fire();
     }
 
@@ -838,21 +855,43 @@ impl TaskScope {
     /// resolves inside the grace and the join acknowledges it. A child the
     /// executor cannot stop never resolves, which is why the grace bounds the
     /// join instead of the join bounding itself.
-    async fn force_stop(&self, grace: Duration) {
+    ///
+    /// Each child settles as it is joined, so the record says how many owners
+    /// the forced stop actually got back rather than how many it aborted. The
+    /// ones still outstanding when the grace expires are named, because a child
+    /// the executor cannot stop is exactly the participant an operator has to
+    /// be told about.
+    async fn force_stop(&self, shutdown: &crate::lifecycle::AggregateShutdown) {
         let handles = self.take_async_children();
+        let aborted = handles.len();
         for handle in handles.iter() {
             handle.abort();
         }
         let mut joins: futures_util::stream::FuturesUnordered<_> =
             handles.into_vec().into_iter().collect();
+        let mut settled = 0;
         let drain = async {
             while let Some(joined) = futures_util::StreamExt::next(&mut joins).await {
                 report_forced_join(joined);
                 self.record_join();
+                settled += 1;
+                shutdown.settle(
+                    &LifecycleParticipant::BackgroundTask,
+                    ParticipantDisposition::CancelledAndJoined,
+                );
             }
         };
-        if tokio::time::timeout(grace, drain).await.is_err() {
+        if tokio::time::timeout(FORCED_JOIN_GRACE, drain)
+            .await
+            .is_err()
+        {
             tracing::warn!("root scope drain grace expired with children still unstoppable");
+        }
+        for _ in settled..aborted {
+            shutdown.settle(
+                &LifecycleParticipant::BackgroundTask,
+                ParticipantDisposition::Named,
+            );
         }
     }
 
@@ -1249,30 +1288,49 @@ pub(crate) fn stop_cancel_watcher(inner: &RuntimeInner, executor: &tokio::runtim
     }
 }
 
-/// Drain the root scope, reporting the failure that outranks the closure's
-/// value when it does not drain cooperatively.
+/// Drain the root scope, recording the participants it could not prove
+/// finished.
 ///
-/// The runtime's configured `shutdown_timeout` is the drain's ESCALATION
-/// BOUNDARY, not a bound on total teardown: children get that long to exit on
-/// `ScopeClosing`, then every retained async handle is aborted and joined under
-/// one forced-join grace so no child the executor can stop outlives the drain.
-/// Resource shutdown, which this design does not bound, runs after and gates
-/// when `run` returns.
+/// The aggregate deadline is the drain's ESCALATION BOUNDARY, not a bound on
+/// total teardown: children get whatever the one shared expiry has left to exit
+/// on `ScopeClosing`, then every retained async handle is aborted and joined
+/// under the fixed forced-join grace so no child the executor can stop outlives
+/// the drain. Resource shutdown runs after, under the remainder of that same
+/// expiry.
+///
+/// The scope settles as one participant and its children as another: the root
+/// scope reports whether its own bounded drain finished, and the background
+/// children report whether the forced stop got their joins back.
 pub(crate) fn drain_root_scope(
     inner: &RuntimeInner,
     executor: &tokio::runtime::Handle,
-) -> Option<crate::RuntimeError> {
-    let shutdown_timeout = inner.config.server_policy.shutdown_timeout_value();
+    log: &mut crate::lifecycle::LifecycleFailureLog,
+) {
+    let shutdown = inner.shutdown_deadline();
+    let remaining = shutdown.bounded(
+        &LifecycleParticipant::RootScope,
+        inner.config.server_policy.shutdown_timeout_value(),
+    );
     let outstanding = inner
         .scope
-        .wait_timeout(shutdown_timeout, inner.test_schedule.as_deref());
-    let outcome = match outstanding {
-        0 => None,
+        .wait_timeout(remaining, inner.test_schedule.as_deref());
+    match outstanding {
+        0 => shutdown.settle(
+            &LifecycleParticipant::RootScope,
+            ParticipantDisposition::Completed,
+        ),
         count => {
-            executor.block_on(inner.scope.force_stop(FORCED_JOIN_GRACE));
-            Some(crate::RuntimeError::ScopeDrainTimeout(count))
+            executor.block_on(inner.scope.force_stop(&shutdown));
+            log.record(
+                LifecycleParticipant::RootScope,
+                LifecyclePhase::GracefulDrain,
+                LifecycleFailureKind::ScopeDrainTimeout { outstanding: count },
+            );
+            shutdown.settle(
+                &LifecycleParticipant::RootScope,
+                ParticipantDisposition::Named,
+            );
         }
-    };
+    }
     inner.observe_drain_end();
-    outcome
 }

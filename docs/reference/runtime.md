@@ -155,9 +155,34 @@ one stored `ServerPolicy`, so the last write to a field wins and the others keep
 `server_policy` set. `shutdown_timeout` is the runtime's aggregate deadline: its servers
 and its root scope consume the same duration rather than one each.
 
-That deadline bounds Camber's own waiting and escalation. It cannot preempt an async task
-that never yields, stop application code running on a blocking or OS thread, or prove that
-an abandoned synchronous callback has returned.
+### One aggregate shutdown deadline
+
+The first graceful transition anywhere — `runtime::request_shutdown()`, a signal the
+watcher delivers, `ServerHandle::shutdown()`, a server's own fatal drain, or the `run`
+closure returning — mints one absolute expiry from `shutdown_timeout`. Every later
+transition reads that same instant back. No nested owner restarts it: a server, an
+admitted request, a registered upgrade, the root scope, a registered resource, and the
+Tokio executor all narrow one expiry instead of each starting a fresh copy of the grace.
+
+A participant may be narrower and never wider. A `ServerBuilder` inside the runtime
+narrows `shutdown_timeout` like any other dimension, and a resource callback receives the
+smaller of its `ResourceBudget` phase deadline and the time the aggregate has left. No
+participant is cut below the fixed 100 ms forced-join grace, which is what a forced stop
+gives an owner it has just told to end.
+
+`ServerHandle::cancel()` mints nothing. Explicit cancellation is forced termination now:
+that server stops under the forced-join grace rather than under a fresh grace period,
+whatever the aggregate had left.
+
+Teardown returns one immutable account. `RuntimeBuilder::run` answers
+`RuntimeError::Lifecycle` when any framework-owned participant could not finish, frozen
+after every join or abandonment decision has been taken — see
+[Errors](error.md#lifecycle-aggregates). A server's own result stays flat on its handle.
+
+That deadline bounds Camber's own waiting and escalation. Cooperative cancellation cannot
+preempt an async task that never yields, stop application code running on a blocking or OS
+thread, or prove that an abandoned synchronous callback has returned. A participant Camber
+could not prove finished is named in the returned aggregate rather than reported stopped.
 
 `otel_endpoint(url)` installs the OTLP exporter as the global tracing subscriber.
 Another subscriber may already hold that slot: `camber::logging::init_logging`, or a

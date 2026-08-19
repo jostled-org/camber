@@ -3,6 +3,7 @@ use crate::common::{
     block_on_detached, ignore_hook, join_bounded, observe_armed_sequence, observe_armed_window,
     registry_len,
 };
+use crate::lifecycle_kinds;
 use crate::scope_builders::{probed_runtime, scope_runtime};
 use camber::RuntimeError;
 use camber::runtime_test_support::{RuntimeCheckpoint, RuntimeController, wait_scope_closing};
@@ -148,9 +149,12 @@ fn wedged_async_child_is_aborted_joined_and_reported() {
         closure_wedged.record(handle);
     });
 
-    assert!(
-        matches!(result, Err(RuntimeError::ScopeDrainTimeout(1))),
-        "the drain did not report one outstanding child: {result:?}"
+    lifecycle_kinds::assert_scope_drain(
+        result
+            .as_ref()
+            .expect_err("the drain reported no outstanding child"),
+        1,
+        "the drain did not report one outstanding child",
     );
     let (joined, entries) = probe.expect("the drain never paused at its terminal observation");
     assert_eq!(
@@ -189,9 +193,12 @@ fn drain_timeout_counts_every_outstanding_child() {
         });
     });
 
-    assert!(
-        matches!(result, Err(RuntimeError::ScopeDrainTimeout(2))),
-        "the drain did not report both outstanding children: {result:?}"
+    lifecycle_kinds::assert_scope_drain(
+        result
+            .as_ref()
+            .expect_err("the drain reported no outstanding children"),
+        2,
+        "the drain did not report both outstanding children",
     );
     drop(park_tx);
 }
@@ -240,9 +247,12 @@ fn nonpreemptible_blocking_child_still_yields_bounded_return() {
             closure_teardown.record(Instant::now());
         });
 
-    assert!(
-        matches!(result, Err(RuntimeError::ScopeDrainTimeout(1))),
-        "the drain did not report the non-preemptible child outstanding: {result:?}"
+    lifecycle_kinds::assert_scope_drain(
+        result
+            .as_ref()
+            .expect_err("the drain reported no outstanding child"),
+        1,
+        "the drain did not report the non-preemptible child outstanding",
     );
 
     let (shutdown, park_ended_at_shutdown) = observed_at_shutdown
@@ -285,9 +295,12 @@ fn resource_shutdown_runs_only_after_stoppable_children_are_drained_or_aborted()
             camber::spawn_async(async { std::future::pending::<()>().await });
         });
 
-    assert!(
-        matches!(result, Err(RuntimeError::ScopeDrainTimeout(1))),
-        "the wedged child was not reported outstanding: {result:?}"
+    lifecycle_kinds::assert_scope_drain(
+        result
+            .as_ref()
+            .expect_err("the wedged child was not reported at all"),
+        1,
+        "the wedged child was not reported outstanding",
     );
     assert_eq!(
         joined_at_shutdown
@@ -315,9 +328,12 @@ fn deadline_drains_registered_async_child_to_zero() {
         observe_escalation_boundary,
     );
 
-    assert!(
-        matches!(result, Err(RuntimeError::ScopeDrainTimeout(1))),
-        "the deadline did not report the registered child: {result:?}"
+    lifecycle_kinds::assert_scope_drain(
+        result
+            .as_ref()
+            .expect_err("the deadline reported no registered child"),
+        1,
+        "the deadline did not report the registered child",
     );
     assert_eq!(
         awaiting,

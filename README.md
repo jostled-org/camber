@@ -45,6 +45,8 @@ fn main() -> Result<(), RuntimeError> {
 
 Use `http::serve(...)` by itself for the default case. Wrap it in `runtime::builder().run(...)` only when you need runtime configuration such as worker counts, shutdown timeouts, or registered resources.
 
+`http::server(router)` returns a `ServerBuilder`, the canonical owned path: it takes a `ServerPolicy` and a TLS configuration, validates them synchronously, and freezes the router, the policy, and the serving context at the terminal `serve*` call. Every dimension has a default; the connection limit is the one that is unbounded when omitted, and a production service should set a finite limit. Shutdown is one aggregate deadline shared by the runtime and every server inside it — no nested owner restarts it — and `RuntimeBuilder::run` returns one `RuntimeError::Lifecycle` account of every participant that could not finish. See the [Runtime Reference](docs/reference/runtime.md) and [HTTP Reference](docs/reference/http.md).
+
 ## Docs
 
 - [Vision](docs/vision.md)

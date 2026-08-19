@@ -16,7 +16,7 @@ use super::mock::LifecycleScript;
 use super::rejection::Rejected;
 use super::request_budget::RequestBudget;
 use super::route_budgets::RouteBudgets;
-use super::server_lifecycle::ServerControl;
+use super::server_lifecycle::{ConnectionShutdown, ServerControl};
 use super::transfer::{TransferDirection, TransferOwner};
 use super::transfer_budget::TransferBudget;
 use std::future::Future;
@@ -283,7 +283,13 @@ pub(super) struct OperationEnvelope {
     /// `None` is a connection with no supervisor to hear from, which is the
     /// detached synchronous callback case. It never observes either terminal.
     control: Option<tokio::sync::watch::Receiver<ServerControl>>,
-    shutdown_timeout: Duration,
+    /// When a graceful shutdown ends for this request.
+    ///
+    /// Read rather than derived: an admitted request that observes a graceful
+    /// transition answers to the instant the transition minted, narrowed by its
+    /// own server's configured grace, not to a fresh copy of that grace started
+    /// when this connection happened to notice.
+    shutdown: ConnectionShutdown,
     connection: Arc<ConnectionLiveness>,
     disconnect: DisconnectSignal,
 }
@@ -295,7 +301,7 @@ impl OperationEnvelope {
         control: Option<tokio::sync::watch::Receiver<ServerControl>>,
         connection: &Arc<ConnectionLiveness>,
         disconnect: &DisconnectSignal,
-        shutdown_timeout: Duration,
+        shutdown: ConnectionShutdown,
         script: Option<&LifecycleScript>,
     ) -> Self {
         let admitted_at = Instant::now();
@@ -305,7 +311,7 @@ impl OperationEnvelope {
             budgets,
             total: request.total().map(|total| admitted_at + total),
             control,
-            shutdown_timeout,
+            shutdown,
             connection: Arc::clone(connection),
             disconnect: disconnect.clone(),
         };
@@ -500,7 +506,7 @@ impl OperationEnvelope {
             idle,
             total,
             control: self.control.clone(),
-            shutdown_timeout: self.shutdown_timeout,
+            shutdown: self.shutdown.clone(),
             shutdown_deadline: None,
             connection: Arc::clone(&self.connection),
             disconnect: self.disconnect.clone(),
@@ -528,9 +534,10 @@ pub(super) struct InboundGuard {
     idle: Option<Duration>,
     total: Option<Instant>,
     control: Option<tokio::sync::watch::Receiver<ServerControl>>,
-    shutdown_timeout: Duration,
-    /// The instant a graceful shutdown's deadline expires at, minted at the
-    /// first turn that observed the transition and never re-minted.
+    /// The shared aggregate this owner's shutdown answer comes from.
+    shutdown: ConnectionShutdown,
+    /// The instant the graceful shutdown this owner observed expires at, read
+    /// once from the shared aggregate and never re-read.
     shutdown_deadline: Option<Instant>,
     connection: Arc<ConnectionLiveness>,
     disconnect: DisconnectSignal,
@@ -578,16 +585,19 @@ impl InboundGuard {
         }
     }
 
-    /// Read the supervisor's control state, minting the shutdown deadline the
+    /// Read the supervisor's control state, taking the shutdown deadline the
     /// first time a graceful transition is observed.
     ///
-    /// The mint is once per owner and never restarted: a later turn that still
-    /// sees `Graceful` reads the deadline the first turn fixed.
+    /// The deadline is READ from the aggregate every participant shares, not
+    /// derived here: the transition that published `Graceful` already fixed the
+    /// one instant, so a connection that observes it late gets the time left
+    /// rather than a fresh copy of the grace. A later turn that still sees
+    /// `Graceful` reads back what the first turn took.
     fn control_state(&mut self) -> Option<ServerControl> {
         let control = *self.control.as_ref()?.borrow();
         match (control, self.shutdown_deadline) {
             (ServerControl::Graceful, None) => {
-                self.shutdown_deadline = Some(Instant::now() + self.shutdown_timeout);
+                self.shutdown_deadline = Some(self.shutdown.deadline());
             }
             (ServerControl::Graceful | ServerControl::Abort | ServerControl::Running, _) => {}
         }

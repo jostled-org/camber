@@ -1,7 +1,9 @@
 use crate::RuntimeError;
+use crate::lifecycle::LifecycleParticipant;
 use crate::runtime_state::{RuntimeConfig, RuntimeInner, recover_poisoned};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
+use std::time::Duration;
 
 /// Runtime scheduling points exposed only for deterministic integration tests.
 #[doc(hidden)]
@@ -18,6 +20,122 @@ pub enum RuntimeCheckpoint {
     ScopeCloseTransition,
     /// The drain observed this child count before waiting for it to change.
     ScopeWaitObserved(usize),
+}
+
+/// The one aggregate shutdown deadline production minted, as the transition
+/// that minted it fixed it.
+///
+/// Read-only, and written by the coordinator that performed the mint: a test
+/// cannot mint, extend, or replace a deadline through this type.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShutdownDeadlineMint {
+    at: tokio::time::Instant,
+    expiry: tokio::time::Instant,
+}
+
+impl ShutdownDeadlineMint {
+    /// The instant the first graceful transition was taken at.
+    #[must_use]
+    pub const fn at(&self) -> tokio::time::Instant {
+        self.at
+    }
+
+    /// The absolute expiry that transition fixed.
+    #[must_use]
+    pub const fn expiry(&self) -> tokio::time::Instant {
+        self.expiry
+    }
+
+    /// The grace between the two, as the configured value it was minted from.
+    #[must_use]
+    pub fn grace(&self) -> Duration {
+        self.expiry.saturating_duration_since(self.at)
+    }
+}
+
+/// One framework owner's reading of the shared aggregate shutdown deadline.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShutdownDeadlineReading {
+    participant: Box<str>,
+    expiry: tokio::time::Instant,
+}
+
+impl ShutdownDeadlineReading {
+    /// The owner that read the deadline, under the bounded name the lifecycle
+    /// vocabulary reports it as.
+    #[must_use]
+    pub fn participant(&self) -> &str {
+        &self.participant
+    }
+
+    /// The absolute expiry that owner was given.
+    #[must_use]
+    pub const fn expiry(&self) -> tokio::time::Instant {
+        self.expiry
+    }
+}
+
+/// How one framework-owned shutdown participant was disposed of.
+///
+/// Closed and exhaustively matchable, and chosen entirely by production: the
+/// three values are the three outcomes an aggregate teardown is allowed to
+/// reach, so an owner missing from the record is a defect rather than a fourth
+/// disposition.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParticipantDisposition {
+    /// The owner finished its own work before the shared deadline.
+    Completed,
+    /// The owner was cancelled and its join was acknowledged.
+    CancelledAndJoined,
+    /// The owner could not be proven finished, and is named in the returned
+    /// aggregate instead.
+    Named,
+}
+
+impl ParticipantDisposition {
+    /// The bounded name this disposition is recorded under.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::CancelledAndJoined => "cancelled-and-joined",
+            Self::Named => "named",
+        }
+    }
+}
+
+/// One participant's recorded settlement.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParticipantSettlement {
+    participant: Box<str>,
+    disposition: ParticipantDisposition,
+}
+
+impl ParticipantSettlement {
+    /// The owner that settled.
+    #[must_use]
+    pub fn participant(&self) -> &str {
+        &self.participant
+    }
+
+    /// How it settled.
+    #[must_use]
+    pub const fn disposition(&self) -> ParticipantDisposition {
+        self.disposition
+    }
+}
+
+/// Every aggregate-shutdown observation one run published.
+#[derive(Default)]
+struct ShutdownObservations {
+    mint: Option<ShutdownDeadlineMint>,
+    mints: usize,
+    readings: Vec<ShutdownDeadlineReading>,
+    settlements: Vec<ParticipantSettlement>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -45,6 +163,12 @@ pub(crate) struct RuntimeSchedule {
     /// worker, exactly as the operating system can, and production decides what
     /// a callback with no worker is called.
     refused_workers: Mutex<std::collections::HashSet<Box<str>>>,
+    /// What the aggregate shutdown coordinator published this run.
+    ///
+    /// Observations only. Nothing here alters a deadline, a disposition, or an
+    /// aggregate entry; production writes each row at the owner that decided
+    /// it.
+    shutdown: Mutex<ShutdownObservations>,
 }
 
 impl RuntimeSchedule {
@@ -58,7 +182,53 @@ impl RuntimeSchedule {
             runtime: OnceLock::new(),
             conflicted: AtomicBool::new(false),
             refused_workers: Mutex::new(std::collections::HashSet::new()),
+            shutdown: Mutex::new(ShutdownObservations::default()),
         }
+    }
+
+    fn shutdown_observations(&self) -> MutexGuard<'_, ShutdownObservations> {
+        recover_poisoned(self.shutdown.lock())
+    }
+
+    /// Record the one mint a graceful transition performed.
+    pub(crate) fn record_deadline_mint(
+        &self,
+        at: tokio::time::Instant,
+        expiry: tokio::time::Instant,
+    ) {
+        let mut observed = self.shutdown_observations();
+        observed.mints += 1;
+        observed
+            .mint
+            .get_or_insert(ShutdownDeadlineMint { at, expiry });
+    }
+
+    /// Record one owner's reading of the shared expiry.
+    pub(crate) fn record_deadline_reading(
+        &self,
+        participant: &LifecycleParticipant,
+        expiry: tokio::time::Instant,
+    ) {
+        self.shutdown_observations()
+            .readings
+            .push(ShutdownDeadlineReading {
+                participant: participant.to_string().into_boxed_str(),
+                expiry,
+            });
+    }
+
+    /// Record how one owner was disposed of.
+    pub(crate) fn record_settlement(
+        &self,
+        participant: &LifecycleParticipant,
+        disposition: ParticipantDisposition,
+    ) {
+        self.shutdown_observations()
+            .settlements
+            .push(ParticipantSettlement {
+                participant: participant.to_string().into_boxed_str(),
+                disposition,
+            });
     }
 
     /// Admit no worker for this resource's lifecycle callbacks until the
@@ -336,6 +506,39 @@ impl RuntimeController {
     /// Admit workers for `resource` again.
     pub fn admit_resource_worker(&self, resource: &str) {
         self.schedule.admit_resource_worker(resource);
+    }
+
+    /// How many aggregate shutdown deadlines production minted. Read-only.
+    ///
+    /// One is the whole contract: a second mint is a nested owner restarting a
+    /// deadline the first transition already fixed.
+    pub fn shutdown_deadline_mints(&self) -> usize {
+        self.schedule.shutdown_observations().mints
+    }
+
+    /// The one mint, as the transition that took it fixed it. Read-only.
+    pub fn shutdown_deadline_mint(&self) -> Option<ShutdownDeadlineMint> {
+        self.schedule.shutdown_observations().mint
+    }
+
+    /// Every owner's reading of the shared expiry, in the order they read it.
+    /// Read-only.
+    pub fn shutdown_deadline_readings(&self) -> Box<[ShutdownDeadlineReading]> {
+        self.schedule
+            .shutdown_observations()
+            .readings
+            .clone()
+            .into_boxed_slice()
+    }
+
+    /// Every participant settlement production recorded, in settle order.
+    /// Read-only.
+    pub fn participant_settlements(&self) -> Box<[ParticipantSettlement]> {
+        self.schedule
+            .shutdown_observations()
+            .settlements
+            .clone()
+            .into_boxed_slice()
     }
 
     pub(crate) fn schedule(&self) -> Arc<RuntimeSchedule> {

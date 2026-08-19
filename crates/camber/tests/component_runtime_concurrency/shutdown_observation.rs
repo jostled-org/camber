@@ -416,8 +416,11 @@ fn cancellation_watcher_panic_displaces_runtime_result() {
         camber::runtime::block_on(tokio::time::sleep(Duration::from_millis(50)));
     });
 
-    assert!(
-        matches!(&outcome, Err(camber::RuntimeError::TaskPanicked(message)) if &**message == "external cancellation watcher panic"),
-        "watcher panic did not displace the runtime result: {outcome:?}"
+    crate::lifecycle_kinds::assert_background_panic(
+        outcome
+            .as_ref()
+            .expect_err("the watcher panic left the runtime result clean"),
+        "external cancellation watcher panic",
+        "watcher panic did not displace the runtime result",
     );
 }

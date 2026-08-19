@@ -678,7 +678,7 @@ async fn dispatch_classified_route<'a>(
         lifecycle.control(),
         connection,
         origin.disconnect,
-        ctx.policy.shutdown_timeout_value(),
+        lifecycle.shutdown_deadline(),
         script.as_deref(),
     );
     operation.observe(script.as_deref(), OperationStage::Dispatch);
@@ -1465,7 +1465,7 @@ async fn dispatch_grpc_inner(
         lifecycle.control(),
         connection,
         origin.disconnect,
-        ctx.policy.shutdown_timeout_value(),
+        lifecycle.shutdown_deadline(),
         script.as_deref(),
     );
     operation.observe(script.as_deref(), OperationStage::Dispatch);

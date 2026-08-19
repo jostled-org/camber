@@ -1,5 +1,11 @@
 pub mod common;
 
+// The closed lifecycle vocabulary every teardown assertion here reads its
+// returned aggregate through. Declared beside `common` for the same reason the
+// two other roots that read it do: it reaches no other support module.
+#[path = "support/lifecycle_kinds.rs"]
+pub mod lifecycle_kinds;
+
 // The deterministic generator is not re-exported by `common`; declaring it
 // here keeps one name per support file rather than a second alias for one
 // `common` already owns.

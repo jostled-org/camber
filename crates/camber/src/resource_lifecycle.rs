@@ -17,6 +17,7 @@ use crate::lifecycle::{
 use crate::resource::entry::ResourceEntry;
 use crate::resource::registry::ResourceRegistry;
 use crate::runtime_state::{LifecycleSignals, RuntimeInner};
+use crate::runtime_test_support::ParticipantDisposition;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use worker::{CallbackOutcome, WorkerContext};
@@ -75,23 +76,35 @@ pub(crate) fn admit_health_coordinator(runtime: &Arc<RuntimeInner>, registry: &R
 /// Shut every eligible resource down, in reverse registration order.
 ///
 /// Runs on the teardown thread after the root scope has drained, so no child
-/// the executor can stop may still reach a resource. Every failure is retained:
-/// a resource that could not stop cleanly is a caller-visible fact, not a log
-/// line.
+/// the executor can stop may still reach a resource. Every failure is retained
+/// in the runtime's one teardown account: a resource that could not stop
+/// cleanly is a caller-visible fact, not a log line.
+///
+/// Each callback waits no longer than the narrower of its own phase deadline
+/// and what the aggregate shutdown has left, so a registry of slow resources
+/// cannot spend one phase deadline apiece past the deadline the whole teardown
+/// shares.
 pub(crate) fn shutdown_resources(
     runtime: &RuntimeInner,
     registry: &ResourceRegistry,
-) -> Option<crate::RuntimeError> {
-    let limit = runtime
+    log: &mut LifecycleFailureLog,
+) {
+    let phase_limit = runtime
         .config
         .resource_budget
         .phase(ResourcePhase::Shutdown);
-    let mut log = LifecycleFailureLog::new();
+    let shutdown = runtime.shutdown_deadline();
     for entry in registry.iter().rev() {
+        let participant = LifecycleParticipant::Resource(Arc::clone(entry.name()));
+        let limit = shutdown.bounded(&participant, phase_limit);
         let outcome = worker::run_callback_blocking(entry, ResourcePhase::Shutdown, limit, runtime);
-        record(entry, ResourcePhase::Shutdown, outcome, &mut log);
+        let settled = match outcome.is_some() {
+            true => ParticipantDisposition::Named,
+            false => ParticipantDisposition::Completed,
+        };
+        record(entry, ResourcePhase::Shutdown, outcome, log);
+        shutdown.settle(&participant, settled);
     }
-    log.into_error()
 }
 
 /// Probe every resource on the configured interval until either lifecycle

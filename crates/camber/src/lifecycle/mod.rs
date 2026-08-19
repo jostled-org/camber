@@ -17,6 +17,9 @@ mod phase;
 mod resource_budget;
 mod resource_failure;
 mod resource_phase;
+mod shutdown;
+
+pub(crate) use shutdown::{AggregateShutdown, FORCED_JOIN_GRACE};
 
 pub use failure::{LifecycleFailure, LifecycleFailureKind};
 pub use failures::{LifecycleFailureLog, LifecycleFailures};

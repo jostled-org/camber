@@ -1,6 +1,5 @@
 use crate::common;
 
-use camber::RuntimeError;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 use std::sync::Arc;
@@ -95,9 +94,12 @@ fn builder_configures_shutdown_timeout() {
             closure_wedged.record((task, Instant::now()));
         });
 
-    assert!(
-        matches!(outcome, Err(RuntimeError::ScopeDrainTimeout(1))),
-        "the safety-net timeout did not report the wedged child: {outcome:?}"
+    crate::lifecycle_kinds::assert_scope_drain(
+        outcome
+            .as_ref()
+            .expect_err("the safety-net timeout reported no wedged child"),
+        1,
+        "the safety-net timeout did not report the wedged child",
     );
 
     let (task, drain_started) = wedged.take();

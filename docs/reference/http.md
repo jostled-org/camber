@@ -963,6 +963,24 @@ streams. Forced cancellation may close transports without graceful protocol
 completion, but the returned result still waits for cooperatively abortable
 owned transport tasks to be joined.
 
+`shutdown()` and `cancel()` are not two speeds of the same request. `shutdown()`
+starts the one aggregate deadline — a `ServerBuilder` inside a Camber runtime
+shares that runtime's, so a server that begins draining late gets the time that
+is left rather than a fresh copy of the grace. `cancel()` starts no grace at
+all: the server enters forced termination immediately, under the fixed
+forced-join window. Neither request restarts a deadline an earlier transition
+already fixed. See
+[One aggregate shutdown deadline](runtime.md#one-aggregate-shutdown-deadline).
+
+A server's own answer stays flat — `Cancelled`, `Timeout`, or the fatal error
+that ended it — on the handle its caller already holds. The runtime entry point
+returns the aggregate for the owners no caller holds a handle for.
+
+Every `ServerBuilder` dimension has a default and every default is finite except
+the connection limit, which is unbounded when omitted. A production service
+should set a finite connection limit; see
+[`connection_limit`](runtime.md#runtime-builder).
+
 ## gRPC
 
 With the `grpc` feature, register tonic-generated services via `GrpcRouter`:

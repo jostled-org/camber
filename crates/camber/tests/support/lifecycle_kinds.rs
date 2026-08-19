@@ -22,9 +22,75 @@
 //! only the vocabulary mounts only this.
 
 use camber::{
-    LifecycleFailure, LifecycleFailureKind, LifecycleParticipant, LifecyclePhase,
-    ResourceFailureKind, ResourcePhase,
+    LifecycleFailure, LifecycleFailureKind, LifecycleFailures, LifecycleParticipant,
+    LifecyclePhase, ResourceFailureKind, ResourcePhase, RuntimeError,
 };
+
+/// The aggregate a runtime teardown returned, or a failure naming what it
+/// returned instead.
+///
+/// Every root that reads a teardown result enters here, so "the returned error
+/// is a lifecycle aggregate" is asserted in one place rather than restated
+/// beside each row's own claim.
+pub fn aggregate(error: &RuntimeError) -> &LifecycleFailures {
+    match error {
+        RuntimeError::Lifecycle(failures) => failures,
+        other => panic!("expected a lifecycle aggregate, got {other:?}"),
+    }
+}
+
+/// Every entry of a returned aggregate, in the order it froze them.
+pub fn aggregate_identities(error: &RuntimeError) -> Box<[String]> {
+    aggregate(error).iter().map(entry_identity).collect()
+}
+
+/// The entry a returned aggregate names as the one to act on.
+pub fn aggregate_primary(error: &RuntimeError) -> &LifecycleFailure {
+    aggregate(error).primary()
+}
+
+/// Assert the returned aggregate reports a scope drain that found `outstanding`
+/// children still running.
+///
+/// The count is the whole claim several rows make, and reading it out of the
+/// closed vocabulary once is what keeps each of them stating the number rather
+/// than the shape of the error that carries it.
+pub fn assert_scope_drain(error: &RuntimeError, outstanding: usize, context: &str) {
+    let reported =
+        aggregate(error)
+            .iter()
+            .find_map(|failure| match (failure.participant(), failure.kind()) {
+                (
+                    LifecycleParticipant::RootScope,
+                    LifecycleFailureKind::ScopeDrainTimeout { outstanding },
+                ) => Some(*outstanding),
+                _ => None,
+            });
+    assert_eq!(
+        reported,
+        Some(outstanding),
+        "{context}: {:?}",
+        aggregate_identities(error)
+    );
+}
+
+/// Assert the returned aggregate's primary is a Camber-owned child that unwound
+/// carrying `payload`.
+pub fn assert_background_panic(error: &RuntimeError, payload: &str, context: &str) {
+    let primary = aggregate_primary(error);
+    let reported = match (primary.participant(), primary.kind()) {
+        (LifecycleParticipant::BackgroundTask, LifecycleFailureKind::TaskPanicked(payload)) => {
+            Some(&**payload)
+        }
+        _ => None,
+    };
+    assert_eq!(
+        reported,
+        Some(payload),
+        "{context}: {:?}",
+        aggregate_identities(error)
+    );
+}
 
 /// Every closed participant, matched without a wildcard.
 ///

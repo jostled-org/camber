@@ -1,3 +1,6 @@
+use crate::lifecycle::{
+    LifecycleFailureKind, LifecycleFailureLog, LifecycleParticipant, LifecyclePhase,
+};
 use crate::resource::registry::ResourceRegistry;
 use crate::resource::{MIN_HEALTH_INTERVAL, Resource};
 use crate::resource_lifecycle::{admit_health_coordinator, run_startup_health, shutdown_resources};
@@ -5,7 +8,7 @@ use crate::runtime_state::{
     RuntimeConfig, RuntimeContextGuard, RuntimeInner, drain_root_scope, install_runtime,
     stop_cancel_watcher, teardown_runtime,
 };
-use crate::runtime_test_support::{RuntimeController, RuntimeSchedule};
+use crate::runtime_test_support::{ParticipantDisposition, RuntimeController, RuntimeSchedule};
 use crate::tls::CertStore;
 use std::sync::Arc;
 use std::time::Duration;
@@ -480,9 +483,11 @@ where
     // The async test entry registers no resource, so it has no readiness pass
     // to refuse it and its value is already the one `finish_runtime` returns.
     let scoped = run_scoped(&tokio_rt, &inner, || async { Ok(f().await) });
-    let drain = close_and_drain(&inner, &tokio_rt);
+    let mut teardown = LifecycleFailureLog::new();
+    close_and_drain(&inner, &tokio_rt, &mut teardown);
+    record_internal_panic(&inner, &mut teardown);
 
-    finish_runtime(&inner, tokio_rt, context, drain, None, scoped)
+    finish_runtime(&inner, tokio_rt, context, teardown, scoped)
 }
 
 /// Tokio's own default worker count.
@@ -588,56 +593,50 @@ type ScopedOutcome<T> = Result<T, Box<dyn std::any::Any + Send>>;
 /// the wait that expects them to have stopped. Both entry points drain through
 /// here, so neither can drift into closing at a different point than the other
 /// — which is what they had already done.
+///
+/// The closure returning is itself a graceful transition, so the aggregate
+/// deadline is minted here for a run that was never asked to stop. A run that
+/// was asked minted it at the request, and this call reads that instant back.
 fn close_and_drain(
     inner: &RuntimeInner,
     tokio_rt: &tokio::runtime::Runtime,
-) -> Option<crate::RuntimeError> {
+    log: &mut LifecycleFailureLog,
+) {
     inner.close_scope();
-    drain_root_scope(inner, tokio_rt.handle())
+    inner
+        .shutdown_deadline()
+        .mint_at(tokio::time::Instant::now());
+    drain_root_scope(inner, tokio_rt.handle(), log);
 }
 
-/// Order the runtime-level failures that displace the closure's value.
+/// Record the panic a Camber-owned child left in the scope's slot.
 ///
-/// A recorded internal panic outranks the resource lifecycle aggregate, and
-/// either outranks a drain timeout: a timeout is frequently the consequence of a
-/// wedged panicking child, so reporting the panic localizes the fault. The
-/// closure's value is never inspected — `T` is opaque, so it is either returned
-/// or displaced.
-///
-/// The displaced timeout is LOGGED rather than dropped. Exactly one error
-/// leaves through the `Result`, and this is the case the precedence above calls
-/// common, so the loser has no return path left at all — and the value it
-/// carries is the child count that failed to exit cooperatively, which nothing
-/// else reports: `drain_root_scope` constructs it silently and the forced
-/// stop's own warning fires only when its grace expires.
-fn runtime_failure(
-    inner: &RuntimeInner,
-    resource_failure: Option<crate::RuntimeError>,
-    drain: Option<crate::RuntimeError>,
-) -> Option<crate::RuntimeError> {
-    let panic = select_runtime_panic(inner.take_internal_panic(), resource_failure);
-    match (panic, drain) {
-        (Some(panicked), Some(displaced)) => {
-            tracing::warn!(%displaced, "drain timeout displaced by a recorded runtime panic");
-            Some(panicked)
-        }
-        (panicked, drain) => panicked.or(drain),
+/// No user holds a handle for such a child, so this slot is the only place its
+/// fault survives. It enters the aggregate as the background task it belongs
+/// to, where the precedence rules — a panic outranks a scope that could not
+/// drain and every resource outcome — decide whether it becomes the primary,
+/// instead of a hand-written ordering doing it here.
+fn record_internal_panic(inner: &RuntimeInner, log: &mut LifecycleFailureLog) {
+    if let Some(panicked) = inner.take_internal_panic() {
+        log.record(
+            LifecycleParticipant::BackgroundTask,
+            LifecyclePhase::GracefulDrain,
+            internal_panic_kind(panicked),
+        );
     }
 }
 
-fn select_runtime_panic(
-    internal: Option<crate::RuntimeError>,
-    resource: Option<crate::RuntimeError>,
-) -> Option<crate::RuntimeError> {
-    match (internal, resource) {
-        (Some(primary), Some(displaced)) => {
-            tracing::warn!(
-                %displaced,
-                "resource lifecycle aggregate displaced by an internal runtime panic"
-            );
-            Some(primary)
+/// State one recorded child fault in the aggregate's own vocabulary.
+///
+/// A panic keeps its payload text, because that is what localizes the fault.
+/// Anything else the slot carried is a typed error and travels as one rather
+/// than being re-rendered into panic text it never had.
+fn internal_panic_kind(panicked: crate::RuntimeError) -> LifecycleFailureKind {
+    match panicked {
+        crate::RuntimeError::TaskPanicked(payload) => {
+            LifecycleFailureKind::TaskPanicked(Arc::from(&*payload))
         }
-        (panic, None) | (None, panic) => panic,
+        other => LifecycleFailureKind::Operation(Arc::new(other)),
     }
 }
 
@@ -738,13 +737,31 @@ where
     // closure reaches the same close, which is why the run is caught.
     let scoped = run_scoped(&tokio_rt, &inner, runtime_scope);
 
-    // Drain the root scope before anything else: no child the executor can
+    let teardown = account_for_teardown(&inner, &tokio_rt, &registry);
+
+    finish_runtime(&inner, tokio_rt, context, teardown, scoped)
+}
+
+/// Stop every owner this runtime is responsible for, in teardown order, and
+/// answer with the account of what each of them did.
+///
+/// One log for the whole teardown. Every owner records into it as its
+/// disposition is decided; nothing is frozen here, because the executor has not
+/// been stopped yet and its own disposition belongs in the same account.
+fn account_for_teardown(
+    inner: &RuntimeInner,
+    tokio_rt: &tokio::runtime::Runtime,
+    registry: &ResourceRegistry,
+) -> LifecycleFailureLog {
+    let mut teardown = LifecycleFailureLog::new();
+
+    // The root scope drains before anything else: no child the executor can
     // stop may still reach a registered resource once shutdown starts.
-    let drain = close_and_drain(&inner, &tokio_rt);
+    close_and_drain(inner, tokio_rt, &mut teardown);
+    record_internal_panic(inner, &mut teardown);
 
-    let resource_failure = shutdown_runtime_services(&inner, &tokio_rt, &registry);
-
-    finish_runtime(&inner, tokio_rt, context, drain, resource_failure, scoped)
+    shutdown_runtime_services(inner, tokio_rt, registry, &mut teardown);
+    teardown
 }
 
 /// Stop services outside the root scope in their required teardown order.
@@ -752,14 +769,28 @@ fn shutdown_runtime_services(
     inner: &RuntimeInner,
     tokio_rt: &tokio::runtime::Runtime,
     registry: &ResourceRegistry,
-) -> Option<crate::RuntimeError> {
+    log: &mut LifecycleFailureLog,
+) {
     stop_cancel_watcher(inner, tokio_rt.handle());
-    let resource_failure = shutdown_resources(inner, registry);
+    shutdown_resources(inner, registry, log);
 
     #[cfg(feature = "otel")]
-    crate::http::otel::shutdown_exporter();
+    shutdown_exporter_participant(inner);
+}
 
-    resource_failure
+/// Flush and stop the trace exporter, settling it as its own participant.
+///
+/// The provider's own shutdown is unbounded and returns nothing this runtime
+/// can act on, so what is recorded is the fact that the exporter was visited
+/// and released — which is what an operator reading the settlement inventory
+/// needs, and the only honest claim available.
+#[cfg(feature = "otel")]
+fn shutdown_exporter_participant(inner: &RuntimeInner) {
+    crate::http::otel::shutdown_exporter();
+    inner.shutdown_deadline().settle(
+        &LifecycleParticipant::Exporter,
+        ParticipantDisposition::Completed,
+    );
 }
 
 /// Provision or load the DNS-01 certificate before the server starts, folding
@@ -912,26 +943,65 @@ fn finish_runtime<T>(
     inner: &RuntimeInner,
     tokio_rt: tokio::runtime::Runtime,
     runtime_guard: RuntimeContextGuard,
-    drain: Option<crate::RuntimeError>,
-    resource_failure: Option<crate::RuntimeError>,
+    mut teardown: LifecycleFailureLog,
     scoped: ScopedOutcome<Result<T, crate::RuntimeError>>,
 ) -> Result<T, crate::RuntimeError> {
     teardown_runtime(inner);
     drop(runtime_guard);
 
-    // This is the window for whatever Tokio still carries once the scope has
-    // drained and resources have shut down — a server handle the caller dropped
-    // without joining, and the connection tasks its supervisor was still
-    // ending. Not a second scope drain: the scope already drained above.
-    tokio_rt.shutdown_timeout(inner.config.server_policy.shutdown_timeout_value());
+    stop_executor(inner, tokio_rt, &mut teardown);
 
-    // Read BEFORE the unwind resumes: `resume_unwind` diverges, and the panic
-    // slot has exactly one reader.
-    match (scoped, runtime_failure(inner, resource_failure, drain)) {
+    // Frozen only now, after every join or abandonment decision above has been
+    // taken. Read BEFORE the unwind resumes: `resume_unwind` diverges.
+    match (scoped, teardown.into_error()) {
         (Ok(Ok(value)), None) => Ok(value),
         (Ok(Ok(_)), Some(error)) => Err(error),
         (Ok(Err(refusal)), teardown) => Err(refuse_past_teardown(refusal, teardown)),
         (Err(payload), failure) => resume_past_failure(failure, payload),
+    }
+}
+
+/// Give whatever Tokio still carries past the scope drain its shutdown window,
+/// and record whether the executor settled inside it.
+///
+/// This is the window for a server handle the caller dropped without joining
+/// and the connection tasks its supervisor was still ending. Not a second scope
+/// drain: the scope already drained above, so the bound is whatever the one
+/// aggregate expiry has left rather than a fresh copy of the configured grace.
+///
+/// `shutdown_timeout` returns as soon as everything has stopped, so an elapsed
+/// span that reached the bound is the executor telling this runtime it still
+/// owns work — the one participant no join handle can speak for.
+fn stop_executor(
+    inner: &RuntimeInner,
+    tokio_rt: tokio::runtime::Runtime,
+    log: &mut LifecycleFailureLog,
+) {
+    let shutdown = inner.shutdown_deadline();
+    let window = shutdown.bounded(
+        &LifecycleParticipant::Executor,
+        inner.config.server_policy.shutdown_timeout_value(),
+    );
+    let started = std::time::Instant::now();
+    tokio_rt.shutdown_timeout(window);
+    match started.elapsed() < window {
+        true => shutdown.settle(
+            &LifecycleParticipant::Executor,
+            ParticipantDisposition::Completed,
+        ),
+        false => {
+            log.record(
+                LifecycleParticipant::Executor,
+                LifecyclePhase::ForcedJoin,
+                LifecycleFailureKind::DeadlineExceeded(
+                    crate::http::DeadlineBoundary::AggregateShutdown,
+                ),
+            );
+            shutdown.settle(
+                &LifecycleParticipant::Executor,
+                ParticipantDisposition::Named,
+            );
+        }
     }
 }
 
@@ -951,22 +1021,43 @@ fn refuse_past_teardown(
     refusal
 }
 
-/// Resume the closure's caught unwind, logging the runtime-level failure that
+/// Resume the closure's caught unwind, reporting the lifecycle account that
 /// unwind displaces.
 ///
-/// The payload leaves through the panic, not through the `Result`, so a
-/// recorded internal panic or a drain timeout has no return path left at all.
-/// The log is the only trace it can leave, and without it a Camber-owned child
-/// that panicked inside a failing `#[camber::test]` — the common case, since
-/// every failed assertion takes this path — disappeared completely.
+/// The payload leaves through the panic, not through the `Result`, so the whole
+/// teardown aggregate has no return path left at all. One structured event is
+/// the only trace it can leave, and without it a Camber-owned child that
+/// panicked inside a failing `#[camber::test]` — the common case, since every
+/// failed assertion takes this path — disappeared completely.
+///
+/// The event exposes the aggregate through the public accessors a caller would
+/// have read off the `Result`: who failed, in which stage, how, and how many
+/// participants the whole account holds. Teardown has already finished by the
+/// time this runs, so nothing the event names is still being decided.
 fn resume_past_failure(
     failure: Option<crate::RuntimeError>,
     payload: Box<dyn std::any::Any + Send>,
 ) -> ! {
-    if let Some(error) = failure {
-        tracing::error!(%error, "runtime failure displaced by an unwinding closure");
+    match failure {
+        Some(crate::RuntimeError::Lifecycle(failures)) => report_displaced_lifecycle(&failures),
+        Some(error) => {
+            tracing::error!(%error, "runtime failure displaced by an unwinding closure");
+        }
+        None => {}
     }
     std::panic::resume_unwind(payload)
+}
+
+/// Emit the one operator event a displaced lifecycle aggregate leaves behind.
+fn report_displaced_lifecycle(failures: &crate::LifecycleFailures) {
+    let primary = failures.primary();
+    tracing::error!(
+        participant = %primary.participant(),
+        phase = %primary.phase(),
+        recorded = failures.len(),
+        displaced = %failures,
+        "lifecycle failures displaced by an unwinding closure"
+    );
 }
 
 fn reject_nested_runtime() -> Result<(), crate::RuntimeError> {

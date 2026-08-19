@@ -221,7 +221,7 @@ impl ScriptedResource {
     /// has already left the park behind, and this is the callback's own thread.
     fn report_parking(&self) {
         if let Some(entered) = self.entered.as_ref() {
-            drop(entered.send(()));
+            let _reported = entered.send(());
         }
     }
 }

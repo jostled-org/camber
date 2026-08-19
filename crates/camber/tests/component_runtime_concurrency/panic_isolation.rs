@@ -1,4 +1,5 @@
 use crate::common::{BOUND, PERPETUAL, SHORT_DRAIN, join_bounded, wait_registry_at_most};
+use crate::lifecycle_kinds;
 use crate::scope_builders::{probed_runtime, scope_runtime};
 use camber::{RuntimeError, runtime, schedule};
 use std::sync::Arc;
@@ -96,9 +97,12 @@ fn internal_panic_displaces_runtime_result_without_inspecting_closure_value() {
         CLOSURE_VALUE
     });
 
-    assert!(
-        matches!(&outcome, Err(RuntimeError::TaskPanicked(message)) if &**message == INTERNAL_PANIC),
-        "the internal panic did not displace the closure's value: {outcome:?}"
+    lifecycle_kinds::assert_background_panic(
+        outcome
+            .as_ref()
+            .expect_err("the internal panic did not displace the closure's value"),
+        INTERNAL_PANIC,
+        "the internal panic did not displace the closure's value",
     );
     assert!(
         sibling_ran.load(Ordering::SeqCst),
@@ -132,8 +136,11 @@ fn internal_panic_outranks_drain_timeout_when_both_occur() {
         );
     });
 
-    assert!(
-        matches!(&outcome, Err(RuntimeError::TaskPanicked(message)) if &**message == INTERNAL_PANIC),
-        "the drain timeout outranked the internal panic: {outcome:?}"
+    lifecycle_kinds::assert_background_panic(
+        outcome
+            .as_ref()
+            .expect_err("neither the panic nor the drain timeout was reported"),
+        INTERNAL_PANIC,
+        "the drain timeout outranked the internal panic",
     );
 }

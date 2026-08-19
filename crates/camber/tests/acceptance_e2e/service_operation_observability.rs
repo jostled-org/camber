@@ -1764,3 +1764,89 @@ fn assert_no_resource_names_in_metrics(metrics: &str) {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 18.T4
+// ---------------------------------------------------------------------------
+
+/// The payload the user closure unwinds with.
+///
+/// Named, because the whole claim is that THIS value reaches the caller rather
+/// than any account teardown then produced.
+const USER_PANIC: &str = "user closure panic under a failing teardown";
+
+/// The event a displaced lifecycle account leaves behind.
+const DISPLACED_EVENT: &str = "lifecycle failures displaced by an unwinding closure";
+
+/// The resource whose teardown fails while the closure is unwinding.
+const DISPLACED_RESOURCE: &str = "displaced-teardown";
+
+/// 18.T4
+///
+/// A closure's panic is the caller's answer and nothing replaces it — not a
+/// `Result`, and not the teardown failures that happened during its unwind. The
+/// account those failures froze into has no return path left at all, so one
+/// production event carries it, through the same public accessors a caller
+/// would have read off the error.
+#[test]
+fn user_panic_resumes_after_displaced_lifecycle_event() {
+    let capture = common::capture_events(DISPLACED_EVENT);
+    let log = std::sync::Arc::new(common::CallbackLog::default());
+
+    let payload = unwinding_run(&log).expect_err("the user closure's panic did not resume");
+    assert_eq!(
+        panic_text(payload.as_ref()),
+        USER_PANIC,
+        "a teardown failure replaced the closure's own payload"
+    );
+
+    let events = capture.events();
+    let reported = events
+        .iter()
+        .find(|event| event.contains(DISPLACED_EVENT))
+        .unwrap_or_else(|| panic!("no displaced-lifecycle event was emitted: {events:?}"));
+    common::assert_field_value(reported, "recorded", "1", DISPLACED_EVENT);
+    common::assert_field_value(reported, "phase", "shutdown", DISPLACED_EVENT);
+    assert!(
+        reported.contains(&format!("participant=resource {DISPLACED_RESOURCE}")),
+        "the displaced event did not name the owner that failed: {reported}"
+    );
+    assert!(
+        reported.contains(common::SCRIPTED_REFUSAL),
+        "the displaced event dropped the failure's own cause: {reported}"
+    );
+}
+
+/// Run a closure that unwinds while one registered resource fails its teardown.
+///
+/// The panic is caught here rather than at the assertion, so the resource's
+/// failure is already frozen into the account by the time the payload is read.
+fn unwinding_run(
+    log: &std::sync::Arc<common::CallbackLog>,
+) -> std::thread::Result<Result<(), camber::RuntimeError>> {
+    let failing = common::ScriptedResource::new(DISPLACED_RESOURCE, log)
+        .shutdown(common::Behavior::FailFrom(1));
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime::builder()
+            .with_tracing()
+            .shutdown_timeout(SHUTDOWN_BOUND)
+            .resource_budget(common::short_resource_budget())
+            .resource(failing)
+            .run(|| panic!("{USER_PANIC}"))
+    }))
+}
+
+/// The text one caught panic payload carries.
+///
+/// The row's claim is about the payload a caller receives, so it is read as the
+/// value `resume_unwind` handed on rather than through any rendering production
+/// might have applied to it.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
+    match payload.downcast_ref::<String>() {
+        Some(owned) => owned,
+        None => payload
+            .downcast_ref::<&str>()
+            .copied()
+            .unwrap_or("the payload carried no readable text"),
+    }
+}

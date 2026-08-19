@@ -29,9 +29,39 @@ The exact enum is documented in rustdoc. The useful public rule is that Camber k
 
 - `NoRuntime` — the call was made with no runtime context established. Nothing was spawned. A handle returned before a runtime exists yields this on `join`/`.await`.
 - `ScopeClosed` — a runtime exists, but its root scope has already closed to admission: the `run` closure returned, or shutdown was requested. Nothing was spawned. This is the defined disposition of a spawn inside the shutdown window, not a fault. In a handler it maps to `503`, not `500` — see [Handler Behavior](#handler-behavior).
-- `ScopeDrainTimeout(n)` — returned by the runtime entry point itself: `runtime::run`, `RuntimeBuilder::run`, `runtime::test`, or `#[camber::test]`. The graceful drain expired with `n` children that had not exited on their own. `n` counts children that failed to exit cooperatively, not children still running when the entry point returned.
+- `ScopeDrainTimeout(n)` — the graceful drain expired with `n` children that had not exited on their own. `n` counts children that failed to exit cooperatively, not children still running when the entry point returned. It reaches a caller inside a `Lifecycle` aggregate rather than on its own.
 
 `NoRuntime` and `ScopeClosed` are distinct so a caller can tell "no runtime at all" from "too late".
+
+## Lifecycle Aggregates
+
+`Lifecycle` is what a runtime entry point returns when teardown could not finish cleanly: `runtime::run`, `RuntimeBuilder::run`, `runtime::test`, or `#[camber::test]`. It carries every framework-owned participant that failed during one startup or one teardown, frozen after every join or abandonment decision has been taken — never a single flattened winner.
+
+```rust
+use camber::{LifecycleFailureKind, LifecycleParticipant, RuntimeError};
+
+fn report(error: &RuntimeError) {
+    let RuntimeError::Lifecycle(failures) = error else { return };
+    // The one to act on. The rest stay available through `iter`.
+    let primary = failures.primary();
+    println!("{} failed in {}", primary.participant(), primary.phase());
+    for failure in failures.iter() {
+        if let LifecycleFailureKind::Resource(resource) = failure.kind() {
+            println!("resource {} : {}", resource.name(), resource.kind());
+        }
+    }
+}
+```
+
+- `primary()` is total — an aggregate exists only because something failed — and is chosen by precedence: the aggregate shutdown deadline, then explicit cancellation, then a panic, then a scope that could not drain, then a resource callback, then every remaining subsystem outcome. Owner order breaks ties inside one class.
+- `iter()` lists every entry in owner order: root scope, servers, their connections and upgrades, background children, resources, the exporter, then the executor.
+- `LifecycleParticipant`, `LifecyclePhase`, and `LifecycleFailureKind` are closed, so a `match` over any of them is exhaustive and a new variant is a deliberate API change.
+
+A server's own result stays flat. `ServerHandle` and `ServerHandleFuture` answer `Result<(), RuntimeError>` — `Cancelled`, `Timeout`, or the fatal error that ended the server — because that value has an owner already holding it. The aggregate names the owners no caller holds a handle for.
+
+What the aggregate cannot claim: Camber's deadlines bound Camber's own waiting and escalation. Cooperative cancellation cannot preempt an async task that never yields, cannot stop application code running on a blocking or OS thread, and cannot prove that an abandoned synchronous callback has returned. A participant Camber could not prove finished is named rather than reported as stopped.
+
+If the user closure panics, the panic is the answer and nothing replaces it. Teardown still runs in full, the aggregate it produced is emitted as one `lifecycle failures displaced by an unwinding closure` event carrying the primary's participant, phase, and the recorded count, and the original payload then resumes.
 
 ## Application-Supplied Variants
 

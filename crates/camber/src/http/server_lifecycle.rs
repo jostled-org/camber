@@ -2,7 +2,7 @@ use std::future::{Future, IntoFuture};
 use std::ops::ControlFlow;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -13,7 +13,9 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use super::BufferConfig;
 use super::mock::{LifecycleCheckpoint, LifecycleFault, LifecycleScript, SupervisorJoinProbe};
 use super::router::ServerDispatch;
+use crate::lifecycle::{AggregateShutdown, FORCED_JOIN_GRACE, LifecycleParticipant};
 use crate::runtime_state::{RuntimeInner, ShutdownSignal, carry_runtime};
+use crate::runtime_test_support::ParticipantDisposition;
 use crate::task::{AsyncJoinFuture, panic_to_error};
 use crate::{RuntimeError, runtime};
 
@@ -132,6 +134,19 @@ impl ServerContextSnapshot {
             .map(|runtime| runtime.shutdown_signal())
     }
 
+    /// The aggregate shutdown this server stops against.
+    ///
+    /// The runtime's when there is one, so a server inside a runtime narrows the
+    /// same expiry every other participant reads instead of starting its own
+    /// copy of the grace. A standalone server owns the only shutdown there is,
+    /// so it mints one over its own configured grace.
+    fn shutdown_deadline(&self) -> Arc<AggregateShutdown> {
+        match self.runtime.as_ref() {
+            Some(runtime) => runtime.shutdown_deadline(),
+            None => AggregateShutdown::new(self.shutdown_timeout(), None),
+        }
+    }
+
     fn shutdown_timeout(&self) -> Duration {
         self.policy.shutdown_timeout_value()
     }
@@ -197,9 +212,42 @@ impl Drop for ConnectionPermit {
     }
 }
 
+/// When a graceful shutdown ends for the requests one connection admitted.
+///
+/// Two bounds, narrowest wins. The shared one is the aggregate every
+/// participant reads, so a request observing a transition late gets the time
+/// that is left rather than a fresh copy of the grace. The local one is the
+/// server's own configured timeout, which may be narrower than the runtime's
+/// and stays this connection's bound when it is.
+#[derive(Clone)]
+pub(super) struct ConnectionShutdown {
+    shared: Option<Arc<AggregateShutdown>>,
+    local: Duration,
+}
+
+impl ConnectionShutdown {
+    /// The instant a graceful shutdown observed in this turn ends at.
+    pub(super) fn deadline(&self) -> tokio::time::Instant {
+        let local = tokio::time::Instant::now() + self.local;
+        match self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.read(&LifecycleParticipant::Connection))
+        {
+            Some(shared) => shared.min(local),
+            None => local,
+        }
+    }
+}
+
 pub(super) struct ConnectionLifecycle {
     permit: Arc<ConnectionPermit>,
     control: Option<tokio::sync::watch::Receiver<ServerControl>>,
+    /// The aggregate expiry this connection's admitted requests answer to.
+    ///
+    /// Travels with `control` because the two are one authority: the control
+    /// transition says a shutdown started, and this says when it ends.
+    shutdown: ConnectionShutdown,
     registration: Option<tokio::sync::mpsc::Sender<UpgradeTicket>>,
     #[cfg(feature = "ws")]
     transport_registration: Option<tokio::sync::mpsc::Sender<TransportRegistration>>,
@@ -213,6 +261,7 @@ impl Clone for ConnectionLifecycle {
         Self {
             permit: Arc::clone(&self.permit),
             control: self.control.clone(),
+            shutdown: self.shutdown.clone(),
             registration: self.registration.clone(),
             #[cfg(feature = "ws")]
             transport_registration: self.transport_registration.clone(),
@@ -227,12 +276,14 @@ impl ConnectionLifecycle {
     fn owned(
         permit: Arc<ConnectionPermit>,
         control: tokio::sync::watch::Receiver<ServerControl>,
+        shutdown: ConnectionShutdown,
         registration: tokio::sync::mpsc::Sender<UpgradeTicket>,
         script: Option<Arc<LifecycleScript>>,
     ) -> Self {
         Self {
             permit,
             control: Some(control),
+            shutdown,
             registration: Some(registration),
             #[cfg(feature = "ws")]
             transport_registration: None,
@@ -258,6 +309,11 @@ impl ConnectionLifecycle {
     /// than as "the server is running".
     pub(super) fn control(&self) -> Option<tokio::sync::watch::Receiver<ServerControl>> {
         self.control.clone()
+    }
+
+    /// The shutdown authority an admitted request on this connection answers to.
+    pub(super) fn shutdown_deadline(&self) -> ConnectionShutdown {
+        self.shutdown.clone()
     }
 
     #[cfg(feature = "ws")]
@@ -770,9 +826,11 @@ impl Future for OwnedTask {
     type Output = OwnedTaskCompletion;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let registered = self.is_registered();
         let result = Pin::new(&mut self.handle).poll(context);
         result.map(|result| OwnedTaskCompletion {
             result,
+            registered,
             expected_cancellation: self
                 .expected_cancellation
                 .as_ref()
@@ -795,6 +853,10 @@ impl Drop for OwnedTask {
 
 struct OwnedTaskCompletion {
     result: Result<(), tokio::task::JoinError>,
+    /// Whether this task was a registered upgrade bridge rather than an
+    /// ordinary connection, so the settlement inventory names the owner that
+    /// actually ended rather than folding every owned task into one.
+    registered: bool,
     expected_cancellation: bool,
 }
 
@@ -869,6 +931,40 @@ impl OwnedHttpTasks {
     }
 }
 
+/// The authority one public server handle holds over the server it owns.
+///
+/// The three travel together because a stop is one act: the aggregate is minted
+/// BEFORE the transition is published, so no participant can observe a graceful
+/// shutdown that has no deadline yet, and the cancellation latch is set before
+/// the abort for the same reason.
+pub(super) struct StopAuthority {
+    control: tokio::sync::watch::Sender<ServerControl>,
+    shutdown: Arc<AggregateShutdown>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl StopAuthority {
+    /// Ask for a graceful stop, minting the one aggregate deadline first.
+    pub(super) fn request_graceful(&self) {
+        self.shutdown.mint_at(tokio::time::Instant::now());
+        ServerControl::send_graceful(&self.control);
+    }
+
+    /// Ask for forced cancellation, which mints nothing at all.
+    pub(super) fn request_cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.abandon();
+    }
+
+    /// Publish the abort an abandoned handle owes its server.
+    ///
+    /// Deliberately not a cancellation: the latch stays unset, so the server
+    /// reads an owner that went away rather than a caller that asked.
+    pub(super) fn abandon(&self) {
+        ServerControl::send_abort(&self.control);
+    }
+}
+
 struct PendingAccepted {
     stream: crate::net::AcceptedStream,
     remote_addr: Option<std::net::SocketAddr>,
@@ -892,6 +988,19 @@ pub(super) struct ServerSupervisor {
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     header_timeout: Duration,
     shutdown_timeout: Duration,
+    /// The one aggregate expiry this server and every other participant share.
+    ///
+    /// Held beside `shutdown_timeout` rather than replacing it: the configured
+    /// grace is this server's own bound, and the aggregate is the outer one it
+    /// may narrow but never outlive.
+    shutdown: Arc<AggregateShutdown>,
+    /// Set when a caller asked THIS server to stop now.
+    ///
+    /// An abandoned join future publishes the same `Abort` on the wire, and the
+    /// two are one event to every connection. Only one of them is a caller
+    /// asking, and only that one skips the grace and belongs in the account the
+    /// runtime returns, so the latch is what tells them apart.
+    cancelled: Arc<AtomicBool>,
     runtime_shutdown: Option<ShutdownSignal>,
     runtime: Option<Arc<RuntimeInner>>,
     connection_limit: Option<Arc<tokio::sync::Semaphore>>,
@@ -926,6 +1035,7 @@ impl ServerSupervisor {
         let context = Arc::new(snapshot.connection_context());
         let header_timeout = snapshot.header_timeout();
         let shutdown_timeout = snapshot.shutdown_timeout();
+        let shutdown = snapshot.shutdown_deadline();
         let runtime_shutdown = snapshot.runtime_shutdown();
         (
             Self {
@@ -935,6 +1045,8 @@ impl ServerSupervisor {
                 tls_acceptor,
                 header_timeout,
                 shutdown_timeout,
+                shutdown,
+                cancelled: Arc::new(AtomicBool::new(false)),
                 runtime_shutdown,
                 runtime: snapshot.runtime,
                 connection_limit,
@@ -959,6 +1071,24 @@ impl ServerSupervisor {
     /// Whether this server was started inside a Camber runtime.
     pub(super) fn is_camber(&self) -> bool {
         self.runtime.is_some()
+    }
+
+    /// What a public handle needs to stop this server: the transition channel,
+    /// the aggregate a graceful request mints from, and the latch a
+    /// cancellation sets.
+    pub(super) fn stop_authority(
+        &self,
+        control: tokio::sync::watch::Sender<ServerControl>,
+    ) -> StopAuthority {
+        StopAuthority {
+            control,
+            shutdown: Arc::clone(&self.shutdown),
+            cancelled: Arc::clone(&self.cancelled),
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
     }
 
     pub(super) async fn run(mut self) -> Result<(), RuntimeError> {
@@ -1254,6 +1384,10 @@ impl ServerSupervisor {
         let lifecycle = ConnectionLifecycle::owned(
             ConnectionPermit::new(permit),
             control.clone(),
+            ConnectionShutdown {
+                shared: Some(Arc::clone(&self.shutdown)),
+                local: self.shutdown_timeout,
+            },
             registration,
             self.script.clone(),
         );
@@ -1408,10 +1542,30 @@ impl ServerSupervisor {
     /// failure starts a graceful shutdown and is recorded as its candidate; a
     /// clean completion must not start one by arriving.
     async fn handle_task_completion(&mut self, completion: OwnedTaskCompletion) {
-        match self.classify_completion(completion) {
-            Some(error) => self.enter_graceful(Some(error)).await,
-            None => {}
+        let (registered, cancelled) = (completion.registered, completion.expected_cancellation);
+        let failure = self.classify_completion(completion);
+        self.settle_owned(
+            registered,
+            connection_disposition(failure.is_some(), cancelled),
+        );
+        if let Some(error) = failure {
+            self.enter_graceful(Some(error)).await;
         }
+    }
+
+    /// Publish how one owned transport was disposed of.
+    ///
+    /// Every owned task settles here, whichever way its join came back, so the
+    /// inventory says what happened to each of them rather than only to the
+    /// ones that failed. A registered bridge is named as the upgrade it is: it
+    /// outlives the response head that created it and settles its own
+    /// connection, which is a different disposition from the connection's.
+    fn settle_owned(&self, registered: bool, disposition: ParticipantDisposition) {
+        let participant = match registered {
+            true => LifecycleParticipant::Upgrade,
+            false => LifecycleParticipant::Connection,
+        };
+        self.shutdown.settle(&participant, disposition);
     }
 
     async fn enter_graceful(&mut self, candidate: Option<RuntimeError>) {
@@ -1431,8 +1585,22 @@ impl ServerSupervisor {
             return;
         }
         self.mode = ShutdownMode::Graceful;
-        self.deadline = Some(selected_at + self.shutdown_timeout);
+        self.deadline = Some(self.graceful_deadline(selected_at));
         self.close_admission(ServerControl::send_graceful).await;
+    }
+
+    /// The instant this server's graceful drain ends at.
+    ///
+    /// The shared expiry is minted here if this transition is the first one
+    /// anywhere; a runtime that already transitioned hands back the instant it
+    /// fixed, so a server entering its drain late gets the time that is left
+    /// rather than a fresh copy of the grace. The server's own configured
+    /// timeout may only narrow that, never extend it.
+    fn graceful_deadline(&self, selected_at: tokio::time::Instant) -> tokio::time::Instant {
+        let shared = self
+            .shutdown
+            .read_or_mint(&LifecycleParticipant::Server, selected_at);
+        shared.min(selected_at + self.shutdown_timeout)
     }
 
     /// Stop admitting and publish the control transition this shutdown makes.
@@ -1459,14 +1627,36 @@ impl ServerSupervisor {
     /// connection for a protocol-level shutdown it can outlast — without a
     /// deadline the forced abort would wait forever on a permit that a
     /// long-lived response never releases.
+    ///
+    /// What it is rearmed to is NOT a second grace period. Abort is forced
+    /// termination, so the window is whatever the one aggregate expiry still
+    /// has, and never less than the fixed forced-join grace every other forced
+    /// stop gives an owner it just told to end.
     async fn begin_abort(&mut self, outcome: Option<TerminalOutcome>) {
         if let Some(outcome) = outcome {
             self.record_escalation(outcome);
         }
         self.mode = ShutdownMode::Abort;
-        self.deadline = Some(tokio::time::Instant::now() + self.shutdown_timeout);
+        self.deadline = Some(self.forced_deadline());
         self.close_admission(ServerControl::send_abort).await;
         self.reject_all_pending().await;
+    }
+
+    /// The instant the forced abort stops waiting on the owners it told to end.
+    ///
+    /// An explicit cancellation gets no grace at all beyond the fixed
+    /// forced-join window: the caller asked for now, and reading the aggregate
+    /// would hand back time it deliberately gave up.
+    fn forced_deadline(&self) -> tokio::time::Instant {
+        let now = tokio::time::Instant::now();
+        let remaining = match self.is_cancelled() {
+            true => Duration::ZERO,
+            false => self
+                .shutdown
+                .remaining(&LifecycleParticipant::Server)
+                .unwrap_or(self.shutdown_timeout),
+        };
+        now + remaining.max(FORCED_JOIN_GRACE)
     }
 
     /// Record the failure a graceful shutdown carries provisionally. First
@@ -1579,9 +1769,19 @@ impl ServerSupervisor {
         self.registration_closed = true;
     }
 
+    /// Abort every remaining connection and settle each join as it comes back.
+    ///
+    /// The forced stop's own inventory: a connection joined here was cancelled
+    /// by this server rather than finished by its peer, and one whose join came
+    /// back a failure is named through the terminal this supervisor reports.
     async fn drain_owned(&mut self) {
         self.reject_all_pending().await;
-        self.tasks.abort_and_drain().await;
+        self.tasks.abort_all();
+        while let Some(completion) = self.tasks.next().await {
+            let registered = completion.registered;
+            let failed = self.classify_completion(completion).is_some();
+            self.settle_owned(registered, connection_disposition(failed, true));
+        }
     }
 
     async fn drain_owned_after_panic(&mut self) {
@@ -1665,12 +1865,47 @@ impl ServerSupervisor {
 
     async fn finish(&mut self) -> Result<(), RuntimeError> {
         let result = self.take_result();
+        self.settle_server(result.as_ref().err());
         LifecycleScript::pause_at(
             self.script.as_deref(),
             LifecycleCheckpoint::AfterSupervisorResultSend,
         )
         .await;
         result
+    }
+
+    /// Publish how this server ended, and record it where the runtime has to
+    /// account for it.
+    ///
+    /// Nothing is RECORDED here. A server's own account leaves through its flat
+    /// result, which is the value its owner already reads and the one place a
+    /// per-server failure belongs; the runtime's aggregate names the owners no
+    /// caller holds a handle for. Cancelling a server is a control action a
+    /// caller asked for, not a lifecycle failure the runtime has to report.
+    ///
+    /// What is published is the disposition, so the settlement inventory says
+    /// what happened to this server rather than leaving it to be inferred from
+    /// a `Result` the aggregate never sees.
+    fn settle_server(&self, terminal: Option<&RuntimeError>) {
+        let disposition = match terminal {
+            Some(RuntimeError::Cancelled) => ParticipantDisposition::CancelledAndJoined,
+            Some(_) | None => ParticipantDisposition::Completed,
+        };
+        self.shutdown
+            .settle(&LifecycleParticipant::Server, disposition);
+    }
+}
+
+/// How one accepted connection's completion settles.
+///
+/// A join the supervisor got back clean is complete; one it got back after
+/// asking for the cancellation is cancelled and joined; anything else is named,
+/// because the supervisor turns that failure into the terminal it reports.
+const fn connection_disposition(failed: bool, cancelled: bool) -> ParticipantDisposition {
+    match (failed, cancelled) {
+        (true, _) => ParticipantDisposition::Named,
+        (false, true) => ParticipantDisposition::CancelledAndJoined,
+        (false, false) => ParticipantDisposition::Completed,
     }
 }
 
