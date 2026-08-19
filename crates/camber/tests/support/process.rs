@@ -399,6 +399,21 @@ pub fn is_private_child(expected_mode: &str) -> bool {
     matches!((mode.as_deref(), nonce.as_deref()), (Some(mode), Some(nonce)) if mode == expected_mode && !nonce.is_empty())
 }
 
+/// Wait out a spawned child, leaving the guard with the caller.
+///
+/// Split from `run_isolated_exact` so a caller that wants the child's own words
+/// on the failure path can still reach them: both failure modes here run the
+/// guard's shutdown, which is what fills its captured streams, and a caller
+/// handed only the error has already lost them.
+fn drive_isolated(
+    child: &mut ChildGuard,
+    assertion_marker: &str,
+    timeout: Duration,
+) -> Result<ExitStatus, ProcessError> {
+    child.wait_for_readiness(assertion_marker, timeout)?;
+    child.wait_bounded(timeout)
+}
+
 pub fn run_isolated_exact(
     test_name: &str,
     mode: &str,
@@ -406,8 +421,7 @@ pub fn run_isolated_exact(
     timeout: Duration,
 ) -> Result<IsolatedRun, ProcessError> {
     let mut child = ChildGuard::spawn_exact_current(test_name, mode, timeout)?;
-    child.wait_for_readiness(assertion_marker, timeout)?;
-    let status = child.wait_bounded(timeout)?;
+    let status = drive_isolated(&mut child, assertion_marker, timeout)?;
     Ok(IsolatedRun {
         status,
         stdout: std::mem::take(&mut child.stdout),
@@ -426,6 +440,13 @@ pub fn run_isolated_exact(
 /// A process-isolated case is otherwise fifteen lines of preamble that every
 /// such test restates, and a copy that forgets the flush hangs its parent on a
 /// marker still sitting in the child's buffer.
+///
+/// The child's stderr is quoted on **both** failure paths, not only the one that
+/// reached an exit status. A body that fails its assertions never prints the
+/// marker, so the parent's readiness wait is what ends — and reporting only that
+/// wait renders a failed claim as a process that would not start, which is the
+/// one thing a falsification receipt taken through here must not be confused
+/// with.
 pub fn run_in_child(
     test_name: &str,
     mode: &str,
@@ -433,22 +454,29 @@ pub fn run_in_child(
     bound: Duration,
     body: impl FnOnce(),
 ) -> bool {
-    if !is_private_child(mode) {
-        let run = run_isolated_exact(test_name, mode, marker, bound)
-            .expect("the isolated child could not be run");
-        assert!(
-            run.success(),
-            "the isolated child failed: {}",
-            String::from_utf8_lossy(run.stderr())
-        );
-        return false;
+    if is_private_child(mode) {
+        body();
+        println!("{marker}");
+        // Flushed here, not left to exit: the parent waits on this line, and a
+        // marker still in the child's buffer reads as a child that never got
+        // there.
+        io::Write::flush(&mut std::io::stdout()).expect("the child could not flush its marker");
+        return true;
     }
-    body();
-    println!("{marker}");
-    // Flushed here, not left to exit: the parent waits on this line, and a
-    // marker still in the child's buffer reads as a child that never got there.
-    io::Write::flush(&mut std::io::stdout()).expect("the child could not flush its marker");
-    true
+    assert_child_succeeded(test_name, mode, marker, bound);
+    false
+}
+
+/// Run the private child from the parent side, failing with what it said.
+fn assert_child_succeeded(test_name: &str, mode: &str, marker: &str, bound: Duration) {
+    let mut child = ChildGuard::spawn_exact_current(test_name, mode, bound)
+        .expect("the isolated child could not be started");
+    let failure = match drive_isolated(&mut child, marker, bound) {
+        Ok(status) if status.success() => return,
+        Ok(status) => format!("the isolated child exited with {status}"),
+        Err(error) => format!("the isolated child never reported: {error}"),
+    };
+    panic!("{failure}\n{}", String::from_utf8_lossy(child.stderr()));
 }
 
 pub fn private_child_parent_id() -> Option<u32> {

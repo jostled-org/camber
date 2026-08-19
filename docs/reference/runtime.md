@@ -74,25 +74,25 @@ closure ever being called. Nothing below can displace it.
 
 Once the closure runs, `run` never inspects its value. `T` is opaque to the
 runtime, so it is either returned as `Ok(T)` or displaced whole by a
-runtime-level failure. Those failures are ordered, first match wins:
+runtime-level failure. One value carries every such failure:
+`RuntimeError::Lifecycle`, the immutable account of each framework-owned
+participant that could not finish — a panicking Camber-owned background child,
+a scope drain that expired with children still outstanding, a resource, the
+exporter, the executor. Nothing weighs those against each other: the account
+keeps them all, and `primary()` is the first of them in owner order. See
+[One aggregate shutdown deadline](#one-aggregate-shutdown-deadline) and
+[Errors](error.md#lifecycle-aggregates).
 
-0. your closure unwinding → the panic resumes, and nothing returns through the
-   `Result` at all
-1. a panic in a Camber-owned background child → `RuntimeError::TaskPanicked`
-2. the scope drain expiring before every child exited on its own →
-   `RuntimeError::ScopeDrainTimeout(count)`, where `count` is how many children
-   the boundary found outstanding
+Your closure unwinding sits above the `Result` rather than inside it. The panic
+resumes, and nothing returns through the `Result` at all.
 
 A panicking closure does not escape teardown. Camber catches the unwind, runs
 teardown in full — admission closes, `ScopeClosing` fires, the scope drains,
 resources shut down — and resumes the panic on the far side, so your panic
-semantics are unchanged. A recorded internal panic or a drain timeout is then
-logged rather than returned: the payload leaves through the panic, so the
-`Result` has no room left to carry either. Every failed assertion inside
-`#[camber::test]` takes this path.
-
-A panic outranks a drain timeout because a timeout is often the consequence of
-a wedged panicking child, so reporting the panic points at the real fault.
+semantics are unchanged. The account teardown produced has no return path left,
+so it leaves through one `lifecycle failures displaced by an unwinding closure`
+event instead of being dropped. Every failed assertion inside `#[camber::test]`
+takes this path.
 
 A panic in a task **you** spawned with `camber::spawn` or `camber::spawn_async`
 is delivered on that task's own handle and leaves the runtime result alone.

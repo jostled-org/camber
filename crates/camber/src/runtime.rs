@@ -613,9 +613,8 @@ fn close_and_drain(
 ///
 /// No user holds a handle for such a child, so this slot is the only place its
 /// fault survives. It enters the aggregate as the background task it belongs
-/// to, where the precedence rules — a panic outranks a scope that could not
-/// drain and every resource outcome — decide whether it becomes the primary,
-/// instead of a hand-written ordering doing it here.
+/// to, and owner order alone decides whether it becomes the primary, instead of
+/// a hand-written ordering doing it here.
 fn record_internal_panic(inner: &RuntimeInner, log: &mut LifecycleFailureLog) {
     if let Some(panicked) = inner.take_internal_panic() {
         log.record(
