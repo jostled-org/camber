@@ -1,0 +1,283 @@
+{
+  "schema_version": 1,
+  "plan": "complete-bounded-service-operation",
+  "step": 18,
+  "plan_base_sha": "6f47ed6338ae422e5377d42a069713092623b71f",
+  "head_sha": "c1fdb643cde2ca34995c1f03f234523b2ec7c985",
+  "source_fingerprint": "d33881e58b8ee209a56984828d2c642c047feaa270f9d6a30b4aa7642e838564",
+  "cargo_lock_sha256": "bd6695b0aab6297fe9a72f8151438725b10d49c2e9ccb8ec9be2127efc61d9a4",
+  "cli_capabilities": [
+    "crypto",
+    "env_access",
+    "file_read",
+    "file_write",
+    "network",
+    "process_exec",
+    "system_time"
+  ],
+  "cli_capability_source": "pedant capabilities crates/camber",
+  "cli_style_scan": {
+    "command": "pedant check --format github crates/camber/src crates/camber/tests",
+    "exit_status": 0,
+    "violation_count": 0
+  },
+  "mcp": {
+    "scope": "camber",
+    "analysis_tier": "syntactic",
+    "analysis_tier_note": "The tier audit_crate returned. Semantic analysis was not available; no syntactic result is described as semantic.",
+    "degraded_file_count": 0,
+    "capabilities": [
+      "crypto",
+      "env_access",
+      "file_read",
+      "file_write",
+      "network",
+      "system_time"
+    ],
+    "violation_count": 0,
+    "deny_count": 0,
+    "gate_verdicts": [
+      {
+        "rule": "env-access-network",
+        "severity": "info",
+        "outcome": "not-deny"
+      }
+    ],
+    "queries_run": [
+      "audit_crate",
+      "query_violations",
+      "query_capabilities",
+      "query_gate_verdicts",
+      "find_structural_duplicates"
+    ],
+    "structural_duplicates": {
+      "changed_exact_groups": 0,
+      "unresolved_responsibility_candidates": 0,
+      "field_definition": "Residual counts after the Pedant Evidence Contract filter and disposition, not raw tool output: the contract states the structural-duplicate output is a candidate set, not a zero-result gate. changed_exact_groups counts exact subgroups with two or more plan-written functions that survive DRY review as genuine duplicated logic. unresolved_responsibility_candidates counts same-responsibility structural candidates among plan-written functions with no recorded disposition.",
+      "exact_hash_semantics": "Pedant's exact_hash is normalized over identifiers and literals, so it groups functions identical up to renaming. Two distinct-responsibility one-expression builder setters collide under it. Raw equality with zero is therefore unattainable for any validated builder vocabulary; the raw inventory is recorded in full below.",
+      "raw_group_count": 173,
+      "raw_function_count": 1245,
+      "raw_exact_subgroups": 82,
+      "raw_exact_subgroups_with_two_or_more_plan_written": 18,
+      "plan_written_test": "no function of that name existed in that file at plan_base_sha",
+      "min_fact_count": 3,
+      "candidates": [
+        {
+          "exact_hash": "2207203985595388630",
+          "plan_written_members": [
+            "crates/camber/src/http/client.rs:410 response_budget",
+            "crates/camber/src/http/proxy_policy.rs:131 upload_budget",
+            "crates/camber/src/http/proxy_policy.rs:140 download_budget",
+            "crates/camber/src/http/route_budgets.rs:48 with_upload",
+            "crates/camber/src/http/route_budgets.rs:52 with_download",
+            "crates/camber/src/http/server_policy.rs:132 upload_budget",
+            "crates/camber/src/http/server_policy.rs:141 download_budget"
+          ],
+          "member_count": 7,
+          "disposition": "validated-builder-setter",
+          "rationale": "Distinct validated builder setters: each writes one distinct field on one type and delegates its validation to the single shared owner (finite_duration, positive_limit, clamped_duration). The shared logic is already extracted; what collides is the one-line field write and its own published Rustdoc contract.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "3436104504614265199",
+          "plan_written_members": [
+            "crates/camber/src/lifecycle/failures.rs:69 fmt",
+            "crates/camber/src/lifecycle/resource_failure.rs:120 fmt"
+          ],
+          "member_count": 2,
+          "disposition": "display-over-distinct-vocabulary",
+          "rationale": "Display over distinct closed types, each rendering its own vocabulary through its own label owner. A shared impl cannot name two vocabularies.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "4075426479772961951",
+          "plan_written_members": [
+            "crates/camber/src/http/host_router.rs:44 request_budget",
+            "crates/camber/src/http/router.rs:113 request_budget"
+          ],
+          "member_count": 2,
+          "disposition": "route-policy-delegation",
+          "rationale": "Router and HostRouter public policy setters. Both delegate to the one shared RouteBudgets owner; each publishes a distinct containment contract that 18.T5 reads. No logic is duplicated.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "4285595480516881765",
+          "plan_written_members": [
+            "crates/camber/src/http/transfer_budget.rs:108 with_clamped_idle",
+            "crates/camber/src/http/transfer_budget.rs:120 with_clamped_total"
+          ],
+          "member_count": 2,
+          "disposition": "validated-builder-setter",
+          "rationale": "Distinct validated builder setters: each writes one distinct field on one type and delegates its validation to the single shared owner (finite_duration, positive_limit, clamped_duration). The shared logic is already extracted; what collides is the one-line field write and its own published Rustdoc contract.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "5112031679071445063",
+          "plan_written_members": [
+            "crates/camber/src/http/proxy_policy.rs:106 buffered_response_limit",
+            "crates/camber/src/http/server_policy.rs:183 connection_limit",
+            "crates/camber/src/http/server_policy.rs:207 profiling_response_limit",
+            "crates/camber/src/http/transfer_budget.rs:132 with_max_bytes"
+          ],
+          "member_count": 4,
+          "disposition": "validated-builder-setter",
+          "rationale": "Distinct validated builder setters: each writes one distinct field on one type and delegates its validation to the single shared owner (finite_duration, positive_limit, clamped_duration). The shared logic is already extracted; what collides is the one-line field write and its own published Rustdoc contract.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "6453673568459510841",
+          "plan_written_members": [
+            "crates/camber/src/http/router.rs:683 buffered_registration",
+            "crates/camber/src/http/router.rs:688 streaming_registration"
+          ],
+          "member_count": 2,
+          "disposition": "registration-variant",
+          "rationale": "Distinct proxy registration variants; each names one enum variant over the one shared frozen-upstream owner.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "7554388837939978947",
+          "plan_written_members": [
+            "crates/camber/src/http/proxy_policy.rs:68 connect_timeout",
+            "crates/camber/src/http/proxy_policy.rs:81 request_timeout",
+            "crates/camber/src/http/proxy_policy.rs:94 upstream_idle_timeout",
+            "crates/camber/src/http/request_budget.rs:84 with_body_idle",
+            "crates/camber/src/http/request_budget.rs:106 with_total",
+            "crates/camber/src/http/server_policy.rs:114 header_timeout",
+            "crates/camber/src/http/server_policy.rs:160 shutdown_timeout",
+            "crates/camber/src/http/transfer_budget.rs:154 with_idle",
+            "crates/camber/src/http/transfer_budget.rs:173 with_total"
+          ],
+          "member_count": 9,
+          "disposition": "validated-builder-setter",
+          "rationale": "Distinct validated builder setters: each writes one distinct field on one type and delegates its validation to the single shared owner (finite_duration, positive_limit, clamped_duration). The shared logic is already extracted; what collides is the one-line field write and its own published Rustdoc contract.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "8708831462233455739",
+          "plan_written_members": [
+            "crates/camber/src/http/async_proxy.rs:467 new",
+            "crates/camber/src/http/async_proxy.rs:513 phase"
+          ],
+          "member_count": 2,
+          "disposition": "shared-constructor-delegation",
+          "rationale": "Distinct named constructors that each fix one discriminator and delegate construction to the one shared private constructor beside them.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "8955662697284124965",
+          "plan_written_members": [
+            "crates/camber/src/lifecycle/participant.rs:71 fmt",
+            "crates/camber/src/lifecycle/resource_failure.rs:50 fmt"
+          ],
+          "member_count": 2,
+          "disposition": "display-over-distinct-vocabulary",
+          "rationale": "Display over distinct closed types, each rendering its own vocabulary through its own label owner. A shared impl cannot name two vocabularies.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "9449748758813936420",
+          "plan_written_members": [
+            "crates/camber/src/http/route_budgets.rs:44 with_request",
+            "crates/camber/src/http/server_policy.rs:123 request_budget"
+          ],
+          "member_count": 2,
+          "disposition": "validated-builder-setter",
+          "rationale": "Distinct validated builder setters: each writes one distinct field on one type and delegates its validation to the single shared owner (finite_duration, positive_limit, clamped_duration). The shared logic is already extracted; what collides is the one-line field write and its own published Rustdoc contract.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "10330992348082219565",
+          "plan_written_members": [
+            "crates/camber/src/http/rejection.rs:1511 protocol_label",
+            "crates/camber/src/lifecycle/phase.rs:28 label"
+          ],
+          "member_count": 2,
+          "disposition": "closed-vocabulary-publisher",
+          "rationale": "Closed-label publishers over distinct enums, each published from its own enum so a variant added there reaches the vocabulary its own labels are checked against.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "13431624355795717364",
+          "plan_written_members": [
+            "crates/camber/src/http/host_router.rs:58 download_budget",
+            "crates/camber/src/http/router.rs:130 download_budget"
+          ],
+          "member_count": 2,
+          "disposition": "route-policy-delegation",
+          "rationale": "Router and HostRouter public policy setters. Both delegate to the one shared RouteBudgets owner; each publishes a distinct containment contract that 18.T5 reads. No logic is duplicated.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "13451292403489576536",
+          "plan_written_members": [
+            "crates/camber/src/http/mock.rs:1025 observe_completion_staged",
+            "crates/camber/src/http/mock.rs:1038 observe_completion_recorded"
+          ],
+          "member_count": 2,
+          "disposition": "shared-observation-delegation",
+          "rationale": "Distinct inert observation checkpoints that each name one counter and delegate to the one shared observe helper.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "15894737539361486835",
+          "plan_written_members": [
+            "crates/camber/src/http/host_router.rs:51 upload_budget",
+            "crates/camber/src/http/router.rs:123 upload_budget"
+          ],
+          "member_count": 2,
+          "disposition": "route-policy-delegation",
+          "rationale": "Router and HostRouter public policy setters. Both delegate to the one shared RouteBudgets owner; each publishes a distinct containment contract that 18.T5 reads. No logic is duplicated.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "17251208434869822345",
+          "plan_written_members": [
+            "crates/camber/src/http/method.rs:65 vocabulary",
+            "crates/camber/src/http/rejection.rs:488 vocabulary"
+          ],
+          "member_count": 2,
+          "disposition": "closed-vocabulary-publisher",
+          "rationale": "Closed-label publishers over distinct enums, each published from its own enum so a variant added there reaches the vocabulary its own labels are checked against.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "18013806584082454554",
+          "plan_written_members": [
+            "crates/camber/src/http/boundary.rs:96 fmt",
+            "crates/camber/src/http/boundary.rs:153 fmt",
+            "crates/camber/src/lifecycle/phase.rs:40 fmt",
+            "crates/camber/src/lifecycle/resource_phase.rs:40 fmt"
+          ],
+          "member_count": 4,
+          "disposition": "display-over-distinct-vocabulary",
+          "rationale": "Display over distinct closed types, each rendering its own vocabulary through its own label owner. A shared impl cannot name two vocabularies.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "18108741211488473314",
+          "plan_written_members": [
+            "crates/camber/src/http/request_budget.rs:147 narrowed_by",
+            "crates/camber/src/http/transfer_budget.rs:208 narrowed_by"
+          ],
+          "member_count": 2,
+          "disposition": "per-dimension-narrowing",
+          "rationale": "Per-dimension narrowing over two budget types with different dimension sets; both delegate every comparison to the one shared narrow helper.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "18128433013332342369",
+          "plan_written_members": [
+            "crates/camber/src/http/completion.rs:264 pre_commit",
+            "crates/camber/src/http/completion.rs:272 post_commit",
+            "crates/camber/src/http/operation.rs:681 observed"
+          ],
+          "member_count": 3,
+          "disposition": "shared-constructor-delegation",
+          "rationale": "Distinct named constructors that each fix one discriminator and delegate construction to the one shared private constructor beside them.",
+          "shared_owner_already_extracted": true
+        }
+      ]
+    }
+  }
+}
