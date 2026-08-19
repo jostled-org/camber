@@ -104,18 +104,17 @@ impl LifecycleFailureLog {
     /// Freeze the log into the error a lifecycle returns, or `None` when
     /// nothing failed.
     ///
-    /// The only way an aggregate is built, so ordering and precedence are
-    /// decided once here rather than at each coordinator that records into it.
+    /// The only way an aggregate is built, so ordering is decided once here
+    /// rather than at each coordinator that records into it. Owner order alone
+    /// picks the primary: the entry a caller acts on is the outermost owner
+    /// that failed, whatever it failed with.
     #[must_use]
     pub fn into_error(self) -> Option<RuntimeError> {
         let mut recorded = self.recorded;
         // Stable, so the admission sequence a runtime already owns decides the
         // order inside one owner class and this only decides the classes.
         recorded.sort_by_key(|failure| failure.participant().owner_rank());
-        let primary = recorded
-            .iter()
-            .min_by_key(|failure| failure.kind().precedence_rank())?
-            .clone();
+        let primary = recorded.first()?.clone();
         Some(RuntimeError::Lifecycle(Arc::new(LifecycleFailures {
             entries: recorded.into(),
             primary,

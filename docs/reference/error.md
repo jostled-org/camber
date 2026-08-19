@@ -53,7 +53,7 @@ fn report(error: &RuntimeError) {
 }
 ```
 
-- `primary()` is total — an aggregate exists only because something failed — and is chosen by precedence: the aggregate shutdown deadline, then explicit cancellation, then a panic, then a scope that could not drain, then a resource callback, then every remaining subsystem outcome. Owner order breaks ties inside one class.
+- `primary()` is total — an aggregate exists only because something failed — and is the first entry in owner order: the outermost owner that failed, whatever it failed with. A root-scope entry is read before a resource's, and a resource's before the executor's. Nothing ranks the failure kinds against each other.
 - `iter()` lists every entry in owner order: root scope, servers, their connections and upgrades, background children, resources, the exporter, then the executor.
 - `LifecycleParticipant`, `LifecyclePhase`, and `LifecycleFailureKind` are closed, so a `match` over any of them is exhaustive and a new variant is a deliberate API change.
 

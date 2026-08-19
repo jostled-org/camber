@@ -41,25 +41,6 @@ pub enum LifecycleFailureKind {
 }
 
 impl LifecycleFailureKind {
-    /// Where this outcome sits in the precedence a primary is chosen by.
-    ///
-    /// The aggregate deadline outranks explicit cancellation, which outranks a
-    /// panic, a scope that could not drain, a resource callback, and finally
-    /// every remaining subsystem outcome. The last class holds the joins and
-    /// returned errors that name no stronger reason on their own; owner order
-    /// tells those apart, so the exporter is read before the executor without
-    /// this ranking having to name either.
-    pub(crate) const fn precedence_rank(&self) -> u8 {
-        match self {
-            Self::DeadlineExceeded(_) => 0,
-            Self::Cancelled => 1,
-            Self::TaskPanicked(_) => 2,
-            Self::ScopeDrainTimeout { .. } => 3,
-            Self::Resource(_) => 4,
-            Self::JoinLost(_) | Self::Operation(_) => 5,
-        }
-    }
-
     /// The typed error nested inside this outcome, for the two kinds that
     /// carry one.
     ///
