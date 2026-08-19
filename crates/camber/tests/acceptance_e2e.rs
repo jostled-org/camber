@@ -4,6 +4,8 @@ pub mod h2_client;
 pub mod http;
 #[path = "support/metrics_scrape.rs"]
 pub mod metrics_scrape;
+#[path = "support/process.rs"]
+pub mod process;
 // Mounted under a name of its own here, because this root's own multipart cases
 // live in a module the inventory proof names `streaming_multipart`.
 #[path = "support/streaming_multipart.rs"]
@@ -35,6 +37,7 @@ pub mod ws;
 pub mod common {
     pub use crate::h2_client::*;
     pub use crate::metrics_scrape::*;
+    pub use crate::process::*;
     pub use crate::rejection_kinds::*;
     pub use crate::rejection_metrics::*;
     pub use crate::rejection_support::*;

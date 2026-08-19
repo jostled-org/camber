@@ -2831,6 +2831,17 @@ fn capture_for(row: &Admitted) -> common::TraceCapture {
 /// stay absent.
 #[test]
 fn cross_protocol_operation_owns_one_envelope_middleware_and_completion() {
+    common::run_in_child(
+        "cross_protocol_service_operation::cross_protocol_operation_owns_one_envelope_middleware_and_completion",
+        "cross-protocol-operation-ownership",
+        "CROSS_PROTOCOL_OPERATION_OWNERSHIP_COMPLETE",
+        BOUND,
+        assert_cross_protocol_operation_ownership,
+    );
+}
+
+/// Run the process-global metrics claim where no sibling test can add records.
+fn assert_cross_protocol_operation_ownership() {
     camber::runtime::builder()
         .with_metrics()
         .with_tracing()

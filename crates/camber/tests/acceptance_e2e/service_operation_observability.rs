@@ -59,6 +59,9 @@ const UNBOUNDED: usize = usize::MAX;
 /// How long a bounded fixture teardown may take.
 const SHUTDOWN_BOUND: Duration = Duration::from_secs(5);
 
+/// How long the isolated completion matrix may occupy its child process.
+const COMPLETION_MATRIX_BOUND: Duration = Duration::from_secs(30);
+
 /// How long a live peer waits for an answer its server has to sample for.
 #[cfg(feature = "profiling")]
 const ANSWER_BOUND: Duration = Duration::from_secs(60);
@@ -1153,6 +1156,17 @@ fn completion_grpc_message(name: &str) -> Box<[u8]> {
 /// same way, under the terminals that are theirs.
 #[test]
 fn completion_metrics_and_events_emit_once_at_true_terminal() {
+    common::run_in_child(
+        "service_operation_observability::completion_metrics_and_events_emit_once_at_true_terminal",
+        "completion-metrics-and-events",
+        "COMPLETION_METRICS_AND_EVENTS_COMPLETE",
+        COMPLETION_MATRIX_BOUND,
+        assert_completion_metrics_and_events,
+    );
+}
+
+/// Run the process-global completion-metrics claim without sibling samples.
+fn assert_completion_metrics_and_events() {
     common::test_runtime()
         .with_metrics()
         .with_tracing()

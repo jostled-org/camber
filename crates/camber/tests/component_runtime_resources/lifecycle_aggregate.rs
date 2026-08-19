@@ -277,9 +277,8 @@ fn assert_every_phase_is_recorded_and_rendered() {
     assert_rendered_failures_state_their_stage(&failures);
 }
 
-/// Every row of the primary precedence, read off aggregates that each drop the
-/// class above.
-fn assert_primary_precedence() {
+/// The primary is the first remaining owner, independent of failure kind.
+fn assert_primary_follows_owner_order() {
     let deadline = drain_row(
         LifecycleParticipant::Server,
         LifecycleFailureKind::DeadlineExceeded(DeadlineBoundary::AggregateShutdown),
@@ -328,11 +327,13 @@ fn assert_primary_precedence() {
         ]
     };
 
-    // Each row drops the class above it, so the next one down must win.
+    // The rows are recorded from innermost to outermost. Removing the tail
+    // therefore drops outer owners while the aggregate still sorts what
+    // remains into owner order.
     let ladder: [(usize, &str); 7] = [
-        (0, "deadline"),
-        (1, "cancelled"),
-        (2, "panicked"),
+        (0, "scope-drain"),
+        (1, "scope-drain"),
+        (2, "scope-drain"),
         (3, "scope-drain"),
         (4, "resource"),
         (5, "operation"),
@@ -523,7 +524,7 @@ fn assert_aggregate_ownership() {
 fn lifecycle_aggregate_accessors_order_and_primary_are_deterministic() {
     assert_owner_order_is_independent_of_recording_order();
     assert_every_phase_is_recorded_and_rendered();
-    assert_primary_precedence();
+    assert_primary_follows_owner_order();
     assert_owner_order_breaks_class_ties();
     assert_causes_are_typed_and_closed();
     assert_clean_teardown_has_no_aggregate();

@@ -77,19 +77,34 @@ pub fn assert_scope_drain(error: &RuntimeError, outstanding: usize, context: &st
 /// Assert the returned aggregate's primary is a Camber-owned child that unwound
 /// carrying `payload`.
 pub fn assert_background_panic(error: &RuntimeError, payload: &str, context: &str) {
-    let primary = aggregate_primary(error);
-    let reported = match (primary.participant(), primary.kind()) {
-        (LifecycleParticipant::BackgroundTask, LifecycleFailureKind::TaskPanicked(payload)) => {
-            Some(&**payload)
-        }
-        _ => None,
-    };
+    let reported = background_panic_payload(aggregate_primary(error));
     assert_eq!(
         reported,
         Some(payload),
         "{context}: {:?}",
         aggregate_identities(error)
     );
+}
+
+/// Assert the returned aggregate retains a Camber-owned child panic anywhere.
+pub fn assert_retained_background_panic(error: &RuntimeError, payload: &str, context: &str) {
+    let reported = aggregate(error).iter().find_map(background_panic_payload);
+    assert_eq!(
+        reported,
+        Some(payload),
+        "{context}: {:?}",
+        aggregate_identities(error)
+    );
+}
+
+/// Read a Camber-owned child panic payload from one aggregate entry.
+fn background_panic_payload(failure: &LifecycleFailure) -> Option<&str> {
+    match (failure.participant(), failure.kind()) {
+        (LifecycleParticipant::BackgroundTask, LifecycleFailureKind::TaskPanicked(payload)) => {
+            Some(payload)
+        }
+        _ => None,
+    }
 }
 
 /// Every closed participant, matched without a wildcard.

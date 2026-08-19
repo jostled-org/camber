@@ -110,10 +110,9 @@ fn internal_panic_displaces_runtime_result_without_inspecting_closure_value() {
     );
 }
 
-/// A panic localizes the fault, so it is reported in preference to the drain
-/// timeout it often causes.
+/// An outer scope drain is primary while the inner panic remains in the account.
 #[test]
-fn internal_panic_outranks_drain_timeout_when_both_occur() {
+fn outer_scope_drain_is_primary_and_retains_inner_panic() {
     let (controller, builder) = probed_runtime(SHORT_DRAIN);
 
     let outcome = builder.run(|| {
@@ -136,11 +135,18 @@ fn internal_panic_outranks_drain_timeout_when_both_occur() {
         );
     });
 
-    lifecycle_kinds::assert_background_panic(
-        outcome
-            .as_ref()
-            .expect_err("neither the panic nor the drain timeout was reported"),
+    let failure = outcome
+        .as_ref()
+        .expect_err("neither the panic nor the drain timeout was reported");
+    lifecycle_kinds::assert_scope_drain(failure, 1, "the outer scope drain was not retained");
+    assert_eq!(
+        lifecycle_kinds::entry_identity(lifecycle_kinds::aggregate_primary(failure)),
+        "root-scope|graceful-drain|scope-drain",
+        "the inner panic displaced the outer failed owner"
+    );
+    lifecycle_kinds::assert_retained_background_panic(
+        failure,
         INTERNAL_PANIC,
-        "the drain timeout outranked the internal panic",
+        "the outer scope drain discarded the inner panic",
     );
 }

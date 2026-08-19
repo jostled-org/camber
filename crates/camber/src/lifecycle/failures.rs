@@ -22,7 +22,7 @@ use std::sync::Arc;
 pub struct LifecycleFailures {
     /// Every recorded failure in owner order.
     entries: Arc<[LifecycleFailure]>,
-    /// The one failure that outranks the rest.
+    /// The first failure in deterministic owner order.
     ///
     /// Held by value rather than as an index into `entries`. Both say the same
     /// thing about a slice this type freezes and never mutates, but only the
@@ -36,10 +36,8 @@ pub struct LifecycleFailures {
 impl LifecycleFailures {
     /// The failure a caller should act on.
     ///
-    /// Chosen by precedence — the aggregate deadline, explicit cancellation, a
-    /// panic, a scope that could not drain, a resource callback, then every
-    /// remaining subsystem outcome — with owner order breaking ties inside one
-    /// class. The rest stay available through [`iter`](Self::iter).
+    /// Chosen by owner order, so the outermost failed owner is primary whatever
+    /// its failure kind. The rest stay available through [`iter`](Self::iter).
     #[must_use]
     pub const fn primary(&self) -> &LifecycleFailure {
         &self.primary

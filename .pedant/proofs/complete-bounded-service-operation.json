@@ -3,8 +3,8 @@
   "plan": "complete-bounded-service-operation",
   "step": 18,
   "plan_base_sha": "6f47ed6338ae422e5377d42a069713092623b71f",
-  "head_sha": "c1fdb643cde2ca34995c1f03f234523b2ec7c985",
-  "source_fingerprint": "d33881e58b8ee209a56984828d2c642c047feaa270f9d6a30b4aa7642e838564",
+  "head_sha": "28df2ef3b8a8e341e0027ec09f42980a715a24ad",
+  "source_fingerprint": "82c42aa1967ef07f671e28a965821e6fe965351682c4c2cade2f7947d496e24d",
   "cargo_lock_sha256": "bd6695b0aab6297fe9a72f8151438725b10d49c2e9ccb8ec9be2127efc61d9a4",
   "cli_capabilities": [
     "crypto",
@@ -55,9 +55,9 @@
       "unresolved_responsibility_candidates": 0,
       "field_definition": "Residual counts after the Pedant Evidence Contract filter and disposition, not raw tool output: the contract states the structural-duplicate output is a candidate set, not a zero-result gate. changed_exact_groups counts exact subgroups with two or more plan-written functions that survive DRY review as genuine duplicated logic. unresolved_responsibility_candidates counts same-responsibility structural candidates among plan-written functions with no recorded disposition.",
       "exact_hash_semantics": "Pedant's exact_hash is normalized over identifiers and literals, so it groups functions identical up to renaming. Two distinct-responsibility one-expression builder setters collide under it. Raw equality with zero is therefore unattainable for any validated builder vocabulary; the raw inventory is recorded in full below.",
-      "raw_group_count": 173,
-      "raw_function_count": 1245,
-      "raw_exact_subgroups": 82,
+      "raw_group_count": 168,
+      "raw_function_count": 1195,
+      "raw_exact_subgroups": 74,
       "raw_exact_subgroups_with_two_or_more_plan_written": 18,
       "plan_written_test": "no function of that name existed in that file at plan_base_sha",
       "min_fact_count": 3,
@@ -81,8 +81,8 @@
         {
           "exact_hash": "3436104504614265199",
           "plan_written_members": [
-            "crates/camber/src/lifecycle/failures.rs:69 fmt",
-            "crates/camber/src/lifecycle/resource_failure.rs:120 fmt"
+            "crates/camber/src/lifecycle/failures.rs:66 fmt",
+            "crates/camber/src/lifecycle/resource_failure.rs:119 fmt"
           ],
           "member_count": 2,
           "disposition": "display-over-distinct-vocabulary",
