@@ -664,7 +664,7 @@ impl InboundGuard {
 /// from the request policy the operation carries.
 pub(super) struct PreCommitCause {
     terminal: InboundTerminal,
-    wire: Option<Rejected>,
+    wire: Option<Box<Rejected>>,
 }
 
 impl PreCommitCause {
@@ -673,8 +673,11 @@ impl PreCommitCause {
     /// Only the gRPC handoff reports one: every other pre-commit source is
     /// observed by this operation itself, through [`Self::observed`].
     #[cfg(feature = "grpc")]
-    pub(super) const fn reported(terminal: InboundTerminal, wire: Option<Rejected>) -> Self {
-        Self { terminal, wire }
+    pub(super) fn reported(terminal: InboundTerminal, wire: Option<Rejected>) -> Self {
+        Self {
+            terminal,
+            wire: wire.map(Box::new),
+        }
     }
 
     /// The cause this operation's own carried sources produced.
@@ -691,7 +694,7 @@ impl PreCommitCause {
 
     /// The refusal the measuring owner minted, given up to the failure table.
     pub(super) fn wire(self) -> Option<Rejected> {
-        self.wire
+        self.wire.map(|wire| *wire)
     }
 }
 

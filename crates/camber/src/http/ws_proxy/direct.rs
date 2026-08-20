@@ -80,7 +80,7 @@ pub(in crate::http) async fn handle_ws_upgrade(
     })
     .await
     .map_err(|rejected| WsRefusal {
-        rejected,
+        rejected: Box::new(rejected),
         subprotocol: selected,
     })
 }

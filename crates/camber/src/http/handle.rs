@@ -1291,7 +1291,7 @@ where
         Err(refusal) => Ok(answer_rejected(
             ctx,
             &refused_upgrade_scope(scope, refusal.subprotocol.as_deref()),
-            refusal.rejected,
+            *refusal.rejected,
             account,
         )),
     }

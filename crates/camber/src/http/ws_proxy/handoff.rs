@@ -48,7 +48,7 @@ pub(super) struct WsHandoff<'a> {
 /// negotiation had selected one, and rejection context reports presence exactly
 /// where an owner established it.
 pub(in crate::http) struct WsRefusal {
-    pub(in crate::http) rejected: Rejected,
+    pub(in crate::http) rejected: Box<Rejected>,
     pub(in crate::http) subprotocol: Option<Box<str>>,
 }
 
@@ -56,7 +56,7 @@ impl WsRefusal {
     /// A refusal found before subprotocol negotiation ran.
     fn unnegotiated(rejected: Rejected) -> Self {
         Self {
-            rejected,
+            rejected: Box::new(rejected),
             subprotocol: None,
         }
     }
@@ -64,7 +64,7 @@ impl WsRefusal {
     /// A refusal found after negotiation settled on what it settled on.
     pub(super) fn negotiated(rejected: Rejected, subprotocol: Option<&str>) -> Self {
         Self {
-            rejected,
+            rejected: Box::new(rejected),
             subprotocol: subprotocol.map(Box::from),
         }
     }
