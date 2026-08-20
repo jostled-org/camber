@@ -126,6 +126,15 @@ impl Listener {
         }
     }
 
+    /// Whether this listener binds a Unix socket rather than a TCP port.
+    ///
+    /// Asked by the builder that resolves TLS: a Unix peer is confined by the
+    /// socket's filesystem permissions and no accept path wraps one, so the
+    /// listener kind is what decides whether a certificate can apply at all.
+    pub(crate) fn is_unix(&self) -> bool {
+        matches!(self.inner, ListenerInner::Unix(_, _))
+    }
+
     /// The bound TCP address, or `None` for a Unix socket.
     pub(crate) fn tcp_addr(&self) -> Option<std::net::SocketAddr> {
         match &self.inner {
@@ -146,23 +155,34 @@ impl Listener {
     }
 
     /// Remove the Unix socket path for this listener.
+    ///
+    /// The fallible spelling, called by the owner that gives the listener up
+    /// while it still has a caller to answer: a path replaced under a running
+    /// service, or one on a directory the process cannot write, is a failure the
+    /// serving terminal returns. `Drop` runs the same removal afterwards and can
+    /// only log, so it is the account for a listener nothing ever served.
     pub fn cleanup(&self) -> Result<(), RuntimeError> {
         match &self.inner {
             ListenerInner::Tcp(_) => Ok(()),
             ListenerInner::Unix(_, socket) => cleanup_unix_socket(socket),
         }
     }
+
+    /// The socket path this listener owns, for the log a failed removal leaves.
+    fn socket_path(&self) -> Option<&std::path::Path> {
+        match &self.inner {
+            ListenerInner::Tcp(_) => None,
+            ListenerInner::Unix(_, socket) => Some(&socket.path),
+        }
+    }
 }
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        if let ListenerInner::Unix(_, socket) = &self.inner
-            && let Err(err) = cleanup_unix_socket(socket)
+        if let Err(err) = self.cleanup()
+            && let Some(path) = self.socket_path()
         {
-            tracing::warn!(
-                "failed to remove unix socket {}: {err}",
-                socket.path.display()
-            );
+            tracing::warn!("failed to remove unix socket {}: {err}", path.display());
         }
     }
 }

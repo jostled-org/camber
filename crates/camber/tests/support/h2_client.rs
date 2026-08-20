@@ -14,6 +14,7 @@
 
 use bytes::Bytes;
 use std::net::SocketAddr;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use super::http::{HttpResponse, bounded, remaining};
@@ -195,12 +196,7 @@ impl PersistentH2Client {
         let (response, mut stream) = self
             .open(method, path, host, headers, body.is_empty(), deadline)
             .await;
-        match body.is_empty() {
-            true => {}
-            false => stream
-                .send_data(Bytes::copy_from_slice(body), true)
-                .expect("the HTTP/2 request body could not be sent"),
-        }
+        send_whole_body(&mut stream, body).await;
         read_answer(response, deadline).await
     }
 
@@ -253,13 +249,12 @@ impl PersistentH2Client {
     /// what these rows prove does not happen.
     pub async fn open_download(&mut self, path: &str) -> H2Download {
         let deadline = Instant::now() + self.bound;
-        let (response, mut stream) = self
+        // The request carries no body, so the send half is closed in the head
+        // itself: a stream left half-open would keep the peer waiting on payload
+        // the row never means to send.
+        let (response, stream) = self
             .open("GET", path, "localhost", &[], true, deadline)
             .await;
-        // The request carries no body, so the send half is closed at once: a
-        // stream left half-open would keep the peer waiting on payload the row
-        // never means to send.
-        let _ended = stream.send_data(Bytes::new(), true);
         H2Download {
             response: Some(response),
             body: None,
@@ -339,6 +334,39 @@ impl PersistentH2Client {
             None => {}
         }
     }
+
+    /// Let this connection end itself, then read its driver's result.
+    ///
+    /// [`Self::close`] aborts the driver, because most cases close with a stream
+    /// the peer is still holding and will never answer — a connection nothing
+    /// can end, which a join would wait on forever. The abort is what makes that
+    /// close return, and it is also what makes it a kill: a `RST_STREAM` the
+    /// case queued may never reach the wire, and the `GOAWAY` behind it never
+    /// does.
+    ///
+    /// A case whose claim IS that its peer saw the cancellation cannot use that.
+    /// This is for the cases that have released every stream they opened: the
+    /// connection has nothing left to wait for, so dropping the sender ends it,
+    /// and the frames the case queued go out before it does.
+    ///
+    /// Bounded, because a case that still owes a stream would otherwise hang the
+    /// whole binary here rather than say which claim it got wrong.
+    pub async fn close_settled(mut self) {
+        let driver = self.driver.take();
+        let bound = self.bound;
+        drop(self);
+        let Some(driver) = driver else {
+            return;
+        };
+        let abort = driver.abort_handle();
+        match tokio::time::timeout(bound, driver).await {
+            Ok(joined) => report_driver(joined),
+            Err(_) => {
+                abort.abort();
+                panic!("the HTTP/2 connection did not end after its last stream was released")
+            }
+        }
+    }
 }
 
 impl Drop for PersistentH2Client {
@@ -391,7 +419,7 @@ impl H2RequestStream {
     /// the frame, and a short one asks whether it is taking frames right now.
     pub async fn offer(&mut self, frame: &[u8], bound: Duration) -> H2Offer {
         match await_credit(&mut self.stream, frame.len(), bound).await {
-            Credit::Granted => offered(send_frame(&mut self.stream, frame)),
+            Credit::Granted => offered(send_frame(&mut self.stream, frame, false).await),
             Credit::Withheld => H2Offer::Withheld,
             Credit::Closed => H2Offer::PeerStopped,
             Credit::Failed(error) => {
@@ -504,24 +532,11 @@ impl H2ReadHalf {
     pub async fn settle(mut self) -> H2Settled {
         let deadline = Instant::now() + self.bound;
         let mut bytes = 0;
-        let mut reset = false;
-        while let Some(chunk) =
-            bounded(self.body.data(), remaining(deadline), "HTTP/2 answer body").await
-        {
-            match chunk {
-                Ok(chunk) => {
-                    self.body
-                        .flow_control()
-                        .release_capacity(chunk.len())
-                        .expect("the HTTP/2 reader could not release its capacity");
-                    bytes += chunk.len();
-                }
-                Err(_) => {
-                    reset = true;
-                    break;
-                }
-            }
-        }
+        let ended = drain_body(&mut self.body, deadline, "HTTP/2 answer body", |chunk| {
+            bytes += chunk.len();
+        })
+        .await;
+        let reset = ended_in_reset(ended, "HTTP/2 answer body", bytes);
         let trailers = match reset {
             true => Box::default(),
             false => bounded(self.body.trailers(), remaining(deadline), "HTTP/2 trailers")
@@ -648,7 +663,7 @@ async fn push_frame(
 ) -> FramePush {
     let bound = remaining(deadline);
     match await_credit(stream, frame.len(), bound).await {
-        Credit::Granted => send_frame(stream, frame),
+        Credit::Granted => send_frame(stream, frame, false).await,
         Credit::Closed => FramePush::PeerStopped,
         Credit::Failed(error) => FramePush::Failed(error),
         Credit::Withheld => {
@@ -657,11 +672,35 @@ async fn push_frame(
     }
 }
 
+/// Send one whole request body, ending the stream with it.
+///
+/// An empty body was ended by the head that declared it, so there is nothing
+/// left to send. A peer that refused from the head alone has already reset this
+/// stream, and its answer is what the caller reads either way; only a send that
+/// failed for some other reason is this client's fault.
+async fn send_whole_body(stream: &mut h2::SendStream<Bytes>, body: &[u8]) {
+    if body.is_empty() {
+        return;
+    }
+    match send_frame(stream, body, true).await {
+        FramePush::Accepted | FramePush::PeerStopped => {}
+        FramePush::Failed(error) => panic!("the HTTP/2 request body could not be sent: {error}"),
+    }
+}
+
 /// Send one frame after the peer grants enough flow-control capacity.
-fn send_frame(stream: &mut h2::SendStream<Bytes>, frame: &[u8]) -> FramePush {
-    match stream.send_data(Bytes::copy_from_slice(frame), false) {
+///
+/// `end_of_stream` states whether this frame completes the request body, which
+/// is the difference between one frame of a paced upload and a whole request
+/// sent at once.
+async fn send_frame(
+    stream: &mut h2::SendStream<Bytes>,
+    frame: &[u8],
+    end_of_stream: bool,
+) -> FramePush {
+    match stream.send_data(Bytes::copy_from_slice(frame), end_of_stream) {
         Ok(()) => FramePush::Accepted,
-        Err(error) => push_failure(error),
+        Err(error) => push_failure(stream, error).await,
     }
 }
 
@@ -677,63 +716,161 @@ fn is_graceful_end(error: &h2::Error) -> bool {
 }
 
 /// Read one `h2` send failure as the peer's disposition or as a fault.
-fn push_failure(error: h2::Error) -> FramePush {
-    match is_graceful_end(&error) {
+///
+/// A frame offered to a stream the peer has already ended comes back as the
+/// user error `InactiveStreamId`, which carries no reason of its own: by its
+/// type alone, a peer that refused this request and a misuse of this client
+/// look the same. So the stream is asked instead of the error, and that is not
+/// a race this side loses — a server answering from the head alone resets the
+/// request body it will never read, and the sender learns of that reset only
+/// once its own frame is refused.
+async fn push_failure(stream: &mut h2::SendStream<Bytes>, error: h2::Error) -> FramePush {
+    match is_graceful_end(&error) || peer_ended_the_stream(stream).await {
         true => FramePush::PeerStopped,
         false => FramePush::Failed(error),
     }
 }
 
-/// Read one HTTP/2 response body to end of stream.
+/// Whether the peer has already ended this stream gracefully.
+///
+/// Polled once rather than awaited: what this asks is the disposition the
+/// stream carries now, and awaiting would park the caller on a stream that is
+/// still open until the peer got around to resetting it.
+async fn peer_ended_the_stream(stream: &mut h2::SendStream<Bytes>) -> bool {
+    let reset = std::future::poll_fn(|cx| Poll::Ready(stream.poll_reset(cx))).await;
+    matches!(reset, Poll::Ready(Ok(reason)) if reason == h2::Reason::NO_ERROR)
+}
+
+/// Read one HTTP/2 response body frame by frame, and report what it ended on.
 ///
 /// Capacity is released per frame because the window is the sender's budget: a
 /// reader that took the bytes and never released it would stall the peer partway
 /// through a body, and the case waiting on that body would report a timeout for
 /// a server that was doing exactly what it was told.
 ///
-/// `bound` covers the whole body, not one frame of it. A per-frame budget gives
-/// a peer dribbling frames a fresh full bound for each one, so a body that never
-/// ends outlasts its caller's deadline by as many frames as the peer cares to
-/// send.
+/// `deadline` covers the whole body, not one frame of it. A per-frame budget
+/// gives a peer dribbling frames a fresh full bound for each one, so a body that
+/// never ends outlasts its caller's deadline by as many frames as the peer cares
+/// to send.
+///
+/// The ending is handed back rather than judged here, because the callers do not
+/// agree on what it means: a reader of a committed answer takes a reset as its
+/// row's answer, and a reader of a whole body takes everything but a graceful
+/// end as a fault. Each frame goes to `received`, so a caller that wants the
+/// payload keeps it and a caller that wants only its size counts it.
+async fn drain_body(
+    body: &mut h2::RecvStream,
+    deadline: Instant,
+    operation: &str,
+    mut received: impl FnMut(&[u8]),
+) -> Result<(), h2::Error> {
+    while let Some(chunk) = bounded(body.data(), remaining(deadline), operation).await {
+        let chunk = chunk?;
+        body.flow_control()
+            .release_capacity(chunk.len())
+            .expect("the HTTP/2 reader could not release its flow-control capacity");
+        received(&chunk);
+    }
+    Ok(())
+}
+
+/// Read one committed answer body's ending as one of the three it can have.
+///
+/// A reset under an answered head is the stream-local disposition a post-commit
+/// terminal applies, and it is exactly what the rows asserting on a reset name.
+/// Every other ending is the connection collapsing under the case — a GOAWAY,
+/// the socket beneath it, or this client's own aborted driver — so the two are
+/// kept apart rather than merged into one failure flag: a row that recorded a
+/// collapse as a reset would pass for a reason it does not claim.
+fn body_end(ended: Result<(), h2::Error>) -> H2BodyEnd {
+    match ended {
+        Ok(()) => H2BodyEnd::Ended,
+        Err(error) if error.is_reset() => H2BodyEnd::Reset,
+        Err(error) => H2BodyEnd::Collapsed(error.to_string().into_boxed_str()),
+    }
+}
+
+/// Read one committed answer body's ending as a reset or as a fault.
+///
+/// For the readers whose row has no claim on a lost connection: only the reset
+/// is an outcome there, and a collapse is the case failing under them.
+fn ended_in_reset(ended: Result<(), h2::Error>, operation: &str, delivered: usize) -> bool {
+    match body_end(ended) {
+        H2BodyEnd::Ended => false,
+        H2BodyEnd::Reset => true,
+        H2BodyEnd::Collapsed(failure) => {
+            panic!("the {operation} failed after {delivered} bytes: {failure}")
+        }
+    }
+}
+
+/// Read one HTTP/2 response body to end of stream, keeping its payload.
+///
+/// A peer that resets this stream with `NO_ERROR` after answering has ended it
+/// gracefully — the stream-local disposition a refusal applies to the request
+/// body it will never read. Any other ending is a fault, because this caller
+/// asked for a whole body and did not get one.
 pub async fn drain_h2_body(
     mut body: h2::RecvStream,
     operation: &str,
     bound: Duration,
 ) -> Box<[u8]> {
-    let deadline = Instant::now() + bound;
     let mut bytes = Vec::new();
-    while let Some(chunk) = bounded(body.data(), remaining(deadline), operation).await {
-        // A peer that resets this stream with NO_ERROR after answering has ended
-        // it gracefully — the stream-local disposition a refusal applies to the
-        // request body it will never read. Any other reason is a fault.
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
-            Err(error) if is_graceful_end(&error) => break,
-            Err(error) => panic!("an HTTP/2 body frame failed: {error}"),
-        };
-        body.flow_control()
-            .release_capacity(chunk.len())
-            .expect("the HTTP/2 reader could not release its flow-control capacity");
-        bytes.extend_from_slice(&chunk);
+    let ended = drain_body(&mut body, Instant::now() + bound, operation, |chunk| {
+        bytes.extend_from_slice(chunk)
+    })
+    .await;
+    match ended {
+        Ok(()) => {}
+        Err(error) if is_graceful_end(&error) => {}
+        Err(error) => panic!("an HTTP/2 body frame failed: {error}"),
     }
     bytes.into_boxed_slice()
 }
 
-/// End the connection driver and read the four outcomes that can have.
+/// End the connection driver and read what it ended as.
 ///
 /// The response is already complete, so the driver is aborted rather than waited
 /// on — the server's own keepalive policy decides when it would otherwise close.
-/// Only the driver's own cancellation is an accepted end: a protocol failure or
-/// a panic inside it is a fault, and a join that only checked for cancellation
-/// would discard both.
+/// A case whose claim is that its peer saw the frames it queued cannot use this;
+/// [`PersistentH2Client::close_settled`] is the close that lets them out.
 async fn join_driver(driver: tokio::task::JoinHandle<Result<(), h2::Error>>) {
     driver.abort();
-    match driver.await {
+    report_driver(driver.await);
+}
+
+/// Report the four outcomes one joined driver can have.
+///
+/// Shared by the aborted close and the settled one, so the two teardown paths
+/// cannot disagree about which of them is a fault. Only a clean end and the
+/// driver's own cancellation are accepted: a protocol failure or a panic inside
+/// it is a fault, and a join that only checked for cancellation would discard
+/// both.
+fn report_driver(joined: Result<Result<(), h2::Error>, tokio::task::JoinError>) {
+    match joined {
         Ok(Ok(())) => {}
         Err(error) if error.is_cancelled() => {}
         Ok(Err(error)) => panic!("HTTP/2 client driver failed: {error}"),
         Err(error) => panic!("HTTP/2 client driver join failed: {error}"),
     }
+}
+
+/// How one committed HTTP/2 body ended.
+///
+/// The three endings are not interchangeable, and which one a post-commit row
+/// got is the row's whole claim: a reset ends one stream while the connection
+/// beneath it keeps answering, a collapse takes that connection away, and a
+/// clean end means no terminal fired at all. The collapse carries what the
+/// transport reported, because a row that accepts one still has to say so with
+/// the failure in hand.
+#[derive(Debug, Eq, PartialEq)]
+pub enum H2BodyEnd {
+    /// End of stream: the whole body arrived.
+    Ended,
+    /// This stream alone was reset under its committed head.
+    Reset,
+    /// The connection beneath this stream went away.
+    Collapsed(Box<str>),
 }
 
 /// What one HTTP/2 peer saw of a committed streaming response.
@@ -742,8 +879,8 @@ pub struct H2Streamed {
     pub status: u16,
     /// Payload bytes the peer actually received.
     pub bytes: usize,
-    /// Whether the stream was reset under its committed head, rather than ended.
-    pub reset: bool,
+    /// How the body under the committed head ended.
+    pub end: H2BodyEnd,
 }
 
 /// One download whose committed head and partial body its case reads itself.
@@ -771,11 +908,15 @@ impl H2Download {
         self.status
     }
 
-    /// Read this download until its stream ends or is reset.
+    /// Read this download until its body ends, however it ends.
     ///
     /// The head is read first when a case has not already read it, so one call
     /// covers the rows whose cause is the producer and the rows whose cause is
     /// something the case does between the head and the body.
+    ///
+    /// The ending is reported rather than judged, because a caller that stops
+    /// the server under its own download is entitled to lose the connection
+    /// while a caller whose producer failed is not.
     pub async fn drain(&mut self) -> H2Streamed {
         if self.response.is_some() {
             self.head().await;
@@ -785,30 +926,14 @@ impl H2Download {
             .body
             .take()
             .expect("this HTTP/2 download's body was already drained");
-        let mut reset = false;
-        while let Some(chunk) =
-            bounded(body.data(), remaining(deadline), "HTTP/2 download body").await
-        {
-            match chunk {
-                Ok(chunk) => {
-                    body.flow_control()
-                        .release_capacity(chunk.len())
-                        .expect("the HTTP/2 reader could not release its capacity");
-                    self.bytes += chunk.len();
-                }
-                // A reset under an answered head is the stream-local disposition
-                // a post-commit terminal applies. It is this row's answer, not a
-                // fault: the status is already on the wire and cannot change.
-                Err(_) => {
-                    reset = true;
-                    break;
-                }
-            }
-        }
+        let ended = drain_body(&mut body, deadline, "HTTP/2 download body", |chunk| {
+            self.bytes += chunk.len();
+        })
+        .await;
         H2Streamed {
             status: self.status,
             bytes: self.bytes,
-            reset,
+            end: body_end(ended),
         }
     }
 

@@ -49,13 +49,6 @@ fn budget_route() -> Router {
     router
 }
 
-async fn wait_paused(controller: &LifecycleController, checkpoint: LifecycleCheckpoint, row: &str) {
-    tokio::time::timeout(EVENT_TIMEOUT, controller.wait_until_paused(checkpoint))
-        .await
-        .unwrap_or_else(|_| panic!("{row}: {checkpoint:?} was never reached"))
-        .unwrap_or_else(|error| panic!("{row}: waiting for {checkpoint:?} failed: {error}"));
-}
-
 /// Serve one row and prove the production owners resolved exactly its values.
 ///
 /// Both checkpoints are armed before anything connects, and each is armed with
@@ -96,16 +89,15 @@ async fn assert_row(row: PolicyRow, hosts: Option<HostRouter>) {
             .await
     });
 
-    wait_paused(
+    let configured = LifecycleCheckpoint::HeaderTimeoutConfigured(row.expected_header);
+    http_support::wait_until_paused_bounded(
         &controller,
-        LifecycleCheckpoint::HeaderTimeoutConfigured(row.expected_header),
-        row.name,
+        configured,
+        &format!("{}: {configured:?}", row.name),
     )
     .await;
     controller
-        .release(LifecycleCheckpoint::HeaderTimeoutConfigured(
-            row.expected_header,
-        ))
+        .release(configured)
         .expect("release the header-timeout observation");
 
     let budgets = LifecycleCheckpoint::RouteBudgetsResolved {
@@ -113,7 +105,12 @@ async fn assert_row(row: PolicyRow, hosts: Option<HostRouter>) {
         upload: row.expected_upload,
         download: row.expected_download,
     };
-    wait_paused(&controller, budgets, row.name).await;
+    http_support::wait_until_paused_bounded(
+        &controller,
+        budgets,
+        &format!("{}: {budgets:?}", row.name),
+    )
+    .await;
     controller
         .release(budgets)
         .expect("release the resolved-budget observation");
@@ -974,6 +971,17 @@ impl StagedServer {
             .unwrap_or_else(|error| panic!("{row}: releasing {checkpoint:?} failed: {error}"));
     }
 
+    /// Record one checkpoint's release without waking what waits there.
+    ///
+    /// The held owner stays parked until something else provokes its next poll,
+    /// which is what lets a row re-arm the same checkpoint before that owner can
+    /// take the turn the re-arm is meant for.
+    fn stage_release(&self, checkpoint: LifecycleCheckpoint, row: &str) {
+        self.controller
+            .stage_release(checkpoint)
+            .unwrap_or_else(|error| panic!("{row}: staging {checkpoint:?} failed: {error}"));
+    }
+
     /// Read back the terminal production selected, and take the fixture down.
     ///
     /// Nothing here chooses the terminal. The row waits at production's own
@@ -986,7 +994,12 @@ impl StagedServer {
         row: &str,
     ) {
         let selected = LifecycleCheckpoint::InboundTerminalSelected(expect.terminal);
-        wait_paused(&self.controller, selected, row).await;
+        http_support::wait_until_paused_bounded(
+            &self.controller,
+            selected,
+            &format!("{row}: {selected:?}"),
+        )
+        .await;
         let polled = self.controller.body_frames_polled();
         self.release(selected, row);
 
@@ -1050,7 +1063,8 @@ async fn assert_held_row(budget: RequestBudget, wire: StagedWire, expect: Preced
     );
     let peer = server.peer(wire);
 
-    wait_paused(&server.controller, held, &row).await;
+    http_support::wait_until_paused_bounded(&server.controller, held, &format!("{row}: {held:?}"))
+        .await;
     // Staged while the coordinator is held: every source this row wants weighed
     // is ready before the turn that weighs them begins.
     tokio::time::sleep(STAGED_IDLE * 2).await;
@@ -1087,16 +1101,23 @@ async fn assert_forced_cancellation_row() {
     );
     let peer = server.peer(StagedWire::Withheld);
 
-    wait_paused(&server.controller, held, &row).await;
+    http_support::wait_until_paused_bounded(&server.controller, held, &format!("{row}: {held:?}"))
+        .await;
     server.handle.cancel();
-    wait_paused(&server.controller, supervisor, &row).await;
+    http_support::wait_until_paused_bounded(
+        &server.controller,
+        supervisor,
+        &format!("{row}: {supervisor:?}"),
+    )
+    .await;
     tokio::time::sleep(STAGED_IDLE * 2).await;
     server.release(held, &row);
 
-    wait_paused(
+    let selected = LifecycleCheckpoint::InboundTerminalSelected(expect.terminal);
+    http_support::wait_until_paused_bounded(
         &server.controller,
-        LifecycleCheckpoint::InboundTerminalSelected(expect.terminal),
-        &row,
+        selected,
+        &format!("{row}: {selected:?}"),
     )
     .await;
     server.release(supervisor, &row);
@@ -1137,25 +1158,38 @@ async fn assert_shutdown_deadline_row() {
     let (gate, staged) = std::sync::mpsc::channel();
     let peer = server.peer(StagedWire::Gated(staged));
 
-    wait_paused(&server.controller, held, &row).await;
+    http_support::wait_until_paused_bounded(&server.controller, held, &format!("{row}: {held:?}"))
+        .await;
     server.handle.shutdown();
-    wait_paused(&server.controller, supervisor, &row).await;
-    server.release(held, &row);
-    tokio::time::sleep(STAGED_SETTLE).await;
+    http_support::wait_until_paused_bounded(
+        &server.controller,
+        supervisor,
+        &format!("{row}: {supervisor:?}"),
+    )
+    .await;
 
-    // The frame opens the next turn, and that turn is the one held while the
-    // minted deadline expires and the cancellation is published beside it.
+    // The release is staged rather than woken, so the coordinator is still
+    // standing on it while the same checkpoint is armed for the turn after. A
+    // release that woke it would leave that re-arm racing the owner, and a turn
+    // the row did not stage could be the one held.
+    server.stage_release(held, &row);
     server.arm(held, &row);
+
+    // The frame is what provokes the poll that observes the staged release, so
+    // the turn it opens is the one held — while the minted deadline expires and
+    // the cancellation is published beside it.
     gate.send(()).expect("release the staged frame");
-    wait_paused(&server.controller, held, &row).await;
+    http_support::wait_until_paused_bounded(&server.controller, held, &format!("{row}: {held:?}"))
+        .await;
     tokio::time::sleep(STAGED_SHUTDOWN + STAGED_SETTLE).await;
     server.handle.cancel();
     server.release(held, &row);
 
-    wait_paused(
+    let selected = LifecycleCheckpoint::InboundTerminalSelected(expect.terminal);
+    http_support::wait_until_paused_bounded(
         &server.controller,
-        LifecycleCheckpoint::InboundTerminalSelected(expect.terminal),
-        &row,
+        selected,
+        &format!("{row}: {selected:?}"),
     )
     .await;
     server.release(supervisor, &row);

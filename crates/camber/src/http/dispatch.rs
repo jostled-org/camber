@@ -284,7 +284,7 @@ pub(super) enum DispatchResult {
     #[cfg(feature = "ws")]
     WebSocket(WsHandler, Request),
     #[cfg(feature = "ws")]
-    ProxyWebSocket(Request, Arc<str>, Arc<str>),
+    ProxyWebSocket(Request, Arc<str>, Arc<str>, Arc<ProxyUpstream>),
     /// Streaming proxy: middleware gates the request, body streams with backpressure.
     ProxyStream(Request, Arc<str>, Arc<str>, Arc<ProxyUpstream>),
 }
@@ -333,7 +333,7 @@ impl DispatchResult {
             | Self::Sse(_, req)
             | Self::ProxyStream(req, _, _, _) => req,
             #[cfg(feature = "ws")]
-            Self::WebSocket(_, req) | Self::ProxyWebSocket(req, _, _) => req,
+            Self::WebSocket(_, req) | Self::ProxyWebSocket(req, _, _, _) => req,
         }
     }
 }
@@ -690,10 +690,15 @@ impl FrozenRouter {
     ) -> DispatchResult {
         #[cfg(feature = "ws")]
         if super::ws_proxy::is_ws_upgrade_request(&req) {
+            // The frozen owner travels with the upgrade for the same reason it
+            // travels with every other forward this route makes: the deadlines
+            // the route configured are the route's, and an upgrade that left it
+            // behind dialed its upstream under no bound at all.
             return DispatchResult::ProxyWebSocket(
                 req,
                 Arc::clone(route.backend),
                 Arc::clone(route.prefix),
+                Arc::clone(route.upstream),
             );
         }
 
@@ -892,11 +897,6 @@ impl ServerDispatch {
         }
     }
 
-    /// The request-body ceiling that contains every child router here.
-    ///
-    /// `None` for a single router: nothing contains it, so its own configured
-    /// ceiling is the whole answer. A host router's ceiling applies to every
-    /// child, and a child that configured one can only narrow it.
     /// The budgets that contain every route here.
     ///
     /// The server's policy is the outermost layer either dispatch shape starts
@@ -909,6 +909,11 @@ impl ServerDispatch {
         }
     }
 
+    /// The request-body ceiling that contains every child router here.
+    ///
+    /// `None` for a single router: nothing contains it, so its own configured
+    /// ceiling is the whole answer. A host router's ceiling applies to every
+    /// child, and a child that configured one can only narrow it.
     fn outer_ceiling(&self) -> Option<ConfiguredCeiling> {
         match self {
             Self::Single(_) => None,

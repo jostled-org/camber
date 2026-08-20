@@ -1714,24 +1714,13 @@ fn publish_resource_states(
 /// passes, and the last of them is a resource whose callback never runs, so
 /// there is nothing else for the row to wait on.
 fn read_until_published(addr: std::net::SocketAddr) -> PublishedState {
-    let mut health = health_read(addr);
-    let deadline = std::time::Instant::now() + common::OBSERVATION_BOUND;
-    while health.1.as_ref() != PUBLISHED_HEALTH && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(25));
-        health = health_read(addr);
-    }
+    let (status, health) = common::health_until(addr, |_, body| body == PUBLISHED_HEALTH);
     let metrics = body_text(&http_support::send(addr, "GET", "/metrics", &[], b""));
     PublishedState {
-        status: health.0,
-        health: health.1,
+        status,
+        health,
         metrics,
     }
-}
-
-/// One live read of the health endpoint: the status it answered and its body.
-fn health_read(addr: std::net::SocketAddr) -> (u16, Box<str>) {
-    let response = http_support::send(addr, "GET", "/health", &[], b"");
-    (response.status, body_text(&response))
 }
 
 /// One answer's body, as the text an operator reads.

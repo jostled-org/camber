@@ -22,6 +22,7 @@
 //! is fixed is dropped rather than delivered.
 
 use super::body::BodyError;
+use super::body_admission::checked_body_frame_total;
 use super::boundary::{ByteBoundary, DeadlineBoundary};
 use super::mock::{CheckpointHold, LifecycleCheckpoint, LifecycleScript, TransferEvent};
 use super::operation::{InboundReady, InboundTerminal, InboundWatch};
@@ -49,6 +50,14 @@ impl TransferDirection {
         match self {
             Self::Upload => ByteBoundary::TransferUpload,
             Self::Download => ByteBoundary::TransferDownload,
+        }
+    }
+
+    /// The direction's name, for the diagnostics that state it.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Upload => "upload",
+            Self::Download => "download",
         }
     }
 }
@@ -423,14 +432,23 @@ impl<S: TransferSource> Transfer<S> {
     /// would carry this transfer past its maximum is released here, while it is
     /// still only a value this turn holds, so the crossing bytes are never
     /// delivered and never retained.
+    ///
+    /// The arithmetic is [`body_admission`](super::body_admission)'s, not a
+    /// second copy: a request body and a streaming transfer that disagreed about
+    /// what "one byte past the maximum" means would be two bounds wearing one
+    /// name. An opt-out is the largest total the platform can represent rather
+    /// than a second code path, the same answer a checked collection's ceiling
+    /// gives, so an unbounded transfer still fails on an overflowing total
+    /// instead of wrapping.
     fn admitted(&mut self, data: Bytes) -> SourceRead {
         let delivered = data.len();
-        let crossed = self
-            .counted
-            .checked_add(delivered)
-            .is_none_or(|total| self.budget.max_bytes().is_some_and(|max| total > max));
-        match crossed {
-            true => {
+        let admitted = checked_body_frame_total(
+            self.counted,
+            delivered,
+            self.budget.max_bytes().unwrap_or(usize::MAX),
+        );
+        match admitted {
+            None => {
                 drop(data);
                 LifecycleScript::observe_transfer(
                     self.observer.as_deref(),
@@ -439,8 +457,8 @@ impl<S: TransferSource> Transfer<S> {
                 );
                 SourceRead::Crossed
             }
-            false => {
-                self.counted += delivered;
+            Some(total) => {
+                self.counted = total;
                 self.quiet_since = Instant::now();
                 self.pending = Some(data);
                 LifecycleScript::observe_transfer(
@@ -696,23 +714,42 @@ impl TransferFailure {
 
     /// The account this failure reports, or a stated absence.
     ///
-    /// A row whose producer minted no account is still described: the terminal
-    /// names the bound, and the diagnostic says which owner observed it rather
-    /// than leaving an operator an empty string to read.
+    /// Borrowed, for the consumers that answer from a failure they keep: a
+    /// refusal and a typed error are both read off a failure their caller still
+    /// owns, so the account is copied rather than taken.
     fn diagnostic(&self) -> Box<str> {
         match &self.account {
             Some(account) => account.clone(),
-            None => format!("{} transfer ended on {:?}", self.label(), self.terminal).into(),
+            None => stated_absence(self.direction, self.terminal),
         }
     }
 
-    /// The direction's name, for the one diagnostic that states it.
-    const fn label(&self) -> &'static str {
-        match self.direction {
-            TransferDirection::Upload => "upload",
-            TransferDirection::Download => "download",
+    /// The account this failure reports, taken out of the failure that held it.
+    ///
+    /// For the one consumer that drops the failure in the same step it reads
+    /// it. The account has a single owner, so copying it there would allocate a
+    /// second one that nothing outlives — one needless allocation for every
+    /// streaming transfer that ends on a terminal.
+    fn into_diagnostic(self) -> Box<str> {
+        let Self {
+            direction,
+            terminal,
+            account,
+            ..
+        } = self;
+        match account {
+            Some(account) => account,
+            None => stated_absence(direction, terminal),
         }
     }
+}
+
+/// The account a row whose producer minted none is still described by.
+///
+/// The terminal names the bound and the direction names the owner that observed
+/// it, rather than leaving an operator an empty string to read.
+fn stated_absence(direction: TransferDirection, terminal: InboundTerminal) -> Box<str> {
+    format!("{} transfer ended on {terminal:?}", direction.label()).into()
 }
 
 impl From<TransferFailure> for BodyError {
@@ -724,10 +761,12 @@ impl From<TransferFailure> for BodyError {
     /// affected stream. What travels here is only the typed direction and
     /// boundary an operator reads afterwards.
     fn from(failure: TransferFailure) -> Self {
+        let direction = failure.direction.label();
+        let terminal = failure.terminal;
         Self::Transfer {
-            direction: failure.label(),
-            terminal: failure.terminal,
-            diagnostic: failure.diagnostic(),
+            direction,
+            terminal,
+            diagnostic: failure.into_diagnostic(),
         }
     }
 }

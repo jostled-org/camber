@@ -8,6 +8,7 @@
 
 use super::super::Request;
 use super::super::body::HyperResponseBody;
+use super::super::proxy_upstream::ProxyUpstream;
 use super::super::rejection::Rejected;
 use super::super::response::HeaderPair;
 use super::super::server_lifecycle::{ConnectionLifecycle, ConnectionPermit, ServerControl};
@@ -20,13 +21,19 @@ use super::handshake::WsUpgrade;
 use super::ownership::{ClientWs, open_bridge, own_upgrade_bridge};
 use std::ops::ControlFlow;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Validate the upgrade pair, build the backend URL, spawn the bridge, return 101.
+///
+/// The upstream owner is read here and not carried into the bridge: the only
+/// thing the bridge needs from it is the deadline its dial runs under, and that
+/// is a value the frozen route already decided.
 pub(in crate::http) async fn handle_proxy_ws(
     ws_upgrade: WsUpgrade,
     req: Request,
     backend: Arc<str>,
     prefix: Arc<str>,
+    upstream: &ProxyUpstream,
     lifecycle: &ConnectionLifecycle,
 ) -> Result<hyper::Response<HyperResponseBody>, WsRefusal> {
     let prepared = match prepare_ws_handoff(ws_upgrade, &req, lifecycle) {
@@ -46,6 +53,7 @@ pub(in crate::http) async fn handle_proxy_ws(
     // The backend is offered the protocol the client was already promised, so
     // it cannot select a different one.
     let forwarded_headers = collect_forwardable_ws_headers(&req, subprotocol);
+    let dial_deadline = upstream.request_timeout();
     let WsHandoff {
         on_upgrade,
         response,
@@ -60,6 +68,7 @@ pub(in crate::http) async fn handle_proxy_ws(
             forwarded_headers,
             attachment,
             permit,
+            dial_deadline,
         )
     })
     .await
@@ -153,6 +162,7 @@ async fn bridge_ws_proxy(
     forwarded_headers: Box<[HeaderPair]>,
     attachment: super::ownership::BridgeAttachment,
     permit: Arc<ConnectionPermit>,
+    dial_deadline: Duration,
 ) {
     let opened = open_bridge(
         on_upgrade,
@@ -177,10 +187,9 @@ async fn bridge_ws_proxy(
         }
     };
 
-    let (mut backend_ws, _) = match tokio_tungstenite::connect_async(backend_request).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::warn!(url = %backend_ws_url, error = %e, "WebSocket proxy backend connection failed");
+    let mut backend_ws = match dial_backend(backend_request, &backend_ws_url, dial_deadline).await {
+        Some(backend_ws) => backend_ws,
+        None => {
             end_client_transport(&mut client_ws, Some(backend_fault_close())).await;
             return;
         }
@@ -189,6 +198,47 @@ async fn bridge_ws_proxy(
     let exit = forward_proxy_frames(&mut control, &mut client_ws, &mut backend_ws).await;
     settle_proxy_transports(exit, &mut client_ws, &mut backend_ws).await;
     drop(permit);
+}
+
+/// The backend transport one proxied bridge frames against.
+type BackendWs =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Reach the backend under the deadline this route froze.
+///
+/// The dial is the one upstream phase nothing else bounds. It runs in the
+/// registered bridge, which the supervisor releases only once the `101` is
+/// committed, so the request total the negotiation spent has already ended — and
+/// a backend that blackholes the SYN would otherwise hold this task, and the
+/// connection permit under it, until the operating system gave up on the
+/// handshake. The route's request deadline is what ends it instead: this call
+/// establishes the transport and completes the upgrade handshake, which is the
+/// same span that deadline bounds on every ordinary forward — the arrival of a
+/// usable upstream head.
+///
+/// `None` is every way the backend failed to answer. The caller owes the peer a
+/// close either way, so the reason is logged here rather than returned to a
+/// caller that could only discard it.
+async fn dial_backend(
+    request: hyper::Request<()>,
+    url: &str,
+    within: Duration,
+) -> Option<BackendWs> {
+    match tokio::time::timeout(within, tokio_tungstenite::connect_async(request)).await {
+        Ok(Ok((backend_ws, _))) => Some(backend_ws),
+        Ok(Err(error)) => {
+            tracing::warn!(%url, %error, "WebSocket proxy backend connection failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                %url,
+                deadline = ?within,
+                "WebSocket proxy backend did not answer the upgrade in time"
+            );
+            None
+        }
+    }
 }
 
 /// Forward frames in both directions until one side ends the bridge.

@@ -296,8 +296,20 @@ impl RuntimeInner {
     }
 
     /// The one aggregate shutdown this runtime and its owned servers share.
+    ///
+    /// Hands out ownership, for a holder that outlives this borrow — a server
+    /// lifecycle, a connection, or a teardown that reads the same aggregate
+    /// across a whole loop.
     pub(crate) fn shutdown_deadline(&self) -> Arc<crate::lifecycle::AggregateShutdown> {
         Arc::clone(&self.shutdown_deadline)
+    }
+
+    /// The same aggregate, borrowed.
+    ///
+    /// For the callers that make one `&self` call and are done: a refcount
+    /// bumped and dropped around a single `mint_at` or `settle` buys nothing.
+    pub(crate) fn shutdown_deadline_ref(&self) -> &crate::lifecycle::AggregateShutdown {
+        &self.shutdown_deadline
     }
 
     /// Request runtime shutdown. Shutdown implies scope closing, so admission

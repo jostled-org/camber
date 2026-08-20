@@ -89,14 +89,12 @@ pub(crate) fn shutdown_resources(
     registry: &ResourceRegistry,
     log: &mut LifecycleFailureLog,
 ) {
-    let phase_limit = runtime
-        .config
-        .resource_budget
-        .phase(ResourcePhase::Shutdown);
+    let budget = runtime.config.resource_budget;
     let shutdown = runtime.shutdown_deadline();
     for entry in registry.iter().rev() {
         let participant = LifecycleParticipant::Resource(Arc::clone(entry.name()));
-        let limit = shutdown.bounded(&participant, phase_limit);
+        let limit =
+            budget.phase_deadline(ResourcePhase::Shutdown, shutdown.remaining(&participant));
         let outcome = worker::run_callback_blocking(entry, ResourcePhase::Shutdown, limit, runtime);
         let settled = match outcome.is_some() {
             true => ParticipantDisposition::Named,

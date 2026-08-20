@@ -10,8 +10,6 @@ use std::time::Duration;
 
 const TRUNCATED_PREFIX: &[u8] = b"known-upstream-prefix";
 const ADVERTISED_BODY_LENGTH: usize = TRUNCATED_PREFIX.len() + 17;
-/// How long a row waits for the production download owner to settle.
-const OBSERVED_BOUND: Duration = Duration::from_secs(5);
 /// The payload the three incremental chunks add up to.
 const INCREMENTAL_BYTES: usize = 21;
 /// The payload maximum the buffered row's router names.
@@ -21,33 +19,14 @@ const INCREMENTAL_BYTES: usize = 21;
 const BUFFERED_MAX_BYTES: usize = 64;
 
 /// Wait until this listener's download owner fixed a terminal and released.
-fn settled_download(controller: &LifecycleController, row: &str) -> TransferObservation {
-    let settled = crate::http::poll_until(OBSERVED_BOUND, || {
-        let observed = controller.transfers_observed();
-        observed.download.terminal.is_some() && observed.download.releases >= 1
-    });
-    let observed = controller.transfers_observed();
-    assert!(
-        settled,
-        "{row}: the download owner never settled: {observed:?}"
-    );
-    observed
-}
-
-/// Wait until this listener's download owner reached its release.
 ///
-/// For the two rows whose cause is the peer: a transport taken away can release
-/// the owner before it weighs another turn, so the release is the whole claim.
-fn released_download(controller: &LifecycleController, row: &str) -> TransferObservation {
-    let settled = crate::http::poll_until(OBSERVED_BOUND, || {
-        controller.transfers_observed().download.releases >= 1
-    });
-    let observed = controller.transfers_observed();
-    assert!(
-        settled,
-        "{row}: the download owner never released: {observed:?}"
-    );
-    observed
+/// The release alone is [`crate::stream_support::released_download`]; this is
+/// that wait with the terminal added, because the rows below read both facts and
+/// a wait that settled on one would race the turn that fixes the other.
+fn settled_download(controller: &LifecycleController, row: &str) -> TransferObservation {
+    crate::stream_support::download_observed(controller, row, "settled", |observed| {
+        observed.download.terminal.is_some() && observed.download.releases >= 1
+    })
 }
 
 enum StreamCompletion {
@@ -474,7 +453,7 @@ fn stream_response_client_disconnect_drops_sender() {
             // 11.T2: the sender the producer lost is the source one production
             // download owner released, and it released it exactly once.
             let row = "a departed peer";
-            let observed = released_download(server.controller(), row);
+            let observed = crate::stream_support::released_download(server.controller(), row);
             assert_eq!(
                 observed.download.releases, 1,
                 "{row}: the owner released its source and producer once: {observed:?}"

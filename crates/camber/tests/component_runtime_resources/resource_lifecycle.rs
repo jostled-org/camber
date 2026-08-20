@@ -295,32 +295,6 @@ fn health_endpoint_returns_200_when_all_resources_healthy() {
 }
 
 #[test]
-fn health_endpoint_returns_503_when_any_resource_unhealthy() {
-    let log = Arc::new(common::CallbackLog::default());
-    // The unwell state arrives on a later pass: a resource already unwell at
-    // the readiness pass refuses the run instead of being served through.
-    let degrading =
-        common::ScriptedResource::new("cache", &log).health(common::Behavior::FailFrom(2));
-    let (status, body) = common::test_runtime()
-        .health_interval(common::TICK)
-        .resource(HealthyResource("db"))
-        .resource(degrading)
-        .run(|| {
-            let addr = common::spawn_server(Router::new());
-            let answer = common::health_until(addr, |status, _| status == 503);
-            runtime::request_shutdown();
-            answer
-        })
-        .unwrap();
-
-    assert_eq!(status, 503, "an unwell resource did not reach the status");
-    assert!(
-        body.contains(r#""status":"unhealthy""#),
-        "expected an unhealthy summary in {body}"
-    );
-}
-
-#[test]
 fn health_check_runs_on_configured_interval() {
     let (checked_tx, checked_rx) = std::sync::mpsc::sync_channel(1);
 

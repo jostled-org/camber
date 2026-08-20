@@ -5,10 +5,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+/// The whole deadline one probe attempt gets, transport included.
+///
+/// Carried on the request rather than on the client, which is what makes it the
+/// only bound a probe has: a reqwest request timeout spans connect through body
+/// end, so a separate connect allowance sitting above this one could never
+/// expire before it did.
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How long a health probe may take to establish its transport.
-const HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The client every backend health probe in this process shares.
 ///
@@ -21,7 +24,6 @@ static HEALTH_CLIENT: std::sync::LazyLock<Result<reqwest::Client, Arc<str>>> =
     std::sync::LazyLock::new(|| {
         reqwest::Client::builder()
             .no_proxy()
-            .connect_timeout(HEALTH_CONNECT_TIMEOUT)
             .build()
             .map_err(|error| -> Arc<str> { error.to_string().into() })
     });

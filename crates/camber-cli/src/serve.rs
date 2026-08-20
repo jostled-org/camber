@@ -140,7 +140,6 @@ fn overlay_handler(
             false => raw_path.into(),
         };
         let base = std::sync::Arc::clone(&base_dir);
-        let backend = std::sync::Arc::clone(&backend);
         let proxy_fut = camber::http::proxy_forward(req, &backend, "");
         // No `spawn_blocking` here: the static-file entry point offloads its own
         // filesystem work, so wrapping it would only put one blocking thread in
@@ -148,7 +147,19 @@ fn overlay_handler(
         Box::pin(async move {
             match camber::http::serve_file(&base, &file_path).await {
                 Ok(file_resp) if file_resp.status() != 404 => file_resp,
-                Ok(_) | Err(_) => proxy_fut.await,
+                Ok(_) => proxy_fut.await,
+                // The overlay still falls back, but a refused file is a
+                // configuration answer — a crossed `ByteBoundary::StaticFile`
+                // or an unreadable root — and it reaches the operator rather
+                // than vanishing behind an upstream response.
+                Err(error) => {
+                    camber::tracing::warn!(
+                        %file_path,
+                        %error,
+                        "overlay file refused; falling back to the proxy"
+                    );
+                    proxy_fut.await
+                }
             }
         })
     }

@@ -27,14 +27,10 @@ fn names(entries: &[Box<str>]) -> Box<[&str]> {
 
 /// Every resource failure the returned aggregate retained, in its own order.
 fn aggregate_rows(error: &RuntimeError) -> Box<[Box<str>]> {
-    lifecycle_failures(error).iter().map(resource_row).collect()
-}
-
-fn lifecycle_failures(error: &RuntimeError) -> &camber::LifecycleFailures {
-    match error {
-        RuntimeError::Lifecycle(failures) => failures,
-        other => panic!("expected a lifecycle aggregate, got {other:?}"),
-    }
+    lifecycle_kinds::aggregate(error)
+        .iter()
+        .map(resource_row)
+        .collect()
 }
 
 /// One entry, read back through the public accessors alone.
@@ -419,7 +415,7 @@ impl ListenerWitness {
 
 /// The aggregate's primary names `resource`, read through the public accessor.
 fn assert_primary(outcome: &RuntimeError, resource: &str) {
-    let primary = lifecycle_failures(outcome).primary();
+    let primary = lifecycle_kinds::aggregate_primary(outcome);
     assert_eq!(
         lifecycle_kinds::participant_name(primary.participant()),
         format!("resource:{resource}"),

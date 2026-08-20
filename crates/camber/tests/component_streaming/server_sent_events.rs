@@ -1,6 +1,6 @@
 use crate::runtime_support as common;
 
-use camber::http::mock::{InboundTerminal, LifecycleController, TransferObservation};
+use camber::http::mock::InboundTerminal;
 use camber::http::{Request, Router, TransferBudget};
 use camber::runtime;
 use std::io::{BufReader, Write};
@@ -10,8 +10,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-/// How long a row waits for the production download owner to settle.
-const OBSERVED_BOUND: Duration = Duration::from_secs(5);
 /// The payload maximum the multi-event row's router names.
 ///
 /// Above what the feed publishes: the claim is which policy an SSE registration
@@ -21,19 +19,6 @@ const FEED_MAX_BYTES: usize = 256;
 ///
 /// Each is `event: message\ndata: data-N\n\n`: twenty-nine bytes of framed feed.
 const FEED_BYTES: usize = 87;
-
-/// Wait until this listener's download owner reached its release, and report it.
-fn released_feed(controller: &LifecycleController, row: &str) -> TransferObservation {
-    let settled = crate::http::poll_until(OBSERVED_BOUND, || {
-        controller.transfers_observed().download.releases >= 1
-    });
-    let observed = controller.transfers_observed();
-    assert!(
-        settled,
-        "{row}: the feed's owner never released: {observed:?}"
-    );
-    observed
-}
 
 #[test]
 fn sse_streams_multiple_events() {
@@ -74,7 +59,7 @@ fn sse_streams_multiple_events() {
             );
 
             let row = "a multi-event feed";
-            let observed = released_feed(server.controller(), row);
+            let observed = crate::stream_support::released_download(server.controller(), row);
             assert_eq!(
                 observed.download.max_bytes,
                 Some(FEED_MAX_BYTES),
@@ -206,7 +191,7 @@ fn sse_client_disconnect_stops_handler() {
             // 11.T2: the writer the handler lost is the source one production
             // download owner released, and it released it exactly once.
             let row = "a departed feed peer";
-            let observed = released_feed(server.controller(), row);
+            let observed = crate::stream_support::released_download(server.controller(), row);
             assert_eq!(
                 observed.download.releases, 1,
                 "{row}: the owner released its source and producer once: {observed:?}"

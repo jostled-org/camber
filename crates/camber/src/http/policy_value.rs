@@ -25,7 +25,7 @@ use std::time::Duration;
 /// overflows on FreeBSD and a millennium on macOS. A deadline at this ceiling
 /// outlives any process that could reach it, and the timers underneath Camber
 /// saturate there anyway, so nothing longer can behave differently.
-const MAX_POLICY_DEADLINE: Duration = Duration::from_secs(86_400 * 365 * 30);
+pub(super) const MAX_POLICY_DEADLINE: Duration = Duration::from_secs(86_400 * 365 * 30);
 
 /// Accept a duration a policy may enforce, or refuse zero and the unreachable.
 ///

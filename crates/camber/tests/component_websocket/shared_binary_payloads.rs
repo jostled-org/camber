@@ -71,15 +71,15 @@ impl Admission {
 #[camber::test]
 async fn shared_binary_allocation_stays_payload_flat_across_fanout() {
     for recipients in FANOUTS {
-        assert_admission_is_payload_flat(recipients).await;
+        assert_admission_is_payload_flat(recipients);
     }
-    assert_frame_conversion_keeps_the_same_backing().await;
+    assert_frame_conversion_keeps_the_same_backing();
 }
 
 /// One fanout's calibrated comparison: the shared path pays the same for both
 /// payload sizes, and the borrowed path pays one copy per recipient.
-async fn assert_admission_is_payload_flat(recipients: usize) {
-    shared_payload_row(MEASURED_BUFFER, recipients, |mut row| async move {
+fn assert_admission_is_payload_flat(recipients: usize) {
+    shared_payload_row(MEASURED_BUFFER, recipients, move |mut row| async move {
         let senders = row.senders();
         let shared_small = calibrated(&mut row, &senders, Admission::Shared, SMALL_PAYLOAD);
         let shared_large = calibrated(&mut row, &senders, Admission::Shared, LARGE_PAYLOAD);
@@ -96,8 +96,7 @@ async fn assert_admission_is_payload_flat(recipients: usize) {
             recipients,
             &format!("borrowed admission to {recipients} recipients"),
         );
-    })
-    .await;
+    });
 }
 
 /// Warm every queue, admit one payload of exactly `len` bytes through
@@ -129,7 +128,7 @@ fn calibrated(
 /// the authority for identity, because it holds the real `Message::Binary` the
 /// production pump built and asks whether the caller's backing is still under
 /// it. A conversion that copied would have dropped the last handle by here.
-async fn assert_frame_conversion_keeps_the_same_backing() {
+fn assert_frame_conversion_keeps_the_same_backing() {
     shared_payload_row(MEASURED_BUFFER, 1, |mut row| async move {
         let expected = payload_bytes(LARGE_PAYLOAD, IDENTITY_TAG);
         row.listener().arm(FRAME_BUILT);
@@ -141,21 +140,20 @@ async fn assert_frame_conversion_keeps_the_same_backing() {
         row.end_every_connection();
         row.stop_and_join().await;
         witness.assert_released("the joined bridge").await;
-    })
-    .await;
+    });
 }
 
 // 1.T2
 #[camber::test]
 async fn shared_binary_refusals_release_the_offered_handle() {
-    assert_live_full_immediate_send_refuses_and_releases().await;
-    assert_terminal_sends_refuse_and_release().await;
-    assert_current_thread_waiting_send_refuses_and_releases().await;
+    assert_live_full_immediate_send_refuses_and_releases();
+    assert_terminal_sends_refuse_and_release();
+    assert_current_thread_waiting_send_refuses_and_releases();
 }
 
 /// A full queue on a live connection refuses the immediate shared send, keeps
 /// nothing, and goes on writing only what it had already admitted.
-async fn assert_live_full_immediate_send_refuses_and_releases() {
+fn assert_live_full_immediate_send_refuses_and_releases() {
     shared_payload_row(REFUSAL_BUFFER, 1, |mut row| async move {
         let sender = row.sender(0).clone();
         fill_outbound_behind_the_writer(row.listener(), &sender).await;
@@ -173,13 +171,12 @@ async fn assert_live_full_immediate_send_refuses_and_releases() {
         drop(sender);
         row.listener().release(BEFORE_WRITE);
         assert_only_the_filled_frames_arrive(&mut row);
-    })
-    .await;
+    });
 }
 
 /// Both shared operations on a connection whose cause is already fixed report
 /// that cause, admit nothing, and keep nothing.
-async fn assert_terminal_sends_refuse_and_release() {
+fn assert_terminal_sends_refuse_and_release() {
     shared_payload_row(MEASURED_BUFFER, 1, |mut row| async move {
         let sender = row.sender(0).clone();
         row.listener().arm(SELECTED);
@@ -214,13 +211,12 @@ async fn assert_terminal_sends_refuse_and_release() {
             row.client(0).peer(),
             "a terminal refusal still reached the peer",
         );
-    })
-    .await;
+    });
 }
 
 /// A current-thread caller is refused before it waits, and the handle it
 /// offered goes with the wait that never happened.
-async fn assert_current_thread_waiting_send_refuses_and_releases() {
+fn assert_current_thread_waiting_send_refuses_and_releases() {
     shared_payload_row(REFUSAL_BUFFER, 1, |mut row| async move {
         let sender = row.sender(0).clone();
         fill_outbound_behind_the_writer(row.listener(), &sender).await;
@@ -249,8 +245,7 @@ async fn assert_current_thread_waiting_send_refuses_and_releases() {
         .await;
         row.listener().release(BEFORE_WRITE);
         assert_only_the_filled_frames_arrive(&mut row);
-    })
-    .await;
+    });
 }
 
 /// One shared waiting send made from a current-thread Tokio runtime.

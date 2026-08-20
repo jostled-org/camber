@@ -25,7 +25,7 @@ use tokio::time::Instant;
 /// is why the grace bounds the wait rather than the wait bounding itself. It is
 /// deliberately small and fixed: it bounds a forced stop, it is not a second
 /// aggregate grace.
-pub(crate) const FORCED_JOIN_GRACE: Duration = Duration::from_millis(100);
+pub const FORCED_JOIN_GRACE: Duration = Duration::from_millis(100);
 
 /// The one aggregate shutdown a runtime and its owned servers share.
 ///
@@ -96,22 +96,10 @@ impl AggregateShutdown {
 
     /// How long `participant` may still wait, bounded by its own `local` limit.
     ///
-    /// The narrower of the two always wins, so a resource phase deadline
-    /// shorter than what the aggregate has left keeps its own bound and one
-    /// longer than the aggregate is cut down to it.
-    ///
-    /// A spent aggregate does not cut a participant to nothing. Every owner
-    /// still gets the fixed forced-join grace, which is what a forced stop
-    /// gives an owner it has just told to end — an owner handed zero would be
-    /// reported outstanding without ever having been asked, which describes the
-    /// order the coordinator visited its participants in rather than anything
-    /// that owner did. `local` still wins whenever it is the narrower of the
-    /// two, so a caller's own shorter bound is never widened by this floor.
+    /// Reads the shared expiry under this participant's name and narrows
+    /// `local` by what is left, through [`narrowed`].
     pub(crate) fn bounded(&self, participant: &LifecycleParticipant, local: Duration) -> Duration {
-        match self.remaining(participant) {
-            Some(remaining) => local.min(remaining.max(FORCED_JOIN_GRACE)),
-            None => local,
-        }
+        narrowed(local, self.remaining(participant))
     }
 
     /// The time left before the shared expiry, or `None` when no transition has
@@ -134,5 +122,32 @@ impl AggregateShutdown {
         if let Some(observer) = self.observer.as_ref() {
             observer.record_settlement(participant, disposition);
         }
+    }
+}
+
+/// The bound a `local` limit actually runs under, given what the aggregate has
+/// left.
+///
+/// The one definition of that arithmetic. [`AggregateShutdown::bounded`] applies
+/// it to whatever bound a participant brought and
+/// [`ResourceBudget::phase_deadline`](crate::ResourceBudget::phase_deadline) to
+/// a configured phase deadline, so a second copy has nothing to drift from.
+///
+/// The narrower of the two always wins, so a resource phase deadline shorter
+/// than what the aggregate has left keeps its own bound and one longer than the
+/// aggregate is cut down to it. `None` is an aggregate no transition has minted
+/// yet, which narrows nothing.
+///
+/// A spent aggregate does not cut a participant to nothing. Every owner still
+/// gets the fixed forced-join grace, which is what a forced stop gives an owner
+/// it has just told to end — an owner handed zero would be reported outstanding
+/// without ever having been asked, which describes the order the coordinator
+/// visited its participants in rather than anything that owner did. `local`
+/// still wins whenever it is the narrower of the two, so a caller's own shorter
+/// bound is never widened by this floor.
+pub(crate) fn narrowed(local: Duration, remaining: Option<Duration>) -> Duration {
+    match remaining {
+        Some(remaining) => local.min(remaining.max(FORCED_JOIN_GRACE)),
+        None => local,
     }
 }

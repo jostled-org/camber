@@ -171,18 +171,39 @@ impl TonicSource {
 }
 
 /// The trailer set one tonic status is written to the wire as.
+///
+/// Written by tonic itself rather than by hand, because the encoding is tonic's
+/// and not Camber's: `grpc-message` is percent-encoded under tonic's own set,
+/// the status details become `grpc-status-details-bin`, and the status's
+/// trailing metadata is extended onto the map. A message written raw reaches
+/// the peer mangled by its percent-decode, and a message holding a byte no
+/// header value admits — every non-ASCII one — reaches it not at all.
 fn status_trailers(status: &tonic::Status) -> hyper::HeaderMap {
-    let mut trailers = hyper::HeaderMap::with_capacity(2);
+    let mut trailers = hyper::HeaderMap::with_capacity(3 + status.metadata().len());
+    match status.add_header(&mut trailers) {
+        Ok(()) => trailers,
+        Err(unwritable) => {
+            tracing::warn!(
+                code = status.code() as i32,
+                %unwritable,
+                "grpc status trailers could not be written",
+            );
+            bare_status_trailers(status)
+        }
+    }
+}
+
+/// The one trailer a status that could not be written whole still owes.
+///
+/// A partially written map is not sent: a peer reads the code that ended the
+/// RPC, or it reads a stream that carries no status at all, and half a status
+/// is the second of those wearing the first one's name.
+fn bare_status_trailers(status: &tonic::Status) -> hyper::HeaderMap {
+    let mut trailers = hyper::HeaderMap::with_capacity(1);
     trailers.insert(
         "grpc-status",
         hyper::header::HeaderValue::from(status.code() as i32),
     );
-    match hyper::header::HeaderValue::from_str(status.message()) {
-        Ok(message) => {
-            trailers.insert("grpc-message", message);
-        }
-        Err(_) => {}
-    }
     trailers
 }
 

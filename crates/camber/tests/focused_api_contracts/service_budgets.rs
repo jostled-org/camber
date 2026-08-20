@@ -30,6 +30,13 @@ const ZERO: Duration = Duration::ZERO;
 const SHORT: Duration = Duration::from_secs(5);
 const LONG: Duration = Duration::from_secs(20);
 
+/// The floor a spent aggregate still leaves every owner it stops.
+///
+/// Read from the crate rather than restated, for the reason every other
+/// re-exported bound is: a second copy would prove its own hundred
+/// milliseconds, not the grace a narrowed callback actually runs under.
+use camber::__private::FORCED_JOIN_GRACE;
+
 fn assert_policy_value<T: Copy + Clone + std::fmt::Debug + Eq + PartialEq + Send + Sync>() {}
 
 fn expect_invalid(result: Result<impl std::fmt::Debug, RuntimeError>, expected_name: &str) {
@@ -930,17 +937,32 @@ fn assert_resource_budget_outer_narrowing() {
 
     // The aggregate shutdown deadline is an outer ceiling: a callback receives
     // the smaller of its phase duration and the time the aggregate has left.
-    assert_eq!(budget.phase_deadline(ResourcePhase::Shutdown, SHORT), SHORT);
+    // This is the call the shutdown coordinator bounds each teardown callback
+    // through, so the arithmetic asserted here is the one a resource runs under.
     assert_eq!(
-        budget.phase_deadline(ResourcePhase::Shutdown, LONG + SHORT),
+        budget.phase_deadline(ResourcePhase::Shutdown, Some(SHORT)),
+        SHORT
+    );
+    assert_eq!(
+        budget.phase_deadline(ResourcePhase::Shutdown, Some(LONG + SHORT)),
         LONG
     );
     assert_eq!(
-        budget.phase_deadline(ResourcePhase::StartupHealth, ZERO),
-        ZERO
+        budget.phase_deadline(ResourcePhase::PeriodicHealth, Some(LONG)),
+        SHORT
     );
+
+    // A spent aggregate leaves the forced-join grace, not nothing: an owner
+    // handed zero would be reported outstanding without ever having been asked.
     assert_eq!(
-        budget.phase_deadline(ResourcePhase::PeriodicHealth, LONG),
+        budget.phase_deadline(ResourcePhase::StartupHealth, Some(ZERO)),
+        FORCED_JOIN_GRACE
+    );
+
+    // No minted aggregate narrows nothing, which is the startup and periodic
+    // probes' whole phase deadline.
+    assert_eq!(
+        budget.phase_deadline(ResourcePhase::StartupHealth, None),
         SHORT
     );
 

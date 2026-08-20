@@ -480,24 +480,33 @@ pub enum RejectionProtocol {
 }
 
 impl RejectionProtocol {
+    /// Every dispatch class this enum admits, in declaration order.
+    ///
+    /// Named exhaustively here, against the variants it lists, for the reason
+    /// [`RejectionKind::ALL`] exists: a seventh class forces an edit to the
+    /// exhaustive [`Self::label`] match, and a list kept anywhere else compiles
+    /// clean at six while every assertion built on it goes on passing over a
+    /// vocabulary that no longer covers the labels production writes.
+    pub(super) const ALL: [Self; 6] = [
+        Self::OrdinaryHttp,
+        Self::StreamingHttp,
+        Self::ServerSentEvents,
+        Self::WebSocket,
+        Self::Grpc,
+        Self::Proxy,
+    ];
+
     /// Every dispatch class, plus the name a head that established none is
     /// recorded under.
     ///
     /// Published from the enum rather than transcribed beside it, so a class
     /// added here reaches the vocabulary a completion label is checked against.
     pub(super) fn vocabulary() -> Box<[&'static str]> {
-        [
-            Self::OrdinaryHttp,
-            Self::StreamingHttp,
-            Self::ServerSentEvents,
-            Self::WebSocket,
-            Self::Grpc,
-            Self::Proxy,
-        ]
-        .map(Self::label)
-        .into_iter()
-        .chain([UNCLASSIFIED_PROTOCOL])
-        .collect()
+        Self::ALL
+            .map(Self::label)
+            .into_iter()
+            .chain([UNCLASSIFIED_PROTOCOL])
+            .collect()
     }
 
     /// The bounded name this dispatch class is recorded under.

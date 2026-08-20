@@ -93,6 +93,25 @@ impl CheckedCollector {
         }
     }
 
+    /// Buy the buffer a source's admitted declaration says it will need.
+    ///
+    /// The declaration was read to refuse an over-large source, and then it was
+    /// worth nothing more: an empty `BytesMut` grows by doubling from sixty-four
+    /// bytes, so a declared eight MiB answer pays about seventeen reallocations
+    /// and seventeen copies for a size the source already stated.
+    ///
+    /// Called after [`Self::admit_declared`] has accepted the declaration, so
+    /// nothing is bought for a length this collection has already refused.
+    ///
+    /// The reserve is what [`declared_reserve`] permits, never what the source
+    /// asked for. A declaration is an untrusted peer claim, and under an
+    /// unbounded ceiling an unclamped reserve would be an allocation any peer
+    /// could name: the cap is what makes reserving from a peer's number safe.
+    pub(super) fn reserve_declared(&mut self, declared: Option<u64>) {
+        self.retained
+            .reserve(declared_reserve(declared, self.ceiling()));
+    }
+
     /// Count one chunk, then keep it — or drop it and refuse.
     ///
     /// The chunk is taken by value so that a crossing one is released here,
@@ -141,6 +160,31 @@ impl CheckedCollector {
     pub(super) fn finish(self) -> Bytes {
         self.retained.freeze()
     }
+}
+
+/// The most a peer's declaration may buy in advance (64 KiB).
+///
+/// A source states its own size, and this process is the one that pays for
+/// believing it. Past this, a body that keeps arriving buys its own buffer out
+/// of bytes that actually arrived.
+const MAX_DECLARED_RESERVE: usize = 64 * 1024;
+
+/// The bytes one admitted declaration buys before the first chunk is read.
+///
+/// Three clamps, and each removes a different way a peer's number could name an
+/// allocation: the platform word, because a declaration is a `u64` and no
+/// machine holds every one of them; this collection's own ceiling, because
+/// nothing above it would be kept; and [`MAX_DECLARED_RESERVE`], because an
+/// unbounded ceiling has no number of its own to clamp against.
+///
+/// `None` is a source that stated no size, which buys nothing.
+fn declared_reserve(declared: Option<u64>, ceiling: usize) -> usize {
+    declared.map_or(0, |stated| {
+        usize::try_from(stated)
+            .unwrap_or(usize::MAX)
+            .min(ceiling)
+            .min(MAX_DECLARED_RESERVE)
+    })
 }
 
 /// The quiet interval one collection allows between the chunks it reads.
@@ -208,8 +252,13 @@ pub(super) async fn collect_response(
     let observer = response
         .remote_addr()
         .and_then(super::mock::lifecycle_script);
+    // Read once and used twice: the same declaration that refuses an over-large
+    // source sizes the buffer for one this collection will keep. Reading it a
+    // second time would be a second answer about what the peer stated.
+    let declared = response.content_length();
     let mut collector = CheckedCollector::new(boundary, limit, observer);
-    collector.admit_declared(response.content_length())?;
+    collector.admit_declared(declared)?;
+    collector.reserve_declared(declared);
     while let Some(chunk) = next_chunk(&mut response, idle).await? {
         collector.retain(chunk)?;
     }

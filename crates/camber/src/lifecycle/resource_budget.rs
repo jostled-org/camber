@@ -43,8 +43,15 @@ pub const DEFAULT_RESOURCE_PHASE_DEADLINE: Duration = Duration::from_secs(30);
 ///
 /// // An aggregate shutdown with three seconds left narrows the phase deadline.
 /// assert_eq!(
-///     budget.phase_deadline(ResourcePhase::Shutdown, Duration::from_secs(3)),
+///     budget.phase_deadline(ResourcePhase::Shutdown, Some(Duration::from_secs(3))),
 ///     Duration::from_secs(3),
+/// );
+///
+/// // A spent aggregate still leaves the forced-join grace, so an owner is
+/// // asked to stop rather than reported outstanding unasked.
+/// assert_eq!(
+///     budget.phase_deadline(ResourcePhase::Shutdown, Some(Duration::ZERO)),
+///     Duration::from_millis(100),
 /// );
 /// # Ok(())
 /// # }
@@ -122,12 +129,18 @@ impl ResourceBudget {
     /// The deadline one callback of `phase` actually runs under, under an outer
     /// aggregate that has `aggregate_remaining` left.
     ///
-    /// The aggregate shutdown deadline is a ceiling every teardown participant
-    /// shares, so a phase deadline can only narrow it and never extend it. A
-    /// startup or periodic probe with no aggregate above it passes its own
-    /// phase deadline as the remaining time.
+    /// The one call the shutdown coordinator bounds each teardown callback
+    /// through, and the arithmetic is the aggregate's own rather than a second
+    /// copy of it: the phase deadline narrows what the aggregate has left, a
+    /// spent aggregate still leaves the fixed forced-join grace, and `None` —
+    /// a startup or periodic probe with no aggregate above it — narrows
+    /// nothing.
     #[must_use]
-    pub fn phase_deadline(&self, phase: ResourcePhase, aggregate_remaining: Duration) -> Duration {
-        self.phase(phase).min(aggregate_remaining)
+    pub fn phase_deadline(
+        &self,
+        phase: ResourcePhase,
+        aggregate_remaining: Option<Duration>,
+    ) -> Duration {
+        super::shutdown::narrowed(self.phase(phase), aggregate_remaining)
     }
 }

@@ -88,7 +88,7 @@ fn emit_bridge_method(method: &prost_build::Method, buf: &mut String) {
 }
 
 /// The methods on one service the async wrapper has no shape for.
-fn streaming_methods(service: &prost_build::Service) -> Vec<&str> {
+fn streaming_methods(service: &prost_build::Service) -> Box<[&str]> {
     service
         .methods
         .iter()

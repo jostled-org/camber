@@ -62,14 +62,6 @@ const PACE: Duration = Duration::from_millis(20);
 /// The multipart boundary the upload rows declare.
 const BOUNDARY: &str = "CamberTransferBnd";
 
-/// Wait until the production owner has been held at `checkpoint`.
-async fn wait_paused(controller: &LifecycleController, checkpoint: LifecycleCheckpoint, row: &str) {
-    tokio::time::timeout(EVENT_TIMEOUT, controller.wait_until_paused(checkpoint))
-        .await
-        .unwrap_or_else(|_| panic!("{row}: {checkpoint:?} was never reached"))
-        .unwrap_or_else(|error| panic!("{row}: waiting for {checkpoint:?} failed: {error}"));
-}
-
 /// Wait until this listener's transfers satisfy `settled`, and report them.
 async fn awaited(
     controller: &LifecycleController,
@@ -470,7 +462,8 @@ async fn assert_held_turn(
         .controller()
         .pause_once(held)
         .expect("arm the transfer's own source checkpoint");
-    wait_paused(server.controller(), held, row).await;
+    http_support::wait_until_paused_bounded(server.controller(), held, &format!("{row}: {held:?}"))
+        .await;
     // Both deadlines expire while the turn is held, and whatever the producer
     // queued behind it is waiting when it resumes.
     tokio::time::sleep(CROSSED_TOTAL + CROSSED_IDLE).await;
@@ -934,7 +927,7 @@ async fn assert_byte_terminal_polls_no_later_frame() {
     // woken by the frame it will be held in front of, so a row that waited first
     // would be waiting for a turn nothing can start.
     witnessed.release();
-    wait_paused(&controller, held, row).await;
+    http_support::wait_until_paused_bounded(&controller, held, &format!("{row}: {held:?}")).await;
     awaited(&controller, row, |_| witnessed.sent() == 2).await;
     controller
         .release(held)
@@ -986,7 +979,8 @@ async fn assert_deadline_terminal_polls_no_later_frame(
         .expect("arm the transfer's source checkpoint");
 
     let mut peer = open_streaming(addr, "/stream", EVENT_TIMEOUT).await;
-    wait_paused(&controller, source, row).await;
+    http_support::wait_until_paused_bounded(&controller, source, &format!("{row}: {source:?}"))
+        .await;
     controller
         .pause_once(selection)
         .expect("arm the transfer's selection checkpoint");
@@ -997,7 +991,12 @@ async fn assert_deadline_terminal_polls_no_later_frame(
         .release(source)
         .expect("release the transfer's source checkpoint");
 
-    wait_paused(&controller, selection, row).await;
+    http_support::wait_until_paused_bounded(
+        &controller,
+        selection,
+        &format!("{row}: {selection:?}"),
+    )
+    .await;
     witnessed.release();
     awaited(&controller, row, |_| witnessed.sent() == 1).await;
     controller
@@ -1142,7 +1141,12 @@ async fn assert_released_on_shutdown() {
 
     // The server's own deadline is minted first, so it expires first: the row
     // reads the transfer only once the escalation behind it is held.
-    wait_paused(&controller, escalation, row).await;
+    http_support::wait_until_paused_bounded(
+        &controller,
+        escalation,
+        &format!("{row}: {escalation:?}"),
+    )
+    .await;
     let observed = awaited(&controller, row, |observed| {
         observed.download.terminal.is_some()
     })

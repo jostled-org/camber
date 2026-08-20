@@ -194,7 +194,8 @@ impl CheckpointState {
 /// what one turn of a `select!` decides needs both of that turn's results ready
 /// in the same poll: waking the future held here decides the turn before the
 /// second result exists, so such a case records the release quietly and lets the
-/// other result provoke the poll that observes both.
+/// other result provoke the poll that observes both. A parked thread is the one
+/// exception, for the reason [`Self::record`] states.
 #[derive(Default)]
 struct ReleaseGate {
     released: AtomicBool,
@@ -205,6 +206,12 @@ struct ReleaseGate {
     /// spent from one still to come.
     polls: AtomicUsize,
     waiting: Mutex<Option<std::task::Waker>>,
+    /// Whether a blocking worker, rather than a future, waits here.
+    ///
+    /// Published before that worker's first look, so a release recorded at any
+    /// point after it arrived finds it set. [`Self::record`] reads it to decide
+    /// whether the release owes an unpark.
+    parked_thread: AtomicBool,
     /// Woken when the held future takes its first look here.
     ///
     /// This, rather than the phase flip, is what an observer waits for. A case
@@ -220,9 +227,18 @@ struct ReleaseGate {
 }
 
 impl ReleaseGate {
-    /// Record the release. Nothing is woken.
+    /// Record the release, and unpark a thread waiting here.
+    ///
+    /// No task is woken, for the reason this type's own account gives. A parked
+    /// thread is not that case: it decides no `select!` turn, and no poll is
+    /// coming to it that something else could provoke, so a release recorded
+    /// without the unpark would hold that worker until the controller closed.
     fn record(&self) {
         self.released.store(true, Ordering::Release);
+        match self.parked_thread.load(Ordering::Acquire) {
+            true => self.wake(),
+            false => {}
+        }
     }
 
     /// Whether the release has been recorded.
@@ -272,8 +288,10 @@ impl ReleaseGate {
     /// second spelling.
     ///
     /// The waker unparks this thread, so a release wakes the worker exactly the
-    /// way it wakes a held future — nothing here spins.
+    /// way it wakes a held future — nothing here spins. A staged release unparks
+    /// it too, which [`Self::record`] accounts for.
     fn held_blocking(&self) {
+        self.parked_thread.store(true, Ordering::Release);
         let waker = std::task::Waker::from(Arc::new(ThreadWaker(std::thread::current())));
         let cx = std::task::Context::from_waker(&waker);
         while self.poll_release(&cx).is_pending() {
@@ -418,23 +436,25 @@ struct CollectionObservations {
     first_retained_bytes: AtomicUsize,
 }
 
-/// What the static-file workers under one root reported about where they ran.
+/// What one family of offloaded workers reported about its entries and its
+/// maximum.
 ///
-/// Counters and the maximum a read froze, each written by the production step
-/// it names. Nothing here starts a worker, resolves a path, measures a file,
-/// reads a byte, chooses a maximum, or decides which thread anything runs on.
+/// The three things every owner that answers on a blocking thread says the same
+/// way, said once. Each owner's own record holds this as a field rather than
+/// flattening it, so a family keeps whatever else only it can report while the
+/// shared trio has one definition.
 #[derive(Default)]
-struct StaticFileObservations {
-    /// The ceiling the most recent read under this root actually collects
+struct WorkerObservations {
+    /// The ceiling the most recent answer from this family actually collects
     /// under, as its own collector compares it.
     ///
     /// The last value rather than a count, because that is the question a row
-    /// asks: this read, under this registration, froze this maximum. Zero is
-    /// no read yet — a frozen maximum is never zero — and [`usize::MAX`] is
-    /// the explicit opt-out, which is what makes a defaulted spelling and an
-    /// unbounded one two different observations rather than one.
+    /// asks: this answer, under this registration, froze this maximum. Zero is
+    /// nothing answered yet — a frozen maximum is never zero — and
+    /// [`usize::MAX`] is the explicit opt-out, which is what makes a defaulted
+    /// spelling and an unbounded one two different observations rather than one.
     frozen_ceiling: AtomicUsize,
-    /// Blocking workers that began under this root.
+    /// Blocking workers that began.
     workers_entered: AtomicUsize,
     /// Blocking workers that handed back an answer or a refusal.
     ///
@@ -442,6 +462,17 @@ struct StaticFileObservations {
     /// abandonment claim: a caller that stopped waiting leaves a worker counted
     /// as entered and not yet returned, still holding what it owns.
     workers_returned: AtomicUsize,
+}
+
+/// What the static-file workers under one root reported about where they ran.
+///
+/// Counters and the maximum a read froze, each written by the production step
+/// it names. Nothing here starts a worker, resolves a path, measures a file,
+/// reads a byte, chooses a maximum, or decides which thread anything runs on.
+#[derive(Default)]
+struct StaticFileObservations {
+    /// What the blocking workers under this root reported about themselves.
+    worker: WorkerObservations,
     /// Path confinements that ran somewhere other than the awaiting thread.
     canonicalized_off_caller: AtomicUsize,
     /// Preflight measurements that ran somewhere other than the awaiting thread.
@@ -463,21 +494,13 @@ struct StaticFileObservations {
 /// owners answer different questions — a file read reports three filesystem steps
 /// under one served root, and a profile is one process-wide answer whose sampling
 /// and rendering happen inside a single worker entry. One struct covering both
-/// would carry a field that is meaningless for whichever owner wrote it.
+/// would carry a field that is meaningless for whichever owner wrote it. What the
+/// two do share is [`WorkerObservations`], which both hold as a field.
 #[cfg(feature = "profiling")]
 #[derive(Default)]
 struct ProfilingObservations {
-    /// The maximum the most recent render is retained under, as its own collector
-    /// compares it. Zero is no render yet; [`usize::MAX`] is the explicit opt-out.
-    frozen_ceiling: AtomicUsize,
-    /// Blocking workers that began sampling.
-    workers_entered: AtomicUsize,
-    /// Blocking workers that handed back an answer or a refusal.
-    ///
-    /// The difference between this and [`Self::workers_entered`] is the
-    /// abandonment claim: a caller that stopped waiting leaves a worker counted
-    /// as entered and not yet returned, still holding what it owns.
-    workers_returned: AtomicUsize,
+    /// What this process's profiling workers reported about themselves.
+    worker: WorkerObservations,
     /// Workers that began on the very thread awaiting them.
     ///
     /// Sampling and rendering both run inside one worker entry, so the thread
@@ -541,6 +564,120 @@ pub(in crate::http) enum StaticFileEvent {
         step: StaticFileStep,
         off_caller: bool,
     },
+}
+
+/// What one offloaded worker publishes, whichever owner it belongs to.
+///
+/// The vocabularies stay apart — a static-file worker reports filesystem steps a
+/// profile has none of, and a profiling entry reports a placement a static-file
+/// entry does not — so this carries only the line that puts one event onto the
+/// script. It is what lets [`BlockingWorkerObserver`] state the entry-and-return
+/// order once for owners that report different things at both ends.
+pub(in crate::http) trait BlockingWorkerEvent: Sized {
+    /// Publish one of these onto `script`, or nothing when none watches.
+    fn publish(script: Option<&LifecycleScript>, event: Self);
+}
+
+#[cfg(feature = "profiling")]
+impl BlockingWorkerEvent for ProfilingEvent {
+    fn publish(script: Option<&LifecycleScript>, event: Self) {
+        LifecycleScript::observe_profiling(script, event);
+    }
+}
+
+impl BlockingWorkerEvent for StaticFileEvent {
+    fn publish(script: Option<&LifecycleScript>, event: Self) {
+        LifecycleScript::observe_static_file(script, event);
+    }
+}
+
+/// The observer one offloaded worker reports through, and the thread it left.
+///
+/// Every owner that answers on a blocking thread holds one of these: the script
+/// it publishes to, resolved once it is running where it may block, and the
+/// identity of the thread awaiting it, so it can say it ran somewhere else. Held
+/// as a field rather than restated as a pair of them, so an owner that offloads
+/// its answer takes the whole protocol with the value — a resolve, an entry, a
+/// hold, a return — instead of reassembling it.
+pub(in crate::http) struct BlockingWorkerObserver {
+    script: Option<Arc<LifecycleScript>>,
+    caller: std::thread::ThreadId,
+}
+
+impl BlockingWorkerObserver {
+    /// Take the awaiting thread's identity, before this worker owns anything.
+    ///
+    /// Built on the awaiting side and moved whole to the blocking thread, which
+    /// is what makes the identity worth taking: the worker compares it against
+    /// wherever it wakes up.
+    pub(in crate::http) fn awaiting() -> Self {
+        Self {
+            script: None,
+            caller: std::thread::current().id(),
+        }
+    }
+
+    /// Take the script this worker reports to, once it is running where it may
+    /// block.
+    ///
+    /// Resolved here rather than beside the request because this is where it is
+    /// read: the awaiting worker never publishes anything through it, and a
+    /// value it does not need is a value it should not lend.
+    pub(in crate::http) fn resolve(&mut self, found: Option<Arc<LifecycleScript>>) {
+        self.script = found;
+    }
+
+    /// The script this worker reports to, when one watches.
+    fn script(&self) -> Option<&LifecycleScript> {
+        self.script.as_deref()
+    }
+
+    /// A handle on that script for an owner that keeps reporting after this
+    /// borrow ends.
+    ///
+    /// The checked collector each worker builds is the one that needs it: it
+    /// publishes from wherever the bytes reach it, not from here.
+    pub(in crate::http) fn shared(&self) -> Option<Arc<LifecycleScript>> {
+        self.script.clone()
+    }
+
+    /// Whether this worker is running anywhere but the thread awaiting it.
+    pub(in crate::http) fn ran_off_caller(&self) -> bool {
+        std::thread::current().id() != self.caller
+    }
+
+    /// Publish one thing this worker did.
+    pub(in crate::http) fn publish<E: BlockingWorkerEvent>(&self, event: E) {
+        E::publish(self.script(), event);
+    }
+
+    /// Hold this worker at `checkpoint` for as long as a case holds it there.
+    pub(in crate::http) fn hold_at(&self, checkpoint: LifecycleCheckpoint) {
+        LifecycleScript::pause_blocking(self.script(), checkpoint);
+    }
+
+    /// Run `work` as this worker's whole answer, announced at both ends.
+    ///
+    /// The order is the protocol, and it is stated here once. The entry is
+    /// published before the hold, so a case that parks this worker at
+    /// `checkpoint` has already seen it begin. The return is published after the
+    /// work, so the gap between the two counts is exactly what a caller that
+    /// stopped waiting left behind. The two events are the owner's own, because
+    /// what a static-file entry reports and what a profiling entry reports are
+    /// not the same claim.
+    pub(in crate::http) fn spanning<E: BlockingWorkerEvent, T>(
+        &self,
+        entered: E,
+        returned: E,
+        checkpoint: LifecycleCheckpoint,
+        work: impl FnOnce() -> T,
+    ) -> T {
+        self.publish(entered);
+        self.hold_at(checkpoint);
+        let answered = work();
+        self.publish(returned);
+        answered
+    }
 }
 
 /// What the static-file workers under one root have done so far.
@@ -969,9 +1106,7 @@ impl LifecycleScript {
         id: super::operation::OperationId,
         total: Option<std::time::Duration>,
     ) {
-        let nanos = total.map_or(UNBOUNDED_TOTAL_NANOS, |total| {
-            u64::try_from(total.as_nanos()).unwrap_or(UNBOUNDED_TOTAL_NANOS)
-        });
+        let nanos = nanos_of(total);
         Self::observe(
             script,
             |script| &script.operation,
@@ -1252,18 +1387,23 @@ impl LifecycleScript {
                     // A value, not a tally: the question is which maximum this
                     // render froze, and adding them would answer neither.
                     ProfilingEvent::CeilingFrozen(ceiling) => {
-                        profiling.frozen_ceiling.store(ceiling, Ordering::Release);
+                        profiling
+                            .worker
+                            .frozen_ceiling
+                            .store(ceiling, Ordering::Release);
                         return;
                     }
-                    ProfilingEvent::Entered { off_caller: true } => &profiling.workers_entered,
+                    ProfilingEvent::Entered { off_caller: true } => {
+                        &profiling.worker.workers_entered
+                    }
                     // Counted under both, because an entry on the awaiting thread
                     // is still an entry: the ownership claim counts workers and
                     // the placement claim counts where they began.
                     ProfilingEvent::Entered { off_caller: false } => {
                         profiling.entries_on_caller.fetch_add(1, Ordering::Release);
-                        &profiling.workers_entered
+                        &profiling.worker.workers_entered
                     }
-                    ProfilingEvent::Returned => &profiling.workers_returned,
+                    ProfilingEvent::Returned => &profiling.worker.workers_returned,
                 };
                 counter.fetch_add(1, Ordering::Release);
             },
@@ -1282,11 +1422,14 @@ impl LifecycleScript {
                     // A value, not a tally: the question is which maximum this
                     // read froze, and adding them would answer neither.
                     StaticFileEvent::CeilingFrozen(ceiling) => {
-                        files.frozen_ceiling.store(ceiling, Ordering::Release);
+                        files
+                            .worker
+                            .frozen_ceiling
+                            .store(ceiling, Ordering::Release);
                         return;
                     }
-                    StaticFileEvent::WorkerEntered => &files.workers_entered,
-                    StaticFileEvent::WorkerReturned => &files.workers_returned,
+                    StaticFileEvent::WorkerEntered => &files.worker.workers_entered,
+                    StaticFileEvent::WorkerReturned => &files.worker.workers_returned,
                     StaticFileEvent::Step {
                         off_caller: false, ..
                     } => &files.steps_on_caller,
@@ -1612,6 +1755,25 @@ fn lifecycle_registry() -> &'static Mutex<Vec<LifecycleRegistration>> {
     REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// How many controllers the registry holds, readable without the lock.
+///
+/// [`scoped_script`] is on the path of every buffered proxy forward, every
+/// outbound client answer, and every static-file read, and it is asking a
+/// question whose answer outside a test is always "nothing is watching". Taking
+/// a process-wide mutex to hear that serializes every Tokio worker in the
+/// process against one lock the production build never needed.
+///
+/// Written under the registry's own lock, on the two lines that change what the
+/// registry holds. Read [`Ordering::Relaxed`] on the fast path, because the only
+/// race it admits is a lookup that runs concurrently with the registration it
+/// would have found, and no case has one: a controller is created before the
+/// server, the root, or the profiler it observes, so the registration is ordered
+/// ahead of the production path by whatever started that work. A stronger
+/// ordering would not close a genuine race here either — it would still have to
+/// read zero — and once a reader sees a nonzero count the registry's lock is
+/// what publishes the entries behind it.
+static REGISTERED_SCOPES: AtomicUsize = AtomicUsize::new(0);
+
 #[doc(hidden)]
 pub struct LifecycleController {
     scope: ObservedScope,
@@ -1641,6 +1803,12 @@ impl LifecycleController {
     /// one turn of a `select!`: [`Self::release`] wakes the future it releases,
     /// so the turn is decided before the second result exists, and a precedence
     /// rule between two ready results is never exercised.
+    ///
+    /// A checkpoint held by a blocking worker is always unparked, staged or not.
+    /// Withholding the wake is about a task wake deciding a `select!` turn early,
+    /// which no blocking worker has; a parked thread has no later poll to observe
+    /// the release on, so withholding it there would hang the case rather than
+    /// stage anything.
     pub fn stage_release(&self, checkpoint: LifecycleCheckpoint) -> Result<(), RuntimeError> {
         self.script.record_release(checkpoint).map(drop)
     }
@@ -1725,10 +1893,7 @@ impl LifecycleController {
             admitted: operation.admitted.load(Ordering::Acquire),
             identity: (identity > 0).then_some(identity),
             distinct_identities: operation.distinct_identities.load(Ordering::Acquire),
-            // Zero is "nothing recorded yet", not a configured total: every
-            // finite total is validated above zero before a policy can hold it.
-            total_from_admission: (total != UNBOUNDED_TOTAL_NANOS && total > 0)
-                .then(|| std::time::Duration::from_nanos(total)),
+            total_from_admission: duration_of(total),
             distinct_totals: operation.distinct_totals.load(Ordering::Acquire),
             dispatch: operation.dispatch.load(Ordering::Acquire),
             middleware: operation.middleware.load(Ordering::Acquire),
@@ -1796,9 +1961,9 @@ impl LifecycleController {
     pub fn profiling_observed(&self) -> ProfilingObservation {
         let profiling = &self.script.profiling;
         ProfilingObservation {
-            frozen_ceiling: profiling.frozen_ceiling.load(Ordering::Acquire),
-            workers_entered: profiling.workers_entered.load(Ordering::Acquire),
-            workers_returned: profiling.workers_returned.load(Ordering::Acquire),
+            frozen_ceiling: profiling.worker.frozen_ceiling.load(Ordering::Acquire),
+            workers_entered: profiling.worker.workers_entered.load(Ordering::Acquire),
+            workers_returned: profiling.worker.workers_returned.load(Ordering::Acquire),
             entries_on_caller: profiling.entries_on_caller.load(Ordering::Acquire),
         }
     }
@@ -1811,9 +1976,9 @@ impl LifecycleController {
     pub fn static_files_observed(&self) -> StaticFileObservation {
         let files = &self.script.static_files;
         StaticFileObservation {
-            frozen_ceiling: files.frozen_ceiling.load(Ordering::Acquire),
-            workers_entered: files.workers_entered.load(Ordering::Acquire),
-            workers_returned: files.workers_returned.load(Ordering::Acquire),
+            frozen_ceiling: files.worker.frozen_ceiling.load(Ordering::Acquire),
+            workers_entered: files.worker.workers_entered.load(Ordering::Acquire),
+            workers_returned: files.worker.workers_returned.load(Ordering::Acquire),
             canonicalized_off_caller: files.canonicalized_off_caller.load(Ordering::Acquire),
             metadata_off_caller: files.metadata_off_caller.load(Ordering::Acquire),
             reads_off_caller: files.reads_off_caller.load(Ordering::Acquire),
@@ -1835,6 +2000,10 @@ impl Drop for LifecycleController {
                     .upgrade()
                     .is_some_and(|script| !Arc::ptr_eq(&script, &self.script))
         });
+        // Counted down after the entry is gone and while the lock is still held,
+        // so no lookup can read a count of zero over a registry this controller
+        // is still listed in.
+        REGISTERED_SCOPES.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -1858,6 +2027,9 @@ fn register(scope: ObservedScope) -> Result<LifecycleController, RuntimeError> {
                 scope: scope.clone(),
                 script: Arc::downgrade(&script),
             });
+            // Counted up under the same lock the entry was pushed under, so the
+            // count and the registry never disagree for a reader that takes it.
+            REGISTERED_SCOPES.fetch_add(1, Ordering::Relaxed);
             Ok(LifecycleController { scope, script })
         }
     }
@@ -1867,8 +2039,21 @@ fn register(scope: ObservedScope) -> Result<LifecycleController, RuntimeError> {
 ///
 /// The scope is recognized rather than rebuilt, so a production lookup that
 /// finds nothing — which is every lookup outside a test — copies no address and
-/// no path to ask the question.
+/// no path to ask the question. An empty registry is answered from
+/// [`REGISTERED_SCOPES`] alone, so that lookup also takes no lock.
 fn scoped_script(watching: impl Fn(&ObservedScope) -> bool) -> Option<Arc<LifecycleScript>> {
+    match REGISTERED_SCOPES.load(Ordering::Relaxed) {
+        0 => None,
+        _ => registered_script(watching),
+    }
+}
+
+/// The script watching the one scope `watching` recognizes, searched under the
+/// registry's lock.
+///
+/// Reached only once a controller is known to exist, and it prunes the entries
+/// whose controllers are gone on the way past.
+fn registered_script(watching: impl Fn(&ObservedScope) -> bool) -> Option<Arc<LifecycleScript>> {
     let mut registry = lifecycle_registry()
         .lock()
         .unwrap_or_else(|error| error.into_inner());

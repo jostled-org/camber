@@ -352,8 +352,34 @@ fn assert_supervisor_checkpoint_reached(
         .expect("release the supervisor checkpoint");
 }
 
+/// The supervisor-loop checkpoints one synchronously served connection reaches,
+/// in production order, ending at the moment Hyper is configured.
+///
+/// The Hyper checkpoint alone cannot carry this claim: a path that regressed to
+/// a bare spawn beside the supervisor would still configure a header boundary
+/// and still reach it. The five before it are the loop itself — the pass that
+/// takes an event, the accept it selects, the socket that accept produced, the
+/// permit the connection limit hands back, and the admission recheck every
+/// family passes through — so a connection that never entered the supervisor's
+/// select loop now fails at the first of them.
+///
+/// The list stops there because the remaining loop variants are not on this
+/// row's path: `SupervisorSelectedDeadline`, `SupervisorSelectedControl`, and
+/// `SupervisorSelectedRuntime` belong to shutdown, `SupervisorSelectedTask` to
+/// a connection that has already ended, and `SupervisorSelectedRegistration` to
+/// an upgrade this plain GET never submits. Each of those has its own row.
+fn synchronous_supervisor_checkpoints() -> [LifecycleCheckpoint; 6] {
+    [
+        LifecycleCheckpoint::BeforeSupervisorSelect,
+        LifecycleCheckpoint::SupervisorSelectedAccept,
+        LifecycleCheckpoint::AfterAccept,
+        LifecycleCheckpoint::SupervisorSelectedPermit,
+        LifecycleCheckpoint::AfterPermit,
+        synchronous_connection_checkpoint(),
+    ]
+}
+
 /// Arm every checkpoint the synchronous path under test must reach.
-#[cfg(feature = "ws")]
 fn arm_checkpoints(controller: &LifecycleController, checkpoints: &[LifecycleCheckpoint]) {
     for checkpoint in checkpoints {
         controller
@@ -368,7 +394,6 @@ fn arm_checkpoints(controller: &LifecycleController, checkpoints: &[LifecycleChe
 /// Order is the whole contract of the sequence: a wait for a later checkpoint
 /// taken while an earlier one still holds the connection would report the
 /// earlier hold as a failure to reach the later one.
-#[cfg(feature = "ws")]
 fn assert_supervisor_checkpoints_reached(
     controller: &LifecycleController,
     checkpoints: &[LifecycleCheckpoint],
@@ -380,13 +405,18 @@ fn assert_supervisor_checkpoints_reached(
 
 /// The checkpoints one synchronously served SSE response reaches, in order.
 ///
+/// `BeforeRuntimeWait` is the supervisor's own first act — it registers this
+/// server's interest in runtime shutdown on the opening select pass, before any
+/// socket exists — so a synchronous server that never entered the supervisor
+/// loop fails here rather than at a streaming checkpoint it would still reach.
 /// `AfterPermit` is the shared admission moment every family passes through;
 /// `SseBufferConfigured` is the streaming owner's own, and it carries the
 /// capacity the router resolved, so a case naming a capacity the router never
 /// configured would wait at a checkpoint production never reaches.
 #[cfg(feature = "ws")]
-fn synchronous_sse_checkpoints() -> [LifecycleCheckpoint; 2] {
+fn synchronous_sse_checkpoints() -> [LifecycleCheckpoint; 3] {
     [
+        LifecycleCheckpoint::BeforeRuntimeWait,
         LifecycleCheckpoint::AfterPermit,
         LifecycleCheckpoint::SseBufferConfigured(SUPERVISED_BUFFER),
     ]
@@ -759,10 +789,8 @@ fn synchronous_serve_reaches_the_shared_supervisor_checkpoints() {
                 .expect("TCP listener address");
             let controller =
                 lifecycle(addr).expect("register synchronous isolation listener address");
-            let checkpoint = synchronous_connection_checkpoint();
-            controller
-                .pause_once(checkpoint)
-                .expect("arm the shared supervisor checkpoint");
+            let checkpoints = synchronous_supervisor_checkpoints();
+            arm_checkpoints(&controller, &checkpoints);
 
             let mut router = Router::new();
             router.get("/sync", |_req: &Request| async {
@@ -775,7 +803,7 @@ fn synchronous_serve_reaches_the_shared_supervisor_checkpoints() {
                 send_request(&mut client, "/sync");
                 read_status(&mut client)
             });
-            assert_supervisor_checkpoint_reached(&controller, checkpoint);
+            assert_supervisor_checkpoints_reached(&controller, &checkpoints);
             assert_eq!(
                 client.join().expect("the synchronous client thread joined"),
                 200

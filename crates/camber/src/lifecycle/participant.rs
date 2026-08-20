@@ -51,33 +51,25 @@ impl LifecycleParticipant {
             Self::Executor => 7,
         }
     }
-
-    /// The bounded name this owner is reported under.
-    pub(crate) const fn label(&self) -> &'static str {
-        match self {
-            Self::RootScope => "root-scope",
-            Self::Server => "server",
-            Self::Connection => "connection",
-            Self::Upgrade => "upgrade",
-            Self::BackgroundTask => "background-task",
-            Self::Resource(_) => "resource",
-            Self::Exporter => "exporter",
-            Self::Executor => "executor",
-        }
-    }
 }
 
+/// The bounded name each owner is reported under.
+///
+/// One arm per participant, written where the name is rendered. A separate
+/// name table would have owed the resource an entry it could never reach: the
+/// arm below carries the registered identity, which is the whole reason this
+/// impl exists.
 impl std::fmt::Display for LifecycleParticipant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Resource(name) => write!(f, "resource {name}"),
-            Self::RootScope
-            | Self::Server
-            | Self::Connection
-            | Self::Upgrade
-            | Self::BackgroundTask
-            | Self::Exporter
-            | Self::Executor => f.write_str(self.label()),
+            Self::RootScope => f.write_str("root-scope"),
+            Self::Server => f.write_str("server"),
+            Self::Connection => f.write_str("connection"),
+            Self::Upgrade => f.write_str("upgrade"),
+            Self::BackgroundTask => f.write_str("background-task"),
+            Self::Exporter => f.write_str("exporter"),
+            Self::Executor => f.write_str("executor"),
         }
     }
 }

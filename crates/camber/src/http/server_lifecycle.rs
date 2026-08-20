@@ -983,6 +983,13 @@ enum SupervisorEvent {
 
 pub(super) struct ServerSupervisor {
     listener: Option<crate::net::Listener>,
+    /// What removing the listener's socket path reported, when it failed.
+    ///
+    /// Held until the terminal result is taken, because that is the only place
+    /// one error can be chosen: the supervisor is the last owner of the
+    /// listener, so a failure here has no caller left to reach except the one
+    /// waiting on how this server ended.
+    cleanup_failure: Option<RuntimeError>,
     dispatch: Arc<ServerDispatch>,
     context: Arc<super::handle::ConnCtx>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
@@ -1040,6 +1047,7 @@ impl ServerSupervisor {
         (
             Self {
                 listener: Some(listener),
+                cleanup_failure: None,
                 dispatch: Arc::new(dispatch),
                 context,
                 tls_acceptor,
@@ -1613,11 +1621,29 @@ impl ServerSupervisor {
     /// is shut down here rather than left to be dropped raw. Both transitions
     /// differ only in which request they publish.
     async fn close_admission(&mut self, publish: fn(&tokio::sync::watch::Sender<ServerControl>)) {
-        self.listener.take();
+        self.release_listener();
         self.registration_sender.take();
         publish(&self.control_sender);
         self.control_receiver.borrow_and_update();
         self.close_pending().await;
+    }
+
+    /// Give the listener up, and keep what removing its socket path reported.
+    ///
+    /// Admission closes exactly once, so this runs once: the second transition
+    /// finds the listener already taken and has nothing to remove. The removal
+    /// happens HERE, on the owner that is giving the listener away, because
+    /// `Drop` is the only step after it and a destructor can log a failed
+    /// removal but cannot return it. A Unix socket path replaced under the
+    /// service is the case that matters — the listener refuses to delete what is
+    /// no longer its own socket, and the caller waiting on this server is told.
+    fn release_listener(&mut self) {
+        let Some(listener) = self.listener.take() else {
+            return;
+        };
+        if let Err(error) = listener.cleanup() {
+            self.cleanup_failure = Some(error);
+        }
     }
 
     /// Enter abort: stop admitting, tell every connection to shut down, and
@@ -1851,7 +1877,7 @@ impl ServerSupervisor {
 
     fn take_result(&mut self) -> Result<(), RuntimeError> {
         let terminal = std::mem::replace(&mut self.terminal, TerminalOutcome::Success);
-        match (terminal, self.current_control()) {
+        let served = match (terminal, self.current_control()) {
             (TerminalOutcome::Timeout, _) => Err(RuntimeError::Timeout),
             (_, ServerControl::Abort) | (TerminalOutcome::Cancelled, _) => {
                 Err(RuntimeError::Cancelled)
@@ -1860,7 +1886,8 @@ impl ServerSupervisor {
             (TerminalOutcome::Fatal(error), ServerControl::Running | ServerControl::Graceful) => {
                 Err(error)
             }
-        }
+        };
+        report_serve_outcome(served, self.cleanup_failure.take())
     }
 
     async fn finish(&mut self) -> Result<(), RuntimeError> {
@@ -1893,6 +1920,27 @@ impl ServerSupervisor {
         };
         self.shutdown
             .settle(&LifecycleParticipant::Server, disposition);
+    }
+}
+
+/// Report both halves of a served listener's outcome.
+///
+/// Only one error can leave, and how the serving ended is the one that says
+/// why; a cleanup failure behind it is logged rather than destroyed. A serve
+/// that ended cleanly has nothing of its own to report, so the cleanup failure
+/// is the whole answer — which is how a socket path replaced under the service
+/// reaches the caller instead of stopping at a warning.
+fn report_serve_outcome(
+    served: Result<(), RuntimeError>,
+    cleanup: Option<RuntimeError>,
+) -> Result<(), RuntimeError> {
+    match (served, cleanup) {
+        (Ok(()), None) => Ok(()),
+        (Ok(()), Some(error)) | (Err(error), None) => Err(error),
+        (Err(error), Some(cleanup_error)) => {
+            tracing::warn!(%cleanup_error, "listener cleanup failed after a serve error");
+            Err(error)
+        }
     }
 }
 

@@ -422,6 +422,17 @@ where
     builder.run(f)
 }
 
+/// The server envelope a test runtime serves under.
+///
+/// Both bounds are far shorter than production's so a test that reaches either
+/// one fails fast. The envelope is a constant rather than a builder chain
+/// because both are literals this crate chooses: `ServerPolicy::of_test_bounds`
+/// states their two rules to the compiler, so there is no refusal to propagate
+/// and none to swallow.
+fn test_server_policy() -> crate::http::ServerPolicy {
+    crate::http::ServerPolicy::of_test_bounds()
+}
+
 /// What a test-optimized runtime is configured as.
 ///
 /// One definition, so the sync and async test entry points cannot drift on a
@@ -436,18 +447,6 @@ where
 /// and the resource health coordinator — while the async entry admits no
 /// background subsystem at all; a test that wants one opts in through the
 /// doc-hidden seam.
-/// The server envelope a test runtime serves under.
-///
-/// Both bounds are far shorter than production's so a test that reaches either
-/// one fails fast, and both are non-zero, so the validated setters cannot
-/// refuse them.
-fn test_server_policy() -> crate::http::ServerPolicy {
-    crate::http::ServerPolicy::default()
-        .header_timeout(Duration::from_millis(100))
-        .and_then(|policy| policy.shutdown_timeout(Duration::from_secs(1)))
-        .unwrap_or_default()
-}
-
 fn test_runtime_config() -> RuntimeConfig {
     RuntimeConfig {
         worker_threads: tokio_default_worker_threads(),
@@ -604,7 +603,7 @@ fn close_and_drain(
 ) {
     inner.close_scope();
     inner
-        .shutdown_deadline()
+        .shutdown_deadline_ref()
         .mint_at(tokio::time::Instant::now());
     drain_root_scope(inner, tokio_rt.handle(), log);
 }
@@ -786,7 +785,7 @@ fn shutdown_runtime_services(
 #[cfg(feature = "otel")]
 fn shutdown_exporter_participant(inner: &RuntimeInner) {
     crate::http::otel::shutdown_exporter();
-    inner.shutdown_deadline().settle(
+    inner.shutdown_deadline_ref().settle(
         &LifecycleParticipant::Exporter,
         ParticipantDisposition::Completed,
     );

@@ -66,7 +66,7 @@ const CANCELLED_TAG: u8 = 0x38;
 #[camber::test]
 async fn shared_binary_fanout_delivers_exact_bytes_to_1_2_16_100_peers() {
     for recipients in FANOUTS {
-        assert_fanout_delivers_exact_bytes(recipients).await;
+        assert_fanout_delivers_exact_bytes(recipients);
     }
 }
 
@@ -75,7 +75,7 @@ async fn shared_binary_fanout_delivers_exact_bytes_to_1_2_16_100_peers() {
 /// The original is dropped while one recipient's writer is still held, so the
 /// only thing keeping the backing alive at that point is what the connections
 /// themselves retained.
-async fn assert_fanout_delivers_exact_bytes(recipients: usize) {
+fn assert_fanout_delivers_exact_bytes(recipients: usize) {
     shared_payload_row(FANOUT_BUFFER, recipients, |mut row| async move {
         let expected = payload_bytes(LARGE_PAYLOAD, FANOUT_TAG);
         let (payload, mut witness) = witnessed_payload(&expected, "the fanned-out payload");
@@ -98,8 +98,7 @@ async fn assert_fanout_delivers_exact_bytes(recipients: usize) {
         row.end_every_connection();
         row.stop_and_join().await;
         witness.assert_released("every completed bridge").await;
-    })
-    .await;
+    });
 }
 
 // 1.T4
@@ -125,8 +124,7 @@ async fn saturated_shared_binary_recipient_does_not_impede_siblings() {
         large_witness
             .assert_released("the large sibling payload")
             .await;
-    })
-    .await;
+    });
 }
 
 /// Fill one recipient's capacity-one queue behind its held writer, and require
@@ -167,13 +165,18 @@ fn admit_and_take(
 #[camber::test]
 async fn shared_binary_terminal_paths_release_every_payload_handle() {
     peer_disconnect_release_row().await;
-    receiver_drop_release_row().await;
-    graceful_shutdown_release_row().await;
-    forced_cancellation_release_row().await;
+    receiver_drop_release_row();
+    graceful_shutdown_release_row();
+    forced_cancellation_release_row();
 }
 
 /// A peer whose transport is reset: the converted frame and the queued clone
 /// are both dropped, and the backing goes with them.
+///
+/// Run on the case's own runtime rather than on a row runtime of its own,
+/// because its stop is the only graceful one there: the three rows below take a
+/// runtime each so they cannot spend one another's aggregate grace, and this
+/// row has nothing to share that grace with.
 async fn peer_disconnect_release_row() {
     abortive_direction_row(TERMINAL_BUFFER, |fixture, peer, connection| async move {
         let (sender, receiver) = connection.split();
@@ -202,7 +205,7 @@ async fn peer_disconnect_release_row() {
 
 /// The unique receive owner going away cancels the converted frame and the
 /// queued clone alike.
-async fn receiver_drop_release_row() {
+fn receiver_drop_release_row() {
     shared_payload_row(TERMINAL_BUFFER, 1, |mut row| async move {
         let expected = payload_bytes(SMALL_PAYLOAD, RECEIVER_TAG);
         let mut witness = stage_converted_and_queued(
@@ -223,8 +226,7 @@ async fn receiver_drop_release_row() {
         row.stop_and_join().await;
         assert_bridge_released(&row.listener().observed(), WsCloseCause::ReceiverDropped, 1);
         witness.assert_released("the receiver-drop bridge").await;
-    })
-    .await;
+    });
 }
 
 /// A graceful stop keeps the promise a successful shared send was given: the
@@ -235,7 +237,7 @@ async fn receiver_drop_release_row() {
 /// into the sink. Asking for the stop first can cancel that future while it
 /// alone owns the converted frame, which would drop a frame a successful send
 /// was promised.
-async fn graceful_shutdown_release_row() {
+fn graceful_shutdown_release_row() {
     shared_payload_row(TERMINAL_BUFFER, 1, |mut row| async move {
         let expected = payload_bytes(SMALL_PAYLOAD, SHUTDOWN_TAG);
         let mut witness = stage_converted_and_queued(
@@ -263,8 +265,7 @@ async fn graceful_shutdown_release_row() {
             .expect("the owned server completed");
         assert_bridge_released(&row.listener().observed(), WsCloseCause::ServerShutdown, 0);
         witness.assert_released("the drained bridge").await;
-    })
-    .await;
+    });
 }
 
 /// A cancelled server owes nothing, and lets go of everything.
@@ -272,7 +273,7 @@ async fn graceful_shutdown_release_row() {
 /// The held checkpoint is never released as progress: the coordinator drops the
 /// outbound future the moment it selects the cause, and that drop is what has to
 /// release the converted frame.
-async fn forced_cancellation_release_row() {
+fn forced_cancellation_release_row() {
     shared_payload_row(TERMINAL_BUFFER, 1, |row| async move {
         let expected = payload_bytes(SMALL_PAYLOAD, CANCELLED_TAG);
         let mut witness = stage_converted_and_queued(
@@ -290,8 +291,7 @@ async fn forced_cancellation_release_row() {
         );
         assert_bridge_released(&row.listener().observed(), WsCloseCause::ServerCancelled, 1);
         witness.assert_released("the cancelled bridge").await;
-    })
-    .await;
+    });
 }
 
 /// Admit two clones of one owner-backed payload and hold the bridge with the

@@ -20,11 +20,10 @@
 use super::Response;
 use super::boundary::ByteBoundary;
 use super::checked_collect::CheckedCollector;
-use super::mock::{LifecycleCheckpoint, LifecycleScript, StaticFileEvent, StaticFileStep};
+use super::mock::{BlockingWorkerObserver, LifecycleCheckpoint, StaticFileEvent, StaticFileStep};
 use crate::RuntimeError;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// The maximum a static file is read and retained under when no caller names
 /// one: eight MiB, the same ceiling Camber's ordinary buffered collections use.
@@ -146,28 +145,26 @@ struct StaticFileWorker {
     file_path: Box<str>,
     /// The maximum to retain under, or `None` for the explicit opt-out.
     limit: Option<usize>,
-    /// The root-scoped observer, when a test registered one. Inert otherwise.
+    /// The root-scoped observer, when a test registered one, and the thread
+    /// awaiting this read. Inert otherwise.
     ///
-    /// Resolved on the blocking thread rather than beside the paths, because
-    /// the lookup takes a process-wide lock: every static-file request would
-    /// otherwise take it on the worker it is awaiting from.
-    observer: Option<Arc<LifecycleScript>>,
-    /// The thread awaiting this read, so each step can report it ran elsewhere.
-    caller: std::thread::ThreadId,
+    /// The shared blocking-worker context, held by every owner that answers off
+    /// a Tokio worker: it resolves its script where the read runs and states the
+    /// entry-and-return order once for all of them.
+    observer: BlockingWorkerObserver,
 }
 
 impl StaticFileWorker {
     /// Take owned copies of everything this read needs.
     ///
-    /// Everything except the observer, which [`Self::answer`] resolves once it
-    /// is running where a lock costs the awaiting worker nothing.
+    /// Everything except the script, which [`Self::answer`] resolves once it is
+    /// running where nothing it looks up is lent back to the awaiting worker.
     fn owning(base_dir: &Path, file_path: &str, limit: Option<usize>) -> Self {
         Self {
-            observer: None,
+            observer: BlockingWorkerObserver::awaiting(),
             base_dir: base_dir.into(),
             file_path: file_path.into(),
             limit,
-            caller: std::thread::current().id(),
         }
     }
 
@@ -179,27 +176,21 @@ impl StaticFileWorker {
     /// [`ByteBoundary::StaticFile`] when the file crosses the maximum, and
     /// [`RuntimeError::Io`] when a file that opened cannot be read.
     fn answer(mut self) -> Result<Response, RuntimeError> {
-        self.observer = super::mock::static_file_script(&self.base_dir);
-        self.observe(StaticFileEvent::WorkerEntered);
-        LifecycleScript::pause_blocking(
-            self.observer.as_deref(),
+        self.observer
+            .resolve(super::mock::static_file_script(&self.base_dir));
+        self.observer.spanning(
+            StaticFileEvent::WorkerEntered,
+            StaticFileEvent::WorkerReturned,
             LifecycleCheckpoint::StaticFileWorkerEntered,
-        );
-        let answered = self.read();
-        self.observe(StaticFileEvent::WorkerReturned);
-        answered
-    }
-
-    /// Publish one thing this worker did.
-    fn observe(&self, event: StaticFileEvent) {
-        LifecycleScript::observe_static_file(self.observer.as_deref(), event);
+            || self.read(),
+        )
     }
 
     /// Run one filesystem step, reporting the thread it ran on.
     fn step<T>(&self, step: StaticFileStep, work: impl FnOnce() -> T) -> T {
-        self.observe(StaticFileEvent::Step {
+        self.observer.publish(StaticFileEvent::Step {
             step,
-            off_caller: std::thread::current().id() != self.caller,
+            off_caller: self.observer.ran_off_caller(),
         });
         work()
     }
@@ -216,22 +207,21 @@ impl StaticFileWorker {
         };
 
         let mut collected =
-            CheckedCollector::new(ByteBoundary::StaticFile, self.limit, self.observer.clone());
+            CheckedCollector::new(ByteBoundary::StaticFile, self.limit, self.observer.shared());
         // Read back off the collector rather than from `self.limit`, so what is
         // reported is the number this read is actually measured against and not
         // the argument that was meant to become it.
-        self.observe(StaticFileEvent::CeilingFrozen(collected.ceiling()));
+        self.observer
+            .publish(StaticFileEvent::CeilingFrozen(collected.ceiling()));
         collected.admit_declared(Some(declared))?;
-        LifecycleScript::pause_blocking(
-            self.observer.as_deref(),
-            LifecycleCheckpoint::StaticFileMetadataObserved,
-        );
+        self.observer
+            .hold_at(LifecycleCheckpoint::StaticFileMetadataObserved);
 
         let opened = match self.open(&canonical) {
             Some(opened) => opened,
             None => return Ok(not_found()),
         };
-        self.fill(&mut collected, opened, declared)?;
+        self.fill(&mut collected, opened)?;
         let content_type = content_type_for(canonical.extension().and_then(|ext| ext.to_str()));
         Ok(Response::bytes_raw(200, collected.finish()).with_content_type(content_type))
     }
@@ -300,14 +290,20 @@ impl StaticFileWorker {
         &self,
         collected: &mut CheckedCollector,
         mut opened: std::fs::File,
-        declared: u64,
     ) -> Result<(), RuntimeError> {
         self.step(StaticFileStep::Read, || {
-            let mut window = vec![0_u8; read_window(declared)].into_boxed_slice();
+            let mut window = vec![0_u8; read_window(collected.ceiling())].into_boxed_slice();
             loop {
                 match opened.read(&mut window) {
                     Ok(0) => return Ok(()),
                     Ok(read) => collected.retain_slice(&window[..read])?,
+                    // A signal reached this thread; the file was not read and
+                    // was not refused. The profiling feature arms a
+                    // process-wide `SIGPROF` timer that fires on every thread,
+                    // so a hand-rolled loop that treated this as an IO failure
+                    // would answer 500 for a readable file under exactly the
+                    // load an operator turns the profiler on for.
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(error) => return Err(RuntimeError::Io(error)),
                 }
             }
@@ -315,17 +311,22 @@ impl StaticFileWorker {
     }
 }
 
-/// How large a window a file of `declared` bytes is worth reading through.
+/// How large a window one read step takes from a file at a time.
 ///
-/// No larger than the file said it holds, so a file that has not grown is read
-/// in one step, and one that has is refused on the step after the last one its
-/// stated size covered. Never larger than [`READ_WINDOW`], because the stated
-/// size is the filesystem's claim and not an allocation to trust, and never
-/// zero, because a zero-length read never ends.
-fn read_window(declared: u64) -> usize {
-    usize::try_from(declared)
-        .unwrap_or(READ_WINDOW)
-        .clamp(1, READ_WINDOW)
+/// Sized from the ceiling this read is measured against, never from what the
+/// file stated. Metadata and open are separate syscalls on separate paths, so a
+/// file replaced between them states a length that no longer describes it, and
+/// a window sized from that length reads a large file in thousands of tiny
+/// steps on a blocking thread.
+///
+/// No larger than the ceiling, so a file that grew after it was measured is
+/// still refused on the step after the last one the ceiling covered: the first
+/// window is admitted whole and the one behind it carries the total past the
+/// maximum. Never larger than [`READ_WINDOW`], because the ceiling may be the
+/// opt-out's maximum and is not an allocation to make, and never zero, because
+/// a zero-length read never ends.
+fn read_window(ceiling: usize) -> usize {
+    ceiling.clamp(1, READ_WINDOW)
 }
 
 /// Canonicalize one path, reporting the resolve failure operators need.

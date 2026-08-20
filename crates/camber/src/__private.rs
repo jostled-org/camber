@@ -53,6 +53,14 @@ pub use crate::http::server_policy::{
 /// actually runs under.
 pub use crate::lifecycle::{DEFAULT_RESOURCE_PHASE_DEADLINE, LifecycleFailureLog};
 
+/// The exact floor no participant's deadline is narrowed below.
+///
+/// Re-exported for the reason the default above is: it is the value a spent
+/// aggregate hands a callback, so a contract restating the figure would prove
+/// its own hundred milliseconds rather than the grace a forced stop gives an
+/// owner it has just told to end.
+pub use crate::lifecycle::FORCED_JOIN_GRACE;
+
 /// The exact resource budget a configured runtime froze.
 ///
 /// Re-exported for the reason the limit accessors above are: a contract that

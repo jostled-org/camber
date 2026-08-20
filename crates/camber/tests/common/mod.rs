@@ -20,6 +20,10 @@ mod rejection_metrics;
 mod resource_scripts;
 #[path = "../support/runtime.rs"]
 mod runtime;
+// Mounted only where its one consumer is: `cpu_profiling` is the sole reader of
+// this module through `common`, and it is gated on the same feature. Without
+// the gate the load harness compiles into six binaries that never name it.
+#[cfg(feature = "profiling")]
 #[path = "../support/service_operation.rs"]
 mod service_operation;
 #[path = "../support/stream.rs"]
@@ -52,6 +56,7 @@ pub use rejection_kinds::*;
 pub use rejection_metrics::*;
 pub use resource_scripts::*;
 pub use runtime::*;
+#[cfg(feature = "profiling")]
 pub use service_operation::*;
 pub use stream::*;
 pub use temp::*;

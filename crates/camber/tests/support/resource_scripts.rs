@@ -110,21 +110,45 @@ impl CallbackLog {
     }
 
     /// Every resource that began `phase`, in the order they began it.
+    ///
+    /// For the rows whose claim is the order. A row that only needs how many
+    /// there were reads [`Self::count`], which builds no names at all.
     pub fn phase(&self, phase: &str) -> Box<[Box<str>]> {
-        let suffix = format!(":{phase}");
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .filter_map(|entry| entry.strip_suffix(&suffix).map(Box::from))
+            .filter_map(|entry| began_in(entry, phase))
+            .map(Box::from)
             .collect()
     }
 
+    /// How many times `resource` began `phase`.
     pub fn count(&self, resource: &str, phase: &str) -> usize {
-        self.phase(phase)
+        self.matching(phase, |began| began == resource)
+    }
+
+    /// How many records of `phase` name a resource `accept` takes.
+    ///
+    /// Counted under the lock with nothing built, because this is what the
+    /// waits poll: a row that watches a callback for two seconds asks about
+    /// four hundred times, and the row whose subject is callback timing is the
+    /// one that would pay for every allocation on the way.
+    fn matching(&self, phase: &str, mut accept: impl FnMut(&str) -> bool) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .filter(|entry| &***entry == resource)
+            .filter(|entry| began_in(entry, phase).is_some_and(&mut accept))
             .count()
+    }
+}
+
+/// The resource one begin record names, when the record is of `phase`.
+fn began_in<'a>(entry: &'a str, phase: &str) -> Option<&'a str> {
+    match entry.rsplit_once(':') {
+        Some((resource, began)) if began == phase => Some(resource),
+        _ => None,
     }
 }
 

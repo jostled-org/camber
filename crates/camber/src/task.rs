@@ -703,6 +703,12 @@ fn record_producer_refusal(producer: &'static str, path: &str, error: &RuntimeEr
 /// `runtime::build_executor` and asserted nowhere. Checking the flavor makes the
 /// call total. Off a multi-thread worker the closure runs inline — there is no
 /// other worker to hand anything to.
+///
+/// Built for the two features that call it: the WebSocket receiver's timed wait
+/// and the DNS-01 provisioner's blocking ACME work. A build with neither has no
+/// blocking closure to hand off, and a function compiled for nobody is one
+/// nothing keeps correct.
+#[cfg(any(feature = "ws", feature = "dns01"))]
 pub(crate) fn block_in_place<F, T>(f: F) -> T
 where
     F: FnOnce() -> T,
@@ -718,14 +724,15 @@ where
 /// The whole policy, in one place, for the Tokio-backed blocking waits the
 /// crate ships. The crossbeam-backed `channel::sync` halves predate it and wait
 /// without it. Off every runtime the wait belongs to the caller's own thread. On a
-/// multi-thread runtime it goes through [`block_in_place`], which hands the
-/// worker to a replacement so the rest of that runtime keeps running. A
-/// current-thread runtime has no second thread to hand anything to, so a wait
-/// there would stop the only thing that could ever end it: those callers are
-/// refused before they wait rather than deadlocked by one.
+/// multi-thread runtime it hands the worker to a replacement so the rest of
+/// that runtime keeps running. A current-thread runtime has no second thread to
+/// hand anything to, so a wait there would stop the only thing that could ever
+/// end it: those callers are refused before they wait rather than deadlocked by
+/// one.
 ///
-/// Held apart from [`block_in_place`], which is total and answers "run this off
-/// the poll path". This one can refuse, and refusing is the point.
+/// Held apart from `block_in_place`, which is total and answers "run this off
+/// the poll path" — and which only the WebSocket and DNS-01 builds compile.
+/// This one can refuse, and refusing is the point.
 pub(crate) fn wait_blocking<F, T>(wait: F) -> Result<T, RuntimeError>
 where
     F: FnOnce() -> T,

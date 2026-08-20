@@ -543,6 +543,31 @@ pub(super) struct ConnDispatch<'a> {
 }
 
 impl<'a> ConnDispatch<'a> {
+    /// Mint the one envelope an admitted head on this connection runs under.
+    ///
+    /// Every admitted class mints one, and only the budgets differ: the control
+    /// channel, the liveness, the disconnect signal, and the shutdown deadline
+    /// are this connection's, and they are read off it here rather than
+    /// assembled again per class. The dispatch observation belongs to the same
+    /// step, because an envelope that exists unobserved is a stage no script can
+    /// see.
+    fn admit(
+        &self,
+        budgets: super::route_budgets::RouteBudgets,
+        script: Option<&super::mock::LifecycleScript>,
+    ) -> OperationEnvelope {
+        let operation = OperationEnvelope::admit(
+            budgets,
+            self.lifecycle.control(),
+            self.connection,
+            self.origin.disconnect,
+            self.lifecycle.shutdown_deadline(),
+            script,
+        );
+        operation.observe(script, OperationStage::Dispatch);
+        operation
+    }
+
     /// This connection's facts, under the one envelope an admitted head minted.
     fn admitted(&self, operation: &'a OperationEnvelope) -> RequestDispatch<'a> {
         RequestDispatch {
@@ -635,7 +660,6 @@ async fn dispatch_classified_route<'a>(
         ctx,
         origin,
         lifecycle,
-        connection,
         account,
         ..
     } = conn;
@@ -673,15 +697,7 @@ async fn dispatch_classified_route<'a>(
     };
     // One envelope per admitted head, minted from the policy the classifier
     // just resolved and carried from here to the response-head boundary.
-    let operation = OperationEnvelope::admit(
-        budgets,
-        lifecycle.control(),
-        connection,
-        origin.disconnect,
-        lifecycle.shutdown_deadline(),
-        script.as_deref(),
-    );
-    operation.observe(script.as_deref(), OperationStage::Dispatch);
+    let operation = conn.admit(budgets, script.as_deref());
     let request_dispatch = conn.admitted(&operation);
     dispatch_admitted_route(hyper_req, class, router, &scope, &request_dispatch).await
 }
@@ -969,9 +985,9 @@ async fn finish_dispatched<'a>(
             .await
         }
         #[cfg(feature = "ws")]
-        DispatchResult::ProxyWebSocket(req, backend, prefix) => {
+        DispatchResult::ProxyWebSocket(req, backend, prefix, upstream) => {
             record_upgrade(ctx, req, account, scope, operation, |req| {
-                ws_proxy::handle_proxy_ws(ws_upgrade, req, backend, prefix, lifecycle)
+                ws_proxy::handle_proxy_ws(ws_upgrade, req, backend, prefix, &upstream, lifecycle)
             })
             .await
         }
@@ -1240,13 +1256,14 @@ fn finish_async(
 /// buffered and streaming exits cannot disagree about what names a request
 /// while they read the same one.
 ///
-/// The handshake runs inside the request total, which ends at the handoff this
-/// records. Everything up to it is still the request — the negotiation, and for
-/// a proxied upgrade the dial and handshake of the upstream leg — so an upgrade
-/// whose peer or upstream never completes it is refused on the same deadline
-/// every other admitted route answers to. The session past a committed `101`
-/// spends no request time: it is bounded by the WebSocket quotas its own
-/// registration carries.
+/// The negotiation runs inside the request total, which ends at the handoff
+/// this records, so an upgrade whose peer never completes it is refused on the
+/// same deadline every other admitted route answers to. The upstream leg of a
+/// proxied upgrade is NOT inside it: the dial and the backend handshake run in
+/// the registered bridge task, which the supervisor only releases once the
+/// `101` is committed, and the route's own frozen deadline is what bounds them.
+/// The session past that `101` spends no request time either: it is bounded by
+/// the WebSocket quotas its own registration carries.
 #[cfg(feature = "ws")]
 async fn record_upgrade<F, Fut>(
     ctx: &ConnCtx,
@@ -1443,7 +1460,6 @@ async fn dispatch_grpc_inner(
         ctx,
         origin,
         lifecycle,
-        connection,
         account,
         ..
     } = conn;
@@ -1456,19 +1472,12 @@ async fn dispatch_grpc_inner(
         router,
         budgets,
     } = class;
-    // One envelope per admitted gRPC head, exactly as every other admitted
-    // class mints one. Every pre-head owner below reads it: the gate, the
-    // payload tonic is handed, and the handoff that commits tonic's answer.
+    // One envelope per admitted gRPC head, minted through the same connection
+    // step every other admitted class mints through. Every pre-head owner below
+    // reads it: the gate, the payload tonic is handed, and the handoff that
+    // commits tonic's answer.
     let script = lifecycle.script();
-    let operation = OperationEnvelope::admit(
-        budgets,
-        lifecycle.control(),
-        connection,
-        origin.disconnect,
-        lifecycle.shutdown_deadline(),
-        script.as_deref(),
-    );
-    operation.observe(script.as_deref(), OperationStage::Dispatch);
+    let operation = conn.admit(budgets, script.as_deref());
     let head = RequestHead::from_hyper_request(&hyper_req, origin);
     let gate = run_head_gate(&head, router, None, &scope);
     operation.observe(script.as_deref(), OperationStage::Middleware);

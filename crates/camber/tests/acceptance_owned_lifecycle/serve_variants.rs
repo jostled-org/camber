@@ -2,12 +2,15 @@ use crate::common;
 
 use camber::RuntimeError;
 use camber::http::mock::{LifecycleCheckpoint, LifecycleController, lifecycle};
-use camber::http::{HostRouter, Request, Response, Router, ServerHandle, ServerHandleFuture};
+use camber::http::{
+    HostRouter, Request, Response, Router, ServerHandle, ServerHandleFuture, ServerPolicy,
+};
 use futures_util::FutureExt;
 use std::future::IntoFuture;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -147,6 +150,163 @@ async fn https_get(
         (Ok(response), Ok(())) => Ok(response),
         (Err(error), _) | (_, Err(error)) => Err(error),
     }
+}
+
+/// A header timeout wider than the built-in sixty-second default.
+///
+/// The dimension is chosen because narrowing is what would silently take it
+/// back: a runtime minted from the defaults contains this server at sixty
+/// seconds, and the connection owner would configure Hyper with that instead.
+const WIDENED_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How many reserved ports this row loses to another process before giving up.
+const RESERVATION_ATTEMPTS: u32 = 5;
+
+/// How long a bind is given to fail before the row treats the server as up.
+const BIND_BOUND: Duration = Duration::from_millis(500);
+
+/// The blocking terminal serves under the policy its builder was given, even
+/// when it is the terminal that establishes the runtime.
+///
+/// `serve` mints a runtime when none exists, and a server's policy is contained
+/// by its runtime's. Minted from the defaults, that containment silently takes
+/// back every dimension the caller widened — this row's 120-second header
+/// timeout served as the 60-second default, with no error and no log. The
+/// observation is armed on the exact value, so a server that resolved any other
+/// one never pauses and the bounded wait reports it.
+///
+/// `serve` takes an address string, so the port must be named before the
+/// terminal binds it, and another process can take it in between. A lost port
+/// says nothing about the claim, so it is retried on a fresh one; every other
+/// outcome fails the row.
+#[test]
+fn blocking_serve_keeps_the_policy_its_builder_named() {
+    for attempt in 1..=RESERVATION_ATTEMPTS {
+        if serve_widened_policy_on_a_reserved_port() {
+            return;
+        }
+        assert!(
+            attempt < RESERVATION_ATTEMPTS,
+            "every reserved port was taken before the blocking terminal bound it"
+        );
+    }
+}
+
+/// Run the widened-policy row once. `false` means the reserved port was taken.
+fn serve_widened_policy_on_a_reserved_port() -> bool {
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+    let addr = probe.local_addr().expect("reserved address");
+    drop(probe);
+
+    let controller = lifecycle(addr).expect("register the reserved port's observer");
+    controller
+        .pause_once(LifecycleCheckpoint::HeaderTimeoutConfigured(
+            WIDENED_HEADER_TIMEOUT,
+        ))
+        .expect("arm the widened header timeout");
+
+    let mut router = Router::new();
+    router.get("/stop", |_req: &Request| async {
+        camber::runtime::request_shutdown();
+        Response::text(200, "stopping")
+    });
+    let (report, reported) = std::sync::mpsc::channel();
+    let serving = std::thread::spawn(move || {
+        let result = camber::http::server(router)
+            .policy(
+                ServerPolicy::default()
+                    .header_timeout(WIDENED_HEADER_TIMEOUT)
+                    .expect("a widened header timeout")
+                    .shutdown_timeout(Duration::from_secs(1))
+                    .expect("a short shutdown deadline"),
+            )
+            .serve(&addr.to_string());
+        let _ = report.send(result);
+    });
+
+    // A terminal that returns this early never served. Only a lost port is
+    // retried; every other early return is this row's failure to report.
+    match reported.recv_timeout(BIND_BOUND) {
+        Ok(Err(RuntimeError::Io(error))) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            serving.join().expect("the serving thread joined");
+            return false;
+        }
+        Ok(outcome) => panic!("the blocking terminal returned before it served: {outcome:?}"),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the blocking terminal dropped its reporter without returning")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+    }
+
+    // The observer's own executor. This thread has entered no runtime, which is
+    // the whole point of the row: the terminal under test is the one that has
+    // to establish one.
+    let observer = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build the observing executor");
+    let stopped = observer.block_on(stop_the_observed_server(addr, &controller));
+    assert_eq!(stopped, 200, "the stop route was not served");
+
+    let outcome = reported
+        .recv_timeout(EVENT_TIMEOUT)
+        .expect("the blocking terminal never returned after its stop route ran");
+    outcome.expect("the blocking terminal ended with an error");
+    serving.join().expect("the serving thread joined");
+    true
+}
+
+/// Stop the served server, reading the header timeout it configured on the way.
+///
+/// The connection is opened first and the pause is waited for second, because
+/// the checkpoint is reached while that connection is being spawned: waiting
+/// before anything connects would wait on a server with nothing to serve.
+async fn stop_the_observed_server(
+    addr: std::net::SocketAddr,
+    controller: &LifecycleController,
+) -> u16 {
+    let mut peer = connect_when_bound(addr).await;
+    peer.write_all(b"GET /stop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("write the stop request");
+
+    let observed = LifecycleCheckpoint::HeaderTimeoutConfigured(WIDENED_HEADER_TIMEOUT);
+    tokio::time::timeout(EVENT_TIMEOUT, controller.wait_until_paused(observed))
+        .await
+        .expect("the blocking terminal never configured the policy it was built with")
+        .expect("waiting for the widened header timeout failed");
+    controller
+        .release(observed)
+        .expect("release the widened header timeout");
+
+    let mut answer = Vec::new();
+    peer.read_to_end(&mut answer)
+        .await
+        .expect("read the stop response");
+    status_of(&answer)
+}
+
+/// Connect to `addr`, retrying until the blocking terminal has bound it.
+async fn connect_when_bound(addr: std::net::SocketAddr) -> tokio::net::TcpStream {
+    let deadline = tokio::time::Instant::now() + EVENT_TIMEOUT;
+    loop {
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(peer) => return peer,
+            Err(error) if tokio::time::Instant::now() >= deadline => {
+                panic!("the blocking terminal never bound {addr}: {error}")
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
+}
+
+/// The status line's code, off a raw response.
+fn status_of(answer: &[u8]) -> u16 {
+    let head = String::from_utf8_lossy(answer);
+    head.split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no status line in {head:?}"))
 }
 
 #[tokio::test(flavor = "multi_thread")]

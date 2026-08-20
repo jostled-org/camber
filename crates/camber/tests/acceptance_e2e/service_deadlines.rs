@@ -1451,7 +1451,9 @@ impl PostCommit {
 /// and nothing else: the peer keeps the `200` it was already given, the route's
 /// mapper is never called, HTTP/1 closes the connection whose framing cannot
 /// continue, and HTTP/2 resets the one affected stream while another stream on
-/// the same connection still answers.
+/// the same connection still answers. The aggregate deadline is the exception
+/// both transports share: the server itself is going, so it cuts the connection
+/// rather than one stream on it, and there is no neighbour left to ask.
 #[test]
 fn postcommit_transfer_failure_preserves_the_wire_status() {
     camber::runtime::builder()
@@ -1594,6 +1596,12 @@ async fn assert_postcommit_http2(row: PostCommit) {
 ///
 /// The reset is the claim HTTP/2 makes that HTTP/1 cannot: the status stays what
 /// was committed, and what ends is one stream rather than the transport under it.
+///
+/// The stop is the one row that cannot make it. Its cause is the server going
+/// away, and a forced end has no graceful frame left to send, so the peer is
+/// entitled to lose the connection instead — the same cut its HTTP/1 twin reads.
+/// What every row shares is that the body did not finish under its committed
+/// head.
 fn assert_postcommit_stream(row: PostCommit, label: &str, streamed: Option<&common::H2Streamed>) {
     let Some(streamed) = streamed else {
         return;
@@ -1602,9 +1610,13 @@ fn assert_postcommit_stream(row: PostCommit, label: &str, streamed: Option<&comm
         streamed.status, 200,
         "{label}: the committed status is not replaced"
     );
+    let cut = match row {
+        PostCommit::Shutdown => streamed.end != common::H2BodyEnd::Ended,
+        _ => streamed.end == common::H2BodyEnd::Reset,
+    };
     assert!(
-        streamed.reset,
-        "{label}: the affected stream is reset rather than ended: {streamed:?}"
+        cut,
+        "{label}: the affected stream is cut under its committed head rather than ended: {streamed:?}"
     );
     let Some(delivered) = row.delivered() else {
         return;

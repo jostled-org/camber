@@ -15,6 +15,11 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 const BLOCKED_BOUND: Duration = Duration::from_millis(300);
 /// The header timeout the `#[camber::test]` runtime establishes.
 const RUNTIME_HEADER_TIMEOUT: Duration = Duration::from_millis(100);
+/// The aggregate shutdown grace the `#[camber::test]` runtime establishes.
+///
+/// Named because the rows that stop a server run under a runtime of their own
+/// and must serve under the same bound the case runtime would have given them.
+const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A route that holds its request until the test releases it.
 struct HeldRoute {
@@ -83,13 +88,6 @@ async fn assert_unanswered(stream: &mut tokio::net::TcpStream, label: &str) {
     }
 }
 
-async fn wait_paused(controller: &LifecycleController, checkpoint: LifecycleCheckpoint, at: &str) {
-    tokio::time::timeout(EVENT_TIMEOUT, controller.wait_until_paused(checkpoint))
-        .await
-        .unwrap_or_else(|_| panic!("{at}: {checkpoint:?} was never reached"))
-        .unwrap_or_else(|error| panic!("{at}: waiting for {checkpoint:?} failed: {error}"));
-}
-
 /// 3.T1
 #[camber::test]
 async fn server_builder_freezes_context_and_policy_at_terminal_call() {
@@ -116,6 +114,28 @@ fn unmanaged(row: &str, assertion: impl FnOnce() + Send + 'static) {
     std::thread::spawn(assertion)
         .join()
         .unwrap_or_else(|_| panic!("{row}: the unmanaged row panicked"));
+}
+
+/// Run one async row that stops a server under a runtime of its own.
+///
+/// The aggregate shutdown deadline is minted by the first graceful transition
+/// anywhere in a runtime and is never restarted, so rows that stop a server
+/// gracefully cannot share one: the second drains under whatever the first left
+/// of the single grace, and a third under none of it at all. A runtime apiece is
+/// what gives every row the whole deadline its stop is measured against, and the
+/// bounds below are the ones `#[camber::test]` would have established, so an
+/// isolated row proves what it proved inside the case runtime.
+fn stopped<F>(row: &'static str, journey: impl FnOnce() -> F + Send + 'static)
+where
+    F: std::future::Future<Output = ()>,
+{
+    unmanaged(row, move || {
+        camber::runtime::builder()
+            .header_timeout(RUNTIME_HEADER_TIMEOUT)
+            .shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT)
+            .run(|| camber::runtime::block_on(journey()))
+            .unwrap_or_else(|error| panic!("the {row} runtime failed: {error:?}"));
+    });
 }
 
 /// Both owned terminals answer an absent Tokio executor synchronously, without
@@ -180,10 +200,9 @@ async fn assert_moved_future_keeps_its_captured_policy() {
         .expect("bind the moved-future listener");
     let addr = listener.local_addr().expect("moved-future address");
     let controller = lifecycle(addr).expect("register the moved-future observer");
+    let configured = LifecycleCheckpoint::HeaderTimeoutConfigured(RUNTIME_HEADER_TIMEOUT);
     controller
-        .pause_once(LifecycleCheckpoint::HeaderTimeoutConfigured(
-            RUNTIME_HEADER_TIMEOUT,
-        ))
+        .pause_once(configured)
         .expect("arm the captured header timeout");
 
     let mut router = Router::new();
@@ -204,7 +223,7 @@ async fn assert_moved_future_keeps_its_captured_policy() {
         executor.block_on(async move {
             tokio::select! {
                 result = served => {
-                    let _ = result;
+                    result.unwrap_or_else(|error| panic!("the moved server future failed: {error:?}"));
                 }
                 _ = stopped => {}
             }
@@ -213,16 +232,14 @@ async fn assert_moved_future_keeps_its_captured_policy() {
 
     let mut peer = connect(addr).await;
     send_get(&mut peer, "/moved").await;
-    wait_paused(
+    crate::common::wait_until_paused_bounded(
         &controller,
-        LifecycleCheckpoint::HeaderTimeoutConfigured(RUNTIME_HEADER_TIMEOUT),
-        "moved future",
+        configured,
+        &format!("moved future: {configured:?}"),
     )
     .await;
     controller
-        .release(LifecycleCheckpoint::HeaderTimeoutConfigured(
-            RUNTIME_HEADER_TIMEOUT,
-        ))
+        .release(configured)
         .expect("release the captured header timeout");
     assert_answered(&mut peer, "moved future").await;
 
@@ -323,11 +340,19 @@ fn serve_on_a_reserved_port() -> bool {
 #[camber::test]
 async fn connection_limit_matrix_holds_one_permit_for_the_transport_lifetime() {
     assert_zero_is_refused_before_any_accept();
-    assert_omitted_limit_admits_concurrent_transports().await;
-    assert_one_permit_covers_each_http_transport().await;
+    // Every row below that ends its server gracefully takes a runtime of its
+    // own; the SSE row cancels, which starts no grace to share.
+    stopped(
+        "omitted limit",
+        assert_omitted_limit_admits_concurrent_transports,
+    );
+    stopped(
+        "one permit per transport",
+        assert_one_permit_covers_each_http_transport,
+    );
     assert_one_permit_covers_an_sse_response().await;
     #[cfg(feature = "grpc")]
-    assert_one_permit_covers_a_grpc_transport().await;
+    stopped("gRPC limit", assert_one_permit_covers_a_grpc_transport);
     unmanaged(
         "bare-Tokio limit",
         assert_bare_tokio_serving_holds_one_permit,
@@ -442,12 +467,9 @@ async fn assert_blocked_on_permit(
     blocked: &mut tokio::net::TcpStream,
     label: &str,
 ) {
-    wait_paused(
-        controller,
-        LifecycleCheckpoint::ConnectionPermitWaitPending,
-        label,
-    )
-    .await;
+    let pending = LifecycleCheckpoint::ConnectionPermitWaitPending;
+    crate::common::wait_until_paused_bounded(controller, pending, &format!("{label}: {pending:?}"))
+        .await;
     controller
         .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
         .unwrap_or_else(|_| panic!("release the {label} permit wait"));
@@ -536,7 +558,7 @@ fn assert_narrowed_limit_admits_one_transport(
     camber::runtime::builder()
         .connection_limit(runtime_limit)
         .header_timeout(RUNTIME_HEADER_TIMEOUT)
-        .shutdown_timeout(Duration::from_secs(1))
+        .shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT)
         .run(|| {
             camber::runtime::block_on(async move {
                 let held = held_router();

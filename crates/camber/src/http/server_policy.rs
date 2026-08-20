@@ -2,7 +2,7 @@
 
 #[cfg(feature = "profiling")]
 use super::policy_value::positive_limit;
-use super::policy_value::{finite_duration, limit_within, narrow};
+use super::policy_value::{MAX_POLICY_DEADLINE, finite_duration, limit_within, narrow};
 use super::request_budget::RequestBudget;
 use super::server::MAX_CONNECTION_LIMIT;
 use super::transfer_budget::TransferBudget;
@@ -79,21 +79,58 @@ pub struct ServerPolicy {
     connection_limit: Option<usize>,
 }
 
-impl Default for ServerPolicy {
-    fn default() -> Self {
+/// The pre-head wait a test runtime serves under.
+pub(crate) const TEST_HEADER_TIMEOUT: Duration = Duration::from_millis(100);
+/// The aggregate shutdown deadline a test runtime serves under.
+pub(crate) const TEST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
+// The two test bounds are literals this crate chooses, not caller input, so
+// `finite_duration`'s two rules are stated to the compiler here rather than to
+// a `Result` arm no value could reach. A retune that put either bound outside
+// the range a policy can carry fails the build instead of handing every
+// `#[camber::test]` the production envelope under a refusal nobody reads.
+const _: () = assert!(!TEST_HEADER_TIMEOUT.is_zero());
+const _: () = assert!(TEST_HEADER_TIMEOUT.as_secs() <= MAX_POLICY_DEADLINE.as_secs());
+const _: () = assert!(!TEST_SHUTDOWN_TIMEOUT.is_zero());
+const _: () = assert!(TEST_SHUTDOWN_TIMEOUT.as_secs() <= MAX_POLICY_DEADLINE.as_secs());
+
+impl ServerPolicy {
+    /// One envelope over the two deadlines a caller may choose between.
+    ///
+    /// `Default::default` is not a `const fn`, so the constant test envelope
+    /// cannot reach the defaults through the trait. Both spellings read this
+    /// one literal, so the dimensions neither of them sets cannot drift apart.
+    const fn of(header_timeout: Duration, shutdown_timeout: Duration) -> Self {
         Self {
-            header_timeout: DEFAULT_HEADER_TIMEOUT,
+            header_timeout,
             request: RequestBudget::from_constants(
                 DEFAULT_REQUEST_TIMEOUT,
                 DEFAULT_REQUEST_TIMEOUT,
             ),
             upload: TransferBudget::unbounded(),
             download: TransferBudget::unbounded(),
-            shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
+            shutdown_timeout,
             #[cfg(feature = "profiling")]
             profiling_response: Some(DEFAULT_PROFILING_RESPONSE_LIMIT),
             connection_limit: None,
         }
+    }
+
+    /// The envelope `runtime::test` and `#[camber::test]` serve under.
+    ///
+    /// A constant rather than a builder chain, because both bounds are fixed
+    /// and validated above: routing them through the refusing setters would
+    /// leave every test entry point carrying a refusal arm no value can reach,
+    /// and the only ways to spend it are to propagate a `Result` that never
+    /// arrives or to substitute the production envelope in silence.
+    pub(crate) const fn of_test_bounds() -> Self {
+        Self::of(TEST_HEADER_TIMEOUT, TEST_SHUTDOWN_TIMEOUT)
+    }
+}
+
+impl Default for ServerPolicy {
+    fn default() -> Self {
+        Self::of(DEFAULT_HEADER_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT)
     }
 }
 

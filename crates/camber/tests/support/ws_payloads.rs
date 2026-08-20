@@ -18,6 +18,7 @@ use std::future::Future;
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 // The allocation oracle installs its own global allocator, and two global
 // allocators do not link. Every item that reaches the probe is built only where
@@ -394,6 +395,15 @@ const BINARY: u8 = 0x02;
 /// The payload a warming admission carries.
 const WARM_TAG: u8 = 0x11;
 
+/// The aggregate shutdown grace a `#[camber::test]` runtime establishes.
+///
+/// Named because every row below runs under a runtime of its own and has to
+/// stop its server under the same bound the case runtime would have given it.
+const ROW_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The pre-head wait a `#[camber::test]` runtime establishes.
+const ROW_HEADER_TIMEOUT: Duration = Duration::from_millis(100);
+
 /// Serve one capacity-`buffer` direct route, connect `recipients` real peers,
 /// and run `case` against every connection the production callback was given.
 ///
@@ -401,7 +411,38 @@ const WARM_TAG: u8 = 0x11;
 /// listener, the same route, the same split, and the same bounded teardown; a
 /// row that opened its own would be the second place a leaked peer, half, or
 /// checkpoint could hide.
-pub async fn shared_payload_row<C, Fut>(buffer: usize, recipients: usize, case: C)
+///
+/// Each row runs on a thread and a runtime of its own, and that is not an
+/// optimisation. The aggregate shutdown deadline is minted by the first graceful
+/// transition anywhere in a runtime and is never restarted, so rows sharing one
+/// runtime share one grace: the second stops under whatever the first left of
+/// it, and a later one under none of it at all — a `Timeout` that reports the
+/// row before it rather than the claim being made. A case that runs several of
+/// these in sequence is the ordinary shape here, so the isolation belongs to the
+/// runner rather than to each case that remembers to ask for it.
+pub fn shared_payload_row<C, Fut>(buffer: usize, recipients: usize, case: C)
+where
+    C: FnOnce(SharedPayloadFixture) -> Fut + Send + 'static,
+    Fut: Future<Output = ()>,
+{
+    let row = std::thread::spawn(move || {
+        camber::runtime::builder()
+            .header_timeout(ROW_HEADER_TIMEOUT)
+            .shutdown_timeout(ROW_SHUTDOWN_TIMEOUT)
+            .run(|| camber::runtime::block_on(serve_shared_payload_row(buffer, recipients, case)))
+            .expect("the shared-payload row runtime failed");
+    });
+    // Resumed rather than reported: the row's own assertion is the failure, and
+    // a join that only said "the row panicked" would replace it with a sentence
+    // naming neither the claim nor the value it got.
+    match row.join() {
+        Ok(()) => {}
+        Err(unwound) => std::panic::resume_unwind(unwound),
+    }
+}
+
+/// One shared-payload row, inside the runtime that owns its stop.
+async fn serve_shared_payload_row<C, Fut>(buffer: usize, recipients: usize, case: C)
 where
     C: FnOnce(SharedPayloadFixture) -> Fut,
     Fut: Future<Output = ()>,

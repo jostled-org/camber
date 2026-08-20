@@ -5,8 +5,16 @@ use super::transfer::{ChannelSource, Transfer, TransferOwner, UpstreamSource};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum BodyError {
+    /// One streaming upstream read failed, carrying the account of why.
+    ///
+    /// Owned rather than shared: the account is minted by the streamer, sent
+    /// down one channel, and read exactly once by the transfer source that
+    /// receives it. Nothing ever holds a second handle to it, so a shared
+    /// allocation would buy a reference count no reader needs — which is why
+    /// [`SourceStep::Failed`](super::transfer::SourceStep::Failed) spells the
+    /// identical payload the same way.
     #[error("upstream proxy body read failed: {0}")]
-    UpstreamProxy(std::sync::Arc<str>),
+    UpstreamProxy(Box<str>),
     /// One committed response body ended on a bound its download owner
     /// enforced.
     ///

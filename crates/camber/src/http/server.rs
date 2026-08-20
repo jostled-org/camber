@@ -277,6 +277,10 @@ impl ServerBuilder {
     ///
     /// A server started inside a runtime that configured TLS inherits that
     /// configuration; this overrides it for this server alone.
+    ///
+    /// A Unix listener cannot serve it. Naming a certificate for one is refused
+    /// by the terminal that would have served it, rather than answered with the
+    /// cleartext that listener has always spoken.
     #[must_use]
     pub fn tls(mut self, config: Arc<rustls::ServerConfig>) -> Self {
         self.tls = Some(config);
@@ -290,17 +294,30 @@ impl ServerBuilder {
     /// Returns `RuntimeError::Io` if `addr` cannot be parsed or bound, and any
     /// error the supervisor propagates. When no runtime context is established
     /// this establishes one rather than refusing, so runtime startup and
-    /// teardown failures from `runtime::run` propagate here too — that is the
-    /// difference between this terminal and
+    /// teardown failures from `RuntimeBuilder::run` propagate here too — that is
+    /// the difference between this terminal and
     /// [`serve_listener`](Self::serve_listener).
     pub fn serve(self, addr: &str) -> Result<(), RuntimeError> {
+        // Read before the builder moves, because the runtime this terminal may
+        // have to establish is established WITH it.
+        let policy = self.policy;
         let bind_and_serve = move || {
             let listener = net::listen(addr)?;
             self.serve_listener(listener)
         };
         match runtime::has_runtime() {
             true => bind_and_serve(),
-            false => runtime::run(bind_and_serve)?,
+            // The minted runtime carries this builder's own policy as the outer
+            // one. Serving narrows the builder's policy against whatever runtime
+            // is current, so a runtime minted from the defaults would contain
+            // this server in bounds its caller never chose — a 120-second header
+            // timeout served as the 60-second default, with no error and no log.
+            // Naming the policy here is what makes that containment real: the
+            // outer envelope and the inner one are the same value, so narrowing
+            // one against the other changes nothing.
+            false => runtime::builder()
+                .server_policy(policy)
+                .run(bind_and_serve)?,
         }
     }
 
@@ -313,10 +330,13 @@ impl ServerBuilder {
     /// absence is refused before the listener is ever polled — use
     /// [`serve`](Self::serve) for the bind-and-run form. Returns
     /// `RuntimeError::Http` when the caller is already inside a current-thread
-    /// runtime, which has no worker core to hand off for the blocking wait.
-    /// Listener and connection failures propagate as `RuntimeError::Io`.
+    /// runtime, which has no worker core to hand off for the blocking wait, and
+    /// `RuntimeError::InvalidArgument` when [`tls`](Self::tls) named a
+    /// certificate for a Unix listener. Listener and connection failures
+    /// propagate as `RuntimeError::Io`, including a failure to remove the Unix
+    /// socket path this listener owns.
     pub fn serve_listener(self, listener: net::Listener) -> Result<(), RuntimeError> {
-        let (supervisor, control) = self.freeze(listener);
+        let (supervisor, control) = self.freeze(listener)?;
         // The executor this server belongs to, named rather than resolved from
         // ambient context: `Handle::current()` panics with none established and
         // would silently run this supervisor on a foreign runtime when a
@@ -348,7 +368,7 @@ impl ServerBuilder {
         listener: tokio::net::TcpListener,
     ) -> Result<ServerHandleFuture, RuntimeError> {
         refuse_without_tokio()?;
-        let (supervisor, control) = self.freeze(net::Listener::from_tcp(listener));
+        let (supervisor, control) = self.freeze(net::Listener::from_tcp(listener))?;
         drop(control);
         Ok(ServerHandleFuture::from_join(SupervisorJoin::Owned(
             Box::pin(supervisor.run()),
@@ -367,7 +387,7 @@ impl ServerBuilder {
         listener: tokio::net::TcpListener,
     ) -> Result<ServerHandle, RuntimeError> {
         refuse_without_tokio()?;
-        let (supervisor, control) = self.freeze(net::Listener::from_tcp(listener));
+        let (supervisor, control) = self.freeze(net::Listener::from_tcp(listener))?;
         let stop = supervisor.stop_authority(control);
         let join = match supervisor.is_camber() {
             true => SupervisorJoin::Camber(spawn_async(supervisor.run()).into_future()),
@@ -381,18 +401,54 @@ impl ServerBuilder {
     /// TLS is resolved from the captured runtime rather than a second lookup,
     /// so the runtime that supplies the policy is the runtime that supplies the
     /// certificate.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RuntimeError::InvalidArgument` for a certificate this builder
+    /// named on a listener that cannot wrap one.
     fn freeze(
         self,
         listener: net::Listener,
-    ) -> (ServerSupervisor, tokio::sync::watch::Sender<ServerControl>) {
+    ) -> Result<(ServerSupervisor, tokio::sync::watch::Sender<ServerControl>), RuntimeError> {
         let buffers = self.routes.buffer_config();
         let snapshot = ServerContextSnapshot::capture(buffers, self.policy);
-        let tls_acceptor = self
-            .tls
-            .or_else(|| snapshot.runtime_tls())
-            .map(tokio_rustls::TlsAcceptor::from);
+        let tls_acceptor =
+            wrapped_transport(&listener, self.tls, &snapshot)?.map(tokio_rustls::TlsAcceptor::from);
+        // The acceptor, not the configuration: what this server will actually
+        // wrap the transport in is the only honest answer to `Request::is_tls`
+        // and to the `X-Forwarded-Proto` every proxied hop reads off it.
         let snapshot = snapshot.with_tls(tls_acceptor.is_some());
-        ServerSupervisor::new(listener, self.routes.freeze(), tls_acceptor, snapshot)
+        Ok(ServerSupervisor::new(
+            listener,
+            self.routes.freeze(),
+            tls_acceptor,
+            snapshot,
+        ))
+    }
+}
+
+/// The certificate this server will wrap its accepted transports in, if any.
+///
+/// TLS is a TCP concern. A Unix peer is confined by the socket's filesystem
+/// permissions, and no accept path has ever wrapped one — so a certificate
+/// resolves to `None` there, and a server on a Unix listener cannot mark its
+/// cleartext requests as terminated TLS by inheriting its runtime's.
+///
+/// A certificate this builder named by hand is the one case that refuses
+/// instead. The caller asked for TLS on a listener that cannot speak it, and
+/// serving cleartext under that request is what silently hands an upstream an
+/// `X-Forwarded-Proto: https` no handshake backs.
+fn wrapped_transport(
+    listener: &net::Listener,
+    configured: Option<Arc<rustls::ServerConfig>>,
+    snapshot: &ServerContextSnapshot,
+) -> Result<Option<Arc<rustls::ServerConfig>>, RuntimeError> {
+    match (listener.is_unix(), configured) {
+        (true, Some(_)) => Err(RuntimeError::InvalidArgument(
+            "tls was configured for a unix listener, which serves cleartext".into(),
+        )),
+        (true, None) => Ok(None),
+        (false, configured) => Ok(configured.or_else(|| snapshot.runtime_tls())),
     }
 }
 

@@ -1,3 +1,4 @@
+use camber::http::mock::{LifecycleController, TransferObservation};
 use std::io;
 use std::net::TcpStream;
 use std::time::Duration;
@@ -117,11 +118,7 @@ pub async fn read_streaming_head(stream: &mut tokio::net::TcpStream, bound: Dura
         assert!(read == 1, "the peer closed before its head was complete");
         head.push(byte[0]);
     }
-    String::from_utf8_lossy(&head)
-        .split_whitespace()
-        .nth(1)
-        .and_then(|token| token.parse::<u16>().ok())
-        .unwrap_or(0)
+    status_line(&head)
 }
 
 /// Read the rest of one streaming body, and report whether it was cut.
@@ -129,22 +126,13 @@ pub async fn read_streaming_head(stream: &mut tokio::net::TcpStream, bound: Dura
 /// For the rows whose head was already taken off the wire: what is left to
 /// establish is only how the body ended, and a cut is what a post-commit terminal
 /// leaves behind.
+///
+/// The ending is read straight off the raw bytes rather than through
+/// [`decoded`], because this caller's head is gone: a reader that split a head
+/// off what is left would take the terminal chunk for one and call a body that
+/// ended a cut.
 pub async fn read_cut(stream: &mut tokio::net::TcpStream) -> bool {
-    use tokio::io::AsyncReadExt;
-
-    let mut raw = Vec::new();
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let read = match stream.read(&mut buffer).await {
-            Ok(0) | Err(_) => break,
-            Ok(read) => read,
-        };
-        raw.extend_from_slice(&buffer[..read]);
-        if chunks_ended(&raw) {
-            return false;
-        }
-    }
-    !chunks_ended(&raw)
+    !chunks_ended(&drain_chunked(stream).await)
 }
 
 /// What one peer saw of a committed streaming response.
@@ -166,6 +154,16 @@ pub struct Streamed {
 /// written, so the transport ends under it rather than replacing it. Both endings
 /// are answers a case asserts on, so neither is treated as a fixture failure.
 pub async fn read_streamed(stream: &mut tokio::net::TcpStream) -> Streamed {
+    decoded(&drain_chunked(stream).await)
+}
+
+/// Read one chunked body off the wire until it ends, is cut, or outlasts its
+/// bound.
+///
+/// The read is the same for both callers; only the reading of what came back
+/// differs, and a second copy of the loop is a second place the bound below can
+/// go missing.
+async fn drain_chunked(stream: &mut tokio::net::TcpStream) -> Box<[u8]> {
     use tokio::io::AsyncReadExt;
 
     let deadline = tokio::time::Instant::now() + STREAMED_READ_BOUND;
@@ -177,7 +175,7 @@ pub async fn read_streamed(stream: &mut tokio::net::TcpStream) -> Streamed {
             .unwrap_or_else(|_| {
                 panic!(
                     "the streaming response neither ended nor was cut inside {STREAMED_READ_BOUND:?}: {:?}",
-                    decoded(&raw)
+                    String::from_utf8_lossy(&raw)
                 )
             });
         let read = match read {
@@ -189,7 +187,7 @@ pub async fn read_streamed(stream: &mut tokio::net::TcpStream) -> Streamed {
             break;
         }
     }
-    decoded(&raw)
+    raw.into_boxed_slice()
 }
 
 /// How long one streaming read waits for its body to end or be cut.
@@ -200,19 +198,67 @@ pub async fn read_streamed(stream: &mut tokio::net::TcpStream) -> Streamed {
 /// that defect stops the suite instead of failing the row that staged it.
 const STREAMED_READ_BOUND: Duration = Duration::from_secs(20);
 
+/// Wait until one listener's download owner reaches `settled`, and report what
+/// it was observed at.
+///
+/// Polled rather than read once: an owner fixes its terminal and releases its
+/// source on turns of its own, so a row that read the record once would race the
+/// turn that produces the fact it asserts on. `what` names the state the row
+/// waited for, so an expired bound says which one never arrived, and the record
+/// is returned either way so a row that never got there fails against what the
+/// owner actually did.
+pub fn download_observed(
+    controller: &LifecycleController,
+    row: &str,
+    what: &str,
+    settled: impl Fn(&TransferObservation) -> bool,
+) -> TransferObservation {
+    let reached = super::http::poll_until(DOWNLOAD_OBSERVED_BOUND, || {
+        settled(&controller.transfers_observed())
+    });
+    let observed = controller.transfers_observed();
+    assert!(
+        reached,
+        "{row}: the download owner never {what}: {observed:?}"
+    );
+    observed
+}
+
+/// Wait until one listener's download owner reached its release.
+///
+/// For the rows whose cause is the peer: a transport taken away can release the
+/// owner before it weighs another turn, so the release is the whole claim. `row`
+/// names the case, so the same wait serves a streamed response and a feed.
+pub fn released_download(controller: &LifecycleController, row: &str) -> TransferObservation {
+    download_observed(controller, row, "released", |observed| {
+        observed.download.releases >= 1
+    })
+}
+
+/// How long a row waits for the production download owner to reach a state.
+const DOWNLOAD_OBSERVED_BOUND: Duration = Duration::from_secs(5);
+
 /// Whether this response has reached its terminal chunk.
 fn chunks_ended(raw: &[u8]) -> bool {
     raw.windows(5).any(|window| window == b"\r\n0\r\n") && raw.ends_with(b"\r\n\r\n")
 }
 
-/// Split one raw HTTP/1 response into the status and the payload it delivered.
-fn decoded(raw: &[u8]) -> Streamed {
-    let text = String::from_utf8_lossy(raw);
-    let status = text
+/// The status one HTTP/1 status line carries.
+///
+/// Which token that is is stated once: the two readers here take their status
+/// off the same wire, and a second spelling is a second answer to the same
+/// question.
+fn status_line(raw: &[u8]) -> u16 {
+    String::from_utf8_lossy(raw)
         .split_whitespace()
         .nth(1)
         .and_then(|token| token.parse::<u16>().ok())
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
+
+/// Split one raw HTTP/1 response into the status and the payload it delivered.
+fn decoded(raw: &[u8]) -> Streamed {
+    let status = status_line(raw);
     let body = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")

@@ -1684,7 +1684,12 @@ async fn assert_handler_cancellation_releases(
 
     upload.reset();
     drop(upload);
-    client.close().await;
+    // Settled rather than aborted: this row's whole claim is that the peer's
+    // cancellation reached the server, and an aborted connection may take the
+    // queued `RST_STREAM` down with it before it ever reaches the wire. The
+    // stream just reset is the only one this connection opened, so nothing is
+    // left for the connection to wait on.
+    client.close_settled().await;
     let label = "a cancelled handler releases everything its request owned";
     assert_ownership_released(
         label,

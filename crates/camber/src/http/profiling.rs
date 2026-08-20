@@ -19,7 +19,7 @@
 use super::Response;
 use super::boundary::ByteBoundary;
 use super::checked_collect::CheckedCollector;
-use super::mock::{LifecycleCheckpoint, LifecycleScript, ProfilingEvent};
+use super::mock::{BlockingWorkerObserver, LifecycleCheckpoint, LifecycleScript, ProfilingEvent};
 use crate::RuntimeError;
 use bytes::Bytes;
 use std::sync::Arc;
@@ -52,14 +52,17 @@ impl ProfilingRequest {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::LimitExceeded`] naming
+    /// Returns [`RuntimeError::NoRuntime`] before any sampling when no Tokio
+    /// runtime is entered, [`RuntimeError::LimitExceeded`] naming
     /// [`ByteBoundary::ProfilingResponse`] when the render crosses the frozen
     /// maximum, [`RuntimeError::Http`] when the profiler could not be started or
     /// its report could not be built, and the mapped worker failure when the
     /// blocking thread never answered.
     pub(super) async fn answer(self) -> Result<Response, RuntimeError> {
+        let executor =
+            tokio::runtime::Handle::try_current().map_err(|_| RuntimeError::NoRuntime)?;
         let worker = ProfilingWorker::owning(self);
-        match tokio::task::spawn_blocking(move || worker.answer()).await {
+        match executor.spawn_blocking(move || worker.answer()).await {
             Ok(answered) => answered,
             Err(joined) => Err(super::blocking_worker_failed(joined)),
         }
@@ -72,14 +75,13 @@ impl ProfilingRequest {
 /// thread that awaits it lends it nothing.
 struct ProfilingWorker {
     request: ProfilingRequest,
-    /// The process-scoped observer, when a test registered one. Inert otherwise.
+    /// The process-scoped observer, when a test registered one, and the thread
+    /// awaiting this answer. Inert otherwise.
     ///
-    /// Resolved on the blocking thread rather than beside the request, because
-    /// the lookup takes a process-wide lock: every profiling request would
-    /// otherwise take it on the worker it is awaiting from.
-    observer: Option<Arc<LifecycleScript>>,
-    /// The thread awaiting this answer, so the worker can report it ran elsewhere.
-    caller: std::thread::ThreadId,
+    /// The shared blocking-worker context, held by every owner that answers off
+    /// a Tokio worker: it resolves its script where the render runs and states
+    /// the entry-and-return order once for all of them.
+    observer: BlockingWorkerObserver,
 }
 
 impl ProfilingWorker {
@@ -87,8 +89,7 @@ impl ProfilingWorker {
     fn owning(request: ProfilingRequest) -> Self {
         Self {
             request,
-            observer: None,
-            caller: std::thread::current().id(),
+            observer: BlockingWorkerObserver::awaiting(),
         }
     }
 
@@ -98,22 +99,15 @@ impl ProfilingWorker {
     ///
     /// Returns whatever [`Self::render`] answered with.
     fn answer(mut self) -> Result<Response, RuntimeError> {
-        self.observer = super::mock::profiling_script();
-        self.observe(ProfilingEvent::Entered {
-            off_caller: std::thread::current().id() != self.caller,
-        });
-        LifecycleScript::pause_blocking(
-            self.observer.as_deref(),
+        self.observer.resolve(super::mock::profiling_script());
+        self.observer.spanning(
+            ProfilingEvent::Entered {
+                off_caller: self.observer.ran_off_caller(),
+            },
+            ProfilingEvent::Returned,
             LifecycleCheckpoint::ProfilingWorkerEntered,
-        );
-        let answered = self.render();
-        self.observe(ProfilingEvent::Returned);
-        answered
-    }
-
-    /// Publish one thing this worker did.
-    fn observe(&self, event: ProfilingEvent) {
-        LifecycleScript::observe_profiling(self.observer.as_deref(), event);
+            || self.render(),
+        )
     }
 
     /// The rendered profile this request asked for.
@@ -131,10 +125,11 @@ impl ProfilingWorker {
             RuntimeError::Http(format!("profiler report failed: {error}").into())
         })?;
 
-        let mut rendered = CappedRender::new(self.request.limit, self.observer.clone());
+        let mut rendered = CappedRender::new(self.request.limit, self.observer.shared());
         // Read back off the render rather than from the frozen argument, so what
         // is reported is the number this answer is actually measured against.
-        self.observe(ProfilingEvent::CeilingFrozen(rendered.ceiling()));
+        self.observer
+            .publish(ProfilingEvent::CeilingFrozen(rendered.ceiling()));
         let written = report.flamegraph(&mut rendered);
         let svg = rendered.finish(written)?;
         Ok(Response::bytes_raw(200, svg).with_content_type("image/svg+xml"))

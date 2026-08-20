@@ -327,6 +327,18 @@ fn camber_creation_keeps_runtime_context_on_a_foreign_poll() {
                     matches!(result, Err(RuntimeError::Timeout)),
                     "expected captured 150ms timeout, got {result:?}"
                 );
+                assert_eq!(
+                    gate.dropped.try_recv(),
+                    Ok(()),
+                    "server returned before aborting its active transport"
+                );
+                assert!(
+                    matches!(
+                        gate.entered.try_recv(),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+                    ),
+                    "owner completion retained the router's handler sender"
+                );
 
                 join_client(first_client).await;
                 join_client(second_client).await;
@@ -379,9 +391,17 @@ fn plain_creation_keeps_standalone_context_under_camber_poll() {
                 let cancelled = tokio::time::timeout(Duration::from_secs(2), server.into_future())
                     .await
                     .expect("the standalone owner did not join after cancellation");
+                // One outcome, not a family of them. `spawn_async` races its
+                // cancel notification ahead of the body it holds, so a handle
+                // cancelled while its future is still serving reports
+                // `Cancelled` and drops that future. `Timeout` here would be
+                // the runtime's own 150ms deadline reaching a capture that
+                // never took it, and `TaskPanicked` would be the owner dying
+                // rather than being cancelled — both are the defect this row
+                // exists to catch.
                 assert!(
-                    cancelled.is_err() || matches!(cancelled, Ok(Ok(()))),
-                    "unexpected standalone owner outcome: {cancelled:?}"
+                    matches!(cancelled, Err(RuntimeError::Cancelled)),
+                    "expected the standalone owner's own cancellation, got {cancelled:?}"
                 );
                 wait_for_drops(&mut gate.dropped, 3, "standalone transport").await;
 

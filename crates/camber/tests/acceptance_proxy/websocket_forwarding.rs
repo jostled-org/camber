@@ -870,6 +870,108 @@ fn forced_proxy_abort_bounds_a_backend_that_never_answers_its_close() {
         .unwrap();
 }
 
+/// The deadline this row's proxy route freezes for reaching its backend.
+const DIAL_DEADLINE: Duration = Duration::from_millis(300);
+
+/// How long the expired dial's close is waited for before the bound is broken.
+///
+/// Room for the deadline itself plus the close it writes afterwards, and far
+/// short of the operating system's own handshake timeout — which is the only
+/// other thing that could end an unbounded dial.
+const DIAL_BOUND: Duration = Duration::from_secs(3);
+
+/// A backend that accepts the transport and never answers the handshake.
+///
+/// Distinct from [`spawn_silent_ws_backend`], which completes the handshake
+/// first: this one never becomes a WebSocket at all, so a dial against it can
+/// only end on a deadline.
+async fn spawn_unanswering_backend() -> LifecycleWsBackend {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind unanswering WebSocket backend");
+    let addr = listener
+        .local_addr()
+        .expect("unanswering WebSocket backend address");
+    let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let accepted = tokio::select! {
+            biased;
+            _ = &mut shutdown_rx => return,
+            accepted = listener.accept() => accepted.expect("accept unanswering backend peer"),
+        };
+        // Held unread and unanswered. The proxy's upgrade request lands in this
+        // socket's receive buffer and nothing here ever looks at it.
+        let _ = shutdown_rx.await;
+        drop(accepted);
+    });
+    LifecycleWsBackend {
+        addr,
+        shutdown,
+        task,
+    }
+}
+
+/// The deadline a proxy route froze bounds the dial its upgrade makes.
+///
+/// The dial runs inside the registered bridge, which the supervisor releases
+/// only after the `101` is committed — so the request total the negotiation
+/// spent has already ended, and the route's own deadline is the only bound left.
+/// Without it a backend that answers no handshake holds the bridge task, and the
+/// connection permit under it, until the operating system gives up. The peer is
+/// past its upgrade by then, so it is told with the `1011` every backend fault
+/// on this bridge gets rather than left reading a dropped socket.
+#[test]
+fn proxied_upgrade_bounds_its_backend_dial_by_the_route_deadline() {
+    runtime::builder()
+        .shutdown_timeout(Duration::from_secs(2))
+        .run(|| {
+            runtime::block_on(async {
+                let backend = spawn_unanswering_backend().await;
+                let mut proxy = Router::new();
+                proxy.proxy_with_policy(
+                    "/ws",
+                    &format!("http://{}", backend.addr),
+                    camber::http::ProxyPolicy::default()
+                        .request_timeout(DIAL_DEADLINE)
+                        .expect("a short upstream deadline"),
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind unanswered-dial proxy listener");
+                let proxy_addr = listener
+                    .local_addr()
+                    .expect("unanswered-dial proxy address");
+                let handle = camber::http::serve_background(listener, proxy)
+                    .expect("owned server requires a Tokio runtime");
+                let mut websocket = connect_async_proxy_websocket(proxy_addr).await;
+
+                let dialed_at = tokio::time::Instant::now();
+                let (opcode, payload) =
+                    read_async_ws_frame_or_eof(&mut websocket, "the expired dial's close")
+                        .await
+                        .expect("an expired dial closes the peer its 101 already answered");
+                let waited = dialed_at.elapsed();
+                assert_eq!(opcode, 0x8, "expected a close frame for the expired dial");
+                assert_eq!(
+                    payload.get(..2),
+                    Some([0x03, 0xf3].as_slice()),
+                    "expected the 1011 a backend fault closes with, got {payload:?}"
+                );
+                assert!(
+                    waited < DIAL_BOUND,
+                    "the dial outlived the route's {DIAL_DEADLINE:?} deadline by {waited:?}"
+                );
+
+                handle.shutdown();
+                lifecycle_event("unanswered-dial proxy join", handle.into_future())
+                    .await
+                    .expect("the proxy server joined after its bridge released");
+                backend.shutdown().await;
+            });
+        })
+        .unwrap();
+}
+
 async fn pending_proxy_upgrade_shutdown_is_rejected(forced: bool) {
     let backend_connections = Arc::new(AtomicUsize::new(0));
     let backend = spawn_lifecycle_ws_backend(Arc::clone(&backend_connections)).await;
