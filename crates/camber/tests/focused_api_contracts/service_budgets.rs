@@ -1056,7 +1056,7 @@ fn unbindable_listener() -> Result<tokio::net::TcpListener, RuntimeError> {
 /// The text is asserted verbatim rather than by keyword: the claim is that the
 /// documentation SAYS these things, and a keyword search passes on a page that
 /// mentions the word while stating the opposite.
-const PUBLISHED_CONTRACTS: [(&str, &str); 9] = [
+const PUBLISHED_CONTRACTS: [(&str, &str); 13] = [
     (README, "ServerBuilder"),
     (README, "a production service should set a finite limit"),
     (
@@ -1065,6 +1065,22 @@ const PUBLISHED_CONTRACTS: [(&str, &str); 9] = [
     ),
     (HTTP_REFERENCE, "gRPC handoff"),
     (HTTP_REFERENCE, "cannot preempt non-yielding async code"),
+    (
+        HTTP_REFERENCE,
+        "capture the ambient context when the supervisor is built",
+    ),
+    (
+        HTTP_REFERENCE,
+        "Route-aware body admission stays the only authority over request payload bytes",
+    ),
+    (
+        HTTP_REFERENCE,
+        "belongs to the selected download `TransferBudget`, not to the request",
+    ),
+    (
+        RUNTIME_REFERENCE,
+        "context synchronously, before it returns",
+    ),
     (RUNTIME_REFERENCE, "One aggregate shutdown deadline"),
     (RUNTIME_REFERENCE, "abandoned synchronous callback"),
     (RUNTIME_REFERENCE, "Cooperative cancellation cannot"),

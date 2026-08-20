@@ -3,8 +3,8 @@
   "plan": "complete-bounded-service-operation",
   "step": 18,
   "plan_base_sha": "6f47ed6338ae422e5377d42a069713092623b71f",
-  "head_sha": "814bca0220af8004ddb7ea5fc8b199494f508bd8",
-  "source_fingerprint": "8ef8fc568b0c74460be621a21999d8f79d3cca57382352ab31052d424f97a0f7",
+  "head_sha": "b3c2ed428d1f3718d4b8ab6989649128896587f4",
+  "source_fingerprint": "69c92b8cb66a0c9677fe0add9a1dfb358527b8e93b8801b2deea7ee750f001f1",
   "cargo_lock_sha256": "bd6695b0aab6297fe9a72f8151438725b10d49c2e9ccb8ec9be2127efc61d9a4",
   "cli_capabilities": [
     "crypto",
