@@ -3,9 +3,9 @@
   "plan": "complete-bounded-service-operation",
   "step": 18,
   "plan_base_sha": "6f47ed6338ae422e5377d42a069713092623b71f",
-  "head_sha": "b3c2ed428d1f3718d4b8ab6989649128896587f4",
-  "source_fingerprint": "69c92b8cb66a0c9677fe0add9a1dfb358527b8e93b8801b2deea7ee750f001f1",
-  "cargo_lock_sha256": "bd6695b0aab6297fe9a72f8151438725b10d49c2e9ccb8ec9be2127efc61d9a4",
+  "head_sha": "9c6077ee4652dbab781b6f78a910328530af3745",
+  "source_fingerprint": "0fa869c97af80b1f8cfe756dee6c67c040b9612ec6a852fce876c2b50fea6d53",
+  "cargo_lock_sha256": "35d3b544c695e9e9654133501f558e76e9f04e6e3194da55dc100f80ac45abde",
   "cli_capabilities": [
     "crypto",
     "env_access",
@@ -55,13 +55,40 @@
       "unresolved_responsibility_candidates": 0,
       "field_definition": "Residual counts after the Pedant Evidence Contract filter and disposition, not raw tool output: the contract states the structural-duplicate output is a candidate set, not a zero-result gate. changed_exact_groups counts exact subgroups with two or more plan-written functions that survive DRY review as genuine duplicated logic. unresolved_responsibility_candidates counts same-responsibility structural candidates among plan-written functions with no recorded disposition.",
       "exact_hash_semantics": "Pedant's exact_hash is normalized over identifiers and literals, so it groups functions identical up to renaming. Two distinct-responsibility one-expression builder setters collide under it. Raw equality with zero is therefore unattainable for any validated builder vocabulary; the raw inventory is recorded in full below.",
-      "raw_group_count": 174,
-      "raw_function_count": 1247,
+      "raw_group_count": 170,
+      "raw_function_count": 1248,
       "raw_exact_subgroups": 82,
-      "raw_exact_subgroups_with_two_or_more_plan_written": 18,
+      "raw_exact_subgroups_with_two_or_more_plan_written": 19,
+      "raw_missing_file_function_count": 8,
+      "raw_missing_files": [
+        "crates/camber/src/http/.!69734!server_policy.rs"
+      ],
+      "missing_file_filter": "The MCP index returned eight facts from one editor temporary file that does not exist in the audited tree. Raw counts retain those facts. Candidate review excludes them because a nonexistent path cannot be plan-written source or a duplicate implementation.",
       "plan_written_test": "no function of that name existed in that file at plan_base_sha",
       "min_fact_count": 3,
       "candidates": [
+        {
+          "exact_hash": "79790052552298938",
+          "plan_written_members": [
+            "crates/camber/src/http/request_budget.rs:RequestBudget::from_constants",
+            "crates/camber/src/http/server_policy.rs:ServerPolicy::of"
+          ],
+          "member_count": 2,
+          "disposition": "nested-default-constructor",
+          "rationale": "Distinct constant constructors at two ownership levels. ServerPolicy::of assembles the whole server envelope and delegates its request defaults to RequestBudget::from_constants; sharing their remaining field writes would merge the server policy with the request budget it contains.",
+          "shared_owner_already_extracted": true
+        },
+        {
+          "exact_hash": "8675416763693038761",
+          "plan_written_members": [
+            "crates/camber/src/http/mock.rs:BlockingWorkerEvent<ProfilingEvent>::publish",
+            "crates/camber/src/http/mock.rs:BlockingWorkerEvent<StaticFileEvent>::publish"
+          ],
+          "member_count": 2,
+          "disposition": "distinct-trait-event-sink",
+          "rationale": "Two implementations of one generic worker-observation trait route distinct event vocabularies to their corresponding LifecycleScript sink. The shared worker protocol is already generic over the trait; only the required per-type sink selection remains in each impl.",
+          "shared_owner_already_extracted": true
+        },
         {
           "exact_hash": "2207203985595388630",
           "plan_written_members": [
@@ -162,17 +189,6 @@
           "member_count": 2,
           "disposition": "shared-constructor-delegation",
           "rationale": "Distinct named constructors that each fix one discriminator and delegate construction to the one shared private constructor beside them.",
-          "shared_owner_already_extracted": true
-        },
-        {
-          "exact_hash": "8955662697284124965",
-          "plan_written_members": [
-            "crates/camber/src/lifecycle/participant.rs:71 fmt",
-            "crates/camber/src/lifecycle/resource_failure.rs:50 fmt"
-          ],
-          "member_count": 2,
-          "disposition": "display-over-distinct-vocabulary",
-          "rationale": "Display over distinct closed types, each rendering its own vocabulary through its own label owner. A shared impl cannot name two vocabularies.",
           "shared_owner_already_extracted": true
         },
         {
