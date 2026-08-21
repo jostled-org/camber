@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/jostled-org/camber/compare/camber-build-v0.5.0...camber-build-v0.6.0) - 2026-08-21
+
+### Added
+
+- *(runtime)* [**breaking**] share one deadline across shutdown owners
+- *(codegen)* name the absent wrapper where a skipped one would have been
+- *(http)* [**breaking**] bound each gRPC call to the head tonic commits
+- implement shared-immutable-websocket-payloads
+
+### Fixed
+
+- *(runtime)* [**breaking**] bound and report the transport edges serving left open
+
 ## [0.5.0](https://github.com/jostled-org/camber/compare/camber-build-v0.4.0...camber-build-v0.5.0) - 2026-08-15
 
 ### Added

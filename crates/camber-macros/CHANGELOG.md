@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/jostled-org/camber/compare/camber-macros-v0.5.0...camber-macros-v0.6.0) - 2026-08-21
+
+### Added
+
+- *(runtime)* [**breaking**] share one deadline across shutdown owners
+- implement shared-immutable-websocket-payloads
+
 ## [0.5.0](https://github.com/jostled-org/camber/compare/camber-macros-v0.4.0...camber-macros-v0.5.0) - 2026-08-15
 
 ### Added
