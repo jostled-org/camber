@@ -465,13 +465,22 @@ fn open_bridge_peer(_addr: SocketAddr) -> Option<TcpStream> {
     None
 }
 
-/// Let the bridge end its own connection, so the drain has nothing left to
-/// force.
+/// Complete the peer-close handshake, so the drain has nothing left to force.
+///
+/// Reading the echoed close is the production boundary that proves the bridge
+/// consumed the peer's frame. Dropping the socket before that point lets TCP
+/// EOF race the frame and can turn this natural completion into cancellation.
 fn close_bridge_peer(bridge: Option<TcpStream>) {
     let Some(mut bridge) = bridge else {
         return;
     };
     common::write_ws_close_frame(&mut bridge);
+    let (opcode, _) = common::read_ws_frame_raw(&mut bridge);
+    assert_eq!(
+        opcode,
+        common::CLOSE,
+        "the registered bridge did not echo its peer's close frame"
+    );
     drop(bridge);
 }
 
