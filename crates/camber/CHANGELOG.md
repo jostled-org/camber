@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/jostled-org/camber/compare/camber-v0.7.0...camber-v0.8.0) - 2026-08-21
+
+### Added
+
+- *(runtime)* [**breaking**] name the outermost failed owner as the primary
+- *(runtime)* [**breaking**] share one deadline across shutdown owners
+- *(runtime)* [**breaking**] bound every resource callback to one owning coordinator
+- *(runtime)* [**breaking**] name the owner every lifecycle failure belongs to
+- *(http)* record each request where its operation actually ends
+- *(http)* carry each gated chain's stated head onto the real one
+- *(codegen)* name the absent wrapper where a skipped one would have been
+- *(http)* [**breaking**] bound each gRPC call to the head tonic commits
+- *(http)* freeze each proxy route's upstream owner with its graph
+- *(http)* bound each streaming direction under its own transfer owner
+- *(http)* [**breaking**] retain a rendered profile under a frozen maximum
+- *(http)* [**breaking**] read a served file off the worker under a frozen maximum
+- *(http)* [**breaking**] collect a buffered proxy answer under a frozen maximum
+- *(http)* [**breaking**] collect the client response under a configured maximum
+- *(http)* [**breaking**] bind an admitted request to its configured deadlines
+- *(http)* [**breaking**] bound service operation with validated policies
+- implement shared-immutable-websocket-payloads
+
+### Fixed
+
+- *(http)* shrink internal refusal errors
+- *(runtime)* [**breaking**] bound and report the transport edges serving left open
+- *(runtime)* align completion proofs with owner order
+- *(http)* wake pre-commit operations on control changes
+- *(http)* bind middleware, stream heads, and upgrades to the total
+- *(http)* observe disconnect before body source failure
+- *(test)* retry the blocking serve row on a lost port
+- *(http)* refuse policy bounds their owners cannot carry
+- *(http)* align service-operation proof boundaries
+- *(test)* close checkpoint wake and address-reuse races
+- *(ws)* require supervised bridge registration
+- *(ws)* [**breaking**] refuse a handshake that declares a payload
+
+### Other
+
+- *(lifecycle)* await WebSocket close handshake
+- *(docs)* assert four more reference-page contracts verbatim
+- *(runtime)* quote the child's stderr on both isolated failure paths
+- *(runtime)* prove a refused readiness pass served no queued peer
+- *(runtime)* match every lifecycle name in one place for both roots
+- attach the tracing setup summary to the module it describes
+- *(runtime)* name every stage a lifecycle failure can be recorded in
+- *(http)* read each account's claims off the values production held
+- *(http)* read each stated head off the owner that commits it
+- *(http)* hold the escalation off the rows a stop would preempt
+- *(http)* read the streaming rows' claims off their transfer owners
+- *(http)* prove the defaulted profile renders under the frozen maximum
+- *(http)* prove the unnamed spellings freeze the documented maximum
+- *(http)* prove the frozen maximum is the route's and holds no crossing
+- *(http)* prove the response ceiling opt-out, default, and idle order
+- *(http)* widen deadline and envelope proofs to every admitted class
+- *(ws)* bound the pending connection-permit wait
+- *(net)* drop the unreachable limit from the raw accept loop
+- *(http)* hold the synchronous rows at their production checkpoints
+- *(test)* reuse the runtime's default worker count in tests
+- *(test)* retag lifecycle proofs to their current plan steps
+- *(http)* cover a server header narrowing the runtime
+- *(http)* rename positive_bytes to positive_limit
+- *(test)* format included lifecycle test source
+- *(http)* cover limit narrowing, policy ordering, and transfer budgets
+- *(http)* share the one-transport server setup across permit rows
+- *(ws)* keep precedence observation ahead of forced abort
+- *(http)* cover gRPC and bare-Tokio connection-limit rows
+- *(ws)* order cancellation before terminal polling
+
 ## [0.7.0](https://github.com/jostled-org/camber/compare/camber-v0.6.0...camber-v0.7.0) - 2026-08-15
 
 ### Added

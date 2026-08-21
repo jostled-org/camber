@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/jostled-org/camber/compare/camber-cli-v0.7.0...camber-cli-v0.8.0) - 2026-08-21
+
+### Added
+
+- *(runtime)* [**breaking**] share one deadline across shutdown owners
+- *(http)* [**breaking**] read a served file off the worker under a frozen maximum
+- implement shared-immutable-websocket-payloads
+
+### Fixed
+
+- *(runtime)* [**breaking**] bound and report the transport edges serving left open
+
 ## [0.7.0](https://github.com/jostled-org/camber/compare/camber-cli-v0.6.0...camber-cli-v0.7.0) - 2026-08-15
 
 ### Added
