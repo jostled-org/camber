@@ -283,7 +283,8 @@ fn forced_cancellation_release_row() {
             "the cancellation payload",
         )
         .await;
-        row.listener().cancel_server();
+        row.listener().select_server_cancellation().await;
+        row.listener().release(SELECTED);
         let completed = row.listener().join_server().await;
         assert!(
             matches!(completed, Err(RuntimeError::Cancelled)),

@@ -745,6 +745,30 @@ impl DirectionTestFixture {
         self.with_server(ServerHandle::cancel, "cancel");
     }
 
+    /// Make server cancellation ready before the bridge polls any terminal
+    /// source, then hold the bridge after it commits that cause.
+    ///
+    /// Cancellation can close the transport around a live bridge. Without the
+    /// poll gate, that resulting disconnect can win an earlier coordinator
+    /// turn and make a cancellation row assert against a cause it did not
+    /// stage. The selected checkpoint stays armed so the caller can inspect
+    /// the committed cause before allowing settlement.
+    pub async fn select_server_cancellation(&self) {
+        let before_poll = LifecycleCheckpoint::WebSocketBeforeTerminalPoll;
+        let selected = LifecycleCheckpoint::WebSocketTerminalSelected;
+        self.arm(before_poll);
+        self.cancel_server();
+        self.wait_paused(before_poll).await;
+        self.arm(selected);
+        self.release(before_poll);
+        self.wait_paused(selected).await;
+        assert_eq!(
+            self.observed().terminal,
+            Some(WsCloseCause::ServerCancelled),
+            "the bridge selected another cause before server cancellation"
+        );
+    }
+
     /// Ask this fixture's still-held server to do one thing.
     ///
     /// A server the case has already finished with is a case asking for
