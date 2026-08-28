@@ -75,13 +75,35 @@ closure ever being called. Nothing below can displace it.
 Once the closure runs, `run` never inspects its value. `T` is opaque to the
 runtime, so it is either returned as `Ok(T)` or displaced whole by a
 runtime-level failure. One value carries every such failure:
-`RuntimeError::Lifecycle`, the immutable account of each framework-owned
+`RuntimeError::Lifecycle`, the immutable account of each direct runtime-owned
 participant that could not finish — a panicking Camber-owned background child,
 a scope drain that expired with children still outstanding, a resource, the
-exporter, the executor. Nothing weighs those against each other: the account
-keeps them all, and `primary()` is the first of them in owner order. See
+exporter. Nothing weighs those against each other: the account keeps them all
+and elects none of them. A caller reads the whole collection. See
 [One aggregate shutdown deadline](#one-aggregate-shutdown-deadline) and
 [Errors](error.md#lifecycle-aggregates).
+
+The participant vocabulary is closed and direct:
+root scope, background task, resource, and exporter.
+These are the owners the runtime itself waits for and
+authoritatively settles. A server, one of its connections, and an upgrade past
+its response head settle inside the flat server tree that owns them and never
+appear as runtime aggregate participants — a server's outcome reaches you
+through its own `ServerHandleFuture`, not through this account. The Tokio
+executor is not a participant either: Camber gets no acknowledgement back from
+it, so there is no fact about it this vocabulary could honestly state.
+
+`LifecycleParticipant::Exporter` is settlement-only vocabulary. The trace
+provider's shutdown is unbounded and hands nothing back, so teardown settles it
+completed through `ShutdownOwner::EXPORTER` and has no outcome it could record a
+failure from. It names the owner the settlement inventory visited, and it is
+never reached as an aggregate failure entry.
+
+Entries are frozen in a stable rendering order — root scope, background
+children, resources, then the exporter — with recording order deciding the
+sequence inside one class. That order is reproducible output and nothing else.
+It is not causal precedence, and the first entry is not more responsible than
+the last.
 
 Your closure unwinding sits above the `Result` rather than inside it. The panic
 resumes, and nothing returns through the `Result` at all.
@@ -222,6 +244,37 @@ call onto `http::server(router)` or `http::server_hosts(hosts)`, which returns a
 methods, so a caller may join first, continue serving, and request shutdown
 later. Dropping either armed owner before completion requests forced shutdown;
 polling a ready result disarms that behavior.
+
+### What the flat result means
+
+The result is causal, not ranked. Each stop command commits its phase into the
+server's stop state before it publishes anything, so a command that has returned
+has already decided how the server ends and nothing downstream can change it.
+`.cancel()` returning means forced cancellation is committed: the join reports
+`RuntimeError::Cancelled` unless a deadline or a settlement committed first, in
+which case that first commit keeps its own result and the cancellation is a
+no-op. A graceful drain that runs out of its one aggregate deadline reports
+`RuntimeError::Timeout`. Two facts with no commit order between them are not
+ranked against each other; whichever committed first is the answer.
+
+A successful join proves each owned accepted transport, connection permit, and
+registered upgrade completed. The server registry owns only connections; each
+connection owns its request and upgrade children; each upgrade retains its
+directions and its callback. A connection permit is released by the
+connection owner that holds it, after both children have settled — so a permit
+outstanding past a join is a bug, not a race.
+
+An upgrade's blocking callback is the one child Camber cannot force. Every
+bridge terminal closes the callback-facing endpoints so a cooperative callback
+wakes, and the upgrade owner holds one join deadline for it that a later server
+transition may shorten but never restart. A callback still blocked at that
+deadline is reported through one WARN event,
+`camber.websocket.callback.outstanding`, carrying
+`disposition="outstanding-after-forced-grace"`. Grep for that event and that
+field: the `CallbackDisposition::OutstandingAfterForcedGrace` record behind them
+is private to the bridge and is not a name to look up. Camber stops claiming the
+callback returned, and the public server result still follows the accepted
+server command.
 
 ### Constructor Context
 

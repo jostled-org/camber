@@ -19,10 +19,10 @@ use super::body::HyperResponseBody;
 use super::body_admission::{self, AdmittedBody, ResolvedBodyPlan};
 use super::dispatch::{FrozenRouter, PreBodyScope, StreamingMultipartTarget};
 use super::handle::{
-    RequestDispatch, answer, answer_inbound_failure, answer_rejected, gate_outcome,
+    RequestDispatch, answer, answer_framework, answer_inbound_failure, gate_outcome,
 };
 use super::head_projection::Gated;
-use super::mock::{LifecycleCheckpoint, LifecycleScript};
+use super::mock::{LifecycleScript, MultipartOwnerEdge};
 use super::multipart::{
     MultipartCompletion, MultipartRevocation, MultipartSessionDriver, MultipartTerminal,
     SessionObserver, open, request_boundary,
@@ -33,6 +33,7 @@ use super::rejection::{
 };
 use super::request::{RequestHead, RequestOrigin};
 use super::response::HandlerOutcome;
+use super::response_commitment::ResponseOrigin;
 use super::{Request, Response};
 use std::future::Future;
 use std::pin::Pin;
@@ -85,7 +86,12 @@ pub(super) async fn dispatch_streaming_multipart(
     let observer = lifecycle.script();
     let admitted = match admit(&hyper_req, &plan, origin, observer.as_ref()).await {
         Ok(admitted) => admitted,
-        Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, account)),
+        // The framework mapper produces this head for an operation that is
+        // already minted, so it names itself on the commitment like every other
+        // producer this route can reach.
+        Err(rejected) => {
+            return Ok(answer_framework(ctx, &scope, rejected, account, operation));
+        }
     };
     let request = RequestHead::from_hyper_request(&hyper_req, origin).to_request(Some(params));
     operation.observe(observer.as_deref(), OperationStage::Middleware);
@@ -95,6 +101,8 @@ pub(super) async fn dispatch_streaming_multipart(
     let answering = super::handle::gate_within_total(gate, request_dispatch, &scope, |blocked| {
         scope.closing(blocked)
     });
+    // The gate took the commitment for whichever owner answered, so nothing is
+    // recorded here.
     let projection = match answering.await {
         Gated::Answered(answered) => return Ok(answered),
         Gated::Admitted(projection) => projection,
@@ -103,7 +111,9 @@ pub(super) async fn dispatch_streaming_multipart(
         match request_boundary(request.header("content-type"), limits.max_boundary_bytes()) {
             Ok(boundary) => boundary,
             Err(refused) => {
-                let response = Settled::framework(refused).respond(&scope);
+                let settled = Settled::framework(refused);
+                operation.commit_response(settled.origin);
+                let response = settled.respond(&scope);
                 return Ok(projection.merged_into(answer(ctx, response, account, &scope)));
             }
         };
@@ -148,14 +158,19 @@ async fn settled_answer(
     // admitted head minted.
     let settled = match super::handle::within_total(session, operation).await {
         Ok(settled) => settled,
-        Err(rejected) => return answer_rejected(ctx, scope, rejected, account),
+        // The total outlived the session, so the head this request gets is the
+        // framework mapper's and not the handler's.
+        Err(rejected) => return answer_framework(ctx, scope, rejected, account, operation),
     };
     operation.observe(lifecycle.script().as_deref(), OperationStage::ResponseHead);
     match settled {
-        Answered::Settled(settled) => answer(ctx, settled.respond(scope), account, scope),
+        Answered::Settled(settled) => {
+            operation.commit_response(settled.origin);
+            answer(ctx, settled.respond(scope), account, scope)
+        }
         // The upload owner's cause carries its own disposition: a mapped one owes
         // the peer this route's mapper once, and a silent one owes it nothing.
-        Answered::Ended(failure) => answer_inbound_failure(ctx, scope, failure, account),
+        Answered::Ended(failure) => answer_inbound_failure(ctx, scope, failure, account, operation),
     }
 }
 
@@ -270,9 +285,9 @@ impl Session {
             observer,
         } = self;
         let (outcome, terminal) = paired(handler, driver, &revocation, observer.as_deref()).await;
-        LifecycleScript::pause_at(
+        LifecycleScript::pause_at_multipart(
             observer.as_deref(),
-            LifecycleCheckpoint::BeforeMultipartResponseSelection,
+            MultipartOwnerEdge::BeforeResponseSelection,
         )
         .await;
         Answered::of(terminal.completion(), outcome, budget)
@@ -283,8 +298,8 @@ impl Session {
 ///
 /// The two arms are two different authorities. A settled session is answered by
 /// the precedence between its own terminal and its handler's outcome. A session
-/// the operation's owner ended is answered by the declared inbound precedence,
-/// which already named the cause and its disposition — a handler cannot turn a
+/// the operation's owner ended is answered by the terminal that owner committed
+/// and the disposition the declared mapping gives it — a handler cannot turn a
 /// crossed deadline into a committed response.
 enum Answered {
     Settled(Settled),
@@ -329,13 +344,13 @@ async fn paired(
         handler.as_mut().poll(cx)
     })
     .await;
-    LifecycleScript::pause_at(observer, LifecycleCheckpoint::MultipartHandlerCompleted).await;
+    LifecycleScript::pause_at_multipart(observer, MultipartOwnerEdge::HandlerCompleted).await;
     revocation.revoke();
     let terminal = match settled {
         Some(terminal) => terminal,
         None => running.await,
     };
-    LifecycleScript::pause_at(observer, LifecycleCheckpoint::MultipartDriverTerminated).await;
+    LifecycleScript::pause_at_multipart(observer, MultipartOwnerEdge::DriverTerminated).await;
     (outcome, terminal)
 }
 
@@ -363,6 +378,12 @@ struct Settled {
     outcome: HandlerOutcome,
     /// Which producer classifies a failure in that outcome.
     kinds: ProducerKinds,
+    /// Which producer this response head belongs to.
+    ///
+    /// Beside the categories rather than derived from them: the two answer
+    /// different questions, and the pair is written together at each of the two
+    /// places precedence settles.
+    origin: ResponseOrigin,
     /// Whether payload the peer sent was left unread.
     unread: bool,
 }
@@ -373,6 +394,7 @@ impl Settled {
         Self {
             outcome: Err(failure),
             kinds: MULTIPART_SESSION,
+            origin: ResponseOrigin::Framework,
             unread: true,
         }
     }
@@ -389,12 +411,14 @@ impl Settled {
             (MultipartCompletion::Complete, outcome) => Self {
                 outcome,
                 kinds: HANDLER,
+                origin: ResponseOrigin::Application,
                 unread: false,
             },
             (MultipartCompletion::Failed(failure), _) => Self::framework(failure),
             (MultipartCompletion::Incomplete(_), Err(error)) => Self {
                 outcome: Err(error),
                 kinds: HANDLER,
+                origin: ResponseOrigin::Application,
                 unread: true,
             },
             (MultipartCompletion::Incomplete(incomplete), Ok(_)) => Self::framework(incomplete),

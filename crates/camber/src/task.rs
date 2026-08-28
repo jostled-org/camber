@@ -486,7 +486,7 @@ where
     // runs and the refusal arrives on the handle. The caller holds that handle,
     // so this child's panic is delivered there and leaves the runtime result
     // untouched.
-    match rt.admit_async(body) {
+    match rt.admit_async(None, body) {
         Ok(()) => AsyncJoinHandle {
             source: AsyncJoinSource::Task(rx),
             cancel: Some(cancel),
@@ -508,8 +508,14 @@ where
 /// the scope that owns its completion, because one `&Arc` supplies both. Every
 /// named subsystem reaches it through `admit_signalled_subsystem_on`; only a
 /// caller with no `Arc` in hand resolves one from the ambient context.
+///
+/// `subsystem` is the name the loop is admitted under, and is `None` for a loop
+/// that carries no name of its own. The name travels with the admission, so it
+/// belongs to this child rather than to whichever child the scope admitted
+/// nearest in time.
 pub(crate) fn admit_signalled_on<B, Fut>(
     runtime: &Arc<RuntimeInner>,
+    subsystem: Option<&str>,
     build: B,
 ) -> Result<(), RuntimeError>
 where
@@ -517,7 +523,7 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     let signals = LifecycleSignals::from_runtime(runtime);
-    runtime.admit_internal_async(build(signals))
+    runtime.admit_internal_async(subsystem, build(signals))
 }
 
 /// Admit one Camber-owned perpetual loop to the ambient runtime's root scope,
@@ -532,7 +538,7 @@ where
     B: FnOnce(LifecycleSignals) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    admit_signalled_on(&runtime::runtime_context()?, build)
+    admit_signalled_on(&runtime::runtime_context()?, None, build)
 }
 
 /// Admit one Camber-owned perpetual loop as a named background subsystem of a
@@ -557,7 +563,10 @@ where
     B: FnOnce(LifecycleSignals) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    report_subsystem_outcome(subsystem, admit_signalled_on(runtime, build))
+    report_subsystem_outcome(
+        subsystem,
+        admit_signalled_on(runtime, Some(subsystem), build),
+    )
 }
 
 /// Log a subsystem admission that was refused, and hand the outcome back.

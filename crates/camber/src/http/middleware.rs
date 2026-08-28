@@ -6,6 +6,7 @@ use super::{Request, Response};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The future one middleware frame hands back.
 ///
@@ -99,6 +100,49 @@ impl Terminal<'_> {
     }
 }
 
+/// Whether a chain reached the terminal that owns its answer.
+///
+/// A buffered route's terminal produces the real head, so a chain that answered
+/// without entering it produced that head itself and is the response's origin. A
+/// gate chain reads the opposite way — its terminal's value is provisional, and
+/// a frame replacing it is exactly what an answer looks like — which is why
+/// [`Gated`](super::head_projection::Gated) decides from the answer's own
+/// provenance instead. The two questions are different, so they are asked
+/// differently.
+#[derive(Clone)]
+pub(super) enum TerminalEntry {
+    /// Nothing stands in front of the terminal, so it answers or nothing does.
+    ///
+    /// Both the empty chain and the answers built with no chain at all: a
+    /// mapped routing refusal has no frame that could have replaced it.
+    Direct,
+    /// A chain stands in front of it, and marks this cell on the way in.
+    Chained(Arc<AtomicBool>),
+}
+
+impl TerminalEntry {
+    /// A cell no chain has reached its terminal through yet.
+    fn pending() -> Self {
+        Self::Chained(Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Record that the chain reached its terminal.
+    fn reached(&self) {
+        match self {
+            Self::Direct => {}
+            Self::Chained(cell) => cell.store(true, Ordering::Release),
+        }
+    }
+
+    /// Whether the terminal produced this chain's answer.
+    pub(super) fn was_reached(&self) -> bool {
+        match self {
+            Self::Direct => true,
+            Self::Chained(cell) => cell.load(Ordering::Acquire),
+        }
+    }
+}
+
 /// Handle to the next layer in the middleware chain.
 ///
 /// Calling `next.call(req)` returns a future that resolves to the
@@ -112,6 +156,8 @@ pub struct Next<'a> {
     /// that fails is mapped where it failed, so what the frames outside it
     /// unwind through is already the mapped response.
     scope: RejectionScope,
+    /// The cell this chain marks when it reaches its terminal.
+    entry: TerminalEntry,
 }
 
 impl<'a> Next<'a> {
@@ -120,11 +166,49 @@ impl<'a> Next<'a> {
         terminal: Terminal<'a>,
         scope: RejectionScope,
     ) -> Self {
+        // An empty chain has nothing that could short-circuit its terminal, so
+        // it costs no cell to say so.
+        let entry = match remaining.is_empty() {
+            true => TerminalEntry::Direct,
+            false => TerminalEntry::pending(),
+        };
         Self {
             remaining,
             terminal,
             scope,
+            entry,
         }
+    }
+
+    /// A chain whose caller never asks which owner answered it.
+    ///
+    /// The gate path is the one that does not ask: what it reads is the answer's
+    /// own provenance, decided by [`Gated`](super::head_projection::Gated) from
+    /// the provisional head the gate terminal marks. Minting a cell for it put an
+    /// allocation and an atomic store on every gated request — every WebSocket,
+    /// event stream, streaming forward, and multipart session behind a router
+    /// with middleware — for a fact nothing ever loads.
+    pub(super) fn untracked(
+        remaining: &'a [MiddlewareFn],
+        terminal: Terminal<'a>,
+        scope: RejectionScope,
+    ) -> Self {
+        Self {
+            remaining,
+            terminal,
+            scope,
+            entry: TerminalEntry::Direct,
+        }
+    }
+
+    /// The signal that says whether this chain's terminal produced its answer.
+    ///
+    /// Read before [`Self::call`] consumes the chain, because the answer is what
+    /// the caller has left afterwards and the answer cannot say who built it: a
+    /// frame that replaced the terminal's response returns the same shape the
+    /// terminal would have.
+    pub(super) fn entry(&self) -> TerminalEntry {
+        self.entry.clone()
     }
 
     /// Run the next middleware layer or terminal handler.
@@ -133,6 +217,7 @@ impl<'a> Next<'a> {
             remaining,
             terminal,
             scope,
+            entry,
         } = self;
         match remaining.split_first() {
             Some((frame, rest)) => {
@@ -140,11 +225,15 @@ impl<'a> Next<'a> {
                     remaining: rest,
                     terminal,
                     scope: scope.clone(),
+                    entry,
                 };
                 let entered = frame(req, next);
                 Box::pin(async move { scope.resolve(entered.await, MIDDLEWARE) })
             }
-            None => terminal.run(req, scope),
+            None => {
+                entry.reached();
+                terminal.run(req, scope)
+            }
         }
     }
 }

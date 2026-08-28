@@ -90,6 +90,7 @@ pub(super) async fn serve_owned_connection(
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     state: ConnectionState,
     control: tokio::sync::watch::Receiver<ServerControl>,
+    #[cfg(feature = "ws")] retention: Arc<super::server_lifecycle::UpgradeRetention>,
 ) {
     // Per-connection liveness belongs to the accepted stream, never to the
     // per-server context every connection shares.
@@ -100,13 +101,38 @@ pub(super) async fn serve_owned_connection(
     // speaks.
     match (stream, tls_acceptor) {
         (crate::net::AcceptedStream::Tcp(stream), Some(acceptor)) => {
-            serve_owned_tls(stream, acceptor, state, liveness, control).await;
+            serve_owned_tls(
+                stream,
+                acceptor,
+                state,
+                liveness,
+                control,
+                #[cfg(feature = "ws")]
+                retention,
+            )
+            .await;
         }
         (crate::net::AcceptedStream::Tcp(stream), None) => {
-            serve_owned_stream(stream, state, liveness, control).await;
+            serve_owned_stream(
+                stream,
+                state,
+                liveness,
+                control,
+                #[cfg(feature = "ws")]
+                retention,
+            )
+            .await;
         }
         (crate::net::AcceptedStream::Unix(stream), _) => {
-            serve_owned_stream(stream, state, liveness, control).await;
+            serve_owned_stream(
+                stream,
+                state,
+                liveness,
+                control,
+                #[cfg(feature = "ws")]
+                retention,
+            )
+            .await;
         }
     }
 }
@@ -117,6 +143,7 @@ async fn serve_owned_tls(
     state: ConnectionState,
     liveness: Arc<ConnectionLiveness>,
     mut control: tokio::sync::watch::Receiver<ServerControl>,
+    #[cfg(feature = "ws")] retention: Arc<super::server_lifecycle::UpgradeRetention>,
 ) {
     let handshake = accept::tls_handshake(stream, &acceptor);
     tokio::pin!(handshake);
@@ -128,7 +155,15 @@ async fn serve_owned_tls(
             None => return,
         },
     };
-    serve_owned_stream(tls_stream, state, liveness, control).await;
+    serve_owned_stream(
+        tls_stream,
+        state,
+        liveness,
+        control,
+        #[cfg(feature = "ws")]
+        retention,
+    )
+    .await;
 }
 
 #[cfg(feature = "ws")]
@@ -461,9 +496,9 @@ async fn drive_owned_reader<S>(
         }
     }
     let _ = peer_closed.send(());
-    super::mock::LifecycleScript::pause_at(
+    super::mock::LifecycleScript::pause_at_upgrade(
         script.as_deref(),
-        super::mock::LifecycleCheckpoint::UpgradePeerClosed,
+        super::mock::UpgradeOwnerEdge::PeerClosed,
     )
     .await;
 }
@@ -473,6 +508,7 @@ async fn serve_owned_stream<S>(
     state: ConnectionState,
     liveness: Arc<ConnectionLiveness>,
     control: tokio::sync::watch::Receiver<ServerControl>,
+    #[cfg(feature = "ws")] retention: Arc<super::server_lifecycle::UpgradeRetention>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -489,6 +525,8 @@ async fn serve_owned_stream<S>(
         state,
         liveness,
         control,
+        #[cfg(feature = "ws")]
+        retention,
     )
     .await;
 }
@@ -499,6 +537,7 @@ async fn serve_owned_io<I>(
     state: ConnectionState,
     liveness: Arc<ConnectionLiveness>,
     mut control: tokio::sync::watch::Receiver<ServerControl>,
+    #[cfg(feature = "ws")] retention: Arc<super::server_lifecycle::UpgradeRetention>,
 ) where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -540,18 +579,19 @@ async fn serve_owned_io<I>(
                 .await;
                 ConnectionFlow::Finished
             }
-            OwnedConnectionEvent::Registration(Some(registration)) => {
-                serve_upgrade_registration(
-                    registration,
+            OwnedConnectionEvent::Handoff(Some(handoff)) => {
+                serve_upgrade_handoff(
+                    handoff,
                     peer_closed,
                     connection.as_mut(),
                     &mut control,
                     &mut upgrade_transport,
                     &mut transport,
+                    &retention,
                 )
                 .await
             }
-            OwnedConnectionEvent::Registration(None) => ConnectionFlow::Serving,
+            OwnedConnectionEvent::Handoff(None) => ConnectionFlow::Serving,
             OwnedConnectionEvent::PeerClosed => {
                 peer_closed = true;
                 ConnectionFlow::Serving
@@ -680,65 +720,42 @@ enum ConnectionFlow {
     Finished,
 }
 
-/// Carry one upgrade registration from prepared to committed.
+/// Take one offered bridge as this connection's child, and carry it to its end.
 ///
-/// Every step can end the connection instead, which is why it answers with a
-/// flow rather than by falling off the end: the caller owns the loop.
+/// The whole of the connection-local handoff: the child is transferred before
+/// the `101` is released, held for as long as it speaks, and joined here. This
+/// connection cannot end — and so cannot give its permit back — until that join
+/// returns. Every step can end the connection instead, which is why it answers
+/// with a flow rather than by falling off the end: the caller owns the loop.
 #[cfg(feature = "ws")]
-async fn serve_upgrade_registration<C>(
-    mut registration: super::server_lifecycle::TransportRegistration,
+async fn serve_upgrade_handoff<C>(
+    handoff: super::server_lifecycle::UpgradeHandoff,
     peer_closed: bool,
     mut connection: std::pin::Pin<&mut C>,
     control: &mut tokio::sync::watch::Receiver<ServerControl>,
     upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
     transport: &mut OwnedTransport,
+    retention: &super::server_lifecycle::UpgradeRetention,
 ) -> ConnectionFlow
 where
     C: HyperConnection,
 {
-    let cancellation = registration.prepare();
-    cancel_closed_registration(peer_closed, cancellation.as_ref());
-    let registration = registration.register();
-    tokio::pin!(registration);
-    let event = await_upgrade_registration(
-        connection.as_mut(),
-        control,
-        registration.as_mut(),
-        transport,
-    )
-    .await;
-    let settled = finish_interrupted_registration(
-        event,
-        connection.as_mut(),
-        registration.as_mut(),
-        cancellation.as_ref(),
-        upgrade_transport,
-        transport,
-    )
-    .await;
-    let settled = match settled {
-        Some(outcome) => outcome,
-        None => return ConnectionFlow::Finished,
-    };
-    let retained =
-        retain_open_upgrade(settled, connection.as_mut(), upgrade_transport, transport).await;
-    let retained = match retained {
-        Some(outcome) => outcome,
-        None => return ConnectionFlow::Finished,
-    };
-    let commitment = match retained.complete() {
-        Some(commitment) => commitment,
+    // Held from the moment this connection takes the offer, and before the
+    // answer that releases a `101`, because either disposition is work a forced
+    // abort must not take away where it stands: a transferred child owes its
+    // peer a close, and a refusal owes its peer the response the handler is
+    // already producing. A refusal therefore keeps the hold — the connection has
+    // an answer outstanding for the rest of its life — and only the transferred
+    // path has a join that says when it is over.
+    retention.hold();
+    let upgrade = match upgrade_transport.accept(handoff, peer_closed).await {
+        Some(upgrade) => upgrade,
         None => return ConnectionFlow::Serving,
     };
     let event = await_upgrade_commitment(connection.as_mut(), control, transport).await;
-    finish_upgrade_commitment(
-        event,
-        commitment,
-        connection.as_mut(),
-        upgrade_transport,
-        transport,
-    )
-    .await;
+    finish_upgrade_handoff(event, &upgrade, connection, upgrade_transport, transport).await;
+    upgrade.join().await;
+    retention.release();
     transport.join().await;
     ConnectionFlow::Finished
 }
@@ -809,152 +826,31 @@ async fn shutdown_owned_connection<C>(
     transport.close().await;
 }
 
-#[cfg(feature = "ws")]
-fn cancel_prepared_upgrade(cancellation: Option<&super::server_lifecycle::UpgradeCancellation>) {
-    match cancellation {
-        Some(cancellation) => cancellation.cancel(),
-        None => {}
-    }
-}
-
-#[cfg(feature = "ws")]
-fn cancel_closed_registration(
-    peer_closed: bool,
-    cancellation: Option<&super::server_lifecycle::UpgradeCancellation>,
-) {
-    match (peer_closed, cancellation) {
-        (true, Some(cancellation)) => cancellation.cancel(),
-        _ => {}
-    }
-}
-
-#[cfg(feature = "ws")]
-async fn settle_interrupted_registration<R>(
-    registration: std::pin::Pin<&mut R>,
-    cancellation: Option<&super::server_lifecycle::UpgradeCancellation>,
-    upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
-) where
-    R: std::future::Future<Output = super::server_lifecycle::TransportRegistrationOutcome>,
-{
-    upgrade_transport.cancel();
-    cancel_prepared_upgrade(cancellation);
-    let outcome = registration.await;
-    drop(outcome.complete());
-    upgrade_transport.abort_pending().await;
-}
-
-/// What ended a registration that never reached its outcome.
+/// Hand the upgraded transport over, if the peer that asked for it is still
+/// there.
 ///
-/// Split from the event so the settle-then-close pair every interruption runs
-/// is written once. Restating it per arm left three copies to keep in step with
-/// each other, and a future arm or a future reordering of the pair would have
-/// had nothing to check it against.
-#[cfg(feature = "ws")]
-enum RegistrationInterruption {
-    /// The connection finished on its own; only its result is left to report.
-    Ended(ConnectionResult),
-    /// The server is winding down, so the connection drains under it.
-    Shutdown(ConnectionShutdown),
-    /// The peer went away mid-registration; the connection is polled to its end.
-    PeerClosed,
-}
-
-#[cfg(feature = "ws")]
-async fn finish_interrupted_registration<C, R>(
-    event: UpgradeRegistrationEvent,
-    connection: std::pin::Pin<&mut C>,
-    registration: std::pin::Pin<&mut R>,
-    cancellation: Option<&super::server_lifecycle::UpgradeCancellation>,
-    upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
-    transport: &mut OwnedTransport,
-) -> Option<super::server_lifecycle::TransportRegistrationOutcome>
-where
-    C: HyperConnection,
-    R: std::future::Future<Output = super::server_lifecycle::TransportRegistrationOutcome>,
-{
-    let interruption = match event {
-        UpgradeRegistrationEvent::Registered(outcome) => return Some(outcome),
-        UpgradeRegistrationEvent::Complete(result) => RegistrationInterruption::Ended(result),
-        UpgradeRegistrationEvent::Shutdown(mode) => RegistrationInterruption::Shutdown(mode),
-        UpgradeRegistrationEvent::PeerClosed => RegistrationInterruption::PeerClosed,
-    };
-    settle_interrupted_registration(registration, cancellation, upgrade_transport).await;
-    match interruption {
-        RegistrationInterruption::Ended(result) => {
-            log_connection_result(result, ConnectionPhase::Serving)
-        }
-        RegistrationInterruption::Shutdown(mode) => {
-            shutdown_hyper_connection(mode, connection).await;
-        }
-        RegistrationInterruption::PeerClosed => {
-            log_connection_result(connection.await, ConnectionPhase::Serving)
-        }
-    }
-    transport.close().await;
-    None
-}
-
-#[cfg(feature = "ws")]
-async fn cancel_admitted_upgrade<C>(
-    outcome: super::server_lifecycle::TransportRegistrationOutcome,
-    connection: std::pin::Pin<&mut C>,
-    upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
-    transport: &mut OwnedTransport,
-) where
-    C: HyperConnection,
-{
-    upgrade_transport.cancel();
-    outcome.cancel();
-    upgrade_transport.abort_pending().await;
-    log_connection_result(connection.await, ConnectionPhase::Serving);
-    transport.close().await;
-}
-
-#[cfg(feature = "ws")]
-async fn retain_open_upgrade<C>(
-    outcome: super::server_lifecycle::TransportRegistrationOutcome,
-    connection: std::pin::Pin<&mut C>,
-    upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
-    transport: &mut OwnedTransport,
-) -> Option<super::server_lifecycle::TransportRegistrationOutcome>
-where
-    C: HyperConnection,
-{
-    let peer_open = match outcome.admitted() {
-        true => transport.peer_remains_open().await,
-        false => true,
-    };
-    match peer_open {
-        true => Some(outcome),
-        false => {
-            cancel_admitted_upgrade(outcome, connection, upgrade_transport, transport).await;
-            None
-        }
-    }
-}
-
+/// A peer that went away between the response head and this point never saw the
+/// `101`, so the child is ended rather than given a transport with nothing on
+/// the far end of it.
 #[cfg(feature = "ws")]
 async fn commit_open_transport(
-    commitment: super::server_lifecycle::UpgradeCommitment,
+    upgrade: &super::server_lifecycle::UpgradeOwner,
     upgrade_transport: &super::server_lifecycle::UpgradeTransportOwner,
     transport: &mut OwnedTransport,
 ) {
     match transport.peer_remains_open().await {
-        true => {
-            commitment.commit();
-            upgrade_transport.commit();
-        }
+        true => upgrade_transport.commit(),
         false => {
             upgrade_transport.cancel();
-            drop(commitment);
+            upgrade.cancel();
         }
     }
 }
 
-/// Why a commitment is given up instead of handed over.
+/// Why a transferred child is given up instead of handed the transport.
 ///
-/// Split from the event so the cancel-then-drop prologue every abandonment runs
-/// is written once, for the same reason [`RegistrationInterruption`] exists.
+/// Split from the event so the cancel-then-end prologue every abandonment runs
+/// is written once rather than restated per arm.
 #[cfg(feature = "ws")]
 enum AbandonedCommitment {
     /// The connection ended with an error, which is reported after the drop.
@@ -966,9 +862,9 @@ enum AbandonedCommitment {
 }
 
 #[cfg(feature = "ws")]
-async fn finish_upgrade_commitment<C>(
+async fn finish_upgrade_handoff<C>(
     event: UpgradeCommitmentEvent,
-    commitment: super::server_lifecycle::UpgradeCommitment,
+    upgrade: &super::server_lifecycle::UpgradeOwner,
     connection: std::pin::Pin<&mut C>,
     upgrade_transport: &super::server_lifecycle::UpgradeTransportOwner,
     transport: &mut OwnedTransport,
@@ -976,10 +872,10 @@ async fn finish_upgrade_commitment<C>(
     C: HyperConnection,
 {
     let abandoned = match event {
-        // The one arm that keeps the commitment, and so the one arm that does
-        // not run the prologue below.
+        // The one arm that hands the transport over, and so the one arm that
+        // does not run the prologue below.
         UpgradeCommitmentEvent::Complete(result) if result.is_ok() => {
-            commit_open_transport(commitment, upgrade_transport, transport).await;
+            commit_open_transport(upgrade, upgrade_transport, transport).await;
             log_connection_result(result, ConnectionPhase::Serving);
             return;
         }
@@ -988,7 +884,7 @@ async fn finish_upgrade_commitment<C>(
         UpgradeCommitmentEvent::PeerClosed => AbandonedCommitment::PeerClosed,
     };
     upgrade_transport.cancel();
-    drop(commitment);
+    upgrade.cancel();
     match abandoned {
         AbandonedCommitment::Ended(result) => {
             log_connection_result(result, ConnectionPhase::Serving)
@@ -1006,7 +902,7 @@ async fn finish_upgrade_commitment<C>(
 enum OwnedConnectionEvent {
     Complete(ConnectionResult),
     Shutdown(ConnectionShutdown),
-    Registration(Option<super::server_lifecycle::TransportRegistration>),
+    Handoff(Option<super::server_lifecycle::UpgradeHandoff>),
     PeerClosed,
 }
 
@@ -1025,37 +921,7 @@ where
         () = owned_transport.peer_closed() => OwnedConnectionEvent::PeerClosed,
         result = connection.as_mut() => OwnedConnectionEvent::Complete(result),
         mode = wait_connection_shutdown(control) => OwnedConnectionEvent::Shutdown(mode),
-        registration = transport.next_registration() => {
-            OwnedConnectionEvent::Registration(registration)
-        }
-    }
-}
-
-#[cfg(feature = "ws")]
-enum UpgradeRegistrationEvent {
-    Complete(ConnectionResult),
-    Shutdown(ConnectionShutdown),
-    Registered(super::server_lifecycle::TransportRegistrationOutcome),
-    PeerClosed,
-}
-
-#[cfg(feature = "ws")]
-async fn await_upgrade_registration<C, R>(
-    mut connection: std::pin::Pin<&mut C>,
-    control: &mut tokio::sync::watch::Receiver<ServerControl>,
-    registration: std::pin::Pin<&mut R>,
-    transport: &mut OwnedTransport,
-) -> UpgradeRegistrationEvent
-where
-    C: HyperConnection,
-    R: std::future::Future<Output = super::server_lifecycle::TransportRegistrationOutcome>,
-{
-    tokio::select! {
-        biased;
-        () = transport.peer_closed() => UpgradeRegistrationEvent::PeerClosed,
-        result = connection.as_mut() => UpgradeRegistrationEvent::Complete(result),
-        mode = wait_connection_shutdown(control) => UpgradeRegistrationEvent::Shutdown(mode),
-        outcome = registration => UpgradeRegistrationEvent::Registered(outcome),
+        handoff = transport.next_handoff() => OwnedConnectionEvent::Handoff(handoff),
     }
 }
 
@@ -1102,13 +968,36 @@ async fn serve_request(
     liveness: Arc<ConnectionLiveness>,
 ) -> Result<hyper::Response<GuardedBody>, std::convert::Infallible> {
     let bodyless_request = request.method() == hyper::Method::HEAD;
-    let (lifetime, guard) = liveness.begin_response();
-    // The request clock starts here, before dispatch reads the head, and its
-    // account is read back after the answer has been built. It is the only clock
-    // every route class shares: one per class put three meanings of "request
-    // duration" into one histogram, and one started after the body was read left
-    // out the inbound time a slow or large upload is made of.
-    let account = super::completion::RequestAccount::begin(ctx, lifecycle);
+    // The one place a request becomes a child of this connection. Recorded
+    // passively at both ends, so the ownership record shows the request nested
+    // under the connection identity rather than beside it.
+    let owner = lifecycle.admit_request();
+    // The request clock starts here, before dispatch reads the head. It is the
+    // only clock every route class shares: one per class put three meanings of
+    // "request duration" into one histogram, and one started after the body was
+    // read left out the inbound time a slow or large upload is made of.
+    //
+    // The identity is minted from the raw head for the same reason. Every later
+    // stage refines it, and an operation whose peer leaves before any exit
+    // answers is still a request an operator can name.
+    let account = super::completion::CompletionAccount::begin(
+        ctx,
+        lifecycle.script(),
+        super::rejection::RequestIdentity::admitted(
+            super::rejection::RequestId::generate(),
+            request.method(),
+            request.uri(),
+            remote_addr,
+            request.version(),
+        ),
+    );
+    // The finalizer moves into the response guard, which is this operation's
+    // one response lifetime. Whichever way that lifetime ends, its drop is the
+    // moment the record is written.
+    let (lifetime, guard) = liveness.begin_response(super::completion::OperationFinalizer::owning(
+        Arc::clone(&account),
+        lifecycle.stop(),
+    ));
     let response = handle_request(
         request,
         router,
@@ -1119,12 +1008,8 @@ async fn serve_request(
         &account,
     )
     .await?;
-    Ok(GuardedBody::attach(
-        response,
-        guard,
-        bodyless_request,
-        account.into_completion(),
-    ))
+    drop(owner);
+    Ok(GuardedBody::attach(response, guard, bodyless_request))
 }
 
 fn connection_builder(

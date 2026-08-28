@@ -110,6 +110,24 @@ impl ResponseProvenance {
         }
     }
 
+    /// Whether rejection policy built this response.
+    ///
+    /// Asked by the owners whose registered producer is only the producer while
+    /// that producer answered for itself. A forwarded route names its upstream,
+    /// and a mapped answer coming back from one means no upstream head ever
+    /// reached it: the mapper built the head instead, and it is the mapper the
+    /// operation's commitment has to name.
+    ///
+    /// Listed rather than wildcarded, for the reason
+    /// [`Self::is_gate_passthrough`] is: a new variant is a compile error here
+    /// instead of a head credited to an owner that produced nothing.
+    pub(super) fn is_mapped(&self) -> bool {
+        match self {
+            Self::Mapped(_) => true,
+            Self::Application | Self::Gate => false,
+        }
+    }
+
     /// The refusal this response answered, when rejection policy produced it.
     pub(super) fn into_refusal(self) -> Option<Box<MappedRefusal>> {
         match self {

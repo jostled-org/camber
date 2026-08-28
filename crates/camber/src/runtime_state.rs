@@ -3,7 +3,7 @@ use crate::resource::registry::ResourceRegistry;
 // cancellation watcher, and the server supervisor all give an aborted owner the
 // same grace rather than three that can drift apart.
 use crate::lifecycle::{
-    FORCED_JOIN_GRACE, LifecycleFailureKind, LifecycleParticipant, LifecyclePhase,
+    FORCED_JOIN_GRACE, LifecycleFailureKind, LifecycleParticipant, LifecyclePhase, ShutdownOwner,
 };
 use crate::runtime_test_support::{ParticipantDisposition, RuntimeCheckpoint, RuntimeSchedule};
 use crate::tls::CertStore;
@@ -341,7 +341,9 @@ impl RuntimeInner {
     /// first of the two triggers (closure return, shutdown request) wins.
     pub(crate) fn close_scope(&self) {
         self.pause_test_schedule(RuntimeCheckpoint::ScopeCloseTransition);
-        self.scope.close();
+        if self.scope.close() {
+            self.observe_scope(RuntimeSchedule::record_scope_drained);
+        }
     }
 
     pub(crate) fn scope_closing(&self) -> LatchSignal {
@@ -370,7 +372,7 @@ impl RuntimeInner {
     /// admission — there is no handle it could ever abort — and the returned
     /// slot releases the claim when dropped.
     pub(crate) fn admit_blocking(self: &Arc<Self>) -> Result<ScopeSlot, crate::RuntimeError> {
-        self.admit(ChildKind::Blocking)
+        self.admit(ChildKind::Blocking, None)
     }
 
     /// Admit one Camber-owned async child, whose panic no user handle can
@@ -378,29 +380,42 @@ impl RuntimeInner {
     ///
     /// The scope records the first such panic so `run` can report it; a
     /// user-owned child keeps delivering its panic through its own handle.
+    ///
+    /// `subsystem` is the name the caller admitted this child under, for the
+    /// Camber-owned loops that carry one. It travels with the admission rather
+    /// than being registered beside it, so the name belongs to this child and
+    /// not to whichever child a concurrent admission produced.
     pub(crate) fn admit_internal_async<F>(
         self: &Arc<Self>,
+        subsystem: Option<&str>,
         body: F,
     ) -> Result<(), crate::RuntimeError>
     where
         F: Future<Output = ()> + Send + 'static,
     {
         let sink = Arc::clone(self);
-        self.admit_async(capture_child_panic(body, sink))
+        self.admit_async(subsystem, capture_child_panic(body, sink))
     }
 
     /// Admit one async child and spawn it behind a start gate, so the scope
     /// registers the joinable handle before the child's body runs. The gate
     /// closes the race between `tokio::spawn` returning a handle and the
     /// child completing.
-    pub(crate) fn admit_async<F>(self: &Arc<Self>, body: F) -> Result<(), crate::RuntimeError>
+    ///
+    /// `subsystem` names a Camber-owned loop and is `None` for a user-owned
+    /// child, which the application already holds its own handle to.
+    pub(crate) fn admit_async<F>(
+        self: &Arc<Self>,
+        subsystem: Option<&str>,
+        body: F,
+    ) -> Result<(), crate::RuntimeError>
     where
         F: Future<Output = ()> + Send + 'static,
     {
         // Resolved before anything is counted, so a runtime with nowhere to run
         // the child refuses it instead of admitting one it cannot launch.
         let executor = self.executor()?;
-        let slot = self.admit(ChildKind::Async)?;
+        let slot = self.admit(ChildKind::Async, subsystem)?;
         let id = slot.id;
         let gate = Arc::new(tokio::sync::Notify::new());
         // The task-local scope is built here rather than through the
@@ -423,16 +438,22 @@ impl RuntimeInner {
             swept.abort();
             return Err(crate::RuntimeError::ScopeClosed);
         }
+        self.observe_scope(|schedule| schedule.record_scope_retention(id));
         self.pause_test_schedule(RuntimeCheckpoint::AdmissionRegistered);
         gate.notify_one();
         Ok(())
     }
 
     /// Admit one child to the root scope, or refuse it once admission closed.
-    fn admit(self: &Arc<Self>, kind: ChildKind) -> Result<ScopeSlot, crate::RuntimeError> {
+    fn admit(
+        self: &Arc<Self>,
+        kind: ChildKind,
+        subsystem: Option<&str>,
+    ) -> Result<ScopeSlot, crate::RuntimeError> {
         match self.scope.admit(kind) {
             None => Err(crate::RuntimeError::ScopeClosed),
             Some(id) => {
+                self.observe_admission(id, kind, subsystem);
                 self.pause_test_schedule(RuntimeCheckpoint::AdmissionCounted);
                 Ok(ScopeSlot {
                     runtime: Arc::clone(self),
@@ -443,15 +464,36 @@ impl RuntimeInner {
         }
     }
 
-    /// How many children the root scope retains an entry for.
-    pub(crate) fn scope_registry_len(&self) -> usize {
-        self.scope.registry_len()
+    /// Publish that `child` was admitted, and whether the owner already holds
+    /// it.
+    ///
+    /// A blocking child's tally entry IS the owner's hold on it: there is no
+    /// handle to fill later, so retention lands with admission. An async child
+    /// is retained when its joinable handle is registered, one checkpoint
+    /// further on.
+    ///
+    /// A `subsystem` name travels with the admission, so a case can ask after a
+    /// Camber-owned loop the runtime started for itself — during startup, before
+    /// any user code ran — rather than only after a claim it could take first.
+    fn observe_admission(&self, child: u64, kind: ChildKind, subsystem: Option<&str>) {
+        self.observe_scope(|schedule| {
+            schedule.record_scope_admission(child, subsystem);
+            match kind {
+                ChildKind::Blocking => schedule.record_scope_retention(child),
+                ChildKind::Async => {}
+            }
+        });
     }
 
-    /// How many children the scope owner has awaited to Tokio-handle
-    /// completion.
-    pub(crate) fn scope_joined_count(&self) -> usize {
-        self.scope.joined_count()
+    /// Publish one owner-local root-scope fact about `child`.
+    ///
+    /// One entry point for every such fact, so the four moments a child passes
+    /// through are published the same way and a run with no controller attached
+    /// pays for none of them.
+    fn observe_scope(&self, publish: impl FnOnce(&RuntimeSchedule)) {
+        if let Some(schedule) = self.test_schedule.as_ref() {
+            publish(schedule);
+        }
     }
 
     /// Take the first panic an internally-owned child recorded, leaving the
@@ -643,7 +685,6 @@ struct ScopeState {
     /// before it could register leaves nothing behind.
     async_children: HashMap<TaskId, Option<tokio::task::JoinHandle<()>>>,
     blocking_children: HashSet<TaskId>,
-    joined: usize,
     /// Set once the escalation has swept the registry, so a handle registered
     /// after that sweep is stopped by its registrar rather than retained by an
     /// owner that will never look again.
@@ -705,22 +746,6 @@ impl ScopeState {
             }
         }
     }
-
-    /// How many children the owner retains a way to stop: one joinable handle
-    /// per spawned async child, one tally entry per blocking child.
-    ///
-    /// A seeded async entry with no handle yet is NOT counted. The entry
-    /// records that the child exists so its removal has something to remove;
-    /// the handle is what the owner can act on, and that is what this number
-    /// has always meant to the probes that read it.
-    fn entries(&self) -> usize {
-        let registered = self
-            .async_children
-            .values()
-            .filter(|handle| handle.is_some())
-            .count();
-        registered + self.blocking_children.len()
-    }
 }
 
 /// The runtime's root task scope: the completion owner of every admitted
@@ -744,7 +769,6 @@ impl TaskScope {
                 next_id: 0,
                 async_children: HashMap::new(),
                 blocking_children: HashSet::new(),
-                joined: 0,
                 stopped: false,
             }),
             idle: Condvar::new(),
@@ -827,14 +851,6 @@ impl TaskScope {
         self.lock().fill_async_handle(id, handle)
     }
 
-    fn registry_len(&self) -> usize {
-        self.lock().entries()
-    }
-
-    fn joined_count(&self) -> usize {
-        self.lock().joined
-    }
-
     fn count(&self) -> usize {
         self.lock().count
     }
@@ -845,20 +861,19 @@ impl TaskScope {
     /// A seeded entry with no handle yet is drained with the rest and yields
     /// nothing to stop: its child is counted but not spawned, and `stopped`
     /// is what makes its registrar abort it instead.
-    fn take_async_children(&self) -> Box<[tokio::task::JoinHandle<()>]> {
+    ///
+    /// Each handle keeps its child's identity. A forced stop joins whichever
+    /// child resolves first, so without the identity travelling beside the
+    /// handle the acknowledgment could only be counted — and a count cannot say
+    /// which child came back.
+    fn take_async_children(&self) -> Box<[(TaskId, tokio::task::JoinHandle<()>)]> {
         let mut state = self.lock();
         state.stopped = true;
         state
             .async_children
             .drain()
-            .filter_map(|(_, handle)| handle)
+            .filter_map(|(id, handle)| handle.map(|handle| (id, handle)))
             .collect()
-    }
-
-    /// Acknowledge that the owner awaited one child's Tokio handle to
-    /// completion.
-    fn record_join(&self) {
-        self.lock().joined += 1;
     }
 
     /// Abort every retained async child and join it under one bounded grace.
@@ -873,22 +888,31 @@ impl TaskScope {
     /// ones still outstanding when the grace expires are named, because a child
     /// the executor cannot stop is exactly the participant an operator has to
     /// be told about.
-    async fn force_stop(&self, shutdown: &crate::lifecycle::AggregateShutdown) {
+    async fn force_stop(
+        &self,
+        shutdown: &crate::lifecycle::AggregateShutdown,
+        schedule: Option<&RuntimeSchedule>,
+    ) {
         let handles = self.take_async_children();
         let aborted = handles.len();
-        for handle in handles.iter() {
+        for (_, handle) in handles.iter() {
             handle.abort();
         }
-        let mut joins: futures_util::stream::FuturesUnordered<_> =
-            handles.into_vec().into_iter().collect();
+        let mut joins: futures_util::stream::FuturesUnordered<_> = handles
+            .into_vec()
+            .into_iter()
+            .map(|(id, handle)| async move { (id, handle.await) })
+            .collect();
         let mut settled = 0;
         let drain = async {
-            while let Some(joined) = futures_util::StreamExt::next(&mut joins).await {
+            while let Some((id, joined)) = futures_util::StreamExt::next(&mut joins).await {
                 report_forced_join(joined);
-                self.record_join();
+                if let Some(schedule) = schedule {
+                    schedule.record_scope_join(id);
+                }
                 settled += 1;
                 shutdown.settle(
-                    &LifecycleParticipant::BackgroundTask,
+                    &ShutdownOwner::BACKGROUND_TASK,
                     ParticipantDisposition::CancelledAndJoined,
                 );
             }
@@ -901,38 +925,50 @@ impl TaskScope {
         }
         for _ in settled..aborted {
             shutdown.settle(
-                &LifecycleParticipant::BackgroundTask,
+                &ShutdownOwner::BACKGROUND_TASK,
                 ParticipantDisposition::Named,
             );
         }
     }
 
-    fn finish(&self, id: TaskId, kind: ChildKind) {
+    /// Release one child's slot, answering whether that release drained the
+    /// scope.
+    fn finish(&self, id: TaskId, kind: ChildKind) -> bool {
         let mut state = self.lock();
         state.remove_child(id, kind);
-        match state.count {
+        let drained = match state.count {
             0 => {
                 tracing::error!("runtime task scope completed an unadmitted child");
-                return;
+                return false;
             }
             1 => {
                 state.count = 0;
                 state.admission = state.admission.on_drained();
+                true
             }
-            current => state.count = current - 1,
-        }
+            current => {
+                state.count = current - 1;
+                false
+            }
+        };
         // Every exit wakes the drain, so its `ScopeWaitObserved` checkpoint
         // reports each count it passes through, not only the last one.
         self.idle.notify_all();
+        drained
     }
 
-    /// Perform the single atomic `Open -> Closing` transition and fire
-    /// `ScopeClosing`. A scope with no children settles straight to `Closed`.
-    fn close(&self) {
+    /// Take the close transition, answering whether it left the scope drained.
+    ///
+    /// A scope holding no children settles straight to `Closed`, so the close
+    /// itself is the drain for that run and no later child exit will publish
+    /// one.
+    fn close(&self) -> bool {
         let mut state = self.lock();
         state.admission = state.admission.on_close(state.count);
+        let drained = matches!(state.admission, Admission::Closed);
         drop(state);
         self.closing.fire();
+        drained
     }
 
     /// Wait for children to exit cooperatively, bounded by `timeout`.
@@ -1005,7 +1041,14 @@ pub(crate) struct ScopeSlot {
 
 impl Drop for ScopeSlot {
     fn drop(&mut self) {
-        self.runtime.scope.finish(self.id, self.kind);
+        let drained = self.runtime.scope.finish(self.id, self.kind);
+        let id = self.id;
+        self.runtime.observe_scope(|schedule| {
+            schedule.record_scope_settlement(id);
+            if drained {
+                schedule.record_scope_drained();
+            }
+        });
     }
 }
 
@@ -1320,7 +1363,7 @@ pub(crate) fn drain_root_scope(
 ) {
     let shutdown = inner.shutdown_deadline();
     let remaining = shutdown.bounded(
-        &LifecycleParticipant::RootScope,
+        &ShutdownOwner::ROOT_SCOPE,
         inner.config.server_policy.shutdown_timeout_value(),
     );
     let outstanding = inner
@@ -1328,20 +1371,21 @@ pub(crate) fn drain_root_scope(
         .wait_timeout(remaining, inner.test_schedule.as_deref());
     match outstanding {
         0 => shutdown.settle(
-            &LifecycleParticipant::RootScope,
+            &ShutdownOwner::ROOT_SCOPE,
             ParticipantDisposition::Completed,
         ),
         count => {
-            executor.block_on(inner.scope.force_stop(&shutdown));
+            executor.block_on(
+                inner
+                    .scope
+                    .force_stop(&shutdown, inner.test_schedule.as_deref()),
+            );
             log.record(
                 LifecycleParticipant::RootScope,
                 LifecyclePhase::GracefulDrain,
                 LifecycleFailureKind::ScopeDrainTimeout { outstanding: count },
             );
-            shutdown.settle(
-                &LifecycleParticipant::RootScope,
-                ParticipantDisposition::Named,
-            );
+            shutdown.settle(&ShutdownOwner::ROOT_SCOPE, ParticipantDisposition::Named);
         }
     }
     inner.observe_drain_end();

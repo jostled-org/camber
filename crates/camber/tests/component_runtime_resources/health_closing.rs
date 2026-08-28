@@ -1,6 +1,6 @@
 use crate::common::{
-    BOUND, BoundedReadError, PERPETUAL, RUNTIME_OWNED_CHILDREN, SHORT_DRAIN, block_on_detached,
-    join_thread_bounded, prove_scope_owned,
+    BOUND, BoundedReadError, PERPETUAL, SHORT_DRAIN, block_on_detached, join_thread_bounded,
+    prove_scope_owned,
 };
 use crate::scope_builders::scope_runtime;
 use camber::{RuntimeError, http, runtime};
@@ -39,14 +39,6 @@ const HEALTHY_RESPONSE: &[u8] =
 /// What the upstream answers [`UNHEALTHY_PATH`] with.
 const UNHEALTHY_RESPONSE: &[u8] =
     b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-
-/// Root-scope children while the checker's loop runs: the runtime's own signal
-/// watcher, the fixture's holder, and the loop itself.
-///
-/// Fixed rather than read from the scope before the loop is admitted. A
-/// baseline the case takes for itself absorbs any stray child into its own
-/// expectation, so an extra internal occupant would still pass.
-const CHECKER_OCCUPANTS: usize = RUNTIME_OWNED_CHILDREN + 2;
 
 /// An HTTP/1.1 upstream on a background thread, answering by request target.
 ///
@@ -171,13 +163,14 @@ fn spawn_health_checker_exits_on_scope_closing() {
     let (proof, healthy) = prove_scope_owned(
         BOUND,
         |builder| builder,
-        move |_| {
+        move |subjects| {
+            subjects.name_subsystem("health checker");
             let checker = http::spawn_health_checker(&url, "/", PERPETUAL);
             runtime::block_on(checker).unwrap().load(Ordering::Acquire)
         },
     );
 
-    proof.assert_owned("spawn_health_checker's loop", CHECKER_OCCUPANTS);
+    proof.assert_owned("spawn_health_checker's loop");
     assert!(healthy, "the deterministic upstream did not report healthy");
     // Exactly one: the initial probe runs before admission and `PERPETUAL`
     // is long enough that the admitted loop cannot add a second, so a loop that
@@ -204,7 +197,8 @@ fn spawn_health_checker_publishes_a_refused_initial_probe() {
     let (proof, healthy) = prove_scope_owned(
         BOUND,
         |builder| builder,
-        move |_| {
+        move |subjects| {
+            subjects.name_subsystem("health checker");
             let checker = http::spawn_health_checker(&url, UNHEALTHY_PATH, PERPETUAL);
             runtime::block_on(checker).unwrap().load(Ordering::Acquire)
         },
@@ -212,7 +206,7 @@ fn spawn_health_checker_publishes_a_refused_initial_probe() {
 
     // Admitted on the same terms as a healthy backend: a refusing upstream is
     // a state the loop reports, not a reason to skip the loop.
-    proof.assert_owned("spawn_health_checker's loop", CHECKER_OCCUPANTS);
+    proof.assert_owned("spawn_health_checker's loop");
     assert!(!healthy, "the refusing upstream was reported healthy");
     assert_eq!(
         upstream.probes(),

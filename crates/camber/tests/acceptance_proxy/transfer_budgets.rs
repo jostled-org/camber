@@ -9,7 +9,10 @@
 use crate::common;
 
 use camber::__private::frozen_proxy_client_identities;
-use camber::http::mock::{InboundTerminal, LifecycleCheckpoint, LifecycleController};
+use camber::http::mock::{
+    InboundTerminal, ResponseCommitmentEdge, ScopedStagedTransfer, ScopedTransferOwner,
+    ServerStopEdge, TransferOwnerController,
+};
 use camber::http::{ProxyPolicy, RejectionKind, Router, TransferBudget};
 use camber::runtime;
 use std::io::Write;
@@ -76,13 +79,6 @@ fn assert_no_upstream_payload(body: &[u8], label: &str) {
             .any(|window| window == UPSTREAM_BODY.as_bytes()),
         "{label}: no part of the upstream's answer reaches the peer",
     );
-}
-
-/// Wait until `controller` is holding production at `checkpoint`.
-fn wait_paused(controller: &LifecycleController, checkpoint: LifecycleCheckpoint, label: &str) {
-    common::block_on(async {
-        common::wait_until_paused_bounded(controller, checkpoint, label).await;
-    });
 }
 
 /// What one refusal left the peer's connection able to do next.
@@ -206,8 +202,11 @@ fn observed_streaming_route(
     backend: &str,
     policy: ProxyPolicy,
     journal: &common::Journal,
-) -> (common::ObservedServer, Arc<LifecycleController>) {
-    let port = common::reserve_observed();
+) -> (
+    common::ObservedServer<ScopedTransferOwner>,
+    Arc<ScopedTransferOwner>,
+) {
+    let port = common::reserve_transfer_owner();
     let controller = port.controller();
     let mut router = Router::new().rejection_mapper(common::recording_mapper(journal, "route"));
     router.proxy_stream_with_policy(PREFIX, backend, policy);
@@ -344,8 +343,8 @@ fn buffered_download_phase_row() {
 /// Wait until one direction's transfer owner has fixed its terminal, and say
 /// which one it fixed.
 fn awaited_terminal(
-    controller: &LifecycleController,
-    direction: impl Fn(&LifecycleController) -> Option<InboundTerminal>,
+    controller: &TransferOwnerController,
+    direction: impl Fn(&TransferOwnerController) -> Option<InboundTerminal>,
     label: &str,
 ) -> InboundTerminal {
     let settled = common::poll_until(ROW_BOUND, || direction(controller).is_some());
@@ -393,7 +392,7 @@ fn upload_phase_row() {
 fn assert_upload_phase(
     answered: &common::HttpResponse,
     journal: &common::Journal,
-    controller: &LifecycleController,
+    controller: &TransferOwnerController,
     label: &str,
 ) {
     assert_eq!(
@@ -410,7 +409,7 @@ fn assert_upload_phase(
     assert_eq!(
         awaited_terminal(
             controller,
-            |controller| controller.transfers_observed().upload.terminal,
+            |controller| controller.observed().upload.terminal,
             label,
         ),
         InboundTerminal::TransferIdle,
@@ -463,7 +462,7 @@ fn download_phase_row() {
 fn assert_download_phase(
     raw: &[u8],
     journal: &common::Journal,
-    controller: &LifecycleController,
+    controller: &TransferOwnerController,
     admitted: usize,
 ) {
     let label = "download phase";
@@ -479,7 +478,7 @@ fn assert_download_phase(
     assert_eq!(
         awaited_terminal(
             controller,
-            |controller| controller.transfers_observed().download.terminal,
+            |controller| controller.observed().download.terminal,
             label,
         ),
         InboundTerminal::TransferBytes,
@@ -668,7 +667,7 @@ const CROSSING_FRAME: &[u8] = b"crossing-frame-past-the-frozen-ceiling";
 struct Staged {
     addr: SocketAddr,
     handle: camber::http::ServerHandle,
-    controller: Arc<LifecycleController>,
+    controller: Arc<ScopedStagedTransfer>,
     journal: common::Journal,
 }
 
@@ -684,7 +683,7 @@ impl Staged {
                 .with_total(total)
                 .expect("a finite request total"),
         );
-        let (listener, addr, controller) = common::reserve_observed().into_owned_parts();
+        let (listener, addr, controller) = common::reserve_staged_transfer().into_owned_parts();
         let handle = camber::http::server(router)
             .policy(
                 camber::http::ServerPolicy::default()
@@ -701,27 +700,17 @@ impl Staged {
         }
     }
 
-    /// Arm one checkpoint this row stages against.
-    fn arm(&self, checkpoint: LifecycleCheckpoint, label: &str) {
-        self.controller
-            .pause_once(checkpoint)
-            .unwrap_or_else(|error| panic!("{label}: arming {checkpoint:?} failed: {error}"));
-    }
-
-    /// Let go of one checkpoint this row was holding.
-    fn release(&self, checkpoint: LifecycleCheckpoint, label: &str) {
-        self.controller
-            .release(checkpoint)
-            .unwrap_or_else(|error| panic!("{label}: releasing {checkpoint:?} failed: {error}"));
-    }
-
     /// Open one upload and wait until its upstream head is held uncommitted.
     fn upload_with_held_head(&self, label: &str) -> TcpStream {
-        self.arm(LifecycleCheckpoint::StreamingUpstreamHeadReady, label);
-        let peer = open_upload(self.addr);
-        wait_paused(
+        common::arm_point(
             &self.controller,
-            LifecycleCheckpoint::StreamingUpstreamHeadReady,
+            ResponseCommitmentEdge::UpstreamHeadReady,
+            label,
+        );
+        let peer = open_upload(self.addr);
+        common::wait_paused_blocking(
+            &self.controller,
+            ResponseCommitmentEdge::UpstreamHeadReady,
             label,
         );
         peer
@@ -735,9 +724,9 @@ impl Staged {
     /// reading payload for a request this service has already ended.
     fn assert_quiesced_upload(&self, frames: usize, label: &str) {
         let released = common::poll_until(ROW_BOUND, || {
-            self.controller.transfers_observed().upload.releases >= 1
+            self.controller.transfers.observed().upload.releases >= 1
         });
-        let observed = self.controller.transfers_observed().upload;
+        let observed = self.controller.transfers.observed().upload;
         assert!(
             released,
             "{label}: the upload owner released its source: {observed:?}",
@@ -749,6 +738,26 @@ impl Staged {
         assert_eq!(
             observed.frames_polled, frames,
             "{label}: no frame is polled past the one the selected cause was weighed against",
+        );
+    }
+
+    /// Assert the upstream's own head is what took this operation's commitment.
+    ///
+    /// Read off the production cell rather than off the status: a `200` the
+    /// route's mapper produced would look the same on the wire, and what this
+    /// row states is which owner answered.
+    fn assert_committed_head(&self, label: &str) {
+        let observed = self.controller.commitment.observed();
+        assert_eq!(
+            observed.committed,
+            Some(camber::http::mock::ResponseCommit::Head(
+                camber::http::mock::ResponseOrigin::Upstream
+            )),
+            "{label}: the upstream head is the fact this operation committed: {observed:?}",
+        );
+        assert_eq!(
+            observed.commits, 1,
+            "{label}: exactly one producer took this operation's commitment: {observed:?}",
         );
     }
 
@@ -806,7 +815,7 @@ struct OperationRow {
 /// it stands, and this row is about what the coordinator decided. Held at the
 /// production transition the supervisor selects it from, the transition is
 /// published and the escalation behind it is not.
-const SUPERVISOR: LifecycleCheckpoint = LifecycleCheckpoint::SupervisorSelectedControl;
+const SUPERVISOR: ServerStopEdge = ServerStopEdge::SupervisorSelectedControl;
 
 /// Run one operation-source row end to end.
 fn run_operation_row(row: &OperationRow) {
@@ -818,14 +827,14 @@ fn run_operation_row(row: &OperationRow) {
         ProxyPolicy::default(),
         operation_total(&row.source),
     );
-    let selected = LifecycleCheckpoint::InboundTerminalSelected(row.terminal);
-    staged.arm(selected, label);
+    let selected = ResponseCommitmentEdge::CauseCommitted(row.terminal);
+    common::arm_point(&staged.controller, selected, label);
     let mut peer = staged.upload_with_held_head(label);
 
     stage_operation_source(&staged, &row.source, &mut peer, label);
-    wait_paused(&staged.controller, selected, label);
+    common::wait_paused_blocking(&staged.controller, selected, label);
     staged.assert_quiesced_upload(1, label);
-    staged.release(selected, label);
+    common::release_point(&staged.controller, selected, label);
 
     assert_staged_answer(&mut peer, row.answer, label);
     staged.assert_mapped(mapper_calls(row.answer), label);
@@ -878,14 +887,14 @@ fn stage_operation_source(
             .shutdown(std::net::Shutdown::Write)
             .expect("the peer ended the half it was sending on"),
         OperationSource::Shutdown => {
-            staged.arm(SUPERVISOR, label);
+            common::arm_point(&staged.controller, SUPERVISOR, label);
             staged.handle.shutdown();
-            wait_paused(&staged.controller, SUPERVISOR, label);
+            common::wait_paused_blocking(&staged.controller, SUPERVISOR, label);
         }
         OperationSource::Cancel => {
-            staged.arm(SUPERVISOR, label);
+            common::arm_point(&staged.controller, SUPERVISOR, label);
             staged.handle.cancel();
-            wait_paused(&staged.controller, SUPERVISOR, label);
+            common::wait_paused_blocking(&staged.controller, SUPERVISOR, label);
         }
     }
 }
@@ -893,7 +902,9 @@ fn stage_operation_source(
 /// Let go of whatever this row held, then stop and join its server.
 fn finish_operation_row(staged: Staged, source: &OperationSource, label: &str) {
     match source {
-        OperationSource::Shutdown | OperationSource::Cancel => staged.release(SUPERVISOR, label),
+        OperationSource::Shutdown | OperationSource::Cancel => {
+            common::release_point(&staged.controller, SUPERVISOR, label)
+        }
         OperationSource::RequestTotal | OperationSource::Disconnect => {}
     }
     staged.finish(label);
@@ -982,6 +993,73 @@ fn run_upload_row(row: &UploadRow) {
     staged.finish(label);
 }
 
+/// The reverse direction: an upstream head committed before the local limit.
+///
+/// Every other row here holds the upstream head uncommitted and lets a local
+/// cause take the cell. This one releases the head first and only then puts the
+/// crossing frame on the wire, which is the order the removed rule could not
+/// answer: an unconditional local-limit priority remaps a `200` the peer is
+/// already holding into a `413`.
+///
+/// The two production edges are what make the order real rather than timed. The
+/// head is held at the instant it became ready, released, and then the row waits
+/// at the downstream commit barrier — which production only reaches after it has
+/// taken the commitment and quiesced this upload. The crossing frame is written
+/// from there, so the ceiling is raised against a request whose answer was
+/// already decided, and the row requires the upstream status, an untouched
+/// mapper, and the upstream's own payload delivered whole.
+fn run_committed_head_row() {
+    let label = "an upstream head committed before the crossing frame";
+    let upstream = common::raw_upstream(200, UPSTREAM_BODY, common::UpstreamAnswers::OnHead);
+    let staged = Staged::serve(
+        &upstream.backend(),
+        upload_policy(&UploadLimit::Bytes),
+        UNREACHED_TOTAL,
+    );
+    common::arm_point(
+        &staged.controller,
+        ResponseCommitmentEdge::BeforeDownstreamCommit,
+        label,
+    );
+    let mut peer = staged.upload_with_held_head(label);
+
+    common::release_point(
+        &staged.controller,
+        ResponseCommitmentEdge::UpstreamHeadReady,
+        label,
+    );
+    common::wait_paused_blocking(
+        &staged.controller,
+        ResponseCommitmentEdge::BeforeDownstreamCommit,
+        label,
+    );
+    // The commitment is taken and this upload has already been asked to stop, so
+    // the ceiling below is raised behind the answer rather than against it.
+    common::tolerate_dead_socket(common::write_chunk(&mut peer, CROSSING_FRAME))
+        .expect("the crossing frame reached the proxy");
+    common::release_point(
+        &staged.controller,
+        ResponseCommitmentEdge::BeforeDownstreamCommit,
+        label,
+    );
+
+    let answered = common::read_http_response_bounded(&mut peer)
+        .unwrap_or_else(|error| panic!("{label}: the committed head went undelivered: {error}"));
+    assert_eq!(
+        answered.status, 200,
+        "{label}: the committed upstream status is the one the peer keeps",
+    );
+    assert_eq!(
+        answered.body.as_ref(),
+        UPSTREAM_BODY.as_bytes(),
+        "{label}: the upstream's own payload is delivered whole",
+    );
+    staged.assert_mapped(0, label);
+    staged.assert_committed_head(label);
+    assert_upstream_leg(&upstream, label);
+    staged.finish(label);
+}
+
 /// Assert this row's refusal came from the owner that measured its bound.
 ///
 /// The journal is read through `only`, which is also this row's at-most-one
@@ -993,12 +1071,12 @@ fn assert_upload_provenance(staged: &Staged, row: &UploadRow) {
         seen.kind, row.kind,
         "{label}: the refusal keeps the category of the owner that raised it",
     );
-    let observed = staged.controller.transfers_observed().upload;
+    let observed = staged.controller.transfers.observed().upload;
     match row.terminal {
         Some(terminal) => assert_eq!(
             awaited_terminal(
-                &staged.controller,
-                |controller| controller.transfers_observed().upload.terminal,
+                &staged.controller.transfers,
+                |controller| controller.observed().upload.terminal,
                 label,
             ),
             terminal,
@@ -1043,15 +1121,23 @@ fn stage_upload_limit(limit: &UploadLimit, peer: &mut TcpStream) {
     }
 }
 
-/// 12.T3
+/// Invariant 11
 ///
-/// Every local source an admitted streaming forward carries is staged against
-/// an upstream head this service is holding and has not committed: the request
-/// total, the peer's own lifetime, the aggregate deadline a stop mints, an
-/// explicit cancellation, and the three bounds this request's own upload runs
-/// under. Each row reads the cause off the production owner that selected it.
+/// A local cause that took this operation's response commitment while its
+/// upstream head was still held short of the commit barrier owns the answer, and
+/// a head committed first is not replaced by one. Every local source an admitted
+/// streaming forward carries is driven against a head this service is holding
+/// and has not committed: the request total, the peer's own lifetime, the
+/// aggregate deadline a stop mints, an explicit cancellation, and the three
+/// bounds this request's own upload runs under. Each row reads the cause off the
+/// production owner that committed it, so the order proved is commit order and
+/// not a rank.
+///
+/// The last row runs that order backwards. It releases the upstream head first
+/// and raises the ceiling behind it, and requires the `200` to stand — which the
+/// removed unconditional local-limit priority answered `413`.
 #[test]
-fn streaming_proxy_equal_ready_local_limit_precedes_uncommitted_upstream_head() {
+fn streaming_proxy_head_and_limit_obey_response_commit_order() {
     for row in [
         OperationRow {
             label: "request total",
@@ -1112,6 +1198,9 @@ fn streaming_proxy_equal_ready_local_limit_precedes_uncommitted_upstream_head() 
             .run(|| run_upload_row(&row))
             .expect("the fixture runtime ran to completion");
     }
+    staged_runtime()
+        .run(run_committed_head_row)
+        .expect("the fixture runtime ran to completion");
 }
 
 /// The runtime one staged row runs under.

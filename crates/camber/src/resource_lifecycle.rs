@@ -12,7 +12,7 @@ mod worker;
 
 use crate::lifecycle::{
     LifecycleFailureKind, LifecycleFailureLog, LifecycleParticipant, LifecyclePhase,
-    ResourceFailureKind, ResourcePhase,
+    ResourceFailureKind, ResourcePhase, ShutdownOwner,
 };
 use crate::resource::entry::ResourceEntry;
 use crate::resource::registry::ResourceRegistry;
@@ -92,16 +92,15 @@ pub(crate) fn shutdown_resources(
     let budget = runtime.config.resource_budget;
     let shutdown = runtime.shutdown_deadline();
     for entry in registry.iter().rev() {
-        let participant = LifecycleParticipant::Resource(Arc::clone(entry.name()));
-        let limit =
-            budget.phase_deadline(ResourcePhase::Shutdown, shutdown.remaining(&participant));
+        let owner = ShutdownOwner::resource(entry.name());
+        let limit = budget.phase_deadline(ResourcePhase::Shutdown, shutdown.remaining(&owner));
         let outcome = worker::run_callback_blocking(entry, ResourcePhase::Shutdown, limit, runtime);
         let settled = match outcome.is_some() {
             true => ParticipantDisposition::Named,
             false => ParticipantDisposition::Completed,
         };
         record(entry, ResourcePhase::Shutdown, outcome, log);
-        shutdown.settle(&participant, settled);
+        shutdown.settle(&owner, settled);
     }
 }
 

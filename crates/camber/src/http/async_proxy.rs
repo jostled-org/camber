@@ -3,10 +3,12 @@ use super::boundary::DeadlineBoundary;
 use super::encoding::decode_hex_pair;
 use super::map_reqwest_error;
 use super::method::{Method, RequestMethod};
-use super::mock::{LifecycleCheckpoint, LifecycleScript};
+use super::mock::{LifecycleScript, ResponseCommitmentEdge};
+use super::operation::InboundTerminal;
 use super::proxy_upstream::ProxyUpstream;
 use super::rejection::{Diagnostic, Rejected, proxy_failure_status};
 use super::response::HeaderPair;
+use super::response_commitment::{OperationCommitment, ResponseCommit, ResponseOrigin};
 use super::transfer::{IncomingSource, Transfer, TransferFailure, TransferOwner};
 use crate::RuntimeError;
 use arrayvec::ArrayString;
@@ -937,9 +939,9 @@ async fn stream_upstream(
     observer: Option<&Arc<LifecycleScript>>,
 ) -> Result<StreamingProxyResponse, ProxyFailure> {
     let answer = send_upstream(builder, upstream).await?;
-    LifecycleScript::pause_at(
+    LifecycleScript::pause_at_response_commit(
         observer.map(Arc::as_ref),
-        LifecycleCheckpoint::StreamingUpstreamHeadReady,
+        ResponseCommitmentEdge::UpstreamHeadReady,
     )
     .await;
     Ok(StreamingProxyResponse {
@@ -948,18 +950,6 @@ async fn stream_upstream(
         rx: spawn_response_streamer(answer.response, upstream.upstream_idle()),
         upload: UploadDisposition::Drained,
     })
-}
-
-/// Forward a request to upstream and stream the response body via a channel.
-///
-/// The payload was collected and bounded before this call, so its upload owes
-/// nothing to settle: only the answer is still outstanding.
-pub(super) async fn forward_request_streaming(
-    req: ProxyRequest,
-    target: &ProxyTarget<'_>,
-) -> Result<StreamingProxyResponse, UploadFailure> {
-    let builder = build_upstream_request(&req, target)?;
-    Ok(stream_upstream(builder, target.upstream, None).await?)
 }
 
 /// Forward an incoming hyper body stream to upstream under its admission.
@@ -979,6 +969,7 @@ pub(super) async fn forward_incoming_streaming(
     admitted: AdmittedBody,
     upload: TransferOwner,
     target: &ProxyTarget<'_>,
+    commitment: &OperationCommitment,
     observer: Option<&Arc<LifecycleScript>>,
 ) -> Result<StreamingProxyResponse, UploadFailure> {
     let (body, coordinator) = bounded_upload(incoming, admitted, upload, observer);
@@ -986,6 +977,7 @@ pub(super) async fn forward_incoming_streaming(
     settle_upload(
         coordinator,
         stream_upstream(builder, target.upstream, observer),
+        commitment,
     )
     .await
 }
@@ -1002,6 +994,15 @@ pub(super) enum UploadFailure {
     Proxy(ProxyFailure),
     /// The bounded upload refused this request before anything was committed.
     Body(Rejected),
+    /// This forward produced no answer, and this operation's response was
+    /// already committed by another producer.
+    ///
+    /// The refusal it measured is deliberately dropped: mapping it would be a
+    /// second status for one request, which is the thing the commitment exists
+    /// to make unreachable. What travels instead is the terminal that ended the
+    /// request, so the exit records the cause the peer was actually lost to
+    /// rather than a payload end this forward never saw.
+    Committed(InboundTerminal),
 }
 
 impl From<ProxyFailure> for UploadFailure {
@@ -1030,8 +1031,9 @@ enum UploadEnd {
     Drained,
     /// The coordinator asked this upload to stop.
     Stopped,
-    /// This upload refused the request, and this is the refusal.
-    Refused(Rejected),
+    /// This upload refused the request: the terminal it read, and the refusal
+    /// the owner that measured it minted.
+    Refused(InboundTerminal, Rejected),
 }
 
 /// What one poll of a bounded upload produced.
@@ -1067,7 +1069,7 @@ struct BoundedUpload {
     /// ask this upload to stop. One handle for both, because they are the same
     /// question from opposite ends: whether anything this upload could still
     /// say would change the answer.
-    refusal: Option<oneshot::Sender<Rejected>>,
+    refusal: Option<oneshot::Sender<UploadRefusal>>,
     /// The acknowledgement this upload owes once it has stopped polling.
     finished: Option<oneshot::Sender<UploadDisposition>>,
     observer: Option<Arc<LifecycleScript>>,
@@ -1075,14 +1077,14 @@ struct BoundedUpload {
 
 /// The half of one bounded upload the request's own coordinator holds.
 struct UploadCoordinator {
-    refusal: oneshot::Receiver<Rejected>,
+    refusal: oneshot::Receiver<UploadRefusal>,
     finished: oneshot::Receiver<UploadDisposition>,
     observer: Option<Arc<LifecycleScript>>,
 }
 
 /// The senders one upload uses to report its terminal state.
 struct UploadSignals {
-    refusal: oneshot::Sender<Rejected>,
+    refusal: oneshot::Sender<UploadRefusal>,
     finished: oneshot::Sender<UploadDisposition>,
 }
 
@@ -1221,12 +1223,15 @@ impl BoundedUpload {
     /// upstream answer needs the crossing observed and not yet reported, so both
     /// results can be staged before either is said.
     async fn crossed(&self, rejected: Rejected) -> UploadStep {
-        LifecycleScript::pause_at(
+        LifecycleScript::pause_at_response_commit(
             self.observer.as_deref(),
-            LifecycleCheckpoint::RequestBodyLimitObserved,
+            ResponseCommitmentEdge::RequestBodyLimitObserved,
         )
         .await;
-        UploadStep::End(UploadEnd::Refused(rejected))
+        UploadStep::End(UploadEnd::Refused(
+            InboundTerminal::RouteBodyLimit,
+            rejected,
+        ))
     }
 
     /// Report how this upload ended, and tell its consumer what to do next.
@@ -1235,7 +1240,7 @@ impl BoundedUpload {
     /// upstream given a clean end would take a truncated request for a complete
     /// one, which is the request Camber refused to forward.
     fn ended(mut self, end: UploadEnd) -> Option<(UploadItem, Self)> {
-        let aborted = matches!(end, UploadEnd::Refused(_));
+        let aborted = matches!(end, UploadEnd::Refused(..));
         self.report(end);
         match aborted {
             true => Some((Err(upload_aborted()), self)),
@@ -1252,7 +1257,7 @@ impl BoundedUpload {
         drop(self.permit.take());
         let disposition = match &end {
             UploadEnd::Drained => UploadDisposition::Drained,
-            UploadEnd::Stopped | UploadEnd::Refused(_) => UploadDisposition::Stopped,
+            UploadEnd::Stopped | UploadEnd::Refused(..) => UploadDisposition::Stopped,
         };
         match self.refusal.take().zip(refusal_of(end)) {
             Some((sender, rejected)) => raise_refusal(sender, rejected),
@@ -1270,7 +1275,7 @@ impl BoundedUpload {
 /// A closed channel means the upstream's answer already won the tie: the peer
 /// is told the upstream's status and never learns its upload crossed the bound.
 /// The log is the operator's only record that the limit fired at all.
-fn raise_refusal(sender: oneshot::Sender<Rejected>, rejected: Rejected) {
+fn raise_refusal(sender: oneshot::Sender<UploadRefusal>, rejected: UploadRefusal) {
     match sender.send(rejected) {
         Ok(()) => {}
         Err(_) => tracing::warn!(
@@ -1290,11 +1295,21 @@ fn acknowledge_end(sender: oneshot::Sender<UploadDisposition>, disposition: Uplo
 }
 
 /// The refusal one ending carries, if it carries one.
-fn refusal_of(end: UploadEnd) -> Option<Rejected> {
+fn refusal_of(end: UploadEnd) -> Option<UploadRefusal> {
     match end {
-        UploadEnd::Refused(rejected) => Some(rejected),
+        UploadEnd::Refused(terminal, rejected) => Some(UploadRefusal { terminal, rejected }),
         UploadEnd::Drained | UploadEnd::Stopped => None,
     }
+}
+
+/// One upload's refusal, and the terminal the owner that measured it read.
+///
+/// The terminal travels with the refusal because the coordinator does not map
+/// it: it takes this operation's commitment under that terminal, and only a
+/// commit that wins gives the refusal to the peer.
+struct UploadRefusal {
+    terminal: InboundTerminal,
+    rejected: Rejected,
 }
 
 /// How one upload ends when its transfer owner fixed a terminal.
@@ -1306,7 +1321,7 @@ fn refusal_of(end: UploadEnd) -> Option<Rejected> {
 /// its answer belongs to the stage that selected it, not to the body.
 fn transfer_end(failure: &TransferFailure) -> UploadEnd {
     match failure.refusal() {
-        Some(rejected) => UploadEnd::Refused(rejected),
+        Some(rejected) => UploadEnd::Refused(failure.terminal(), rejected),
         None => UploadEnd::Stopped,
     }
 }
@@ -1317,7 +1332,7 @@ fn transfer_end(failure: &TransferFailure) -> UploadEnd {
 /// been taken, nothing this upload could still say would change it, so the way
 /// to stop it is to stop listening. An upload that has already reported waits
 /// here forever, which is the poll its caller never makes.
-async fn stop_requested(refusal: Option<&mut oneshot::Sender<Rejected>>) {
+async fn stop_requested(refusal: Option<&mut oneshot::Sender<UploadRefusal>>) {
     match refusal {
         Some(sender) => sender.closed().await,
         None => std::future::pending().await,
@@ -1329,7 +1344,7 @@ async fn stop_requested(refusal: Option<&mut oneshot::Sender<Rejected>>) {
 /// A channel that closes with nothing on it is an upload that ended inside its
 /// bound: nothing is owed, so this never resolves, and the answer the
 /// coordinator is still waiting for is the upstream's.
-async fn upload_refusal(refusal: &mut oneshot::Receiver<Rejected>) -> Rejected {
+async fn upload_refusal(refusal: &mut oneshot::Receiver<UploadRefusal>) -> UploadRefusal {
     match refusal.await {
         Ok(rejected) => rejected,
         Err(_) => std::future::pending().await,
@@ -1338,33 +1353,65 @@ async fn upload_refusal(refusal: &mut oneshot::Receiver<Rejected>) -> Rejected {
 
 /// Settle one streaming request between its own bound and the upstream's answer.
 ///
-/// Biased on the bound. Both results can become ready in the same turn — a
-/// crossing frame and a response head — and the tie is decided for the refusal,
-/// because the alternative commits an answer to a request this route already
-/// refused to forward in full.
+/// Unbiased, because there is no rank to apply. A crossing frame and an upstream
+/// head are two producers of one answer, and whichever reaches this operation's
+/// response commitment first owns it. A crossing committed before the head
+/// entered its commit barrier maps `BodyLimit`; a head committed first stays
+/// authoritative and this upload only stops. Released together with no edge
+/// between them, either is a correct result, and both leave the same cleanup.
 async fn settle_upload(
     mut coordinator: UploadCoordinator,
     upstream: impl Future<Output = Result<StreamingProxyResponse, ProxyFailure>>,
+    commitment: &OperationCommitment,
 ) -> Result<StreamingProxyResponse, UploadFailure> {
     tokio::pin!(upstream);
     let answered = tokio::select! {
-        biased;
-        rejected = upload_refusal(&mut coordinator.refusal) => {
-            return Err(UploadFailure::Body(rejected));
+        refusal = upload_refusal(&mut coordinator.refusal) => {
+            return Err(committed_refusal(refusal, commitment));
         }
         answered = &mut upstream => answered,
     };
-    let answered = resolve_upstream_result(&mut coordinator, answered)?;
-    coordinator.commit(answered).await
+    let answered = resolve_upstream_result(&mut coordinator, answered, commitment)?;
+    coordinator.commit(answered, commitment).await
+}
+
+/// Answer one upload refusal that reached this operation's commitment.
+///
+/// A refusal that took the cell is this request's answer and is mapped. A
+/// refusal that found it taken lost to whatever holds the answer, so it stops
+/// the upload without a status of its own: that owner answers the peer, and the
+/// forced close unread payload already requires is what this upload still owes.
+///
+/// What it carries out is the cause the winner committed, because that is what
+/// the exit records this request as having ended on. A head that holds the cell
+/// names no cause at all, so the terminal this upload measured for itself is the
+/// only fact left to report it under.
+fn committed_refusal(refusal: UploadRefusal, commitment: &OperationCommitment) -> UploadFailure {
+    let UploadRefusal { terminal, rejected } = refusal;
+    match commitment.commit_cause(terminal) {
+        Ok(()) => UploadFailure::Body(rejected),
+        Err(ResponseCommit::Cause(committed)) => UploadFailure::Committed(committed),
+        Err(ResponseCommit::Head(_)) => UploadFailure::Committed(terminal),
+    }
 }
 
 /// Prefer a refusal that caused the upstream request itself to fail.
+///
+/// The upstream leg failed, so nothing committed a head for it. The refusal this
+/// upload raised is then the only producer left, and it takes the commitment on
+/// the same rule every other producer does.
+///
+/// With no refusal behind the failure, the mapper that answers the peer is the
+/// last producer this request has, and it records itself where it maps — at the
+/// exit that turns this failure into a response. Recorded here as well, the one
+/// framework head would be counted as two producers reaching the cell.
 fn resolve_upstream_result(
     coordinator: &mut UploadCoordinator,
     answered: Result<StreamingProxyResponse, ProxyFailure>,
+    commitment: &OperationCommitment,
 ) -> Result<StreamingProxyResponse, UploadFailure> {
     answered.map_err(|failure| match coordinator.refusal.try_recv() {
-        Ok(rejected) => UploadFailure::Body(rejected),
+        Ok(refusal) => committed_refusal(refusal, commitment),
         Err(_) => UploadFailure::Proxy(failure),
     })
 }
@@ -1374,11 +1421,17 @@ impl UploadCoordinator {
     async fn commit(
         mut self,
         answered: StreamingProxyResponse,
+        commitment: &OperationCommitment,
     ) -> Result<StreamingProxyResponse, UploadFailure> {
+        // Taken before the upload is asked to stop, in that order and not the
+        // reverse: the head is authoritative from here, and quiescing first
+        // would leave a window in which a crossing frame could still map over an
+        // answer this proxy had already accepted.
+        commitment.record_head(ResponseOrigin::Upstream);
         let upload = self.quiesce().await;
-        LifecycleScript::pause_at(
+        LifecycleScript::pause_at_response_commit(
             self.observer.as_deref(),
-            LifecycleCheckpoint::BeforeStreamingResponseCommit,
+            ResponseCommitmentEdge::BeforeDownstreamCommit,
         )
         .await;
         Ok(StreamingProxyResponse { upload, ..answered })
@@ -1404,9 +1457,9 @@ impl UploadCoordinator {
                 Ok(Ok(disposition)) => disposition,
                 Ok(Err(_)) | Err(_) => UploadDisposition::Stopped,
             };
-        LifecycleScript::pause_at(
+        LifecycleScript::pause_at_response_commit(
             self.observer.as_deref(),
-            LifecycleCheckpoint::StreamingUploadQuiesced,
+            ResponseCommitmentEdge::UploadQuiesced,
         )
         .await;
         disposition

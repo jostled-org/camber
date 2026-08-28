@@ -9,11 +9,15 @@ use crate::handshake::{Header, LOCAL_HOST, accepted, accepted_plus, handshake_re
 use crate::common::{
     ASYNC_EVENT_TIMEOUT, assert_http_ok, assert_optional_close_then_eof,
     assert_refusal_body_then_eof, lifecycle_event, read_async_http_head, read_ws_binary_frame,
-    read_ws_text_frame, status_from_raw, write_ws_binary_frame, write_ws_close_frame,
-    write_ws_text_frame,
+    read_ws_text_frame, registered_connections, status_from_raw, transferred_upgrades,
+    write_ws_binary_frame, write_ws_close_frame, write_ws_text_frame,
 };
 use camber::RuntimeError;
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController, LifecycleFault, lifecycle};
+use camber::http::mock::{
+    ConnectionOwnershipEvent, ConnectionOwnershipObservation, ScopedConnectionOwner,
+    UpgradeOwnerController, UpgradeOwnerEdge, connection_owner, faulted_registration,
+    registration_selection, upgrade_owner,
+};
 use camber::http::{Request, Response, Router, WsConn, WsMessage};
 use camber::runtime;
 use std::future::IntoFuture;
@@ -129,28 +133,35 @@ fn assert_cancelled(result: Result<(), RuntimeError>) {
     );
 }
 
-fn arm_unacknowledged_upgrade(controller: &LifecycleController) {
-    controller
-        .pause_once(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+/// Hold one upgrade child either side of the acknowledgement it is waiting for.
+///
+/// The upgrade owner and nothing else, taken as a loan: three rows below hold a
+/// child this way and each names a different second family beside it, so the
+/// pair of arms is written once against the one family both moves belong to.
+fn arm_unacknowledged_upgrade(owners: &impl common::Owns<UpgradeOwnerController>) {
+    let upgrades = owners.owner();
+    upgrades
+        .pause_once(UpgradeOwnerEdge::AfterHandoffSubmitted)
         .expect("pause after upgrade-ticket submission");
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+    upgrades
+        .pause_once(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .expect("pause before upgrade acknowledgement");
 }
 
-async fn wait_for_unacknowledged_upgrade(controller: &LifecycleController) {
+async fn wait_for_unacknowledged_upgrade(owners: &impl common::Owns<UpgradeOwnerController>) {
+    let upgrades = owners.owner();
     lifecycle_event(
         "upgrade ticket reaches the production registration channel",
-        controller.wait_until_paused(LifecycleCheckpoint::AfterUpgradeTicketSubmitted),
+        upgrades.wait_until_paused(UpgradeOwnerEdge::AfterHandoffSubmitted),
     )
     .await
     .expect("upgrade ticket reaches the production registration channel");
-    controller
-        .release(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+    upgrades
+        .release(UpgradeOwnerEdge::AfterHandoffSubmitted)
         .expect("release submitted upgrade ticket");
     lifecycle_event(
         "submitted upgrade reaches acknowledgement checkpoint",
-        controller.wait_until_paused(LifecycleCheckpoint::BeforeUpgradeAcknowledge),
+        upgrades.wait_until_paused(UpgradeOwnerEdge::BeforeTransferAcknowledge),
     )
     .await
     .expect("submitted upgrade reaches acknowledgement checkpoint");
@@ -966,7 +977,7 @@ fn websocket_upgrade_excludes_body_policy_and_refuses_a_declared_payload() {
             // has to reach the same head-only exclusion the accepted upgrade
             // does: a `400` produced by reading the payload would be the body
             // policy answering after all.
-            let port = common::reserve_observed();
+            let port = common::reserve_request_body_owner();
             let observed = port.serve(body_limit_ws_router(&asked));
             let (mut watched, watched_head) = ws_connect(observed.addr(), "/ws", &[]);
             assert_websocket_switch(&watched_head, "observed handshake");
@@ -986,9 +997,10 @@ fn websocket_upgrade_excludes_body_policy_and_refuses_a_declared_payload() {
                 0,
                 "a direct WebSocket upgrade is bodyless, so no body policy is asked about it"
             );
-            assert_eq!(observed.controller().body_frames_polled(), 0);
-            assert_eq!(observed.controller().body_peak_retained_bytes(), 0);
-            assert_eq!(observed.controller().body_permit_owners_dropped(), 0);
+            let body = observed.controller().observed();
+            assert_eq!(body.frames_polled, 0);
+            assert_eq!(body.peak_retained_bytes, 0);
+            assert_eq!(body.permit_owners_dropped, 0);
             runtime::request_shutdown();
         })
         .unwrap();
@@ -1048,7 +1060,8 @@ async fn pending_direct_upgrade_shutdown_is_rejected(forced: bool) {
         .await
         .expect("bind pending-upgrade listener");
     let addr = listener.local_addr().expect("pending listener address");
-    let controller = lifecycle(addr).expect("install lifecycle controller");
+    let controller =
+        registration_selection(addr).expect("register the pending upgrade's stop and children");
     arm_unacknowledged_upgrade(&controller);
     let handle = camber::http::serve_background(listener, lifecycle_websocket_router())
         .expect("owned server requires a Tokio runtime");
@@ -1061,8 +1074,14 @@ async fn pending_direct_upgrade_shutdown_is_rejected(forced: bool) {
         true => handle.cancel(),
         false => runtime::request_shutdown(),
     }
+    // Released only once this server's own stop state has committed. A
+    // cancellation commits before the command returns; a runtime shutdown
+    // commits when the supervisor takes the signal, and the answer this
+    // connection gives has to be on the far side of whichever it was.
+    common::await_committed_stop(&controller, "the pending direct upgrade").await;
     controller
-        .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+        .upgrades
+        .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .expect("release pending upgrade into shutdown");
     let mut owner = Box::pin(handle.into_future());
     let response = read_async_http_head(&mut pending, "the rejected direct-upgrade response").await;
@@ -1111,10 +1130,10 @@ async fn cancelled_pending_direct_upgrade_is_joined_and_connection_local() {
     let addr = listener
         .local_addr()
         .expect("cancellation listener address");
-    let controller = lifecycle(addr).expect("install lifecycle controller");
+    let controller = upgrade_owner(addr).expect("register the cancelled upgrade's children");
     arm_unacknowledged_upgrade(&controller);
     controller
-        .pause_once(LifecycleCheckpoint::UpgradePeerClosed)
+        .pause_once(UpgradeOwnerEdge::PeerClosed)
         .expect("pause after direct peer closure is observed");
     let handle = camber::http::serve_background(listener, router)
         .expect("owned server requires a Tokio runtime");
@@ -1126,15 +1145,15 @@ async fn cancelled_pending_direct_upgrade_is_joined_and_connection_local() {
     drop(pending);
     lifecycle_event(
         "owned reader observation of direct peer closure",
-        controller.wait_until_paused(LifecycleCheckpoint::UpgradePeerClosed),
+        controller.wait_until_paused(UpgradeOwnerEdge::PeerClosed),
     )
     .await
     .expect("owned reader observes direct peer closure");
     controller
-        .release(LifecycleCheckpoint::UpgradePeerClosed)
+        .release(UpgradeOwnerEdge::PeerClosed)
         .expect("release observed direct peer closure");
     controller
-        .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+        .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .expect("release cancelled registration");
 
     assert_http_ok(addr, "/ok", "the listener after registrar cancellation").await;
@@ -1173,7 +1192,8 @@ async fn supervisor_unwind_joins_acknowledged_and_pending_direct_upgrades() {
         .await
         .expect("bind unwind listener");
     let addr = listener.local_addr().expect("unwind listener address");
-    let controller = lifecycle(addr).expect("install lifecycle controller");
+    let controller =
+        faulted_registration(addr).expect("register the unwound supervisor's children");
     let handle = camber::http::serve_background(listener, lifecycle_websocket_router())
         .expect("owned server requires a Tokio runtime");
     let mut acknowledged = connect_async_websocket(addr, "/ws").await;
@@ -1184,21 +1204,27 @@ async fn supervisor_unwind_joins_acknowledged_and_pending_direct_upgrades() {
         .expect("connect pending direct upgrade");
     async_ws_request(&mut pending, "/ws").await;
     wait_for_unacknowledged_upgrade(&controller).await;
+    common::unwind_the_supervisor(&controller, "the unwinding supervisor").await;
+    // Released only once the unwind has committed its forced phase, so the
+    // connection's answer reads a server that has already stopped admitting
+    // rather than racing the panic it is meant to follow.
     controller
-        .inject_once(LifecycleFault::PanicSupervisorCore)
-        .expect("inject supervisor unwind");
-    controller
-        .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
-        .expect("release supervisor into unwind");
+        .upgrades
+        .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
+        .expect("release the held transfer edge");
 
     let mut owner = Box::pin(handle.into_future());
     assert_optional_close_then_eof(&mut acknowledged, "unwound direct").await;
     let pending_response =
         read_async_http_head(&mut pending, "the unwound direct-upgrade response").await;
+    // A refusal rather than an internal failure: the connection holding the
+    // offer reads the forced phase the unwinding supervisor committed, so it
+    // knows the server stopped admitting rather than only that an owner went
+    // away.
     assert_eq!(
         status_from_raw(&pending_response),
-        500,
-        "supervisor-unavailable direct upgrade did not return 500: {pending_response}"
+        503,
+        "the refused direct upgrade did not return 503: {pending_response}"
     );
     assert!(
         pending_response
@@ -1208,12 +1234,133 @@ async fn supervisor_unwind_joins_acknowledged_and_pending_direct_upgrades() {
     );
     assert_refusal_body_then_eof(
         &mut pending,
-        "internal server error",
+        "service unavailable",
         "unwound pending transport EOF",
     )
     .await;
     match lifecycle_event("supervisor unwind drain", owner.as_mut()).await {
         Err(RuntimeError::TaskPanicked(message)) => assert!(!message.is_empty()),
         other => panic!("expected TaskPanicked after upgrade drain, got {other:?}"),
+    }
+}
+
+/// A router whose one upgrade route holds its bridge until the peer closes.
+fn owner_tree_router() -> Router {
+    let mut router = Router::new();
+    router.get("/ok", |_request: &Request| async {
+        Response::text(200, "ok")
+    });
+    router.ws("/ws", |_request: &Request, mut conn: WsConn| {
+        while conn.recv().is_some() {}
+        Ok(())
+    });
+    router
+}
+
+/// Fail if the record names any upgrade beside a connection rather than beneath
+/// one.
+///
+/// The prohibited vocabulary is checked by shape rather than by identity: no
+/// server-scope upgrade event may appear at all, whatever it names.
+fn assert_no_sideways_upgrade(observed: &ConnectionOwnershipObservation, context: &str) {
+    for event in observed.events.iter() {
+        assert!(
+            !matches!(
+                event,
+                ConnectionOwnershipEvent::ServerUpgradeRegistered { .. }
+                    | ConnectionOwnershipEvent::ServerUpgradeSettled { .. }
+            ),
+            "{context}: an upgrade registered beside its connection: {event:?}"
+        );
+    }
+}
+
+// 2.T1 — Invariant 5 substrate: each request and upgrade has exactly one parent,
+// and no upgrade registers beside its connection.
+//
+// The barrier is the protocol's: the `101` has been read, so the connection has
+// already produced its response head and transferred what it produced. The
+// record is then read for the whole sequence under one connection identity.
+#[camber::test]
+async fn connection_owner_transfers_request_to_upgrade_without_sideways_registration() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let controller = connection_owner(addr).expect("register the owner-tree observer");
+    let handle = camber::http::serve_background(listener, owner_tree_router())
+        .expect("owned server requires a Tokio runtime");
+
+    let mut peer = tokio::net::TcpStream::connect(addr).await.unwrap();
+    async_ws_request(&mut peer, "/ws").await;
+    let response = read_async_http_head(&mut peer, "the owner-tree upgrade response").await;
+    assert_eq!(status_from_raw(&response), 101, "unexpected: {response}");
+
+    let observed = controller.observed();
+    assert_no_sideways_upgrade(&observed, "the transferred upgrade");
+    let connections = registered_connections(&observed);
+    assert_eq!(
+        connections.len(),
+        1,
+        "one peer registered {} connection owners: {:?}",
+        connections.len(),
+        observed.events
+    );
+    let connection = connections[0];
+    let request = observed
+        .events
+        .iter()
+        .find_map(|event| match event {
+            ConnectionOwnershipEvent::ConnectionRequestAdmitted {
+                connection: parent,
+                request,
+            } if *parent == connection => Some(*request),
+            _ => None,
+        })
+        .expect("the handshake request was never admitted under its connection");
+    assert!(
+        observed.contains(ConnectionOwnershipEvent::ConnectionRequestSettled {
+            connection,
+            request,
+        }),
+        "the handshake request never settled under its connection: {:?}",
+        observed.events
+    );
+    let upgrade = transferred_upgrades(&observed)
+        .iter()
+        .find_map(|(parent, upgrade)| (*parent == connection).then_some(*upgrade))
+        .expect("the upgrade was never transferred to its connection");
+    assert_ne!(
+        upgrade, request,
+        "the upgrade reused its request's identity, so the tree names one owner twice"
+    );
+
+    // Closing the peer settles the child, and the child settles under the same
+    // parent it was transferred to.
+    drop(peer);
+    let settled = ConnectionOwnershipEvent::ConnectionUpgradeSettled {
+        connection,
+        upgrade,
+    };
+    lifecycle_event(
+        "the transferred upgrade never settled under its connection",
+        await_ownership_event(&controller, settled),
+    )
+    .await;
+    assert_no_sideways_upgrade(&controller.observed(), "the settled upgrade");
+
+    runtime::request_shutdown();
+    assert!(handle.await.is_ok());
+}
+
+/// Wait until the owner tree has recorded `event`.
+///
+/// The record is written by production at the mutation it names, so this only
+/// reads: a case waiting here cannot make the event happen, and the bound its
+/// caller applies is what turns a settlement that never arrives into a failure.
+async fn await_ownership_event(
+    controller: &ScopedConnectionOwner,
+    event: ConnectionOwnershipEvent,
+) {
+    while !controller.observed().contains(event) {
+        tokio::task::yield_now().await;
     }
 }

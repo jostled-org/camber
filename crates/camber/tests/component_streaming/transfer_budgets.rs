@@ -11,7 +11,8 @@ use crate::http as http_support;
 use crate::stream_support::{Streamed, open_streaming, read_streamed};
 
 use camber::http::mock::{
-    InboundTerminal, LifecycleCheckpoint, LifecycleController, TransferObservation,
+    InboundTerminal, ServerStopEdge, TransferDirectionObservation, TransferObservation,
+    TransferOwnerController, TransferOwnerEdge,
 };
 use camber::http::{
     Method, MultipartLimits, MultipartStream, Rejection, RejectionContext, RejectionKind, Request,
@@ -64,13 +65,13 @@ const BOUNDARY: &str = "CamberTransferBnd";
 
 /// Wait until this listener's transfers satisfy `settled`, and report them.
 async fn awaited(
-    controller: &LifecycleController,
+    controller: &TransferOwnerController,
     row: &str,
     settled: impl Fn(&TransferObservation) -> bool,
 ) -> TransferObservation {
     let deadline = tokio::time::Instant::now() + EVENT_TIMEOUT;
     loop {
-        let observed = controller.transfers_observed();
+        let observed = controller.observed();
         if settled(&observed) {
             return observed;
         }
@@ -143,7 +144,7 @@ async fn assert_exact_limit_row() {
     let row = "the exact maximum";
     let budget = TransferBudget::bounded(MAX_BYTES, UNREACHED, UNREACHED)
         .expect("the exact-limit budget is accepted");
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let server = port.serve(ending_stream(MAX_BYTES / FRAME.len(), budget));
     let addr = server.addr();
 
@@ -211,7 +212,7 @@ async fn assert_crossing_row() {
     let row = "the crossing frame";
     let budget = TransferBudget::bounded(MAX_BYTES, UNREACHED, UNREACHED)
         .expect("the crossing budget is accepted");
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let server = port.serve(holding_stream(MAX_BYTES / FRAME.len() + 1, budget));
     let addr = server.addr();
 
@@ -257,7 +258,7 @@ async fn assert_download_idle_row() {
     let budget = TransferBudget::unbounded()
         .with_idle(CROSSED_IDLE)
         .expect("the idle budget is accepted");
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let server = port.serve(holding_stream(1, budget));
     let addr = server.addr();
 
@@ -301,7 +302,7 @@ async fn assert_download_total_row() {
     let budget = TransferBudget::unbounded()
         .with_total(CROSSED_TOTAL)
         .expect("the total budget is accepted");
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let server = port.serve(paced_stream(budget));
     let addr = server.addr();
 
@@ -356,7 +357,7 @@ async fn assert_empty_frame_row() {
     let row = "an empty frame";
     let budget = TransferBudget::bounded(MAX_BYTES, CROSSED_IDLE, UNREACHED)
         .expect("the empty-frame budget is accepted");
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let server = port.serve(empty_frame_stream(budget));
     let addr = server.addr();
 
@@ -426,31 +427,60 @@ async fn assert_sink_backpressure_row() {
             .expect("the backpressure budget is accepted"),
         1,
         None,
-        InboundTerminal::TransferTotal,
+        &[InboundTerminal::TransferTotal],
+        false,
     )
     .await;
 }
 
 /// Hold one download owner's turn until every staged source is ready, and read
-/// back which of them the declared order named.
+/// back which of them it committed.
 ///
 /// The hold is the owner's own pre-source checkpoint, so the turn that decides
 /// sees each staged source in one reading. `frames` is what the producer queues,
 /// and `armed_after` delays the hold until that many payload bytes have already
 /// been admitted — which is how a row stages the frame that crosses the maximum
 /// as the one read inside the held turn.
+///
+/// `accepts` is the set the answer must come from, never a winner: a row with an
+/// edge between its sources declares one member and a row with no edge declares
+/// every member, and both ask production the same question. A multi-member set
+/// additionally requires identical cleanup, which is the half a membership
+/// assertion alone cannot state.
+///
+/// `complete` is what the peer is owed, and it picks the producer too, because
+/// the two are one fact: a producer that holds can never deliver a complete
+/// body, and a producer that ended owing nothing always does.
 async fn assert_held_turn(
     row: &str,
     budget: TransferBudget,
     frames: usize,
     armed_after: Option<usize>,
-    expected: InboundTerminal,
+    accepts: &[InboundTerminal],
+    complete: bool,
 ) {
-    let port = http_support::reserve_observed();
-    let server = port.serve(holding_stream(frames, budget));
+    let port = http_support::reserve_transfer_owner();
+    let server = port.serve(if complete {
+        ending_stream(frames, budget)
+    } else {
+        holding_stream(frames, budget)
+    });
     let addr = server.addr();
-    let held = LifecycleCheckpoint::BeforeTransferSourcePoll;
+    let held = TransferOwnerEdge::BeforeSourcePoll;
+    let arm = || {
+        server
+            .controller()
+            .pause_once(held)
+            .expect("arm the transfer's own source checkpoint");
+    };
 
+    // A producer that ends is armed before its peer exists: its end is the
+    // first thing the source read produces, so a hold armed afterwards would be
+    // reached with nothing left to hold. A producer that holds is armed once
+    // the peer is on, which is also where a staging row counts its bytes.
+    if complete {
+        arm();
+    }
     let mut peer = open_streaming(addr, "/stream", EVENT_TIMEOUT).await;
     if let Some(admitted) = armed_after {
         awaited(server.controller(), row, |observed| {
@@ -458,14 +488,13 @@ async fn assert_held_turn(
         })
         .await;
     }
-    server
-        .controller()
-        .pause_once(held)
-        .expect("arm the transfer's own source checkpoint");
+    if !complete {
+        arm();
+    }
     http_support::wait_until_paused_bounded(server.controller(), held, &format!("{row}: {held:?}"))
         .await;
     // Both deadlines expire while the turn is held, and whatever the producer
-    // queued behind it is waiting when it resumes.
+    // queued or ended behind it is waiting when it resumes.
     tokio::time::sleep(CROSSED_TOTAL + CROSSED_IDLE).await;
     server
         .controller()
@@ -475,23 +504,34 @@ async fn assert_held_turn(
     let delivered = read_streamed(&mut peer).await;
     assert_eq!(
         (delivered.status, delivered.complete),
-        (200, false),
-        "{row}: the committed status stands and the body is cut rather than ended"
+        (200, complete),
+        "{row}: {}",
+        if complete {
+            "the committed source end delivers a complete body"
+        } else {
+            "the committed status stands and the body is cut rather than ended"
+        }
     );
     let observed = awaited(server.controller(), row, |observed| {
         observed.download.terminal.is_some()
     })
     .await;
-    assert_eq!(
-        observed.download.terminal,
-        Some(expected),
-        "{row}: the declared order named this cause: {observed:?}"
+    let committed = observed
+        .download
+        .terminal
+        .unwrap_or_else(|| panic!("{row}: the owner fixed no cause: {observed:?}"));
+    assert!(
+        accepts.contains(&committed),
+        "{row}: the closed set is {accepts:?}, and production committed {committed:?}"
     );
     assert_eq!(
         observed.download.terminals, 1,
-        "{row}: one cause, fixed once"
+        "{row}: one cause, fixed once, whichever member it was: {observed:?}"
     );
     drop(peer);
+    if accepts.len() > 1 {
+        assert_released_once(server.controller(), row).await;
+    }
     stop(server, row);
 }
 
@@ -528,7 +568,7 @@ async fn assert_frozen_download(
     inner: TransferBudget,
     expected: TransferBudget,
 ) {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let server = port.serve(ending_stream(1, inner).download_budget(outer));
     let addr = server.addr();
 
@@ -556,7 +596,7 @@ async fn assert_frozen_download(
 /// registration that names none inherits its router's.
 async fn assert_sse_rows() {
     let row = "an SSE registration's own interval";
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let mut router = Router::new();
     router.get_sse_with_budget(
         "/events",
@@ -593,7 +633,7 @@ async fn assert_sse_rows() {
     let inherited = TransferBudget::unbounded()
         .with_idle(CROSSED_IDLE)
         .expect("the router's download interval is accepted");
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let mut router = Router::new();
     router.get_sse(
         "/events",
@@ -626,7 +666,7 @@ async fn assert_sse_rows() {
 /// reads.
 async fn assert_upload_idle_row() {
     let row = "the upload quiet interval";
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     // The upload policy names a maximum it must not keep: route-aware admission
     // is this payload's only counter, so the owner carries the interval and drops
     // the maximum. A policy that named none could not tell the two apart.
@@ -676,7 +716,7 @@ async fn assert_upload_idle_row() {
 /// A trailer costs no payload bytes and ends nothing.
 async fn assert_upload_trailer_row() {
     let row = "a trailered upload";
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let server = port.serve(
         multipart_router().upload_budget(
             TransferBudget::unbounded()
@@ -787,7 +827,7 @@ async fn stalled_upload(addr: SocketAddr) -> tokio::net::TcpStream {
 }
 
 /// Stop one served fixture and report a teardown that did not finish.
-fn stop(server: http_support::ObservedServer, row: &str) {
+fn stop<Owner>(server: http_support::ObservedServer<Owner>, row: &str) {
     server
         .shutdown_bounded(SHUTDOWN_TIMEOUT)
         .unwrap_or_else(|error| panic!("{row}: teardown failed: {error}"));
@@ -902,7 +942,7 @@ impl Witnessed {
 async fn assert_byte_terminal_polls_no_later_frame() {
     let row = "a byte terminal";
     let witnessed = Witnessed::new();
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let controller = port.controller();
     let server = port.serve(
         witnessed.router(
@@ -913,7 +953,7 @@ async fn assert_byte_terminal_polls_no_later_frame() {
         ),
     );
     let addr = server.addr();
-    let held = LifecycleCheckpoint::BeforeTransferSourcePoll;
+    let held = TransferOwnerEdge::BeforeSourcePoll;
 
     let mut peer = open_streaming(addr, "/stream", EVENT_TIMEOUT).await;
     awaited(&controller, row, |observed| {
@@ -968,12 +1008,12 @@ async fn assert_deadline_terminal_polls_no_later_frame(
     expected: InboundTerminal,
 ) {
     let witnessed = Witnessed::new();
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let controller = port.controller();
     let server = port.serve(witnessed.router(0, 1, budget));
     let addr = server.addr();
-    let source = LifecycleCheckpoint::BeforeTransferSourcePoll;
-    let selection = LifecycleCheckpoint::BeforeTransferTerminalSelection;
+    let source = TransferOwnerEdge::BeforeSourcePoll;
+    let selection = TransferOwnerEdge::BeforeTerminalCommit;
     controller
         .pause_once(source)
         .expect("arm the transfer's source checkpoint");
@@ -1027,7 +1067,7 @@ async fn assert_deadline_terminal_polls_no_later_frame(
 /// row that only compared the count with itself would read both numbers after the
 /// extra frame had already been taken.
 async fn assert_settled_polls(
-    controller: &LifecycleController,
+    controller: &TransferOwnerController,
     row: &str,
     expected: InboundTerminal,
     polls: usize,
@@ -1052,26 +1092,50 @@ async fn assert_settled_polls(
     // The witnessed frame is still in the channel, so a guard that let go would
     // read it while this row waits.
     tokio::time::sleep(CROSSED_IDLE).await;
-    let settled = controller.transfers_observed();
+    let settled = controller.observed();
     assert_eq!(
         settled.download.frames_polled, polls,
         "{row}: no frame is polled after the terminal is fixed: {settled:?}"
     );
 }
 
-/// Prove the owner released its source and producer exactly once.
-async fn assert_released_once(controller: &LifecycleController, row: &str) {
-    let observed = awaited(controller, row, |observed| observed.download.releases >= 1).await;
+/// Prove the download owner released its source and producer exactly once.
+async fn assert_released_once(controller: &TransferOwnerController, row: &str) {
+    assert_half_released_once(controller, row, download).await;
+}
+
+/// Prove the named half's owner released its source and producer exactly once.
+///
+/// Taken as the half to read rather than written twice: an unordered row has to
+/// require identical cleanup from every member of its closed set, and the
+/// question is the same one whichever direction owns the transfer.
+async fn assert_half_released_once(
+    controller: &TransferOwnerController,
+    row: &str,
+    half: fn(&TransferObservation) -> &TransferDirectionObservation,
+) {
+    let observed = awaited(controller, row, |observed| half(observed).releases >= 1).await;
     assert_eq!(
-        observed.download.releases, 1,
+        half(&observed).releases,
+        1,
         "{row}: the owner released its source and producer once: {observed:?}"
     );
+}
+
+/// The download half of one transfer observation.
+fn download(observed: &TransferObservation) -> &TransferDirectionObservation {
+    &observed.download
+}
+
+/// The upload half of one transfer observation.
+fn upload(observed: &TransferObservation) -> &TransferDirectionObservation {
+    &observed.upload
 }
 
 /// A peer that goes away releases the owner without a terminal of its own.
 async fn assert_released_on_disconnect() {
     let row = "a departed peer";
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let controller = port.controller();
     let server = port.serve(holding_stream(
         1,
@@ -1106,7 +1170,7 @@ async fn assert_released_on_disconnect() {
 /// decided.
 async fn assert_released_on_shutdown() {
     let row = "a stopped server";
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_stopped_transfer();
     let (listener, addr, controller) = port.into_owned_parts();
     let handle = camber::http::server(paced_stream(
         TransferBudget::unbounded()
@@ -1133,10 +1197,11 @@ async fn assert_released_on_shutdown() {
     // task runs first decides what this row reads. The escalation is held at the
     // production checkpoint the supervisor selects it from, so the deadline this
     // row named is the one that ends the stream.
-    let escalation = LifecycleCheckpoint::SupervisorSelectedDeadline;
+    let escalation = ServerStopEdge::SupervisorSelectedDeadline;
     controller
+        .stop
         .pause_once(escalation)
-        .expect("arm the supervisor's escalation checkpoint");
+        .expect("arm the supervisor's escalation edge");
     handle.shutdown();
 
     // The server's own deadline is minted first, so it expires first: the row
@@ -1147,7 +1212,7 @@ async fn assert_released_on_shutdown() {
         &format!("{row}: {escalation:?}"),
     )
     .await;
-    let observed = awaited(&controller, row, |observed| {
+    let observed = awaited(&controller.transfers, row, |observed| {
         observed.download.terminal.is_some()
     })
     .await;
@@ -1156,15 +1221,16 @@ async fn assert_released_on_shutdown() {
         Some(InboundTerminal::ShutdownDeadline),
         "{row}: the aggregate deadline is the terminal: {observed:?}"
     );
-    assert_released_once(&controller, row).await;
+    assert_released_once(&controller.transfers, row).await;
 
     // Teardown is this row's own, on every path: the graceful window has already
     // closed, so the escalation is let go of and the server is cancelled and
     // joined under a bound rather than waited on for a completion its own
     // deadline has passed.
     controller
+        .stop
         .release(escalation)
-        .expect("release the supervisor's escalation checkpoint");
+        .expect("release the supervisor's escalation edge");
     handle.cancel();
     assert!(
         tokio::time::timeout(SHUTDOWN_TIMEOUT, handle).await.is_ok(),
@@ -1172,25 +1238,66 @@ async fn assert_released_on_shutdown() {
     );
 }
 
-/// 11.T3
+/// Invariant 11
 ///
-/// The transfer sources extend the one declared precedence rather than keeping a
-/// table of their own. Each row makes two sources ready inside one held
-/// scheduling turn and reads which of them production named, and the retained
-/// Step 6 pair is a required control: an extension that reordered the inbound
-/// causes fails that row while every transfer row still passes.
+/// A transfer owner commits the fact its own source read produced. A deadline
+/// that became observable in the same turn is not a higher-ranked event that
+/// replaces it — there is no rank — so the two rows with a real barrier prove
+/// both directions: a crossing frame read inside a turn whose deadlines had
+/// already expired still commits the byte maximum, and a source that reached its
+/// normal end inside such a turn still commits that end and delivers a complete
+/// body.
+///
+/// The end row is where the removed table disagrees, and it is where this row
+/// states its red: that table ranked both of this direction's deadlines above
+/// the source's own end, so restoring it cuts the body the end row is owed.
+/// `runtime-causality-transfer-order-red` reverts the rank in a sandbox and
+/// requires exactly that failure. The crossing frame is the retained companion —
+/// the removed table put the byte maximum above the same two deadlines — so it
+/// states what the cutover kept rather than what it changed.
+///
+/// Where no barrier exists the rows state the set instead. Two of this
+/// direction's own deadlines crossed inside one held turn, and a stalled
+/// upload's request interval against its transfer interval, are pairs nothing
+/// separates: the row names both members, requires production to commit one of
+/// them, and requires identical cleanup either way.
+///
+/// The remaining row is a retained regression over the same seam.
 #[test]
-fn equal_ready_transfer_events_extend_inbound_precedence() {
+fn transfer_first_commit_survives_later_higher_rank_event() {
     camber::runtime::builder()
         .run(|| {
             camber::runtime::block_on(async {
                 assert_bytes_outrank_deadlines().await;
-                assert_idle_outranks_total().await;
-                assert_upload_idle_outranks_transfer_idle().await;
-                assert_retained_inbound_order().await;
+                assert_source_end_survives_expired_deadlines().await;
+                assert_concurrent_transfer_deadlines().await;
+                assert_concurrent_upload_intervals().await;
+                assert_buffered_route_resolves_no_transfer_owner().await;
             });
         })
-        .expect("the transfer precedence runtime ran");
+        .expect("the transfer commit-order runtime ran");
+}
+
+/// A source that ended normally inside a turn whose deadlines had expired.
+///
+/// The owner is held in front of its source read, both of its own deadlines are
+/// allowed to expire, and the release puts the source's end and those deadlines
+/// in one turn. The end is the owner's own read, so it takes this direction's
+/// one terminal and the peer is given a complete body — where the removed table
+/// promoted the quiet interval and cut it.
+async fn assert_source_end_survives_expired_deadlines() {
+    // No frame is queued behind the hold, so the one thing the held turn's
+    // source read produces is the end itself.
+    assert_held_turn(
+        "a source end against both expired deadlines",
+        TransferBudget::bounded(usize::MAX, CROSSED_IDLE, CROSSED_TOTAL)
+            .expect("the commit-order budget is accepted"),
+        0,
+        None,
+        &[InboundTerminal::ResponseHead],
+        true,
+    )
+    .await;
 }
 
 /// The byte maximum outranks both transfer deadlines ready beside it.
@@ -1205,36 +1312,50 @@ async fn assert_bytes_outrank_deadlines() {
             .expect("the equal-ready budget is accepted"),
         MAX_BYTES / FRAME.len() + 1,
         Some(MAX_BYTES),
-        InboundTerminal::TransferBytes,
+        &[InboundTerminal::TransferBytes],
+        false,
     )
     .await;
 }
 
-/// The quiet interval outranks the lifetime ready beside it.
+/// The quiet interval and the lifetime, ready in one turn with nothing between.
 ///
 /// Nothing is queued behind the hold, so no frame restarts the interval and both
-/// deadlines are ready in the one turn.
-async fn assert_idle_outranks_total() {
+/// of this direction's own deadlines are crossed when the turn resumes. Neither
+/// caused the other and no act of the peer, the producer, or the server falls
+/// between them, so the row states the set production may commit from and
+/// requires the same cleanup from either member: the committed `200` stands, the
+/// body is cut rather than ended, the cause is fixed once, and the owner
+/// releases once.
+async fn assert_concurrent_transfer_deadlines() {
     assert_held_turn(
         "a quiet interval against a lifetime",
         TransferBudget::bounded(usize::MAX, CROSSED_IDLE, CROSSED_TOTAL)
-            .expect("the equal-ready budget is accepted"),
+            .expect("the unordered budget is accepted"),
         0,
         None,
-        InboundTerminal::TransferIdle,
+        &[
+            InboundTerminal::TransferIdle,
+            InboundTerminal::TransferTotal,
+        ],
+        false,
     )
     .await;
 }
 
-/// The request body's quiet interval outranks the transfer's, ready together.
+/// The request body's quiet interval and the transfer's, ready together.
 ///
 /// Both are live on one upload turn, which is what makes this row the joint one:
 /// the request deadline the admitted head minted and the transfer deadline the
-/// route's upload policy named are weighed against each other by the one order,
-/// and the request's row is the higher of the two.
-async fn assert_upload_idle_outranks_transfer_idle() {
+/// route's upload policy named cross at the same instant on the same stalled
+/// upload, and nothing orders them. Either is this upload's cause. What is the
+/// same for both is what the peer reads, what the route was asked for, and what
+/// the owner leaves behind, so that is what the row requires — down to the one
+/// release, which is the half of identical cleanup a membership assertion alone
+/// cannot state.
+async fn assert_concurrent_upload_intervals() {
     let row = "a request interval against a transfer interval";
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let server = port.serve(
         multipart_router()
             .request_budget(
@@ -1260,29 +1381,43 @@ async fn assert_upload_idle_outranks_transfer_idle() {
         observed.upload.terminal.is_some()
     })
     .await;
+    let committed = observed
+        .upload
+        .terminal
+        .unwrap_or_else(|| panic!("{row}: the upload fixed no cause: {observed:?}"));
+    assert!(
+        matches!(
+            committed,
+            InboundTerminal::BodyIdle | InboundTerminal::TransferIdle
+        ),
+        "{row}: the closed set is the request's interval or the transfer's, and \
+         production committed {committed:?}"
+    );
     assert_eq!(
-        observed.upload.terminal,
-        Some(InboundTerminal::BodyIdle),
-        "{row}: the request's interval outranks the transfer's: {observed:?}"
+        observed.upload.terminals, 1,
+        "{row}: one cause, fixed once, whichever member it was: {observed:?}"
     );
     drop(peer);
+    assert_half_released_once(server.controller(), row, upload).await;
     stop(server, row);
 }
 
-/// The retained Step 6 control: the inbound order this step extends is
-/// unchanged.
+/// The control that keeps a buffered route out of the transfer seam entirely.
 ///
-/// A buffered route with no transfer owner at all, whose request interval and
-/// request lifetime are both crossed. The interval is the higher row, exactly as
-/// it was before the transfer terminals existed — an extension that inserted a
-/// transfer row above it, or that reordered these two, fails here.
+/// A buffered route has no transfer owner at all, and its request interval and
+/// request lifetime are both crossed by the same withheld payload. The two carry
+/// no order — they are one operation's own clocks, crossed together — so the row
+/// requires the closed set of the causes that can map it and the one thing the
+/// pair shares: a single mapper call, one `408`, and no transfer owner resolved.
+/// A transfer row that inserted itself into a buffered route's answer fails here
+/// whichever member won, because the set does not contain it.
 ///
 /// The cause is read through the route's own rejection mapper rather than off the
-/// status: both retained rows answer `408`, so a status is the one thing that
-/// cannot tell them apart.
-async fn assert_retained_inbound_order() {
-    let row = "the retained inbound pair";
-    let port = http_support::reserve_observed();
+/// status: both members answer `408`, so a status is the one thing that cannot
+/// tell them apart.
+async fn assert_buffered_route_resolves_no_transfer_owner() {
+    let row = "a buffered route's own request clocks";
+    let port = http_support::reserve_transfer_owner();
     let mut router = Router::new();
     router.post("/buffered", |_req: &Request| async {
         Response::text(200, "buffered")
@@ -1318,18 +1453,26 @@ async fn assert_retained_inbound_order() {
     let delivered = read_streamed(&mut peer).await;
     assert_eq!(
         delivered.status, 408,
-        "{row}: the request's own interval answered it"
+        "{row}: either of this request's own clocks answers it the same way"
     );
     let kinds = mapped
         .lock()
         .expect("the retained control's mapper log is uncontended")
         .clone();
     assert_eq!(
-        kinds,
-        vec![RejectionKind::BodyTimeout],
-        "{row}: the request's interval is the cause production selected, mapped once"
+        kinds.len(),
+        1,
+        "{row}: whichever clock committed, the route's mapper ran once: {kinds:?}"
     );
-    let observed = server.controller().transfers_observed();
+    assert!(
+        matches!(
+            kinds.first(),
+            Some(RejectionKind::BodyTimeout | RejectionKind::RequestTimeout)
+        ),
+        "{row}: the closed set is the request's interval or its lifetime, and \
+         production mapped {kinds:?}"
+    );
+    let observed = server.controller().observed();
     assert_eq!(
         (observed.upload, observed.download),
         (Default::default(), Default::default()),

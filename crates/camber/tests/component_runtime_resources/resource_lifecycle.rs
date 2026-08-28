@@ -245,8 +245,23 @@ fn resource_shutdown_panic_is_reported_after_other_callbacks_finish() {
         .resource(FinalizationProbe(Arc::clone(&finalized)))
         .run(|| ());
 
+    // Searched for, never elected: the aggregate carries an entry per failed
+    // owner in its own rendering order, so a run that recorded a second owner
+    // ahead of this one would hand a reader the wrong kind entirely.
     let panicked = match &outcome {
-        Err(RuntimeError::Lifecycle(failures)) => failures.primary().kind().clone(),
+        Err(RuntimeError::Lifecycle(failures)) => failures
+            .iter()
+            .map(|failure| failure.kind().clone())
+            .find(|kind| matches!(kind, camber::LifecycleFailureKind::Resource(_)))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no resource failure reached the aggregate: {:?}",
+                    failures
+                        .iter()
+                        .map(crate::lifecycle_kinds::entry_identity)
+                        .collect::<Vec<_>>()
+                )
+            }),
         other => panic!("resource panic was not reported as an aggregate: {other:?}"),
     };
     assert!(

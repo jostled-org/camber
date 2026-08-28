@@ -64,6 +64,8 @@ pub mod framework_rejections;
 pub mod host_routing_and_outbound_proxy;
 #[path = "acceptance_e2e/mixed_content_and_websocket_proxy.rs"]
 pub mod mixed_content_and_websocket_proxy;
+#[path = "acceptance_e2e/operation_commitment.rs"]
+pub mod operation_commitment;
 #[path = "acceptance_e2e/routing_and_outbound_calls.rs"]
 pub mod routing_and_outbound_calls;
 #[path = "acceptance_e2e/service_deadlines.rs"]

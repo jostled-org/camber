@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use camber::http::mock::{LifecycleCheckpoint, lifecycle};
+use camber::http::mock::{ConnectionOwnerEdge, connection_owner};
 
 /// The bound every wait in this module fails on rather than blocking forever.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -110,9 +110,10 @@ fn header_timeout_closes_idle_keepalive_connection() {
 
             let listener = camber::net::listen("127.0.0.1:0").expect("bind");
             let addr = listener.local_addr().expect("addr").tcp().unwrap();
-            let controller = lifecycle(addr).expect("register the idle keep-alive listener");
-            let configured = LifecycleCheckpoint::HeaderTimeoutConfigured(IDLE_BOUND);
-            controller
+            let connections =
+                connection_owner(addr).expect("register the idle keep-alive listener");
+            let configured = ConnectionOwnerEdge::HeaderTimeoutConfigured(IDLE_BOUND);
+            connections
                 .pause_once(configured)
                 .expect("arm the configured header boundary");
 
@@ -124,12 +125,12 @@ fn header_timeout_closes_idle_keepalive_connection() {
             // is written until Hyper owns it.
             let mut stream = crate::http::connect(addr).expect("connect");
             common::block_on(async {
-                tokio::time::timeout(EVENT_TIMEOUT, controller.wait_until_paused(configured))
+                tokio::time::timeout(EVENT_TIMEOUT, connections.wait_until_paused(configured))
                     .await
                     .expect("the served connection never reached its configured header boundary")
             })
             .expect("production header-boundary configuration returned Pending");
-            controller
+            connections
                 .release(configured)
                 .expect("release the configured header boundary");
 
@@ -146,7 +147,7 @@ fn header_timeout_closes_idle_keepalive_connection() {
                 "server to close an already-served idle connection on the header boundary",
             );
 
-            drop(controller);
+            drop(connections);
             camber::runtime::request_shutdown();
         })
         .unwrap();

@@ -19,7 +19,7 @@
 use super::Response;
 use super::boundary::ByteBoundary;
 use super::checked_collect::CheckedCollector;
-use super::mock::{BlockingWorkerObserver, LifecycleCheckpoint, LifecycleScript, ProfilingEvent};
+use super::mock::{BlockingWorkerEdge, BlockingWorkerObserver, LifecycleScript, ProfilingEvent};
 use crate::RuntimeError;
 use bytes::Bytes;
 use std::sync::Arc;
@@ -105,7 +105,7 @@ impl ProfilingWorker {
                 off_caller: self.observer.ran_off_caller(),
             },
             ProfilingEvent::Returned,
-            LifecycleCheckpoint::ProfilingWorkerEntered,
+            BlockingWorkerEdge::ProfilingWorkerEntered,
             || self.render(),
         )
     }

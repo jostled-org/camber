@@ -308,7 +308,7 @@ fn startup_resource_failures_prevent_admission_and_aggregate_every_cause() {
         .as_slice(),
         "the readiness aggregate did not retain every cause in registration order"
     );
-    assert_primary(&outcome, "returning");
+    assert_names_resource(&outcome, "returning");
 
     gate.open();
     wait_until("the released worker to let its resource go", || {
@@ -413,17 +413,28 @@ impl ListenerWitness {
     }
 }
 
-/// The aggregate's primary names `resource`, read through the public accessor.
-fn assert_primary(outcome: &RuntimeError, resource: &str) {
-    let primary = lifecycle_kinds::aggregate_primary(outcome);
+/// The aggregate holds an entry naming `resource`, read through the public
+/// iteration.
+///
+/// Any entry, not a chosen one: every entry is a direct failure the account
+/// reports, so a row that read the first would be asserting a rendering order
+/// rather than the owner it cares about.
+fn assert_names_resource(outcome: &RuntimeError, resource: &str) {
+    let named = lifecycle_kinds::aggregate(outcome)
+        .iter()
+        .find(|failure| {
+            matches!(failure.participant(), LifecycleParticipant::Resource(name) if &**name == resource)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the aggregate never named {resource}: {:?}",
+                lifecycle_kinds::aggregate_identities(outcome)
+            )
+        });
     assert_eq!(
-        lifecycle_kinds::participant_name(primary.participant()),
+        lifecycle_kinds::participant_name(named.participant()),
         format!("resource:{resource}"),
-        "the aggregate's primary named the wrong owner: {primary}"
-    );
-    assert!(
-        matches!(primary.participant(), LifecycleParticipant::Resource(name) if &**name == resource),
-        "the primary's own identity did not match its rendered name"
+        "the named entry's identity did not match its rendered name: {named}"
     );
 }
 
@@ -465,7 +476,7 @@ fn shutdown_resource_failures_reach_the_lifecycle_aggregate() {
         .as_slice(),
         "the teardown aggregate did not retain every failure in teardown order"
     );
-    assert_primary(&outcome, "blocked");
+    assert_names_resource(&outcome, "blocked");
     assert!(
         elapsed < OBSERVATION_BOUND,
         "the run took {elapsed:?}, so a teardown callback outlived its phase limit"

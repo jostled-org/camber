@@ -9,7 +9,10 @@ use crate::common::{
     write_ws_close_frame, write_ws_text_frame,
 };
 use camber::RuntimeError;
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController, LifecycleFault, lifecycle};
+use camber::http::mock::{
+    ConnectionOwnerEdge, ScopedFaultedRegistration, ScopedUpgradeOwner, UpgradeOwnerEdge,
+    connection_owner, faulted_registration, registration_selection, upgrade_owner,
+};
 use camber::http::{
     self, DisconnectCause, DisconnectSignal, Next, Request, Response, Router, ServerHandleFuture,
     WsConn,
@@ -182,9 +185,9 @@ async fn proxied_websocket_resolves_completed_at_handoff() {
         .await
         .expect("bind proxy handoff listener");
     let proxy_addr = listener.local_addr().expect("proxy handoff address");
-    let controller = lifecycle(proxy_addr).expect("install proxy handoff controller");
+    let controller = upgrade_owner(proxy_addr).expect("install proxy handoff controller");
     controller
-        .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+        .pause_once(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .expect("pause proxy handoff acknowledgement");
     let handle = camber::http::serve_background(listener, proxy)
         .expect("owned server requires a Tokio runtime");
@@ -195,7 +198,7 @@ async fn proxied_websocket_resolves_completed_at_handoff() {
     send_async_proxy_upgrade(&mut peer).await;
     lifecycle_event(
         "proxy handoff acknowledgement checkpoint",
-        controller.wait_until_paused(LifecycleCheckpoint::BeforeUpgradeAcknowledge),
+        controller.wait_until_paused(UpgradeOwnerEdge::BeforeTransferAcknowledge),
     )
     .await
     .expect("proxy upgrade reaches acknowledgement checkpoint");
@@ -211,7 +214,7 @@ async fn proxied_websocket_resolves_completed_at_handoff() {
     );
 
     controller
-        .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+        .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .expect("release proxy handoff acknowledgement");
     let response = read_async_http_head(&mut peer, "the proxied handoff upgrade response").await;
     assert_eq!(
@@ -615,7 +618,7 @@ fn websocket_proxy_stream_upgrade_excludes_body_policy_and_refuses_a_declared_pa
         .run(|| {
             let backend_addr = common::spawn_server(echo_ws_backend());
 
-            let port = common::reserve_observed();
+            let port = common::reserve_request_body_owner();
             let asked = Arc::new(AtomicUsize::new(0));
             let mut proxy = Router::new().max_request_body(10);
             proxy.proxy_stream("/ws", &format!("http://{backend_addr}"));
@@ -665,9 +668,10 @@ fn websocket_proxy_stream_upgrade_excludes_body_policy_and_refuses_a_declared_pa
                 0,
                 "a proxied WebSocket upgrade is bodyless, not a streaming upload"
             );
-            assert_eq!(server.controller().body_frames_polled(), 0);
-            assert_eq!(server.controller().body_peak_retained_bytes(), 0);
-            assert_eq!(server.controller().body_permit_owners_dropped(), 0);
+            let body = server.controller().observed();
+            assert_eq!(body.frames_polled, 0);
+            assert_eq!(body.peak_retained_bytes, 0);
+            assert_eq!(body.permit_owners_dropped, 0);
             runtime::request_shutdown();
         })
         .unwrap();
@@ -690,14 +694,14 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
                     .await
                     .expect("bind owned proxy listener");
                 let proxy_addr = listener.local_addr().expect("owned proxy listener address");
-                let controller = lifecycle(proxy_addr).expect("install proxy controller");
+                let controller = connection_owner(proxy_addr).expect("install proxy controller");
                 let handle = camber::http::serve_background(listener, proxy)
                     .expect("owned server requires a Tokio runtime");
                 let mut websocket = connect_async_proxy_websocket(proxy_addr).await;
                 assert_proxy_echo(&mut websocket).await;
                 assert_eq!(backend_connections.load(Ordering::Acquire), 1);
                 controller
-                    .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                    .pause_once(ConnectionOwnerEdge::PermitWaitPending)
                     .expect("pause when the proxy permit wait becomes pending");
                 let mut second = tokio::net::TcpStream::connect(proxy_addr)
                     .await
@@ -709,7 +713,7 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
                 .await
                 .expect("write permit-waiting proxy request");
                 controller
-                    .wait_until_paused(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                    .wait_until_paused(ConnectionOwnerEdge::PermitWaitPending)
                     .await
                     .expect("proxy semaphore acquisition returned pending");
                 assert!(
@@ -722,7 +726,7 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
 
                 runtime::request_shutdown();
                 controller
-                    .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                    .release(ConnectionOwnerEdge::PermitWaitPending)
                     .expect("release pending proxy permit wait into shutdown");
                 let mut owner = Box::pin(handle.into_future());
                 assert_owned_proxy_close_contract(&mut websocket, owner.as_mut()).await;
@@ -980,12 +984,14 @@ async fn pending_proxy_upgrade_shutdown_is_rejected(forced: bool) {
         .await
         .expect("bind pending proxy-upgrade listener");
     let proxy_addr = listener.local_addr().expect("pending proxy address");
-    let controller = lifecycle(proxy_addr).expect("install pending proxy controller");
+    let controller = registration_selection(proxy_addr).expect("install pending proxy controller");
     controller
-        .pause_once(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+        .upgrades
+        .pause_once(UpgradeOwnerEdge::AfterHandoffSubmitted)
         .expect("pause after pending proxy ticket submission");
     controller
-        .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+        .upgrades
+        .pause_once(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .expect("pause pending proxy upgrade");
     let handle = camber::http::serve_background(listener, lifecycle_proxy_router(backend_addr))
         .expect("owned server requires a Tokio runtime");
@@ -994,22 +1000,31 @@ async fn pending_proxy_upgrade_shutdown_is_rejected(forced: bool) {
         .expect("connect pending proxied WebSocket peer");
     send_async_proxy_upgrade(&mut pending).await;
     controller
-        .wait_until_paused(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+        .upgrades
+        .wait_until_paused(UpgradeOwnerEdge::AfterHandoffSubmitted)
         .await
         .expect("pending proxy ticket reaches the supervisor channel");
     controller
-        .release(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+        .upgrades
+        .release(UpgradeOwnerEdge::AfterHandoffSubmitted)
         .expect("release submitted pending proxy ticket");
     controller
-        .wait_until_paused(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+        .upgrades
+        .wait_until_paused(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .await
         .expect("proxy upgrade reaches acknowledgement checkpoint");
     match forced {
         true => handle.cancel(),
         false => runtime::request_shutdown(),
     }
+    // Released only once this server's own stop state has committed. A
+    // cancellation commits before the command returns; a runtime shutdown
+    // commits when the supervisor takes the signal, and the answer this
+    // connection gives has to be on the far side of whichever it was.
+    common::await_committed_stop(&controller, "the pending proxy upgrade").await;
     controller
-        .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+        .upgrades
+        .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .expect("release pending proxy upgrade into shutdown");
     let mut owner = Box::pin(handle.into_future());
     let response = read_async_http_head(&mut pending, "the rejected proxy-upgrade response").await;
@@ -1057,46 +1072,17 @@ async fn cancelled_pending_proxy_upgrade_is_joined_and_connection_local() {
         .await
         .expect("bind proxy cancellation listener");
     let proxy_addr = listener.local_addr().expect("proxy cancellation address");
-    let controller = lifecycle(proxy_addr).expect("install proxy cancellation controller");
-    controller
-        .pause_once(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
-        .expect("pause after cancellable proxy ticket submission");
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
-        .expect("pause cancellable proxy upgrade");
-    controller
-        .pause_once(LifecycleCheckpoint::UpgradePeerClosed)
-        .expect("pause after proxy peer closure is observed");
+    let controller = upgrade_owner(proxy_addr).expect("install proxy cancellation controller");
+    arm_cancellable_proxy_upgrade(&controller);
     let handle = camber::http::serve_background(listener, proxy)
         .expect("owned server requires a Tokio runtime");
     let mut pending = tokio::net::TcpStream::connect(proxy_addr)
         .await
         .expect("connect cancellable proxy peer");
     send_async_proxy_upgrade(&mut pending).await;
-    controller
-        .wait_until_paused(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
-        .await
-        .expect("cancellable proxy ticket reaches the supervisor channel");
-    controller
-        .release(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
-        .expect("release submitted cancellable proxy ticket");
-    controller
-        .wait_until_paused(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
-        .await
-        .expect("cancellable proxy upgrade reaches acknowledgement checkpoint");
+    hold_proxy_upgrade_at_transfer_edge(&controller).await;
     drop(pending);
-    lifecycle_event(
-        "owned reader observation of proxy peer closure",
-        controller.wait_until_paused(LifecycleCheckpoint::UpgradePeerClosed),
-    )
-    .await
-    .expect("owned reader observes proxy peer closure");
-    controller
-        .release(LifecycleCheckpoint::UpgradePeerClosed)
-        .expect("release observed proxy peer closure");
-    controller
-        .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
-        .expect("release cancelled proxy registration");
+    release_proxy_upgrade_after_peer_close(&controller).await;
 
     assert_http_ok(
         proxy_addr,
@@ -1142,7 +1128,7 @@ struct ProxyUnwindScenario {
     /// a controller left behind in the setup would retire the injected fault
     /// before the unwind it arms is observed. The case owns the fault until it
     /// has read every verdict that depends on it.
-    controller: LifecycleController,
+    controller: ScopedFaultedRegistration,
     handle: camber::http::ServerHandle,
     acknowledged: tokio::net::TcpStream,
     pending: tokio::net::TcpStream,
@@ -1155,39 +1141,46 @@ async fn start_proxy_unwind_scenario() -> ProxyUnwindScenario {
         .await
         .expect("bind proxy unwind listener");
     let proxy_addr = listener.local_addr().expect("proxy unwind address");
-    let controller = lifecycle(proxy_addr).expect("install proxy unwind controller");
+    let controller = faulted_registration(proxy_addr).expect("install proxy unwind controller");
     let handle = camber::http::serve_background(listener, lifecycle_proxy_router(backend.addr))
         .expect("owned server requires a Tokio runtime");
     let mut acknowledged = connect_async_proxy_websocket(proxy_addr).await;
     assert_proxy_echo(&mut acknowledged).await;
     assert_eq!(backend_connections.load(Ordering::Acquire), 1);
     controller
-        .pause_once(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+        .upgrades
+        .pause_once(UpgradeOwnerEdge::AfterHandoffSubmitted)
         .expect("pause after second proxy ticket submission");
     controller
-        .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+        .upgrades
+        .pause_once(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .expect("pause second proxy upgrade");
     let mut pending = tokio::net::TcpStream::connect(proxy_addr)
         .await
         .expect("connect pending proxy upgrade");
     send_async_proxy_upgrade(&mut pending).await;
     controller
-        .wait_until_paused(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+        .upgrades
+        .wait_until_paused(UpgradeOwnerEdge::AfterHandoffSubmitted)
         .await
         .expect("second proxy ticket reaches the supervisor channel");
     controller
-        .release(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+        .upgrades
+        .release(UpgradeOwnerEdge::AfterHandoffSubmitted)
         .expect("release submitted second proxy ticket");
     controller
-        .wait_until_paused(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+        .upgrades
+        .wait_until_paused(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .await
         .expect("second proxy upgrade reaches acknowledgement checkpoint");
+    common::unwind_the_supervisor(&controller, "the unwinding proxy supervisor").await;
+    // Released only once the unwind has committed its forced phase, so the
+    // connection's answer reads a server that has already stopped admitting
+    // rather than racing the panic it is meant to follow.
     controller
-        .inject_once(LifecycleFault::PanicSupervisorCore)
-        .expect("inject proxy supervisor unwind");
-    controller
-        .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
-        .expect("release proxy supervisor into unwind");
+        .upgrades
+        .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
+        .expect("release the held proxy transfer edge");
     ProxyUnwindScenario {
         backend,
         backend_connections,
@@ -1204,8 +1197,12 @@ async fn finish_proxy_unwind_scenario(mut scenario: ProxyUnwindScenario) {
     let pending_response =
         read_async_http_head(&mut scenario.pending, "the unwound proxy-upgrade response").await;
     let pending_status = status_from_raw(&pending_response);
+    // A refusal rather than an internal failure: the connection holding the
+    // offer reads the forced phase the unwinding supervisor committed, so it
+    // knows the server stopped admitting rather than only that an owner went
+    // away.
     assert_eq!(
-        pending_status, 500,
+        pending_status, 503,
         "pending proxy upgrade committed an unexpected response: {pending_response}"
     );
     assert!(
@@ -1221,7 +1218,7 @@ async fn finish_proxy_unwind_scenario(mut scenario: ProxyUnwindScenario) {
     );
     assert_refusal_body_then_eof(
         &mut scenario.pending,
-        "internal server error",
+        "service unavailable",
         "the unwound pending proxy transport",
     )
     .await;
@@ -1238,4 +1235,54 @@ async fn finish_proxy_unwind_scenario(mut scenario: ProxyUnwindScenario) {
 async fn supervisor_unwind_joins_acknowledged_and_pending_proxy_upgrades() {
     let scenario = start_proxy_unwind_scenario().await;
     finish_proxy_unwind_scenario(scenario).await;
+}
+
+/// Arm the three edges a cancelled proxy upgrade is walked through.
+///
+/// Armed together because the walk needs all three before the peer connects: an
+/// edge armed later would be armed after production had already run past it.
+fn arm_cancellable_proxy_upgrade(controller: &ScopedUpgradeOwner) {
+    controller
+        .pause_once(UpgradeOwnerEdge::AfterHandoffSubmitted)
+        .expect("pause after the cancellable proxy offer is submitted");
+    controller
+        .pause_once(UpgradeOwnerEdge::BeforeTransferAcknowledge)
+        .expect("pause the cancellable proxy upgrade at its transfer edge");
+    controller
+        .pause_once(UpgradeOwnerEdge::PeerClosed)
+        .expect("pause after proxy peer closure is observed");
+}
+
+/// Take the offered proxy upgrade as far as its connection's transfer edge.
+async fn hold_proxy_upgrade_at_transfer_edge(controller: &ScopedUpgradeOwner) {
+    controller
+        .wait_until_paused(UpgradeOwnerEdge::AfterHandoffSubmitted)
+        .await
+        .expect("the cancellable proxy offer reaches its connection");
+    controller
+        .release(UpgradeOwnerEdge::AfterHandoffSubmitted)
+        .expect("release the submitted cancellable proxy offer");
+    controller
+        .wait_until_paused(UpgradeOwnerEdge::BeforeTransferAcknowledge)
+        .await
+        .expect("the cancellable proxy upgrade reaches its transfer edge");
+}
+
+/// Let the held transfer answer, but only after the peer close is observed.
+///
+/// The order is the whole claim: the connection decides against a peer it
+/// already knows has gone, so the cancellation is its own rather than a race.
+async fn release_proxy_upgrade_after_peer_close(controller: &ScopedUpgradeOwner) {
+    lifecycle_event(
+        "owned reader observation of proxy peer closure",
+        controller.wait_until_paused(UpgradeOwnerEdge::PeerClosed),
+    )
+    .await
+    .expect("owned reader observes proxy peer closure");
+    controller
+        .release(UpgradeOwnerEdge::PeerClosed)
+        .expect("release observed proxy peer closure");
+    controller
+        .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
+        .expect("release the cancelled proxy transfer");
 }

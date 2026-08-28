@@ -9,6 +9,7 @@ use super::proxy_upstream::{ProxyClients, ProxyUpstream};
 use super::rejection::{Rejection, RejectionContext, RejectionMapper, shared_mapper};
 use super::response::HandlerOutcome;
 use super::response::IntoResponse;
+use super::response_commitment::ResponseOrigin;
 use super::sse::SseWriter;
 use super::static_files::{DEFAULT_STATIC_FILE_LIMIT, frozen_static_file_limit};
 use super::stream::StreamResponse;
@@ -797,11 +798,14 @@ impl Router {
         self.root.insert_route(
             method,
             path,
-            RouteHandler::Async(Box::new(move |req: &Request| {
-                let fut = handler(req);
-                Box::pin(async move { fut.await.into_response() })
-                    as Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
-            })),
+            RouteHandler::Async(
+                Box::new(move |req: &Request| {
+                    let fut = handler(req);
+                    Box::pin(async move { fut.await.into_response() })
+                        as Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
+                }),
+                ResponseOrigin::Application,
+            ),
         );
     }
 
@@ -872,13 +876,16 @@ fn static_route_handler(
     limit: Option<usize>,
     select: impl Fn(&Request) -> Cow<'static, str> + Send + Sync + 'static,
 ) -> RouteHandler {
-    RouteHandler::Async(Box::new(move |req: &Request| {
-        let base_dir = Arc::clone(&base_dir);
-        let file_path = select(req);
-        Box::pin(
-            async move { super::static_files::read_bounded(&base_dir, &file_path, limit).await },
-        ) as Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
-    }))
+    RouteHandler::Async(
+        Box::new(move |req: &Request| {
+            let base_dir = Arc::clone(&base_dir);
+            let file_path = select(req);
+            Box::pin(async move {
+                super::static_files::read_bounded(&base_dir, &file_path, limit).await
+            }) as Pin<Box<dyn Future<Output = HandlerOutcome> + Send>>
+        }),
+        ResponseOrigin::StaticFile,
+    )
 }
 
 /// How one registered proxy route carries its answer back.

@@ -11,6 +11,7 @@ use crate::rejection_support::{
 };
 use crate::runtime_support as common;
 
+use camber::http::mock::ScopedRequestBodyOwner;
 use camber::http::{BodyAdmission, BodyAdmissionContext, RejectionKind, Request, Response, Router};
 use camber::{RuntimeError, runtime};
 use std::future::Future;
@@ -166,7 +167,7 @@ fn policy_error_maps_body_admission_without_polling_or_handler_entry() {
 
             assert_default_admission_refusal(&handled, &calls);
 
-            let port = wire::reserve_observed();
+            let port = wire::reserve_request_body_owner();
             let mapped: Journal = Arc::new(Mutex::new(Vec::new()));
             let mut mapping = Router::new();
             admission_routes(&mut mapping, &handled);
@@ -194,14 +195,15 @@ fn policy_error_maps_body_admission_without_polling_or_handler_entry() {
                 0,
                 "a refused request never reaches the handler"
             );
+            // One snapshot for both counters, so the two sentences describe the
+            // same moment rather than two.
+            let body = server.controller().observed();
             assert_eq!(
-                server.controller().body_frames_polled(),
-                0,
+                body.frames_polled, 0,
                 "a refused request polls no body frame"
             );
             assert_eq!(
-                server.controller().body_permit_owners_dropped(),
-                0,
+                body.permit_owners_dropped, 0,
                 "a policy that never returned a permit created no owner"
             );
 
@@ -215,7 +217,7 @@ fn policy_error_maps_body_admission_without_polling_or_handler_entry() {
                 "the admitted control asked the same policy once, and it admitted"
             );
             assert!(
-                server.controller().body_frames_polled() > 0,
+                server.controller().observed().frames_polled > 0,
                 "the same counter moves once an admitted body is collected"
             );
 
@@ -248,7 +250,7 @@ fn policy_panic_maps_redacted_internal_service_without_unwind() {
             let calls = Arc::new(AtomicUsize::new(0));
             let mapped: Journal = Arc::new(Mutex::new(Vec::new()));
 
-            let port = wire::reserve_observed();
+            let port = wire::reserve_request_body_owner();
             let mut router = Router::new();
             admission_routes(&mut router, &handled);
             let router = router
@@ -290,8 +292,8 @@ fn policy_panic_maps_redacted_internal_service_without_unwind() {
                 0,
                 "a panicking policy never reaches the handler"
             );
-            assert_eq!(server.controller().body_frames_polled(), 0);
-            assert_eq!(server.controller().body_permit_owners_dropped(), 0);
+            assert_eq!(server.controller().observed().frames_polled, 0);
+            assert_eq!(server.controller().observed().permit_owners_dropped, 0);
 
             let control = wire::send(addr, "POST", "/control/2", &[], b"still-serving");
             assert_eq!(
@@ -299,7 +301,7 @@ fn policy_panic_maps_redacted_internal_service_without_unwind() {
                 "the request future did not unwind, so the server still serves"
             );
             assert_eq!(control.body.as_ref(), b"still-serving");
-            assert!(server.controller().body_frames_polled() > 0);
+            assert!(server.controller().observed().frames_polled > 0);
 
             runtime::request_shutdown();
         })
@@ -335,16 +337,17 @@ struct Counts {
 impl Counts {
     /// Read every counter one row is judged on, at one moment.
     fn read(
-        server: &wire::ObservedServer,
+        server: &wire::ObservedServer<ScopedRequestBodyOwner>,
         policy: &Arc<AtomicUsize>,
         handled: &Arc<AtomicUsize>,
     ) -> Self {
+        let body = server.controller().observed();
         Self {
             policy: policy.load(Ordering::SeqCst),
             handled: handled.load(Ordering::SeqCst),
-            frames: server.controller().body_frames_polled(),
-            permits: server.controller().body_permit_owners_dropped(),
-            peak_retained: server.controller().body_peak_retained_bytes(),
+            frames: body.frames_polled,
+            permits: body.permit_owners_dropped,
+            peak_retained: body.peak_retained_bytes,
         }
     }
 
@@ -386,8 +389,8 @@ fn declaration_server(
     handled: &Arc<AtomicUsize>,
     calls: &Arc<AtomicUsize>,
     drops: &Arc<AtomicUsize>,
-) -> wire::ObservedServer {
-    let port = wire::reserve_observed();
+) -> wire::ObservedServer<ScopedRequestBodyOwner> {
+    let port = wire::reserve_request_body_owner();
     let mut router = Router::new();
     router.post(PLAIN_ROUTE, counting_echo(handled));
     router.post(SELECTED_ROUTE, counting_echo(handled));
@@ -402,7 +405,7 @@ fn declaration_server(
 /// Assert the configured ceiling refuses a declaration before the policy is
 /// asked, and the route-selected maximum refuses one after it.
 fn assert_declaration_refusals(
-    server: &wire::ObservedServer,
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
     calls: &Arc<AtomicUsize>,
     handled: &Arc<AtomicUsize>,
 ) {
@@ -460,7 +463,7 @@ fn assert_declaration_refusals(
 
 /// Assert a zero maximum refuses the first stated byte and admits an empty body.
 fn assert_zero_maximum_rows(
-    server: &wire::ObservedServer,
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
     calls: &Arc<AtomicUsize>,
     handled: &Arc<AtomicUsize>,
 ) {
@@ -501,7 +504,7 @@ fn assert_zero_maximum_rows(
 
 /// Assert declarations at and below the ceiling are collected in full.
 fn assert_admitted_declarations(
-    server: &wire::ObservedServer,
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
     calls: &Arc<AtomicUsize>,
     handled: &Arc<AtomicUsize>,
 ) {
@@ -549,7 +552,7 @@ fn assert_hard_ceiling_refusal(
     calls: &Arc<AtomicUsize>,
     drops: &Arc<AtomicUsize>,
 ) {
-    let port = wire::reserve_observed();
+    let port = wire::reserve_request_body_owner();
     let mut router = Router::new();
     router.post(PLAIN_ROUTE, counting_echo(handled));
     let server = port.serve(
@@ -626,8 +629,11 @@ fn terminal_routes(router: &mut Router, handled: &Arc<AtomicUsize>) {
 }
 
 /// Serve the terminal matrix: one permit per admitted request, one refusal.
-fn terminal_server(handled: &Arc<AtomicUsize>, drops: &Arc<AtomicUsize>) -> wire::ObservedServer {
-    let port = wire::reserve_observed();
+fn terminal_server(
+    handled: &Arc<AtomicUsize>,
+    drops: &Arc<AtomicUsize>,
+) -> wire::ObservedServer<ScopedRequestBodyOwner> {
+    let port = wire::reserve_request_body_owner();
     let mut router = Router::new();
     terminal_routes(&mut router, handled);
     router.use_middleware(|request: &Request, next: camber::http::Next| {
@@ -653,7 +659,10 @@ fn terminal_server(handled: &Arc<AtomicUsize>, drops: &Arc<AtomicUsize>) -> wire
 }
 
 /// Drive the terminals that complete: empty, collected, gated, and failed.
-fn assert_completing_terminals(server: &wire::ObservedServer, drops: &Arc<AtomicUsize>) -> usize {
+fn assert_completing_terminals(
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
+    drops: &Arc<AtomicUsize>,
+) -> usize {
     let empty = wire::send(server.addr(), "POST", "/ok/1", &[], b"");
     assert_eq!(empty.status, 200);
     assert_eq!(empty.body.as_ref(), b"");
@@ -679,7 +688,7 @@ fn assert_completing_terminals(server: &wire::ObservedServer, drops: &Arc<Atomic
 
 /// Drive the terminals that refuse the body itself.
 fn assert_body_refusal_terminals(
-    server: &wire::ObservedServer,
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
     drops: &Arc<AtomicUsize>,
     released: usize,
 ) -> usize {
@@ -712,7 +721,7 @@ fn assert_body_refusal_terminals(
 
 /// Drive the deadline terminal: a body that is promised and never finishes.
 fn assert_deadline_terminal(
-    server: &wire::ObservedServer,
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
     drops: &Arc<AtomicUsize>,
     released: usize,
 ) -> usize {
@@ -733,7 +742,7 @@ fn assert_deadline_terminal(
 
 /// Drive the refusal that creates no owner at all.
 fn assert_admission_refusal_terminal(
-    server: &wire::ObservedServer,
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
     drops: &Arc<AtomicUsize>,
     released: usize,
 ) {
@@ -801,7 +810,7 @@ fn buffered_permit_terminal_matrix_releases_once() {
             let released = assert_deadline_terminal(&server, &drops, released);
             assert_admission_refusal_terminal(&server, &drops, released);
             assert_eq!(
-                server.controller().body_permit_owners_dropped(),
+                server.controller().observed().permit_owners_dropped,
                 drops.load(Ordering::Acquire),
                 "the listener counted the same releases the permits themselves recorded"
             );
@@ -822,8 +831,11 @@ const ACCOUNTED_ROUTE: &str = "/accounted";
 /// No policy, because what these rows turn on is the bound itself: a configured
 /// ceiling reaches the collector as the effective limit, and an application
 /// decision beside it would only be a second number to attribute the answer to.
-fn accounting_server(handled: &Arc<AtomicUsize>, ceiling: usize) -> wire::ObservedServer {
-    let port = wire::reserve_observed();
+fn accounting_server(
+    handled: &Arc<AtomicUsize>,
+    ceiling: usize,
+) -> wire::ObservedServer<ScopedRequestBodyOwner> {
+    let port = wire::reserve_request_body_owner();
     let mut router = Router::new();
     router.post(ACCOUNTED_ROUTE, counting_echo(handled));
     port.serve(router.max_request_body(ceiling))
@@ -839,14 +851,10 @@ fn assert_retained_within_bound(handled: &Arc<AtomicUsize>) {
         b"abcdefg",
         "every frame below the bound is retained"
     );
+    let within = server.controller().observed();
+    assert_eq!(within.frames_polled, 2, "both data frames were polled");
     assert_eq!(
-        server.controller().body_frames_polled(),
-        2,
-        "both data frames were polled"
-    );
-    assert_eq!(
-        server.controller().body_peak_retained_bytes(),
-        7,
+        within.peak_retained_bytes, 7,
         "peak retention is exactly what the request retained"
     );
 
@@ -859,7 +867,7 @@ fn assert_retained_within_bound(handled: &Arc<AtomicUsize>) {
         "a body exactly at the bound is retained whole"
     );
     assert_eq!(
-        server.controller().body_peak_retained_bytes(),
+        server.controller().observed().peak_retained_bytes,
         DECLARED_CEILING,
         "peak retention reaches the bound and stops there"
     );
@@ -876,13 +884,13 @@ fn assert_crossing_frame_is_dropped(handled: &Arc<AtomicUsize>) {
         crossed.status, 413,
         "the crossing frame produces the limit refusal"
     );
+    let accounted = server.controller().observed();
     assert_eq!(
-        server.controller().body_frames_polled(),
-        2,
+        accounted.frames_polled, 2,
         "the crossing frame was polled, and measured, before it could be kept"
     );
     assert_eq!(
-        server.controller().body_peak_retained_bytes(),
+        accounted.peak_retained_bytes,
         DECLARED_CEILING - 4,
         "accounting runs before the append, so the crossing frame is never retained"
     );
@@ -902,18 +910,19 @@ fn assert_zero_bound_rows(handled: &Arc<AtomicUsize>) {
         "a zero bound admits a body with no data frame"
     );
     assert_eq!(empty.body.as_ref(), b"");
-    assert_eq!(server.controller().body_frames_polled(), 0);
-    assert_eq!(server.controller().body_peak_retained_bytes(), 0);
+    let admitted = server.controller().observed();
+    assert_eq!(admitted.frames_polled, 0);
+    assert_eq!(admitted.peak_retained_bytes, 0);
 
     let crossed = chunked_answer(server.addr(), ACCOUNTED_ROUTE, &[b"x"]);
     assert_eq!(
         crossed.status, 413,
         "a zero bound refuses the first data byte"
     );
-    assert_eq!(server.controller().body_frames_polled(), 1);
+    let refused = server.controller().observed();
+    assert_eq!(refused.frames_polled, 1);
     assert_eq!(
-        server.controller().body_peak_retained_bytes(),
-        0,
+        refused.peak_retained_bytes, 0,
         "a zero bound retains nothing at all"
     );
 }
@@ -982,7 +991,7 @@ fn buffered_permit_stays_owned_through_handler_and_drops_afterward() {
             let gate = Arc::new(tokio::sync::Notify::new());
             let (entered_tx, entered) = std::sync::mpsc::sync_channel(1);
 
-            let port = wire::reserve_observed();
+            let port = wire::reserve_request_body_owner();
             let mut router = Router::new();
             router.post("/held/:id", {
                 let gate = Arc::clone(&gate);
@@ -1027,7 +1036,7 @@ fn buffered_permit_stays_owned_through_handler_and_drops_afterward() {
                 "the permit stays owned while the handler holds its request"
             );
             assert_eq!(
-                server.controller().body_permit_owners_dropped(),
+                server.controller().observed().permit_owners_dropped,
                 0,
                 "no permit owner has been released yet"
             );
@@ -1041,13 +1050,13 @@ fn buffered_permit_stays_owned_through_handler_and_drops_afterward() {
                 1,
                 "request and response completion releases the permit exactly once"
             );
-            assert_eq!(server.controller().body_permit_owners_dropped(), 1);
+            assert_eq!(server.controller().observed().permit_owners_dropped, 1);
 
             let control = wire::send(addr, "POST", "/after/2", &[], b"after-body");
             assert_eq!(control.status, 200);
             assert_eq!(control.body.as_ref(), b"after-body");
             assert_eq!(drops.load(Ordering::Acquire), 2);
-            assert_eq!(server.controller().body_permit_owners_dropped(), 2);
+            assert_eq!(server.controller().observed().permit_owners_dropped, 2);
 
             runtime::request_shutdown();
         })

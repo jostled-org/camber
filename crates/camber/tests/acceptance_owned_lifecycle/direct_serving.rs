@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use camber::RuntimeError;
-use camber::http::mock::{LifecycleCheckpoint, lifecycle};
+use camber::http::mock::{ConnectionOwnerEdge, connection_owner};
 use camber::http::{HostRouter, Request, Response, Router, SseWriter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -286,7 +286,7 @@ fn camber_creation_keeps_runtime_context_on_a_foreign_poll() {
                 let (router, mut gate) = multi_gated_router();
                 let listener = bind_listener().await;
                 let addr = listener.local_addr().unwrap();
-                let controller = lifecycle(addr).unwrap();
+                let connections = connection_owner(addr).unwrap();
 
                 // Built here, under Camber. A raw Tokio task has no Camber
                 // provenance of its own, and no longer needs one: the capture
@@ -298,12 +298,12 @@ fn camber_creation_keeps_runtime_context_on_a_foreign_poll() {
                 let first_client = tokio::spawn(plain_request(addr, "localhost"));
                 receive_with_guard(&mut gate.entered, "first captured transport").await;
 
-                controller
-                    .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                connections
+                    .pause_once(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
                 let second_client = tokio::spawn(plain_request(addr, "localhost"));
-                controller
-                    .wait_until_paused(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                connections
+                    .wait_until_paused(ConnectionOwnerEdge::PermitWaitPending)
                     .await
                     .unwrap();
                 assert!(
@@ -315,8 +315,8 @@ fn camber_creation_keeps_runtime_context_on_a_foreign_poll() {
                 );
 
                 camber::runtime::request_shutdown();
-                controller
-                    .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                connections
+                    .release(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
 
                 let result = tokio::time::timeout(Duration::from_secs(2), server)

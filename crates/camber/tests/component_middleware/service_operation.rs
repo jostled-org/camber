@@ -21,8 +21,8 @@ use camber::http::{Next, Request, Response, Router, SseWriter, StreamResponse};
 use camber::{RuntimeError, runtime};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 #[cfg(feature = "grpc")]
@@ -167,18 +167,25 @@ fn fail_on_unwind(router: &mut Router) {
 /// gate at all — its middleware wraps the answer its handler already produced —
 /// so the same refusal reaches it only after that handler ran, and a shared
 /// total would make each half's claim unreadable.
+///
+/// The gated side is waitable, and the wrapped side is not. Every class but one
+/// answers the peer from behind its gate, so reading the answer is already
+/// reading that the work ran; an upgrade commits its head first and enters its
+/// session after, so the only way to count it is to wait for it.
 #[derive(Default)]
 struct Work {
     /// Producers, sessions, upgrades, forwarded legs, and services that begin
     /// only once a gate has admitted the request.
-    gated: AtomicUsize,
+    gated: Mutex<usize>,
+    /// Woken by every gated entry, for the class that commits its head first.
+    entered: Condvar,
     /// Handlers and forwarded legs whose answer the chain wraps.
     wrapped: AtomicUsize,
 }
 
 impl Work {
     fn gated(&self) -> usize {
-        self.gated.load(Ordering::SeqCst)
+        *self.recorded()
     }
 
     fn wrapped(&self) -> usize {
@@ -186,11 +193,42 @@ impl Work {
     }
 
     fn enter_gated(&self) {
-        self.gated.fetch_add(1, Ordering::SeqCst);
+        *self.recorded() += 1;
+        self.entered.notify_all();
     }
 
     fn enter_wrapped(&self) {
         self.wrapped.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Block until `count` gated entries have been recorded, or fail the row.
+    ///
+    /// Bounded by the same deadline every exchange here runs under, so a
+    /// session that never starts fails as the missing entry it is rather than
+    /// parking the binary.
+    ///
+    /// Upgrades are the only class that commits its head before its gated work
+    /// begins, so without the feature that serves them nothing has to wait.
+    #[cfg(feature = "ws")]
+    fn await_gated(&self, count: usize, label: &str) {
+        let (recorded, waited) = self
+            .entered
+            .wait_timeout_while(self.recorded(), BOUND, |gated| *gated < count)
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(
+            !waited.timed_out(),
+            "{label}: only {} of the {count} gated entries this row drives ran within {BOUND:?}",
+            *recorded,
+        );
+    }
+
+    /// The gated count, held for reading or for the wait that watches it.
+    ///
+    /// Poison-recovering, like every other lock in this suite: a row that
+    /// panicked while holding it has already failed, and a second panic here
+    /// would report the lock instead of the assertion that broke.
+    fn recorded(&self) -> MutexGuard<'_, usize> {
+        self.gated.lock().unwrap_or_else(|error| error.into_inner())
     }
 }
 
@@ -238,6 +276,12 @@ impl Fixture {
     /// How much wrapped work — the two classes with no gate — ran.
     fn wrapped(&self) -> usize {
         self.work.wrapped()
+    }
+
+    /// Wait until `count` gated entries have been recorded.
+    #[cfg(feature = "ws")]
+    fn await_gated(&self, count: usize, label: &str) {
+        self.work.await_gated(count, label);
     }
 
     /// The category the mapper recorded for this row's one refusal.
@@ -507,9 +551,20 @@ fn multipart_declaration() -> Box<str> {
 /// Drive one upgrade handshake and read the head it answered with.
 #[cfg(feature = "ws")]
 fn handshake(addr: SocketAddr, path: &str) -> wire::HttpResponse {
+    upgrade(addr, path).0
+}
+
+/// Drive one upgrade handshake and keep the peer that completed it.
+///
+/// The peer is handed back for the row whose next claim is about what runs
+/// behind a committed handshake: the head is answered before the session
+/// starts, so a peer dropped at the head hands the bridge a terminal of its own
+/// while the row is still waiting for that session.
+#[cfg(feature = "ws")]
+fn upgrade(addr: SocketAddr, path: &str) -> (wire::HttpResponse, std::net::TcpStream) {
     let mut peer = crate::ws_support::start_upgrade(addr, path);
     let raw = crate::ws_support::read_until_double_crlf(&mut peer);
-    parsed_head(&raw)
+    (parsed_head(&raw), peer)
 }
 
 /// Read one handshake answer's status line and header lines.
@@ -719,7 +774,11 @@ fn assert_upgrades_projected(fixture: &Fixture) {
         ("direct upgrade", WS_PATH),
         ("proxied upgrade", WS_PROXY_PATH),
     ] {
-        let head = handshake(fixture.addr, path);
+        let entered_before = fixture.gated();
+        // The peer is held for the whole row: a session enters behind the head
+        // it answered with, so a peer dropped at the head would be racing the
+        // bridge that starts it.
+        let (head, _peer) = upgrade(fixture.addr, path);
         assert_eq!(head.status, 101, "{label}: wire status");
         assert_projected(&head, label);
         assert!(
@@ -731,6 +790,10 @@ fn assert_upgrades_projected(fixture: &Fixture) {
             Some("websocket"),
             "{label}: the handshake's own correction was lost to the merge",
         );
+        // Waited for rather than read, because this is the one class whose
+        // gated work begins after the head the row just read: the handshake
+        // commits, and the session behind it enters at its own pace.
+        fixture.await_gated(entered_before + 1, label);
     }
 }
 

@@ -11,7 +11,10 @@ use crate::common::{
     recording_mapper,
 };
 
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController};
+use camber::http::mock::{
+    ConnectionOwnerEdge, ScopedSupervisedRegistration, ServerStopEdge, UpgradeOwnerEdge,
+    supervised_registration,
+};
 use camber::http::{
     Rejection, RejectionContext, RejectionKind, RejectionProtocol, Request, Router, WsConn,
 };
@@ -123,23 +126,25 @@ fn calibrated(dispatched: &Arc<AtomicUsize>) -> usize {
 /// instead. The supervisor observing that task's join is the point the permit is
 /// provably back, and it is a checkpoint rather than a wait.
 async fn calibrate_limited_dispatch(
-    controller: &LifecycleController,
+    owners: &ScopedSupervisedRegistration,
     addr: SocketAddr,
     dispatched: &Arc<AtomicUsize>,
 ) -> usize {
     let peer = dispatch_one_upgrade(addr, dispatched).await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedTask)
+    owners
+        .stop
+        .pause_once(ServerStopEdge::SupervisorSelectedTask)
         .unwrap();
     drop(peer);
     crate::wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        owners,
+        ServerStopEdge::SupervisorSelectedTask,
         "the calibrating bridge's task was never joined",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedTask)
+    owners
+        .stop
+        .release(ServerStopEdge::SupervisorSelectedTask)
         .unwrap();
     calibrated(dispatched)
 }
@@ -225,7 +230,7 @@ async fn upgrade_registration_rejection_keeps_close_permit_and_completion_contra
     let dispatched = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = crate::lifecycle(addr).unwrap();
+    let owners = supervised_registration(addr).unwrap();
     // Adopted rather than held bare: `ServerHandle` has no `Drop`, so an
     // assertion failing anywhere below leaves the supervisor task and its
     // listener with no explicit cancel. The guard owes that cancel and the join
@@ -242,30 +247,32 @@ async fn upgrade_registration_rejection_keeps_close_permit_and_completion_contra
     // registrar refuses an upgrade it can no longer own. The handshake offers a
     // subprotocol, so the refusal is raised past a settled negotiation.
     let mut client = crate::prepare_offered_submitted_upgrade(
-        &controller,
+        &owners,
         addr,
         &crate::common::ws_upgrade_request_with(SOCKET, &[("Sec-WebSocket-Protocol", SUBPROTOCOL)]),
     )
     .await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+    owners
+        .stop
+        .pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
     // The guard steps aside here, and only here: from this line on the case has
     // sent its own cancel, so no exit path can leave the server uncancelled.
     let handle = served.into_handle();
     handle.cancel();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    owners
+        .stop
+        .release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     crate::wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "registration control selection timed out",
     )
     .await;
-    crate::apply_selected_event_then_release_upgrade(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+    crate::apply_selected_event_then_release_transfer(
+        &owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "forced control was not applied before releasing the submitted upgrade",
     )
     .await;
@@ -323,34 +330,35 @@ fn assert_refusal_context(journal: &Journal, label: &str, subprotocol: Option<&s
 /// admission, so holding the handshake back is what lets a second peer reach
 /// the limit's wait before the upgrade that will be refused exists at all.
 async fn accept_idle_peer_holding_the_permit(
-    controller: &LifecycleController,
+    owners: &ScopedSupervisedRegistration,
     addr: SocketAddr,
 ) -> tokio::net::TcpStream {
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedAccept)
+    owners
+        .stop
+        .pause_once(ServerStopEdge::SupervisorSelectedAccept)
         .unwrap();
     let peer = tokio::net::TcpStream::connect(addr).await.unwrap();
     crate::wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "the idle peer's accept selection timed out",
     )
     .await;
     crate::apply_selected(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "the idle peer's post-accept boundary timed out",
     )
     .await;
     crate::select_next(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedPermit,
+        owners,
+        ServerStopEdge::SupervisorSelectedPermit,
         "the idle peer's permit selection timed out",
     )
     .await;
     crate::apply_selected(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedPermit,
+        owners,
+        ServerStopEdge::SupervisorSelectedPermit,
         "the idle peer's post-permit boundary timed out",
     )
     .await;
@@ -359,19 +367,19 @@ async fn accept_idle_peer_holding_the_permit(
 
 /// Accept a second peer, which the limit can only park.
 async fn park_second_peer(
-    controller: &LifecycleController,
+    owners: &ScopedSupervisedRegistration,
     addr: SocketAddr,
 ) -> tokio::net::TcpStream {
     let peer = tokio::net::TcpStream::connect(addr).await.unwrap();
     crate::select_next(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "the parked peer's accept selection timed out",
     )
     .await;
     crate::apply_selected(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "the parked peer's post-accept boundary timed out",
     )
     .await;
@@ -383,35 +391,35 @@ async fn park_second_peer(
 /// The checkpoint is the whole observation: reaching it means the immediate
 /// acquisition failed, so the only permit this server has is the one the idle
 /// connection took at admission and still holds.
-async fn observe_parked_permit_wait(controller: &LifecycleController) {
-    controller
-        .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+async fn observe_parked_permit_wait(owners: &ScopedSupervisedRegistration) {
+    owners
+        .connections
+        .pause_once(ConnectionOwnerEdge::PermitWaitPending)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRegistration)
+    owners
+        .upgrades
+        .pause_once(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
-        .unwrap();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    owners
+        .stop
+        .release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     crate::wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::ConnectionPermitWaitPending,
+        owners,
+        ConnectionOwnerEdge::PermitWaitPending,
         "the parked peer was admitted while the upgrade still held the only permit",
     )
     .await;
 }
 
-/// Offer the handshake, then let forced control refuse the ticket it submits.
+/// Offer the handshake, then let forced control refuse the transfer it asks for.
 ///
-/// The cancel lands between the supervisor selecting the ticket and applying
-/// it, so the registrar answers an upgrade whose admission has already closed —
-/// the same refusal the unlimited case drives, reached without giving the
-/// permit up first.
+/// The cancel lands while the connection is held at its own transfer edge, so
+/// the answer it gives refuses an upgrade whose admission has already closed —
+/// the same refusal the unlimited case drives, reached without giving the permit
+/// up first.
 async fn refuse_the_offered_upgrade(
-    controller: &LifecycleController,
+    owners: &ScopedSupervisedRegistration,
     client: &mut tokio::net::TcpStream,
     handle: &camber::http::ServerHandle,
 ) {
@@ -420,43 +428,43 @@ async fn refuse_the_offered_upgrade(
         .await
         .unwrap();
     crate::wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedRegistration,
-        "the submitted upgrade ticket was never selected",
+        owners,
+        UpgradeOwnerEdge::BeforeTransferAcknowledge,
+        "the offered upgrade never reached its connection's transfer edge",
     )
     .await;
     handle.cancel();
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+    owners
+        .stop
+        .pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedRegistration)
-        .unwrap();
-    controller
-        .release(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+    owners
+        .upgrades
+        .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .unwrap();
 }
 
 /// Enter the abort while the refusal is still held inside policy.
 ///
-/// This is the observation the permit carries. The abort forces every owned
-/// task down, but not until each connection it refused has released its permit,
-/// so a connection that gave the slot up at mapping time would be aborted here
-/// — with its refusal still unwritten — instead of answering it.
+/// This is the observation the permit carries. The abort forces down every
+/// connection with no answer of its own outstanding, and a connection that has
+/// just refused an upgrade has one, so a connection that gave the slot up at
+/// mapping time would be aborted here — with its refusal still unwritten —
+/// instead of answering it.
 async fn begin_abort_over_the_held_refusal(
-    controller: &LifecycleController,
+    owners: &ScopedSupervisedRegistration,
     mapping: &mut HeldMapping,
 ) {
     mapping.await_entry().await;
     crate::wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "forced control was never selected while the refusal was held",
     )
     .await;
     crate::apply_selected(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "forced control was not applied while the refusal was held",
     )
     .await;
@@ -470,24 +478,24 @@ async fn begin_abort_over_the_held_refusal(
 /// pause — the lifecycle seam has no `disarm`. An assertion failing between the
 /// two points leaves production held at both, so the case would run into this
 /// server's thirty-second shutdown deadline instead of failing where it failed.
-const HELD_WAITS: [LifecycleCheckpoint; 2] = [
-    LifecycleCheckpoint::ConnectionPermitWaitPending,
-    LifecycleCheckpoint::BeforeSupervisorSelect,
-];
+const HELD_PERMIT_WAIT: ConnectionOwnerEdge = ConnectionOwnerEdge::PermitWaitPending;
+const HELD_SELECT_BOUNDARY: ServerStopEdge = ServerStopEdge::BeforeSupervisorSelect;
 
-/// Release whatever of [`HELD_WAITS`] is still held, on every exit path.
+/// Release both held waits, on every exit path.
 ///
 /// The successful path releases both itself and asserts that it did, so this
 /// finds nothing left. A release with nothing paused reports an error, which is
 /// this guard finding its work already done rather than a fault to raise —
 /// raising it during an unwind would replace the case's own failure.
-struct HeldWaits<'a>(&'a LifecycleController);
+///
+/// The two are released by name rather than from one list: they belong to
+/// different owners, so no single vocabulary can spell both.
+struct HeldWaits<'a>(&'a ScopedSupervisedRegistration);
 
 impl Drop for HeldWaits<'_> {
     fn drop(&mut self) {
-        for checkpoint in HELD_WAITS {
-            let _ = self.0.release(checkpoint);
-        }
+        let _ = self.0.connections.release(HELD_PERMIT_WAIT);
+        let _ = self.0.stop.release(HELD_SELECT_BOUNDARY);
     }
 }
 
@@ -511,7 +519,7 @@ fn refused_upgrade_registration_holds_its_connection_permit() {
                 let (router, mut mapping) = held_mapping_router(&journal, &dispatched);
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let controller = crate::lifecycle(addr).unwrap();
+                let owners = supervised_registration(addr).unwrap();
                 // Adopted rather than held bare, for the reason the unlimited
                 // case gives: `ServerHandle` has no `Drop`, so the guard owes the
                 // cancel and the join until this case sends its own cancel.
@@ -522,16 +530,16 @@ fn refused_upgrade_registration_holds_its_connection_permit() {
                 );
                 // Declared after the server so it drops first: an unwind has to
                 // release the waits before anything waits on this server's join.
-                let held = HeldWaits(&controller);
+                let held = HeldWaits(&owners);
 
-                let calibrated = calibrate_limited_dispatch(&controller, addr, &dispatched).await;
+                let calibrated = calibrate_limited_dispatch(&owners, addr, &dispatched).await;
 
-                let mut client = accept_idle_peer_holding_the_permit(&controller, addr).await;
-                let parked = park_second_peer(&controller, addr).await;
-                observe_parked_permit_wait(&controller).await;
+                let mut client = accept_idle_peer_holding_the_permit(&owners, addr).await;
+                let parked = park_second_peer(&owners, addr).await;
+                observe_parked_permit_wait(&owners).await;
                 let handle = served.into_handle();
-                refuse_the_offered_upgrade(&controller, &mut client, &handle).await;
-                begin_abort_over_the_held_refusal(&controller, &mut mapping).await;
+                refuse_the_offered_upgrade(&owners, &mut client, &handle).await;
+                begin_abort_over_the_held_refusal(&owners, &mut mapping).await;
                 crate::assert_refused_upgrade_wire(&mut client, "the permit-held refused upgrade")
                     .await;
 
@@ -539,11 +547,13 @@ fn refused_upgrade_registration_holds_its_connection_permit() {
                 // the whole refusal, so no part of mapping handed the slot on.
                 // Asserted rather than left to `held`, because a release that
                 // reports nothing paused is a wait production never reached.
-                controller
-                    .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                owners
+                    .connections
+                    .release(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
-                controller
-                    .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+                owners
+                    .stop
+                    .release(ServerStopEdge::BeforeSupervisorSelect)
                     .unwrap();
                 drop(held);
                 drop(parked);

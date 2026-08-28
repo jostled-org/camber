@@ -1,5 +1,8 @@
 pub mod common;
 
+#[cfg(feature = "ws")]
+#[path = "component_websocket/callback_ownership.rs"]
+mod callback_ownership;
 #[path = "component_websocket/connection_limits.rs"]
 mod connection_limits;
 #[cfg(feature = "ws")]
@@ -14,6 +17,9 @@ mod handshake;
 #[cfg(feature = "ws")]
 #[path = "component_websocket/shared_binary_payloads.rs"]
 mod shared_binary_payloads;
+#[cfg(feature = "ws")]
+#[path = "component_websocket/terminal_causality.rs"]
+mod terminal_causality;
 #[cfg(feature = "ws")]
 #[path = "component_websocket/transport_ownership.rs"]
 mod transport_ownership;

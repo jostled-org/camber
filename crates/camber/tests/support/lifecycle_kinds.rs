@@ -26,6 +26,14 @@ use camber::{
     LifecyclePhase, ResourceFailureKind, ResourcePhase, RuntimeError,
 };
 
+/// Every entry a returned aggregate holds, rendered on one line.
+///
+/// The projection a row reads when its claim is about the whole account rather
+/// than about one entry it can name.
+pub fn aggregate_rendering(error: &RuntimeError) -> Box<str> {
+    aggregate(error).to_string().into_boxed_str()
+}
+
 /// The aggregate a runtime teardown returned, or a failure naming what it
 /// returned instead.
 ///
@@ -42,11 +50,6 @@ pub fn aggregate(error: &RuntimeError) -> &LifecycleFailures {
 /// Every entry of a returned aggregate, in the order it froze them.
 pub fn aggregate_identities(error: &RuntimeError) -> Box<[String]> {
     aggregate(error).iter().map(entry_identity).collect()
-}
-
-/// The entry a returned aggregate names as the one to act on.
-pub fn aggregate_primary(error: &RuntimeError) -> &LifecycleFailure {
-    aggregate(error).primary()
 }
 
 /// Assert the returned aggregate reports a scope drain that found `outstanding`
@@ -74,20 +77,13 @@ pub fn assert_scope_drain(error: &RuntimeError, outstanding: usize, context: &st
     );
 }
 
-/// Assert the returned aggregate's primary is a Camber-owned child that unwound
+/// Assert the returned aggregate reports a Camber-owned child that unwound
 /// carrying `payload`.
+///
+/// Reported anywhere in the account: every entry is a direct failure the
+/// runtime reports, so a row that looked at one chosen entry would be asserting
+/// a rendering order rather than the fault it cares about.
 pub fn assert_background_panic(error: &RuntimeError, payload: &str, context: &str) {
-    let reported = background_panic_payload(aggregate_primary(error));
-    assert_eq!(
-        reported,
-        Some(payload),
-        "{context}: {:?}",
-        aggregate_identities(error)
-    );
-}
-
-/// Assert the returned aggregate retains a Camber-owned child panic anywhere.
-pub fn assert_retained_background_panic(error: &RuntimeError, payload: &str, context: &str) {
     let reported = aggregate(error).iter().find_map(background_panic_payload);
     assert_eq!(
         reported,
@@ -114,13 +110,9 @@ fn background_panic_payload(failure: &LifecycleFailure) -> Option<&str> {
 pub fn participant_name(participant: &LifecycleParticipant) -> String {
     match participant {
         LifecycleParticipant::RootScope => "root-scope".to_owned(),
-        LifecycleParticipant::Server => "server".to_owned(),
-        LifecycleParticipant::Connection => "connection".to_owned(),
-        LifecycleParticipant::Upgrade => "upgrade".to_owned(),
         LifecycleParticipant::BackgroundTask => "background-task".to_owned(),
         LifecycleParticipant::Resource(name) => format!("resource:{name}"),
         LifecycleParticipant::Exporter => "exporter".to_owned(),
-        LifecycleParticipant::Executor => "executor".to_owned(),
     }
 }
 

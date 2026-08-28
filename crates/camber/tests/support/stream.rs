@@ -1,4 +1,4 @@
-use camber::http::mock::{LifecycleController, TransferObservation};
+use camber::http::mock::{TransferObservation, TransferOwnerController};
 use std::io;
 use std::net::TcpStream;
 use std::time::Duration;
@@ -208,15 +208,14 @@ const STREAMED_READ_BOUND: Duration = Duration::from_secs(20);
 /// is returned either way so a row that never got there fails against what the
 /// owner actually did.
 pub fn download_observed(
-    controller: &LifecycleController,
+    controller: &TransferOwnerController,
     row: &str,
     what: &str,
     settled: impl Fn(&TransferObservation) -> bool,
 ) -> TransferObservation {
-    let reached = super::http::poll_until(DOWNLOAD_OBSERVED_BOUND, || {
-        settled(&controller.transfers_observed())
-    });
-    let observed = controller.transfers_observed();
+    let reached =
+        super::http::poll_until(DOWNLOAD_OBSERVED_BOUND, || settled(&controller.observed()));
+    let observed = controller.observed();
     assert!(
         reached,
         "{row}: the download owner never {what}: {observed:?}"
@@ -229,7 +228,7 @@ pub fn download_observed(
 /// For the rows whose cause is the peer: a transport taken away can release the
 /// owner before it weighs another turn, so the release is the whole claim. `row`
 /// names the case, so the same wait serves a streamed response and a feed.
-pub fn released_download(controller: &LifecycleController, row: &str) -> TransferObservation {
+pub fn released_download(controller: &TransferOwnerController, row: &str) -> TransferObservation {
     download_observed(controller, row, "released", |observed| {
         observed.download.releases >= 1
     })

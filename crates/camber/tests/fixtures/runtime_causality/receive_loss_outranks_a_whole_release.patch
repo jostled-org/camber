@@ -1,0 +1,36 @@
+diff --git a/crates/camber/src/http/ws_proxy/direct.rs b/crates/camber/src/http/ws_proxy/direct.rs
+index 76577df..685a7bb 100644
+--- a/crates/camber/src/http/ws_proxy/direct.rs
++++ b/crates/camber/src/http/ws_proxy/direct.rs
+@@ -407,11 +407,13 @@ impl DirectBridge<'_> {
+         let received = inbound.run();
+         let written = outbound.run();
+         tokio::pin!(stopped, unreceived, received, written);
++        // Ranked: a receive owner that left outranks a last sender that did, so
++        // it is asked before the write side that still owes something.
+         tokio::select! {
+             biased;
++            () = &mut unreceived => WsCloseCause::ReceiverDropped,
+             cause = &mut written => cause,
+             cause = &mut received => cause,
+-            () = &mut unreceived => WsCloseCause::ReceiverDropped,
+             mode = &mut stopped => control_cause(mode),
+         }
+     }
+@@ -554,12 +556,12 @@ async fn receive_owner_left(
+     owner: &Option<tokio::sync::mpsc::Sender<WsMessage>>,
+     send_owners: &tokio::sync::mpsc::WeakSender<WsMessage>,
+ ) {
++    // Ranked: a receive owner that left answers whether or not the application
++    // let go of the send half in the same moment, so releasing the whole
++    // connection is read as one half of it going away.
++    let _ = send_owners;
+     match owner {
+         Some(owner) => owner.closed().await,
+-        None => return std::future::pending().await,
+-    }
+-    match send_owners.upgrade() {
+-        Some(_) => {}
+         None => std::future::pending().await,
+     }
+ }

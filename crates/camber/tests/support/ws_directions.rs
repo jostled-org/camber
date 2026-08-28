@@ -21,14 +21,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use camber::RuntimeError;
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController, lifecycle};
+use camber::http::mock::{
+    ScopedRetainedBridge, WebSocketDirectionEdge, WebSocketTerminalEdge, retained_bridge,
+};
 use camber::http::{
     Request, Router, ServerHandle, ServerHandleFuture, WsCloseCause, WsConn, WsMessage, WsReceive,
     WsReceiver, WsSender,
 };
 use futures_util::FutureExt;
 
-use super::http::{assert_server_joined, reserve_observed, wait_until_paused_bounded};
+use super::http::{BridgeHold, assert_server_joined, bounded_pause, reserve_registered};
 use super::ws_async::lifecycle_event;
 
 /// The bound every wait, join, read, and shutdown in a direction case runs
@@ -57,13 +59,23 @@ pub struct DirectionHandoff {
     /// The other end of the channel every parked callback waits on.
     ///
     /// Never read and never sent on: it is held for its `Drop`. While it
-    /// exists, the callback's own wait cannot end; dropping this handoff is
-    /// what lets every parked callback return.
-    #[expect(dead_code, reason = "held for its Drop, which unparks the callback")]
-    parked: std::sync::mpsc::Sender<()>,
+    /// exists, the callback's own wait cannot end, and letting it go is what
+    /// lets every parked callback return.
+    ///
+    /// In an `Option` because the fixture takes it. A parked callback is a
+    /// child its connection cannot settle without, so the row that asks its
+    /// server to stop has to be the one that lets the callback go — a gate
+    /// released only when this handoff drops would hold the connection past
+    /// the stop and turn every such row into a drain that ran out.
+    parked: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl DirectionHandoff {
+    /// Take the gate every parked callback of this row waits on.
+    pub fn take_gate(&mut self) -> Option<std::sync::mpsc::Sender<()>> {
+        self.parked.take()
+    }
+
     /// The next connection the production callback was given.
     pub async fn connection(&mut self) -> WsConn {
         lifecycle_event(
@@ -96,7 +108,7 @@ pub fn direction_router(path: &str, buffer: usize) -> (Router, DirectionHandoff)
         router.ws_buffer_size(buffer),
         DirectionHandoff {
             connections,
-            parked,
+            parked: Some(parked),
         },
     )
 }
@@ -351,6 +363,7 @@ where
                 .expect("owned server requires a Tokio runtime")
         },
         |fixture| async move {
+            fixture.hold_callbacks(handoff.take_gate());
             let peer = fixture.connect_abortive(DIRECTION_PATH).await;
             let connection = handoff.connection().await;
             case(fixture, peer, connection).await;
@@ -386,33 +399,6 @@ where
                 .expect("owned server requires a Tokio runtime")
         },
         handoff,
-        &[],
-        case,
-    )
-    .await;
-}
-
-/// The same row, with `armed` checkpoints already in place when the peer
-/// connects.
-///
-/// The bridge passes some of its checkpoints on the way to handing the callback
-/// its connection, and a case that already holds one is too late to arm those.
-pub async fn staged_direction_row<C, Fut>(
-    buffer: usize,
-    armed: &'static [LifecycleCheckpoint],
-    case: C,
-) where
-    C: FnOnce(Arc<DirectionTestFixture>, TcpStream, WsConn) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let (router, handoff) = direction_router(DIRECTION_PATH, buffer);
-    run_row(
-        |listener| {
-            camber::http::serve_background(listener, router)
-                .expect("owned server requires a Tokio runtime")
-        },
-        handoff,
-        armed,
         case,
     )
     .await;
@@ -438,7 +424,6 @@ where
                 .expect("owned server requires a Tokio runtime")
         },
         handoff,
-        &[],
         case,
     )
     .await;
@@ -447,19 +432,17 @@ where
 /// Bind, serve, connect, take the callback's connection, run the case.
 ///
 /// The handoff stays owned here for the whole case, so the production callback
-/// stays parked in its own frame rather than returning under the row.
-async fn run_row<S, C, Fut>(
-    serve: S,
-    mut handoff: DirectionHandoff,
-    armed: &'static [LifecycleCheckpoint],
-    case: C,
-) where
+/// stays parked in its own frame rather than returning under the row. Its gate
+/// goes to the fixture, which is what releases the callback when the row asks
+/// its server to stop.
+async fn run_row<S, C, Fut>(serve: S, mut handoff: DirectionHandoff, case: C)
+where
     S: FnOnce(tokio::net::TcpListener) -> ServerHandle,
     C: FnOnce(Arc<DirectionTestFixture>, TcpStream, WsConn) -> Fut,
     Fut: Future<Output = ()>,
 {
     DirectionTestFixture::run(serve, |fixture| async move {
-        armed.iter().for_each(|checkpoint| fixture.arm(*checkpoint));
+        fixture.hold_callbacks(handoff.take_gate());
         let peer = fixture.connect(DIRECTION_PATH);
         let connection = handoff.connection().await;
         case(fixture, peer, connection).await;
@@ -530,19 +513,31 @@ pub struct DirectionTestFixture {
     /// held its own until the last handle dropped would publish the port as
     /// reusable while still occupying the entry a case drawing that port needs.
     /// [`DirectionTestFixture::finish`] takes it back first.
-    controller: Mutex<Option<Arc<LifecycleController>>>,
+    controller: Mutex<Option<Arc<ScopedRetainedBridge>>>,
     server: Mutex<Option<ServerHandle>>,
-    armed: Mutex<Vec<LifecycleCheckpoint>>,
+    armed: Mutex<Vec<BridgeHold>>,
     workers: Mutex<Vec<(Box<str>, std::thread::JoinHandle<()>)>>,
+    /// The gate this row's parked callbacks wait on, once the row hands it over.
+    ///
+    /// `None` for a row whose callbacks park on nothing. Held rather than read:
+    /// dropping it is the release.
+    callbacks: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl DirectionTestFixture {
     /// Reserve an observed listener, serve it, and run `case` against the
     /// result.
     ///
-    /// The reservation is the suite's own: [`reserve_observed`] binds the
+    /// The reservation is the suite's own: [`reserve_registered`] binds the
     /// ephemeral port and registers its observer before anything serves on it,
     /// which is the ordering every listener-scoped observation here depends on.
+    /// The observer names the four families a retained bridge has and no
+    /// others: the direction owners a row holds a transport half at, the
+    /// terminal owner that commits the one cause both halves end on, the
+    /// upgrade child that retained the callback they settle around, and the
+    /// connection owner that says the child was its own. A row here cannot
+    /// reach the supervisor pass or the permit that admitted the connection
+    /// under it.
     /// The server is served from that reservation rather than through the
     /// guarded fixtures beside it, because a case here reads the server's own
     /// completion outcome and stops it at an exact moment — see
@@ -563,13 +558,14 @@ impl DirectionTestFixture {
         C: FnOnce(Arc<DirectionTestFixture>) -> Fut,
         Fut: Future<Output = ()>,
     {
-        let (listener, addr, controller) = reserve_observed().into_owned_parts();
+        let (listener, addr, controller) = reserve_registered(retained_bridge).into_owned_parts();
         let fixture = Arc::new(Self {
             addr,
             controller: Mutex::new(Some(controller)),
             server: Mutex::new(Some(serve(listener))),
             armed: Mutex::new(Vec::new()),
             workers: Mutex::new(Vec::new()),
+            callbacks: Mutex::new(None),
         });
         let cased = AssertUnwindSafe(case(Arc::clone(&fixture)))
             .catch_unwind()
@@ -612,9 +608,8 @@ impl DirectionTestFixture {
     ///
     /// The handle carries the registration, so a case that stores one holds the
     /// registry entry teardown gave back and re-opens the address-reuse race it
-    /// closes. [`Self::observed`] and [`Self::checkpoint_polls`] are what a row
-    /// reads through instead.
-    pub fn controller(&self) -> Arc<LifecycleController> {
+    /// closes. [`Self::observed`] is what a row reads through instead.
+    pub fn controller(&self) -> Arc<ScopedRetainedBridge> {
         self.controller
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -663,50 +658,61 @@ impl DirectionTestFixture {
         peer
     }
 
-    /// Arm one production checkpoint, recording it for release at teardown.
-    pub fn arm(&self, checkpoint: LifecycleCheckpoint) {
-        self.controller()
-            .pause_once(checkpoint)
-            .expect("arm direction checkpoint");
+    /// Arm one production owner's edge, recording it for release at teardown.
+    ///
+    /// The edge is named through [`BridgeHold`], which carries the name and no
+    /// authority: each arm reaches production through exactly the narrow
+    /// controller that owns it, so a row here can hold a direction or a
+    /// terminal owner and can offer neither one a cause.
+    pub fn arm(&self, hold: BridgeHold) {
+        hold.arm_on(&self.controller())
+            .expect("arm direction owner edge");
         self.armed
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .push(checkpoint);
+            .push(hold);
     }
 
-    /// Wait until production reaches an armed checkpoint.
+    /// Wait until production reaches an armed edge.
     ///
-    /// The context names the checkpoint. A row here waits at several of them in
+    /// The context names the edge. A row here waits at several of them in
     /// sequence, and one shared wording turns every expiry into the same
     /// sentence — which says a pause never arrived without saying which.
-    pub async fn wait_paused(&self, checkpoint: LifecycleCheckpoint) {
-        wait_until_paused_bounded(
-            &self.controller(),
-            checkpoint,
-            &format!("production reaching direction checkpoint {checkpoint:?}"),
+    pub async fn wait_paused(&self, hold: BridgeHold) {
+        let owners = self.controller();
+        bounded_pause(
+            hold.paused_on(&owners),
+            &format!("production reaching direction owner edge {hold:?}"),
         )
         .await;
     }
 
-    /// Release one armed checkpoint and stop owning it.
-    pub fn release(&self, checkpoint: LifecycleCheckpoint) {
-        self.controller()
-            .release(checkpoint)
-            .expect("release direction checkpoint");
-        self.forget(checkpoint);
+    /// Release one armed edge and stop owning it.
+    pub fn release(&self, hold: BridgeHold) {
+        hold.release_on(&self.controller())
+            .expect("release direction owner edge");
+        self.forget(hold);
     }
 
-    /// Record one armed checkpoint's release without waking what waits there.
+    /// Record one held direction's release without waking it.
     ///
-    /// The held future stays parked and observes the release on whatever poll
-    /// something else provokes. It is the only way to put a production event
-    /// that is already in hand into the same turn as one the case triggers
-    /// afterwards: an ordinary release decides that turn by itself.
-    pub fn stage_release(&self, checkpoint: LifecycleCheckpoint) {
+    /// The direction stays parked and observes the release on whatever poll
+    /// something else provokes. It is the only way to put a frame the direction
+    /// is already holding into the same turn as an event the row publishes
+    /// afterwards: an ordinary release wakes it, and the turn is spent before
+    /// the second event exists.
+    ///
+    /// The direction has to still own what it is holding for that to be worth
+    /// staging. A coordinator answering in the same turn drops the direction's
+    /// running future, so a row stages the release at an edge where the frame
+    /// lives on the pump — never at one where it lives on that future's own
+    /// stack, which is a frame the row's own staging then loses.
+    pub fn release_without_waking(&self, edge: WebSocketDirectionEdge) {
         self.controller()
-            .stage_release(checkpoint)
-            .expect("stage direction checkpoint release");
-        self.forget(checkpoint);
+            .directions
+            .release_without_waking(edge)
+            .expect("release the held direction without waking it");
+        self.forget(BridgeHold::Direction(edge));
     }
 
     /// Take one message through each untimed facade receiver, on a worker.
@@ -720,16 +726,56 @@ impl DirectionTestFixture {
         self.spawn_worker("facade-receives", move || FacadeReceives::take(connection))
     }
 
-    fn forget(&self, checkpoint: LifecycleCheckpoint) {
+    /// Take this row's parked-callback gate, so the fixture can release it.
+    pub fn hold_callbacks(&self, gate: Option<std::sync::mpsc::Sender<()>>) {
+        *self
+            .callbacks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = gate;
+    }
+
+    /// Let every parked callback of this row return.
+    ///
+    /// Idempotent: the gate leaves once, and a second call finds nothing left
+    /// to release. A row with no parked callback releases nothing.
+    pub fn release_callbacks(&self) {
+        drop(
+            self.callbacks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take(),
+        );
+    }
+
+    fn forget(&self, hold: BridgeHold) {
         self.armed
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .retain(|armed| *armed != checkpoint);
+            .retain(|armed| *armed != hold);
     }
 
     /// What this fixture's listener has published about its direct bridges.
     pub fn observed(&self) -> camber::http::mock::WebSocketDirectionObservation {
-        self.controller().websocket_directions()
+        self.controller().terminals.observed()
+    }
+
+    /// What those bridges have published about the callbacks they started.
+    ///
+    /// Every record one bridge appended, in the order it appended them: the
+    /// deadline it fixed when it closed its callback's endpoints, any later
+    /// transition that brought that deadline forward, and the disposition the
+    /// join ended at.
+    pub fn callbacks(&self) -> Box<[camber::http::mock::WebSocketCallbackObservation]> {
+        self.controller().upgrades.callbacks()
+    }
+
+    /// What this fixture's listener recorded about the connections under it.
+    ///
+    /// Read-only, and the only place a row can ask whose child a bridge's
+    /// upgrade was: the transfer and the settlement are both written by the
+    /// connection owner that performed them.
+    pub fn ownership(&self) -> camber::http::mock::ConnectionOwnershipObservation {
+        self.controller().connections.observed()
     }
 
     /// Ask this fixture's server to stop gracefully, without taking it.
@@ -745,27 +791,24 @@ impl DirectionTestFixture {
         self.with_server(ServerHandle::cancel, "cancel");
     }
 
-    /// Make server cancellation ready before the bridge polls any terminal
-    /// source, then hold the bridge after it commits that cause.
+    /// Commit this server's cancellation, then hold the bridge on the far side
+    /// of the cause it fixed.
     ///
-    /// Cancellation can close the transport around a live bridge. Without the
-    /// poll gate, that resulting disconnect can win an earlier coordinator
-    /// turn and make a cancellation row assert against a cause it did not
-    /// stage. The selected checkpoint stays armed so the caller can inspect
-    /// the committed cause before allowing settlement.
+    /// The public command is the whole barrier: `cancel` returns only once the
+    /// forced phase is committed in the shared stop state, and the bridge's own
+    /// commit is taken inside that state's lock — so every cause it could
+    /// otherwise have offered afterwards, including the disconnect that
+    /// cancellation's own transport close produces, reads the earlier fact.
+    /// The terminal edge stays armed so the caller can inspect the committed
+    /// cause before allowing settlement.
     pub async fn select_server_cancellation(&self) {
-        let before_poll = LifecycleCheckpoint::WebSocketBeforeTerminalPoll;
-        let selected = LifecycleCheckpoint::WebSocketTerminalSelected;
-        self.arm(before_poll);
+        self.arm(AFTER_COMMIT);
         self.cancel_server();
-        self.wait_paused(before_poll).await;
-        self.arm(selected);
-        self.release(before_poll);
-        self.wait_paused(selected).await;
+        self.wait_paused(AFTER_COMMIT).await;
         assert_eq!(
             self.observed().terminal,
             Some(WsCloseCause::ServerCancelled),
-            "the bridge selected another cause before server cancellation"
+            "the bridge committed another cause after cancellation was accepted"
         );
     }
 
@@ -775,6 +818,11 @@ impl DirectionTestFixture {
     /// something that cannot happen, not a no-op: the row would go on to assert
     /// against a stop it never requested.
     fn with_server(&self, ask: impl FnOnce(&ServerHandle), what: &str) {
+        // Before the command, never after it. A parked callback is a child of
+        // the connection that started it, so a server told to stop while one is
+        // still in application code drains for the whole grace and reports the
+        // row's own fixture rather than its claim.
+        self.release_callbacks();
         let held = self
             .server
             .lock()
@@ -866,6 +914,12 @@ impl DirectionTestFixture {
     /// this fixture still held would refuse the next case that drew this port.
     async fn finish(&self) {
         self.release_every_gate();
+        // Before the stop below, for the reason the stop commands release it:
+        // a callback still in application code is a child the connection that
+        // started it cannot settle without, so a teardown that stopped first
+        // would drain to its deadline and report this fixture rather than the
+        // row it was running.
+        self.release_callbacks();
         let server = self
             .server
             .lock()
@@ -896,12 +950,12 @@ impl DirectionTestFixture {
         );
     }
 
-    /// Let go of every checkpoint the case armed and did not spend.
+    /// Let go of every owner edge the case armed and did not spend.
     ///
-    /// A checkpoint that was armed but never reached is not paused, and one the
-    /// case already released is spent; both refuse the release and both are
-    /// fine. What must not happen is a reached-and-held checkpoint surviving
-    /// teardown, and that is the case this covers.
+    /// An edge that was armed but never reached is not paused, and one the case
+    /// already released is spent; both refuse the release and both are fine.
+    /// What must not happen is a reached-and-held edge surviving teardown, and
+    /// that is the case this covers.
     fn release_every_gate(&self) {
         let armed =
             std::mem::take(&mut *self.armed.lock().unwrap_or_else(|error| error.into_inner()));
@@ -914,8 +968,8 @@ impl DirectionTestFixture {
         // A fixture that already gave its observer back has nothing to release:
         // closing the controller lets go of every checkpoint it still held.
         match controller {
-            Some(controller) => armed.into_iter().for_each(|checkpoint| {
-                let _ = controller.release(checkpoint);
+            Some(controller) => armed.into_iter().for_each(|hold| {
+                let _ = hold.release_on(&controller);
             }),
             None => {}
         }
@@ -1014,7 +1068,7 @@ impl DirectionTestFixture {
                  {DIRECTION_DEADLINE:?} after completion: {error}"
             ),
         }
-        drop(lifecycle(addr).unwrap_or_else(|error| {
+        drop(camber::http::mock::unwatched(addr).unwrap_or_else(|error| {
             panic!("the direction listener's observer for {addr} outlived its fixture: {error}")
         }));
     }
@@ -1031,6 +1085,7 @@ impl Drop for DirectionTestFixture {
     /// an executor.
     fn drop(&mut self) {
         self.release_every_gate();
+        self.release_callbacks();
         match self
             .server
             .lock()
@@ -1064,8 +1119,23 @@ pub fn direction_peer(addr: SocketAddr, path: &str) -> TcpStream {
     peer
 }
 
+/// The edge that holds the outbound direction with the frame it is about to
+/// write in its own hand.
+///
+/// Named as the bare edge as well as the hold below, because a row that stages
+/// this direction's release names the edge alone: the staged release is asked
+/// of that owner's own controller, which takes no [`BridgeHold`].
+pub const BEFORE_WRITE_EDGE: WebSocketDirectionEdge = WebSocketDirectionEdge::BeforeOutboundWrite;
 /// The checkpoint every row that needs a held writer arms.
-pub const BEFORE_WRITE: LifecycleCheckpoint = LifecycleCheckpoint::WebSocketBeforeOutboundWrite;
+pub const BEFORE_WRITE: BridgeHold = BridgeHold::Direction(BEFORE_WRITE_EDGE);
+/// The checkpoint every row that needs a held converted frame arms, after
+/// production built it and before the sink takes it.
+pub const FRAME_BUILT: BridgeHold =
+    BridgeHold::Direction(WebSocketDirectionEdge::OutboundFrameBuilt);
+/// The edge that holds a bridge once its one cause is committed.
+pub const AFTER_COMMIT: BridgeHold = BridgeHold::Terminal(WebSocketTerminalEdge::AfterCommit);
+/// The edge that holds a bridge with a cause offered and not yet committed.
+pub const BEFORE_COMMIT: BridgeHold = BridgeHold::Terminal(WebSocketTerminalEdge::BeforeCommit);
 
 /// The WebSocket close opcode, as it appears on the wire.
 pub const CLOSE: u8 = 0x08;

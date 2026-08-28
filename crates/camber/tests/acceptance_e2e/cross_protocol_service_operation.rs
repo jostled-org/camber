@@ -13,10 +13,14 @@
 use crate::common;
 use crate::http as http_support;
 
-use camber::http::mock::{InboundTerminal, LifecycleCheckpoint, LifecycleController};
+use camber::http::mock::{
+    ConnectionOwnerController, ConnectionOwnerEdge, InboundTerminal, ResponseCommit,
+    ResponseCommitmentEdge, ResponseOrigin, ScopedAdmittedOperation, ScopedCommittedTransfer,
+    ScopedUnwatched, TransferOwnerController,
+};
 use camber::http::{
-    BodyAdmission, BodyAdmissionContext, GrpcRouter, RejectionKind, RejectionProtocol,
-    RequestBudget, Router, ServerPolicy, TransferBudget,
+    BodyAdmission, BodyAdmissionContext, GrpcRouter, Next, RejectionKind, RejectionProtocol,
+    Request, RequestBudget, Response, Router, ServerPolicy, TransferBudget,
 };
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -327,17 +331,43 @@ impl RowBudgets {
 
 /// One served gRPC fixture, its observer, and what its mapper recorded.
 struct GrpcFixture {
-    server: http_support::ObservedServer,
-    controller: Arc<LifecycleController>,
+    server: http_support::ObservedServer<ScopedCommittedTransfer>,
+    controller: Arc<ScopedCommittedTransfer>,
     journal: common::Journal,
     log: Arc<EchoLog>,
     /// Every head this fixture's service produced and then lost.
     head_dropped: tokio::sync::mpsc::UnboundedReceiver<()>,
 }
 
+/// Whether a fixture's router carries a chain that answers before tonic.
+///
+/// A gRPC call reaches its service through a middleware gate, and a chain that
+/// refuses there produces the head itself. Named as a row axis rather than
+/// assembled per row, so the refusing fixture and the passing one differ in
+/// exactly the chain and nothing else.
+#[derive(Clone, Copy)]
+enum Chain {
+    /// No middleware: the request reaches tonic.
+    None,
+    /// One frame that answers without calling `next.call`.
+    Refusing,
+}
+
+/// The status the refusing chain answers with.
+const GATE_REFUSED: u16 = 403;
+
 impl GrpcFixture {
     /// Serve one router carrying the full-duplex service under `budgets`.
     fn serve(plan: EchoPlan, budgets: RowBudgets) -> Self {
+        Self::assembled(plan, budgets, Chain::None)
+    }
+
+    /// Serve that same router behind a chain that refuses before tonic.
+    fn serve_behind_refusing_gate(plan: EchoPlan, budgets: RowBudgets) -> Self {
+        Self::assembled(plan, budgets, Chain::Refusing)
+    }
+
+    fn assembled(plan: EchoPlan, budgets: RowBudgets, chain: Chain) -> Self {
         let journal = common::journal();
         let log = Arc::new(EchoLog::default());
         let (head_dropped, dropped_heads) = tokio::sync::mpsc::unbounded_channel();
@@ -350,11 +380,17 @@ impl GrpcFixture {
                 head_dropped,
             })),
         );
+        match chain {
+            Chain::None => {}
+            Chain::Refusing => router.use_middleware(|_req: &Request, _next: Next| async {
+                Response::text(GATE_REFUSED, "gated").expect("the gate's answer is representable")
+            }),
+        }
         let router = router
             .request_budget(budgets.request)
             .upload_budget(budgets.upload)
             .download_budget(budgets.download);
-        let port = http_support::reserve_observed();
+        let port = http_support::reserve_committed_transfer();
         let controller = port.controller();
         let server = port.serve_with_policy(
             router,
@@ -400,20 +436,8 @@ impl GrpcFixture {
         self.server.addr()
     }
 
-    fn arm(&self, checkpoint: LifecycleCheckpoint, label: &str) {
-        self.controller
-            .pause_once(checkpoint)
-            .unwrap_or_else(|error| panic!("{label}: arming {checkpoint:?} failed: {error}"));
-    }
-
-    fn release(&self, checkpoint: LifecycleCheckpoint, label: &str) {
-        self.controller
-            .release(checkpoint)
-            .unwrap_or_else(|error| panic!("{label}: releasing {checkpoint:?} failed: {error}"));
-    }
-
-    async fn wait_paused(&self, checkpoint: LifecycleCheckpoint, label: &str) {
-        http_support::wait_until_paused_bounded(&self.controller, checkpoint, label).await;
+    async fn wait_paused(&self, edge: ResponseCommitmentEdge, label: &str) {
+        http_support::wait_until_paused_bounded(&self.controller, edge, label).await;
     }
 
     /// Everything the route's mapper was handed, taken once.
@@ -478,15 +502,17 @@ struct PreHeadRow {
     status: u16,
 }
 
-/// 13.T1
+/// Invariant 11
 ///
-/// A local budget the operation carries, and a local terminal the upload it
-/// handed tonic fixed, both beat a tonic head that became ready in the same
-/// scheduling turn. The winner cancels tonic, maps once through the route's own
-/// mapper, and commits nothing tonic produced. A head that wins alone commits
-/// without any mapper call and hands authority on.
+/// The handoff is the barrier, and commit order across it is the whole rule.
+/// Row B commits a budget rejection while tonic's head is still held short of
+/// the handoff: the rejection took this operation's commitment, so it maps once
+/// through the route's own mapper and nothing tonic produced is committed.
+/// Row A crosses the handoff first, so the commitment is tonic's, and a budget
+/// that expires afterwards reaches a cell already held — the peer keeps tonic's
+/// status and no mapper runs.
 #[test]
-fn grpc_prehead_budget_beats_equal_ready_tonic_head_and_maps_once() {
+fn grpc_budget_and_tonic_head_obey_handoff_commit_order() {
     camber::runtime::builder()
         .run(|| {
             camber::runtime::block_on(async {
@@ -494,6 +520,8 @@ fn grpc_prehead_budget_beats_equal_ready_tonic_head_and_maps_once() {
                     run_pre_head_row(row).await;
                 }
                 assert_tonic_head_wins_alone().await;
+                assert_committed_handoff_outlasts_a_later_budget().await;
+                assert_refusing_gate_commits_before_tonic().await;
             });
         })
         .expect("the gRPC pre-head runtime ran to completion");
@@ -525,23 +553,31 @@ fn pre_head_rows() -> [PreHeadRow; 2] {
 async fn run_pre_head_row(row: &PreHeadRow) {
     let label = row.label;
     let mut fixture = GrpcFixture::serve(EchoPlan::Echo, row.budgets);
-    fixture.arm(LifecycleCheckpoint::GrpcHeadReady, label);
+    http_support::arm_point(
+        &fixture.controller,
+        ResponseCommitmentEdge::GrpcHeadReady,
+        label,
+    );
     let mut rpc = OpenedRpc::start(fixture.addr(), "camber").await;
     fixture
-        .wait_paused(LifecycleCheckpoint::GrpcHeadReady, label)
+        .wait_paused(ResponseCommitmentEdge::GrpcHeadReady, label)
         .await;
     // The head exists and is still tonic's answer to give: the checkpoint holds
     // it, and the witness inside it has not fired.
     fixture.assert_head_held(label);
 
-    let selected = LifecycleCheckpoint::InboundTerminalSelected(row.terminal);
-    fixture.arm(selected, label);
+    let selected = ResponseCommitmentEdge::CauseCommitted(row.terminal);
+    http_support::arm_point(&fixture.controller, selected, label);
     // The frozen deadline is real time, so waiting it out is the production
     // event itself rather than a race made likely by a sleep.
     tokio::time::sleep(row.elapse).await;
-    fixture.release(LifecycleCheckpoint::GrpcHeadReady, label);
+    http_support::release_point(
+        &fixture.controller,
+        ResponseCommitmentEdge::GrpcHeadReady,
+        label,
+    );
     fixture.wait_paused(selected, label).await;
-    fixture.release(selected, label);
+    http_support::release_point(&fixture.controller, selected, label);
 
     let answered = rpc.stream.commit().await;
     assert_eq!(
@@ -591,14 +627,14 @@ async fn run_pre_head_row(row: &PreHeadRow) {
 async fn assert_tonic_head_wins_alone() {
     let label = "tonic head";
     let fixture = GrpcFixture::serve(EchoPlan::Echo, RowBudgets::unreached());
-    let committed = LifecycleCheckpoint::GrpcHandoffCommitted;
-    fixture.arm(committed, label);
+    let committed = ResponseCommitmentEdge::GrpcHandoffCommitted;
+    http_support::arm_point(&fixture.controller, committed, label);
 
     let mut rpc = OpenedRpc::start(fixture.addr(), "camber").await;
     // The head reaches the peer only after this boundary, so being held here is
     // itself the proof that an uncontested head crossed it.
     fixture.wait_paused(committed, label).await;
-    let observed = fixture.controller.operations_observed();
+    let observed = fixture.controller.commitment.operations_observed();
     assert_eq!(
         (observed.admitted, observed.distinct_identities),
         (1, 1),
@@ -609,7 +645,7 @@ async fn assert_tonic_head_wins_alone() {
         (1, 1, 1),
         "{label}: every pre-head owner reads that one envelope once: {observed:?}",
     );
-    fixture.release(committed, label);
+    http_support::release_point(&fixture.controller, committed, label);
 
     let answered = rpc.stream.commit().await;
     assert_eq!(
@@ -634,10 +670,121 @@ async fn assert_tonic_head_wins_alone() {
         "{label}: an uncontested call ends its stream rather than resetting it",
     );
     assert_eq!(
-        fixture.controller.operations_observed().response_head,
+        fixture
+            .controller
+            .commitment
+            .operations_observed()
+            .response_head,
         1,
         "{label}: one committed head reaches the response-head owner exactly once",
     );
+    fixture.assert_never_mapped(label);
+
+    rpc.close().await;
+    fixture.finish(label);
+}
+
+/// Row A: a budget that expires after the handoff was committed maps nothing.
+///
+/// The barrier is production's own. Held at the handoff, Camber has taken this
+/// operation's commitment for tonic's head, and the row reads both halves of
+/// that off the commitment itself — one producer took the cell, and the producer
+/// it names is the gRPC handoff — before letting anything else happen. A handoff
+/// that took the cell under any other origin answers the completion finalizer
+/// with a producer that never ran. The upload's quiet
+/// interval is then allowed to expire while the head is still held, so the
+/// budget becomes a real fact of a request whose answer is already decided. The
+/// peer must keep tonic's status, and the route's mapper must never run.
+async fn assert_committed_handoff_outlasts_a_later_budget() {
+    let label = "committed handoff outlasts a later budget";
+    let fixture = GrpcFixture::serve(
+        EchoPlan::Echo,
+        RowBudgets::unreached().with_upload_idle(STAGED_QUIET),
+    );
+    let committed = ResponseCommitmentEdge::GrpcHandoffCommitted;
+    http_support::arm_point(&fixture.controller, committed, label);
+
+    let mut rpc = OpenedRpc::start(fixture.addr(), "camber").await;
+    fixture.wait_paused(committed, label).await;
+    let observed = fixture.controller.commitment.observed();
+    assert_eq!(
+        observed.commits, 1,
+        "{label}: the handoff took this operation's one commitment: {observed:?}",
+    );
+    assert_eq!(
+        observed.committed,
+        Some(ResponseCommit::Head(ResponseOrigin::Grpc)),
+        "{label}: the commitment names the handoff that produced this head: {observed:?}",
+    );
+
+    // The frozen interval is real time, so waiting it out is the production
+    // event rather than a race a sleep made likely. It expires while the head is
+    // held here, which is what makes it later than the commitment.
+    tokio::time::sleep(STAGED_QUIET + PAST_DEADLINE).await;
+    http_support::release_point(&fixture.controller, committed, label);
+
+    let answered = rpc.stream.commit().await;
+    assert_eq!(
+        answered.status(),
+        200,
+        "{label}: a committed handoff keeps the status tonic produced",
+    );
+    rpc.stream.finish();
+    let settled = answered.settle().await;
+    assert!(
+        settled.bytes > 0,
+        "{label}: tonic's reply reached the peer: {settled:?}",
+    );
+    fixture.assert_never_mapped(label);
+
+    rpc.close().await;
+    fixture.finish(label);
+}
+
+/// A chain that answers a gRPC call before tonic is the producer of that head.
+///
+/// The gate is the only pre-commit producer this class has in front of the
+/// handoff, and it is the one this operation's commitment must name. The row
+/// reads three things that separate a wired gate from an unwired one: the peer
+/// gets the chain's status and no `grpc-status` behind it, the service was never
+/// entered — so nothing tonic produced could have been committed instead — and
+/// the commitment holds exactly one head, the middleware's. A gate that took no
+/// commitment leaves the cell empty, which the completion finalizer reads as a
+/// head Hyper wrote for an operation no Camber owner reached.
+async fn assert_refusing_gate_commits_before_tonic() {
+    let label = "a chain that refuses before the handoff";
+    let mut fixture =
+        GrpcFixture::serve_behind_refusing_gate(EchoPlan::Echo, RowBudgets::unreached());
+
+    let mut rpc = OpenedRpc::start(fixture.addr(), "camber").await;
+    let answered = rpc.stream.commit().await;
+    assert_eq!(
+        answered.status(),
+        GATE_REFUSED,
+        "{label}: the chain answered this call in front of tonic",
+    );
+    let settled = answered.settle().await;
+    assert_eq!(
+        settled.trailer("grpc-status"),
+        None,
+        "{label}: Camber owned this boundary, so nothing may write a gRPC status: {settled:?}",
+    );
+    // The witness fires when a head the service produced is dropped, so silence
+    // here is a service that was never reached rather than one that answered.
+    fixture.assert_head_held(label);
+
+    let observed = fixture.controller.commitment.observed();
+    assert_eq!(
+        observed.commits, 1,
+        "{label}: the gate took this operation's one commitment: {observed:?}",
+    );
+    assert_eq!(
+        observed.committed,
+        Some(ResponseCommit::Head(ResponseOrigin::Middleware)),
+        "{label}: the commitment names the chain that produced the head: {observed:?}",
+    );
+    // The chain returned a response rather than a failure, so nothing was
+    // classified and the route's mapper is owed nothing.
     fixture.assert_never_mapped(label);
 
     rpc.close().await;
@@ -688,8 +835,9 @@ async fn assert_posthead_upload_failure_reaches_tonic() {
     // head that is already on the wire.
     let settled = answered.settle().await;
 
+    let transfers = fixture.controller.transfers.observed();
     assert_eq!(
-        fixture.controller.transfers_observed().upload.terminal,
+        transfers.upload.terminal,
         Some(InboundTerminal::TransferIdle),
         "{label}: the upload owner fixed the terminal its own policy names",
     );
@@ -745,8 +893,9 @@ async fn assert_posthead_download_failure_stays_stream_local() {
     // download's own quiet interval is what ends the answer.
     let settled = answered.settle().await;
 
+    let transfers = fixture.controller.transfers.observed();
     assert_eq!(
-        fixture.controller.transfers_observed().download.terminal,
+        transfers.download.terminal,
         Some(InboundTerminal::TransferIdle),
         "{label}: the download owner fixed the terminal its own policy names",
     );
@@ -822,7 +971,7 @@ async fn assert_service_status_and_trailers_are_authoritative() {
 // 13.T3
 // ---------------------------------------------------------------------------
 
-/// 13.T3
+/// Invariant 22
 ///
 /// One owner table over real transports. Only the boundaries Camber owned reach
 /// a rejection mapper: a head Hyper refused never became an operation, a frame
@@ -831,9 +980,22 @@ async fn assert_service_status_and_trailers_are_authoritative() {
 /// proxy failure before commitment is Camber's to map, and a stream terminal
 /// after commitment ends its body without replacing a status.
 ///
-/// Every row drives a failure of its own. A row that took a clean journey would
-/// hold with the ownership it claims unwired, because an empty mapper journal is
-/// what a success looks like too.
+/// The causal rows read the operation's own commitment as well as its mapper: a
+/// head Hyper refused mints no commitment at all, and a proxy failure before
+/// commitment takes one that no later owner can replace. Established structured
+/// mapping, protocol-owned headers, and the multipart and budget authorities
+/// keep their claims unchanged beside them.
+///
+/// The closing group is the other half of the same table: one readback per
+/// producer family — local buffered, buffered and streaming proxy, server-sent
+/// events, streaming multipart, gRPC, and both upgrade classes — each answering
+/// normally and each required to name itself on the head it produced. The
+/// failure rows say which boundaries Camber owns; these say who answered when no
+/// boundary was crossed at all, which no failure row can.
+///
+/// Every failure row drives a failure of its own. A row that took a clean
+/// journey would hold with the ownership it claims unwired, because an empty
+/// mapper journal is what a success looks like too.
 #[test]
 fn prehead_and_posthandoff_protocol_failures_stay_with_their_owner() {
     camber::runtime::builder()
@@ -845,13 +1007,14 @@ fn prehead_and_posthandoff_protocol_failures_stay_with_their_owner() {
                 assert_stream_postcommit_terminal_reaches_no_mapper().await;
                 #[cfg(feature = "ws")]
                 assert_websocket_post_101_reaches_no_mapper().await;
+                assert_every_producer_family_names_its_head().await;
             });
         })
         .expect("the protocol owner table ran to completion");
 }
 
-/// A head Hyper refuses has no request policy, so no Camber mapper runs and no
-/// operation is ever minted.
+/// A head Hyper refuses has no request policy, so no Camber mapper runs, no
+/// operation is ever minted, and there is no commitment for one to hold.
 async fn assert_hyper_prehead_failure_reaches_no_mapper() {
     let label = "hyper pre-head";
     let journal = common::journal();
@@ -860,7 +1023,7 @@ async fn assert_hyper_prehead_failure_reaches_no_mapper() {
     router.get("/quick", |_req: &camber::http::Request| async {
         camber::http::Response::text(200, "quick")
     });
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_response_commitment();
     let controller = port.controller();
     let server = port.serve(router);
     let addr = server.addr();
@@ -970,7 +1133,9 @@ async fn assert_proxy_precommit_failure_is_camber_mapped() {
     // A backend nothing listens on: the connect phase fails before any upstream
     // head exists, which is the phase Camber still owns.
     router.proxy("/upstream", "http://127.0.0.1:1");
-    let server = http_support::reserve_observed().serve(router);
+    let port = http_support::reserve_response_commitment();
+    let controller = port.controller();
+    let server = port.serve(router);
     let addr = server.addr();
 
     let answered = tokio::task::spawn_blocking(move || {
@@ -994,6 +1159,14 @@ async fn assert_proxy_precommit_failure_is_camber_mapped() {
         mapped[0].protocol,
         Some(RejectionProtocol::Proxy),
         "{label}: the refusal keeps the class the proxy route established",
+    );
+    // The failure is Camber's because it reached this operation's commitment
+    // first. One producer took it, and the mapper that answered the peer is the
+    // only other owner that reached the cell at all.
+    let observed = controller.observed();
+    assert_eq!(
+        observed.commits, 1,
+        "{label}: a pre-commit failure takes the one commitment: {observed:?}",
     );
     server
         .shutdown_bounded(BOUND)
@@ -1021,7 +1194,7 @@ async fn assert_stream_postcommit_terminal_reaches_no_mapper() {
             .with_idle(STAGED_QUIET)
             .expect("a finite download quiet interval"),
     );
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let controller = port.controller();
     let server = port.serve(router);
     let addr = server.addr();
@@ -1038,7 +1211,7 @@ async fn assert_stream_postcommit_terminal_reaches_no_mapper() {
     let settled = answered.settle().await;
 
     assert_eq!(
-        controller.transfers_observed().download.terminal,
+        controller.observed().download.terminal,
         Some(InboundTerminal::TransferIdle),
         "{label}: the download owner fixed the terminal its own policy names",
     );
@@ -1071,23 +1244,17 @@ fn echoed(sender: &camber::http::WsSender, message: camber::http::WsMessage) {
     }
 }
 
-/// A WebSocket direction that *fails* after `101` belongs to its bridge, not to
-/// a mapper.
+/// The table whose bridge reports the cause its receive owner read.
 ///
-/// The peer completes the handshake, exchanges one message so the bridge is
-/// provably pumping the transport, and then writes a frame with the mask bit
-/// clear — which a server must refuse. That refusal is a real terminal on a
-/// direction past `101`, and the row reads both halves of the claim: the bridge
-/// fixed the cause itself, and nothing about it reached the route's mapper. A
-/// clean close would satisfy the second half on its own, which is why this row
-/// does not take one.
+/// The cause is sent back over a channel rather than stored, so the row reads
+/// what the bridge decided rather than what a closed socket implies.
 #[cfg(feature = "ws")]
-async fn assert_websocket_post_101_reaches_no_mapper() {
-    let label = "websocket post-101";
-    let journal = common::journal();
-    let (reported, causes) = std::sync::mpsc::channel();
+fn reporting_ws_router(
+    journal: &common::Journal,
+    reported: std::sync::mpsc::Sender<camber::http::WsCloseCause>,
+) -> Router {
     let reported = Arc::new(Mutex::new(reported));
-    let mut router = Router::new().rejection_mapper(common::recording_mapper(&journal, "ws-owner"));
+    let mut router = Router::new().rejection_mapper(common::recording_mapper(journal, "ws-owner"));
     router.ws(
         "/ws",
         move |_req: &camber::http::Request, conn: camber::http::WsConn| {
@@ -1107,7 +1274,32 @@ async fn assert_websocket_post_101_reaches_no_mapper() {
             Ok(())
         },
     );
-    let server = http_support::reserve_observed().serve(router);
+    router
+}
+
+/// A WebSocket direction that *fails* after `101` belongs to its bridge, not to
+/// a mapper.
+///
+/// The peer completes the handshake, exchanges one message so the bridge is
+/// provably pumping the transport, and then writes a frame with the mask bit
+/// clear — which a server must refuse. That refusal is a real terminal on a
+/// direction past `101`, and the row reads both halves of the claim: the bridge
+/// fixed the cause itself, and nothing about it reached the route's mapper. A
+/// clean close would satisfy the second half on its own, which is why this row
+/// does not take one.
+///
+/// It is also the one row that reads the commitment an accepted upgrade takes.
+/// The `101` crossed before the bridge owned anything, so the producer named
+/// here is the upgrade and not whatever the directions went on to do.
+#[cfg(feature = "ws")]
+async fn assert_websocket_post_101_reaches_no_mapper() {
+    let label = "websocket post-101";
+    let journal = common::journal();
+    let (reported, causes) = std::sync::mpsc::channel();
+    let router = reporting_ws_router(&journal, reported);
+    let port = http_support::reserve_response_commitment();
+    let controller = port.controller();
+    let server = port.serve(router);
     let addr = server.addr();
 
     let (head, echoed, cause) = tokio::task::spawn_blocking(move || {
@@ -1132,6 +1324,20 @@ async fn assert_websocket_post_101_reaches_no_mapper() {
         head.starts_with("HTTP/1.1 101"),
         "{label}: the handshake commits before the bridge owns the transport: {head}",
     );
+    // The `101` is a response head like any other, so the upgrade that produced
+    // it is the producer this operation's commitment names. An upgrade that took
+    // no commitment leaves the cell empty, and the completion finalizer then
+    // records every accepted upgrade as a head Hyper wrote.
+    let observed = controller.observed();
+    assert_eq!(
+        observed.commits, 1,
+        "{label}: the accepted upgrade took this operation's one commitment: {observed:?}",
+    );
+    assert_eq!(
+        observed.committed,
+        Some(ResponseCommit::Head(ResponseOrigin::WebSocket)),
+        "{label}: the commitment names the upgrade that produced the 101: {observed:?}",
+    );
     assert_eq!(
         echoed.as_ref(),
         "live",
@@ -1149,6 +1355,357 @@ async fn assert_websocket_post_101_reaches_no_mapper() {
     server
         .shutdown_bounded(BOUND)
         .expect("the WebSocket owner fixture tore down");
+}
+
+// ---------------------------------------------------------------------------
+// The producer families, read back over real transports
+// ---------------------------------------------------------------------------
+
+/// The paths one listener serves every producer family under.
+const FAMILY_LOCAL: &str = "/family/local";
+const FAMILY_SSE: &str = "/family/sse";
+const FAMILY_MULTIPART: &str = "/family/multipart";
+const FAMILY_BUFFERED_PREFIX: &str = "/family/buffered";
+const FAMILY_BUFFERED: &str = "/family/buffered/echo";
+const FAMILY_STREAMED_PREFIX: &str = "/family/streamed";
+const FAMILY_STREAMED: &str = "/family/streamed/echo";
+#[cfg(feature = "ws")]
+const FAMILY_WS: &str = "/family/ws";
+#[cfg(feature = "ws")]
+const FAMILY_WS_PROXY_PREFIX: &str = "/family/wsproxy";
+#[cfg(feature = "ws")]
+const FAMILY_WS_PROXY: &str = "/family/wsproxy/ws";
+
+/// The upstream route both proxy families forward to.
+const FAMILY_UPSTREAM: &str = "/echo";
+
+/// The upstream upgrade the proxied WebSocket family forwards to.
+#[cfg(feature = "ws")]
+const FAMILY_UPSTREAM_WS: &str = "/ws";
+
+/// One served listener carrying every producer family at once.
+///
+/// One listener rather than one per family, because the cell each row reads is
+/// that listener's own: families served apart would each be read back from a
+/// commitment no other producer could have reached, which is the confusion this
+/// table exists to rule out. What separates the rows is the origin production
+/// wrote, not the endpoint they were driven against.
+struct FamilyFixture {
+    server: http_support::ObservedServer<camber::http::mock::ScopedResponseCommitment>,
+    controller: Arc<camber::http::mock::ScopedResponseCommitment>,
+    upstream: http_support::ReadyServer,
+    journal: common::Journal,
+    /// The operations this listener had already settled before any row ran.
+    ///
+    /// The fixture answers its own readiness probe, and that probe is an
+    /// operation with a commitment like any other. A row counting from zero
+    /// would be off by whatever the harness asked before it.
+    settled_before: usize,
+}
+
+impl FamilyFixture {
+    /// Serve the upstream both proxy families forward to, then the listener.
+    fn serve() -> Self {
+        let upstream = http_support::spawn_server_ready(family_upstream(), BOUND)
+            .expect("the family upstream answered");
+        let backend = format!("http://{}", upstream.local_addr());
+        let journal = common::journal();
+        let port = http_support::reserve_response_commitment();
+        let controller = port.controller();
+        let server = port.serve(family_router(&journal, &backend));
+        let settled_before = controller.observed().distinct_operations;
+        Self {
+            server,
+            controller,
+            upstream,
+            journal,
+            settled_before,
+        }
+    }
+
+    fn addr(&self) -> std::net::SocketAddr {
+        self.server.addr()
+    }
+
+    /// Assert the `row`-th operation this listener settled named `origin`.
+    ///
+    /// The count is what ties the reading to the row that just ran: the cell
+    /// reports the most recent commitment, and a row reading it without saying
+    /// which operation it belongs to would pass on the previous family's answer.
+    fn assert_committed(&self, label: &str, origin: ResponseOrigin, row: usize) {
+        let observed = self.controller.observed();
+        assert_eq!(
+            observed.committed,
+            Some(ResponseCommit::Head(origin)),
+            "{label}: the head this family produced names its own producer: {observed:?}",
+        );
+        assert_eq!(
+            observed.distinct_operations,
+            self.settled_before + row,
+            "{label}: the commitment read is this row's own: {observed:?}",
+        );
+        let mapped = common::drain(&self.journal);
+        assert!(
+            mapped.is_empty(),
+            "{label}: a family that produced its own head maps nothing: {mapped:?}",
+        );
+    }
+
+    /// Assert exactly `rows` operations settled a commitment behind this table.
+    ///
+    /// The count is the table's own completeness check: a family whose row was
+    /// skipped, whose registration never matched, or whose exchange answered
+    /// somebody else's operation leaves this short, and a row that drove more
+    /// than the one operation it claims leaves it long.
+    fn assert_families_settled(&self, label: &str, rows: usize) {
+        let observed = self.controller.observed();
+        assert_eq!(
+            observed.distinct_operations,
+            self.settled_before + rows,
+            "{label}: every family drove exactly one operation of its own: {observed:?}",
+        );
+    }
+
+    fn finish(self, label: &str) {
+        self.server
+            .shutdown_bounded(BOUND)
+            .unwrap_or_else(|error| panic!("{label}: the listener did not stop: {error}"));
+        self.upstream
+            .shutdown_bounded(BOUND)
+            .unwrap_or_else(|error| panic!("{label}: the upstream did not stop: {error}"));
+    }
+}
+
+/// The upstream both proxy families and the proxied upgrade forward to.
+fn family_upstream() -> Router {
+    let mut upstream = Router::new();
+    upstream.get(FAMILY_UPSTREAM, |_req: &Request| async {
+        Response::text(200, "upstream")
+    });
+    register_family_upstream_upgrade(&mut upstream);
+    upstream
+}
+
+#[cfg(feature = "ws")]
+fn register_family_upstream_upgrade(upstream: &mut Router) {
+    upstream.ws(
+        FAMILY_UPSTREAM_WS,
+        |_req: &Request, conn: camber::http::WsConn| held_session(conn),
+    );
+}
+
+#[cfg(not(feature = "ws"))]
+fn register_family_upstream_upgrade(_upstream: &mut Router) {}
+
+/// Every producer family, mounted on the one router that answers them all.
+fn family_router(journal: &common::Journal, backend: &str) -> Router {
+    let mut router = Router::new();
+    router.get(FAMILY_LOCAL, |_req: &Request| async {
+        Response::text(200, "local")
+    });
+    register_family_sse(&mut router);
+    register_family_multipart(&mut router);
+    register_family_upgrades(&mut router, backend);
+    router.proxy(FAMILY_BUFFERED_PREFIX, backend);
+    router.proxy_stream(FAMILY_STREAMED_PREFIX, backend);
+    let (head_dropped, _dropped) = tokio::sync::mpsc::unbounded_channel();
+    router.grpc(
+        GrpcRouter::new().add_service(streamer_server::StreamerServer::new(EchoService {
+            plan: EchoPlan::Echo,
+            log: Arc::new(EchoLog::default()),
+            head_dropped,
+        })),
+    );
+    router.rejection_mapper(common::recording_mapper(journal, "family-owner"))
+}
+
+/// The event-stream family, whose feed ends as soon as it has opened.
+///
+/// One event and done: the head is the whole claim here, and a feed that stayed
+/// open would leave the peer reading rather than the row asserting.
+fn register_family_sse(router: &mut Router) {
+    router.get_sse(
+        FAMILY_SSE,
+        |_req: &Request, writer: &mut camber::http::SseWriter| writer.event("family", "sse"),
+    );
+}
+
+/// The streaming multipart family, which reads its whole payload and answers.
+fn register_family_multipart(router: &mut Router) {
+    router.multipart(
+        camber::http::Method::Post,
+        FAMILY_MULTIPART,
+        camber::http::MultipartLimits::default(),
+        |_req: &Request, mut stream: camber::http::MultipartStream| async move {
+            let received = crate::multipart_support::drain_fields(&mut stream).await?;
+            Response::text(200, &format!("received {received} bytes"))
+        },
+    );
+}
+
+/// The two upgrade families: one this router owns, one it forwards.
+#[cfg(feature = "ws")]
+fn register_family_upgrades(router: &mut Router, backend: &str) {
+    router.ws(FAMILY_WS, |_req: &Request, conn: camber::http::WsConn| {
+        held_session(conn)
+    });
+    router.proxy(FAMILY_WS_PROXY_PREFIX, backend);
+}
+
+#[cfg(not(feature = "ws"))]
+fn register_family_upgrades(_router: &mut Router, _backend: &str) {}
+
+/// Every producer family names itself on the head it produced.
+///
+/// The closure half of the owner table. The rows above establish which
+/// boundaries Camber owns when something fails; these establish who answered
+/// when nothing did — one readback per family, on one listener, over the same
+/// transports a service runs on. A family missing here is a producer whose
+/// origin no acceptance row has ever read.
+async fn assert_every_producer_family_names_its_head() {
+    let fixture = FamilyFixture::serve();
+    assert_buffered_family(
+        &fixture,
+        "local buffered",
+        FAMILY_LOCAL,
+        ResponseOrigin::Application,
+        1,
+    )
+    .await;
+    assert_buffered_family(
+        &fixture,
+        "buffered proxy",
+        FAMILY_BUFFERED,
+        ResponseOrigin::Upstream,
+        2,
+    )
+    .await;
+    assert_buffered_family(
+        &fixture,
+        "streaming proxy",
+        FAMILY_STREAMED,
+        ResponseOrigin::Upstream,
+        3,
+    )
+    .await;
+    assert_buffered_family(
+        &fixture,
+        "server-sent events",
+        FAMILY_SSE,
+        ResponseOrigin::ServerSentEvents,
+        4,
+    )
+    .await;
+    assert_multipart_family(&fixture, 5).await;
+    assert_grpc_family(&fixture, 6).await;
+    let rows = assert_upgrade_families(&fixture, 6).await;
+    fixture.assert_families_settled("producer families", rows);
+    fixture.finish("producer families");
+}
+
+/// Drive one family answered over ordinary HTTP framing and read its origin.
+async fn assert_buffered_family(
+    fixture: &FamilyFixture,
+    label: &str,
+    path: &'static str,
+    origin: ResponseOrigin,
+    row: usize,
+) {
+    let addr = fixture.addr();
+    let answered = tokio::task::spawn_blocking(move || {
+        http_support::request(addr, "GET", path, &[], b"", BOUND)
+    })
+    .await
+    .expect("the family peer settled")
+    .unwrap_or_else(|error| panic!("{label}: the family answer was never read: {error}"));
+    assert_eq!(
+        answered.status,
+        200,
+        "{label}: this family produced its own head: {}",
+        answered.text(),
+    );
+    fixture.assert_committed(label, origin, row);
+}
+
+/// Drive the streaming multipart family and read its origin.
+async fn assert_multipart_family(fixture: &FamilyFixture, row: usize) {
+    let label = "streaming multipart";
+    let addr = fixture.addr();
+    let body = crate::multipart_support::multipart_body(
+        crate::multipart_support::BOUNDARY,
+        &[crate::multipart_support::Field::text("field", "value")],
+    )
+    .into_boxed_slice();
+    let answered = tokio::task::spawn_blocking(move || {
+        crate::multipart_support::upload(addr, FAMILY_MULTIPART, &body)
+    })
+    .await
+    .expect("the multipart peer settled");
+    assert_eq!(
+        answered.status,
+        200,
+        "{label}: the session's own handler produced this head: {}",
+        answered.text(),
+    );
+    fixture.assert_committed(label, ResponseOrigin::Application, row);
+}
+
+/// Drive the gRPC family and read its origin from the head tonic produced.
+async fn assert_grpc_family(fixture: &FamilyFixture, row: usize) {
+    let label = "grpc";
+    let mut rpc = OpenedRpc::start(fixture.addr(), "camber").await;
+    let answered = rpc.stream.commit().await;
+    assert_eq!(
+        answered.status(),
+        200,
+        "{label}: tonic produced this family's head",
+    );
+    fixture.assert_committed(label, ResponseOrigin::Grpc, row);
+    rpc.stream.finish();
+    let _ended = answered.settle().await;
+    rpc.close().await;
+}
+
+/// Drive both upgrade families and read the origin each `101` committed.
+///
+/// Hands back the last row it drove, so the table's own count closes over
+/// whichever families this build carries.
+#[cfg(feature = "ws")]
+async fn assert_upgrade_families(fixture: &FamilyFixture, row: usize) -> usize {
+    assert_upgrade_family(fixture, "direct websocket", FAMILY_WS, row + 1).await;
+    assert_upgrade_family(fixture, "proxied websocket", FAMILY_WS_PROXY, row + 2).await;
+    row + 2
+}
+
+#[cfg(not(feature = "ws"))]
+async fn assert_upgrade_families(_fixture: &FamilyFixture, row: usize) -> usize {
+    row
+}
+
+/// Drive one upgrade family, and read the origin behind its `101`.
+///
+/// The peer leaves with the head in hand: the `101` is the response this family
+/// produced, and whatever the directions behind it go on to do belongs to the
+/// bridge rather than to this operation's commitment.
+#[cfg(feature = "ws")]
+async fn assert_upgrade_family(
+    fixture: &FamilyFixture,
+    label: &str,
+    path: &'static str,
+    row: usize,
+) {
+    let addr = fixture.addr();
+    let head = tokio::task::spawn_blocking(move || {
+        let mut peer = common::start_upgrade(addr, path);
+        common::read_until_double_crlf(&mut peer)
+    })
+    .await
+    .expect("the upgrade peer settled");
+    assert!(
+        head.starts_with("HTTP/1.1 101"),
+        "{label}: this family produced its own head: {head}",
+    );
+    fixture.assert_committed(label, ResponseOrigin::WebSocket, row);
 }
 
 // ---------------------------------------------------------------------------
@@ -1258,10 +1815,10 @@ impl MatrixWork {
 /// class today. It runs the identical chain, so the row it answers is still the
 /// same chain's, at the boundary tonic owns.
 struct MatrixFixture {
-    server: http_support::ObservedServer,
-    controller: Arc<LifecycleController>,
-    grpc: http_support::ObservedServer,
-    upstream: http_support::ObservedServer,
+    server: http_support::ObservedServer<ScopedAdmittedOperation>,
+    controller: Arc<ScopedAdmittedOperation>,
+    grpc: http_support::ObservedServer<ScopedAdmittedOperation>,
+    upstream: http_support::ObservedServer<ScopedUnwatched>,
     journal: common::Journal,
     work: Arc<MatrixWork>,
 }
@@ -1283,13 +1840,13 @@ impl MatrixFixture {
     fn serve_under(policy: fn() -> ServerPolicy) -> Self {
         let work = Arc::new(MatrixWork::default());
         let journal = common::journal();
-        let upstream = http_support::reserve_observed().serve(matrix_upstream(&work));
+        let upstream = http_support::reserve_unwatched().serve(matrix_upstream(&work));
         let backend = format!("http://{}", upstream.addr());
 
         let mut hosts = camber::http::HostRouter::new();
         hosts.add(MATRIX_HOST, matrix_child(&work, &journal, &backend));
         hosts.add(OTHER_HOST, other_child());
-        let port = http_support::reserve_observed();
+        let port = http_support::reserve_admitted_operation();
         let controller = port.controller();
         // Served through the builder rather than through the host helper: the
         // shutdown row needs the aggregate deadline this matrix names, and the
@@ -1299,7 +1856,7 @@ impl MatrixFixture {
         Self {
             server,
             controller,
-            grpc: http_support::reserve_observed()
+            grpc: http_support::reserve_admitted_operation()
                 .serve_with_policy(matrix_grpc_router(&work, &journal), policy()),
             upstream,
             journal,
@@ -1312,16 +1869,14 @@ impl MatrixFixture {
     /// The permit row holds nothing open past its own assertions, so each of
     /// the three ends gracefully; a row that left a transport behind reports it
     /// here rather than in whichever row ran next.
+    ///
+    /// Written out rather than looped: the three are watched through different
+    /// views now, so they are three types rather than one, and the loop that
+    /// took them as one list would need them to be the same.
     fn tear_down(self, label: &str) {
-        for (owner, name) in [
-            (self.server, "host-routed"),
-            (self.grpc, "grpc"),
-            (self.upstream, "upstream"),
-        ] {
-            owner.shutdown_bounded(BOUND).unwrap_or_else(|error| {
-                panic!("{label}: the {name} owner did not end gracefully: {error}")
-            });
-        }
+        stop_owner(self.server.shutdown_bounded(BOUND), "host-routed", label);
+        stop_owner(self.grpc.shutdown_bounded(BOUND), "grpc", label);
+        stop_owner(self.upstream.shutdown_bounded(BOUND), "upstream", label);
     }
 
     fn addr(&self) -> std::net::SocketAddr {
@@ -1870,7 +2425,7 @@ async fn assert_the_same_chain_decides_over_tls(work: &Arc<MatrixWork>) {
     let label = "tls";
     let (server_config, connector) = common::self_signed_server_and_connector();
     let journal = common::journal();
-    let upstream = http_support::reserve_observed().serve(matrix_upstream(work));
+    let upstream = http_support::reserve_unwatched().serve(matrix_upstream(work));
     let backend = format!("http://{}", upstream.addr());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1991,7 +2546,7 @@ async fn assert_precommit_refusal_is_mapped_by_its_owner(fixture: &MatrixFixture
 async fn assert_disconnect_ends_the_producer_it_was_read_by(fixture: &MatrixFixture) {
     let label = "disconnect";
     let addr = fixture.addr();
-    let before = fixture.controller.transfers_observed().download.releases;
+    let before = downloads_released(&fixture.controller.transfers);
     // Baselined for the same reason the release count beside it is: every one
     // of these counters is monotonic across the whole matrix, so the claim is
     // what this row's own peer caused, not what the count already stood at.
@@ -2031,7 +2586,7 @@ async fn assert_disconnect_ends_the_producer_it_was_read_by(fixture: &MatrixFixt
         "{label}: the event producer outlived the peer it was being read by",
     );
     let released = http_support::poll_until(BOUND, || {
-        fixture.controller.transfers_observed().download.releases > before
+        downloads_released(&fixture.controller.transfers) > before
     });
     assert!(
         released,
@@ -2116,7 +2671,7 @@ async fn assert_permit_returns_after_the_transport(class: &'static str, held: He
     let fixture = MatrixFixture::serve_limited();
     let addr = fixture.addr();
     let holder = hold_transport(addr, held, class).await;
-    let parked = park_on_permit(&fixture.controller, addr, class).await;
+    let parked = park_on_permit(&fixture.controller.connections, addr, class).await;
     let parked = assert_still_waiting(parked, class).await;
     // The transport's own boundary: the peer that owned it is gone, so the
     // producer, bridge, or forwarded leg reading for it ends and the permit it
@@ -2151,7 +2706,7 @@ async fn assert_permit_returns_after_the_grpc_transport() {
 
     // The gRPC class is served on a listener of its own, so the permit under
     // observation is that listener's rather than the host-routed one's.
-    let parked = park_on_permit(fixture.grpc.controller(), addr, class).await;
+    let parked = park_on_permit(&fixture.grpc.controller().connections, addr, class).await;
     let parked = assert_still_waiting(parked, class).await;
     // tonic's answer did not end the transport; closing the connection does,
     // and that is the boundary the permit comes back at.
@@ -2197,26 +2752,20 @@ async fn hold_transport(
 /// peer has reached the permit wait and been let go of the checkpoint, so the
 /// silence that follows is the limit holding.
 async fn park_on_permit(
-    controller: &LifecycleController,
+    controller: &ConnectionOwnerController,
     addr: std::net::SocketAddr,
     class: &'static str,
 ) -> std::net::TcpStream {
-    controller
-        .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
-        .unwrap_or_else(|error| panic!("{class}: arming the permit wait failed: {error}"));
+    let pending = ConnectionOwnerEdge::PermitWaitPending;
+    http_support::arm_point(controller, pending, class);
     let parked = tokio::task::spawn_blocking(move || credentialed_peer(addr, MATRIX_HTTP))
         .await
         .expect("the waiting peer settled");
-    tokio::time::timeout(
-        BOUND,
-        controller.wait_until_paused(LifecycleCheckpoint::ConnectionPermitWaitPending),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("{class}: the second peer never reached the permit wait"))
-    .unwrap_or_else(|error| panic!("{class}: waiting for the permit wait failed: {error}"));
-    controller
-        .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
-        .unwrap_or_else(|error| panic!("{class}: releasing the permit wait failed: {error}"));
+    tokio::time::timeout(BOUND, controller.wait_until_paused(pending))
+        .await
+        .unwrap_or_else(|_| panic!("{class}: the second peer never reached the permit wait"))
+        .unwrap_or_else(|error| panic!("{class}: waiting for the permit wait failed: {error}"));
+    http_support::release_point(controller, pending, class);
     parked
 }
 
@@ -2306,7 +2855,7 @@ async fn assert_shutdown_releases_every_protocol_owner(fixture: MatrixFixture) {
 /// The host-routed service ends on its own deadline with a session still open.
 #[cfg(feature = "ws")]
 async fn assert_forced_shutdown_ends_the_held_upgrade(
-    server: http_support::ObservedServer,
+    server: http_support::ObservedServer<ScopedAdmittedOperation>,
     work: &Arc<MatrixWork>,
 ) {
     let label = "shutdown";
@@ -2339,7 +2888,7 @@ async fn assert_forced_shutdown_ends_the_held_upgrade(
 /// Without upgrades there is no session to hold, so the service ends gracefully.
 #[cfg(not(feature = "ws"))]
 async fn assert_forced_shutdown_ends_the_held_upgrade(
-    server: http_support::ObservedServer,
+    server: http_support::ObservedServer<ScopedAdmittedOperation>,
     _work: &Arc<MatrixWork>,
 ) {
     server
@@ -2457,6 +3006,14 @@ const FAILED_UPGRADE_PERMITS: usize = 0;
 /// The answer a handshake Camber cannot complete is refused with.
 const REFUSED_HANDSHAKE: u16 = 400;
 
+/// What this listener's download owner has released so far.
+///
+/// Read from the transfer owner for the same reason: a release is the direction's
+/// own, and this row claims nothing about the rest of the scope.
+fn downloads_released(controller: &TransferOwnerController) -> usize {
+    controller.observed().download.releases
+}
+
 /// What one row's own listener published while that row ran.
 ///
 /// Deltas rather than totals: the observations are cumulative per listener, and
@@ -2473,8 +3030,8 @@ struct OwnedOnce {
 
 impl OwnedOnce {
     /// What `controller` published since `baseline` was taken.
-    fn since(baseline: &Baseline, controller: &LifecycleController) -> Self {
-        let after = controller.operations_observed();
+    fn since(baseline: &Baseline, controller: &ScopedAdmittedOperation) -> Self {
+        let after = controller.commitment.operations_observed();
         let before = &baseline.observed;
         Self {
             envelopes: after.admitted - before.admitted,
@@ -2482,7 +3039,7 @@ impl OwnedOnce {
             middleware: after.middleware - before.middleware,
             staged: after.completions_staged - before.completions_staged,
             recorded: after.completions_recorded - before.completions_recorded,
-            permits: controller.body_permit_owners_dropped() - baseline.permits,
+            permits: http_support::body_owners(controller).permit_owners_dropped - baseline.permits,
         }
     }
 }
@@ -2502,11 +3059,15 @@ struct Baseline {
 
 impl Baseline {
     /// Take everything one row on `addr` is measured against.
-    async fn take(addr: std::net::SocketAddr, controller: &LifecycleController) -> Self {
-        let before = controller.operations_observed();
+    async fn take(addr: std::net::SocketAddr, controller: &ScopedAdmittedOperation) -> Self {
+        let before = controller.commitment.operations_observed();
         let scraped = scrape_completions(addr).await;
         let settled = http_support::poll_until(BOUND, || {
-            controller.operations_observed().completions_recorded > before.completions_recorded
+            controller
+                .commitment
+                .operations_observed()
+                .completions_recorded
+                > before.completions_recorded
         });
         assert!(
             settled,
@@ -2514,8 +3075,8 @@ impl Baseline {
              can be told apart from it",
         );
         Self {
-            observed: controller.operations_observed(),
-            permits: controller.body_permit_owners_dropped(),
+            observed: controller.commitment.operations_observed(),
+            permits: http_support::body_owners(controller).permit_owners_dropped,
             scraped,
         }
     }
@@ -2580,7 +3141,7 @@ async fn moved_on_the_wire(
 /// offered one to hold.
 fn owned_once(
     baseline: &Baseline,
-    controller: &LifecycleController,
+    controller: &ScopedAdmittedOperation,
     permits: usize,
     label: &str,
 ) -> OwnedOnce {
@@ -2625,8 +3186,8 @@ fn assert_owned_nothing(owned: &OwnedOnce, label: &str) {
 
 /// One admitted class 15.T3 drives, and everything its one account names.
 ///
-/// The class label and the terminal are stated rather than read back off the
-/// record: a row that took production's own answer as its expectation would
+/// The class label and the completion facts are stated rather than read back off
+/// the record: a row that took production's own answer as its expectation would
 /// agree with whatever the recorder wrote.
 struct Admitted {
     class: &'static str,
@@ -2634,7 +3195,12 @@ struct Admitted {
     path: &'static str,
     status: u16,
     protocol: &'static str,
-    terminal: &'static str,
+    /// The producer that took this class's response commitment.
+    origin: &'static str,
+    /// What became of the answer that producer committed.
+    delivery: &'static str,
+    /// How this class's connection ended under it, if it did.
+    connection_end: &'static str,
     /// How many permit owners this class releases.
     ///
     /// One for a class that consumes a request body, and none for a head-only
@@ -2659,23 +3225,34 @@ impl Admitted {
     /// Built as one value because it is one claim: a delta taken over a subset
     /// of the labels would count a record another class produced. No row here
     /// crosses a configured bound, so every one of them names the absence.
-    fn labels<'a>(&'a self, status: &'a str) -> [(&'a str, &'a str); 5] {
+    fn labels<'a>(&'a self, status: &'a str) -> [(&'a str, &'a str); 9] {
         [
             ("method", self.method),
             ("status", status),
             ("protocol", self.protocol),
-            ("terminal", self.terminal),
+            ("origin", self.origin),
+            ("rejection", "none"),
+            ("delivery", self.delivery),
+            ("connection_end", self.connection_end),
             ("boundary", "none"),
+            ("shutdown", "none"),
         ]
     }
 
     /// The fields this row's completion event must carry.
-    fn stated(&self) -> [String; 4] {
+    ///
+    /// All seven dimensions, matching what [`Self::labels`] asks of the metric:
+    /// an event stating six of them leaves the seventh free to say anything.
+    fn stated(&self) -> [String; 8] {
         [
             format!("status={}", self.status),
             format!("protocol={}", self.protocol),
-            format!("terminal={}", self.terminal),
+            format!("origin={}", self.origin),
+            format!("delivery={}", self.delivery),
+            format!("connection_end={}", self.connection_end),
+            "rejection=none".to_owned(),
             "boundary=none".to_owned(),
+            "shutdown=none".to_owned(),
         ]
     }
 }
@@ -2688,7 +3265,9 @@ const OWNED_EXCHANGE_CLASSES: [Admitted; 4] = [
         path: MATRIX_HTTP,
         status: 200,
         protocol: "ordinary_http",
-        terminal: "completed",
+        origin: "application",
+        delivery: "produced",
+        connection_end: "none",
         permits: 1,
         records: 1,
     },
@@ -2698,7 +3277,9 @@ const OWNED_EXCHANGE_CLASSES: [Admitted; 4] = [
         path: MATRIX_STREAM,
         status: 200,
         protocol: "streaming_http",
-        terminal: "completed",
+        origin: "application",
+        delivery: "produced",
+        connection_end: "none",
         permits: 1,
         records: 1,
     },
@@ -2710,7 +3291,9 @@ const OWNED_EXCHANGE_CLASSES: [Admitted; 4] = [
         // The forwarded leg the upstream serves for this row is answered as
         // ordinary HTTP, so it lands under a label set that is not this one.
         protocol: "proxy",
-        terminal: "completed",
+        origin: "upstream",
+        delivery: "produced",
+        connection_end: "none",
         permits: 1,
         records: 1,
     },
@@ -2720,7 +3303,9 @@ const OWNED_EXCHANGE_CLASSES: [Admitted; 4] = [
         path: MATRIX_STREAMED,
         status: 200,
         protocol: "proxy",
-        terminal: "completed",
+        origin: "upstream",
+        delivery: "produced",
+        connection_end: "none",
         permits: 1,
         records: 1,
     },
@@ -2736,7 +3321,14 @@ const OWNED_SSE_CLASS: Admitted = Admitted {
     path: MATRIX_SSE,
     status: 200,
     protocol: "server_sent_events",
-    terminal: "disconnect",
+    // The feed's own handoff still produced this head; the transport failing
+    // under it is a separate fact, and neither erases the other. This peer is
+    // dropped while the feed is actively writing, so the write that fails is
+    // what ends the connection — a peer that leaves an idle body behind reaches
+    // read EOF instead, which is the other row of that vocabulary.
+    origin: "sse",
+    delivery: "interrupted",
+    connection_end: "transport-failed",
     permits: 0,
     records: 1,
 };
@@ -2748,7 +3340,9 @@ const OWNED_GRPC_CLASS: Admitted = Admitted {
     path: ECHO_PATH,
     status: 200,
     protocol: "grpc",
-    terminal: "completed",
+    origin: "grpc",
+    delivery: "produced",
+    connection_end: "none",
     permits: 0,
     records: 1,
 };
@@ -2762,7 +3356,9 @@ const OWNED_UPGRADE_CLASSES: [Admitted; 2] = [
         path: MATRIX_WS,
         status: 101,
         protocol: "websocket",
-        terminal: "completed",
+        origin: "websocket",
+        delivery: "produced",
+        connection_end: "none",
         permits: 0,
         records: 1,
     },
@@ -2774,7 +3370,9 @@ const OWNED_UPGRADE_CLASSES: [Admitted; 2] = [
         // The handshake establishes the class, not the registration: a proxied
         // upgrade is answered as an upgrade, whichever route forwarded it.
         protocol: "websocket",
-        terminal: "completed",
+        origin: "websocket",
+        delivery: "produced",
+        connection_end: "none",
         permits: 0,
         // Two operations, on one class: the peer's upgrade, committed by the
         // matrix, and the forwarded upgrade the upstream committed for it.
@@ -2946,6 +3544,13 @@ async fn assert_upgrades_own_one_account(fixture: &MatrixFixture) {
 
 #[cfg(not(feature = "ws"))]
 async fn assert_upgrades_own_one_account(_fixture: &MatrixFixture) {}
+
+/// Report one matrix owner that did not end gracefully, naming which it was.
+fn stop_owner(stopped: Result<(), http_support::FixtureError>, name: &str, label: &str) {
+    stopped.unwrap_or_else(|error| {
+        panic!("{label}: the {name} owner did not end gracefully: {error}")
+    });
+}
 
 /// The gRPC class owns the same one of everything, at the boundary tonic owns.
 async fn assert_grpc_owns_one_account(fixture: &MatrixFixture) {

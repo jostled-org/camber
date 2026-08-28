@@ -1,5 +1,5 @@
 use crate::RuntimeError;
-use crate::lifecycle::LifecycleParticipant;
+use crate::lifecycle::ShutdownOwner;
 use crate::runtime_state::{RuntimeConfig, RuntimeInner, recover_poisoned};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
@@ -129,6 +129,61 @@ impl ParticipantSettlement {
     }
 }
 
+/// What one run published about the children its root scope admitted.
+///
+/// Facts about named children, and one fact about the scope itself. There is no
+/// total here on purpose: a count answers "how many children exist", which is a
+/// question about the whole runtime, and every case that used to ask it was
+/// really asking whether one child it had just started had been admitted,
+/// retained, joined, or let go.
+#[derive(Default)]
+struct ScopeSettlementObservations {
+    /// Claims taken before an admission, oldest first.
+    ///
+    /// One claim binds to one admission, in the order both happened, so a case
+    /// that claims and then starts a child names that child and no other.
+    claims: std::collections::VecDeque<ScopeClaim>,
+    /// Which admitted child each bound claim named.
+    named: std::collections::HashMap<ScopeClaim, ScopeChildId>,
+    /// Which admitted child production admitted under each subsystem name.
+    ///
+    /// The other half of naming, for the Camber-owned loops the runtime starts
+    /// for itself. Those admissions happen during startup, before any case body
+    /// runs, so no claim could have been taken ahead of them — but production
+    /// already carries the name it admitted each one under, and that name binds
+    /// to the child rather than to a position in the admission order.
+    subsystems: std::collections::HashMap<Box<str>, ScopeChildId>,
+    /// Children the scope owner retains a way to stop.
+    retained: std::collections::HashSet<ScopeChildId>,
+    /// Children whose Tokio handle the scope owner awaited to completion.
+    joined: std::collections::HashSet<ScopeChildId>,
+    /// Children that have left the scope.
+    settled: std::collections::HashSet<ScopeChildId>,
+    /// Whether the root scope itself has drained.
+    drained: bool,
+    /// The claim minted next.
+    next_claim: ScopeClaim,
+}
+
+/// One case's claim on the child a runtime admits next.
+type ScopeClaim = u64;
+
+/// How one case identifies the root-scope child it is asking about.
+///
+/// Two ways in, because there are two kinds of child. A case that starts its
+/// own child claims the next admission before starting it. A Camber-owned loop
+/// the runtime started during its own setup was admitted before any case body
+/// ran, so it is identified by the name production admitted it under.
+enum ScopeSubject {
+    /// The child bound to the claim this case took before starting it.
+    Admission(ScopeClaim),
+    /// The child production admitted under this subsystem name.
+    Subsystem(Box<str>),
+}
+
+/// The identity production minted for one admitted child.
+pub(crate) type ScopeChildId = u64;
+
 /// Every aggregate-shutdown observation one run published.
 #[derive(Default)]
 struct ShutdownObservations {
@@ -169,6 +224,11 @@ pub(crate) struct RuntimeSchedule {
     /// aggregate entry; production writes each row at the owner that decided
     /// it.
     shutdown: Mutex<ShutdownObservations>,
+    /// What the root scope published about the children it admitted.
+    ///
+    /// Observations only, on the same terms as `shutdown`: production admits,
+    /// retains, joins, and releases exactly as it would with nothing attached.
+    scope: Mutex<ScopeSettlementObservations>,
 }
 
 impl RuntimeSchedule {
@@ -183,11 +243,96 @@ impl RuntimeSchedule {
             conflicted: AtomicBool::new(false),
             refused_workers: Mutex::new(std::collections::HashSet::new()),
             shutdown: Mutex::new(ShutdownObservations::default()),
+            scope: Mutex::new(ScopeSettlementObservations::default()),
         }
     }
 
     fn shutdown_observations(&self) -> MutexGuard<'_, ShutdownObservations> {
         recover_poisoned(self.shutdown.lock())
+    }
+
+    fn scope_observations(&self) -> MutexGuard<'_, ScopeSettlementObservations> {
+        recover_poisoned(self.scope.lock())
+    }
+
+    /// Claim the child this runtime admits next.
+    fn claim_next_admission(&self) -> ScopeClaim {
+        let mut observed = self.scope_observations();
+        let claim = observed.next_claim;
+        observed.next_claim = claim.wrapping_add(1);
+        observed.claims.push_back(claim);
+        claim
+    }
+
+    /// Bind the oldest waiting claim to the child production just admitted.
+    ///
+    /// A run with no claim waiting binds no positional claim: the unnamed
+    /// children a runtime admits for itself are not the subject of any case,
+    /// and holding them would grow that map for the life of a long run.
+    ///
+    /// A named admission takes no claim. The name production carried is the
+    /// whole handle on such a child. A Camber-owned loop reaches admission from
+    /// a case body as readily as from startup: the renewal and signal-watcher
+    /// seams do exactly that. Binding it positionally as well would hand a case
+    /// holding an outstanding claim a loop it never started, in place of the
+    /// child it took the claim for.
+    pub(crate) fn record_scope_admission(&self, child: ScopeChildId, subsystem: Option<&str>) {
+        let mut observed = self.scope_observations();
+        let positional_claim = match subsystem {
+            Some(subsystem) => {
+                observed.subsystems.insert(Box::from(subsystem), child);
+                None
+            }
+            None => observed.claims.pop_front(),
+        };
+        if let Some(claim) = positional_claim {
+            observed.named.insert(claim, child);
+        }
+    }
+
+    /// Record that the scope owner now retains a way to stop this child.
+    pub(crate) fn record_scope_retention(&self, child: ScopeChildId) {
+        self.scope_observations().retained.insert(child);
+    }
+
+    /// Record that the scope owner awaited this child's handle to completion.
+    pub(crate) fn record_scope_join(&self, child: ScopeChildId) {
+        self.scope_observations().joined.insert(child);
+    }
+
+    /// Record that this child has left the scope.
+    pub(crate) fn record_scope_settlement(&self, child: ScopeChildId) {
+        let mut observed = self.scope_observations();
+        observed.retained.remove(&child);
+        observed.settled.insert(child);
+    }
+
+    /// Record that the root scope itself has drained.
+    pub(crate) fn record_scope_drained(&self) {
+        self.scope_observations().drained = true;
+    }
+
+    /// Whether one subject's child has reached the fact `reached` reads.
+    ///
+    /// A subject production has not admitted yet answers `false`: the child does
+    /// not exist, so it has reached nothing. That is a different answer from the
+    /// refusal an unattached or double-attached controller gives, which is why
+    /// the two leave through different sides of the `Result`.
+    fn child_reached(
+        &self,
+        subject: &ScopeSubject,
+        reached: impl FnOnce(&ScopeSettlementObservations, ScopeChildId) -> bool,
+    ) -> Result<bool, RuntimeError> {
+        self.attached()?;
+        let observed = self.scope_observations();
+        let child = match subject {
+            ScopeSubject::Admission(claim) => observed.named.get(claim).copied(),
+            ScopeSubject::Subsystem(name) => observed.subsystems.get(name).copied(),
+        };
+        Ok(match child {
+            Some(child) => reached(&observed, child),
+            None => false,
+        })
     }
 
     /// Record the one mint a graceful transition performed.
@@ -206,13 +351,13 @@ impl RuntimeSchedule {
     /// Record one owner's reading of the shared expiry.
     pub(crate) fn record_deadline_reading(
         &self,
-        participant: &LifecycleParticipant,
+        owner: &ShutdownOwner,
         expiry: tokio::time::Instant,
     ) {
         self.shutdown_observations()
             .readings
             .push(ShutdownDeadlineReading {
-                participant: participant.to_string().into_boxed_str(),
+                participant: owner.to_string().into_boxed_str(),
                 expiry,
             });
     }
@@ -220,13 +365,13 @@ impl RuntimeSchedule {
     /// Record how one owner was disposed of.
     pub(crate) fn record_settlement(
         &self,
-        participant: &LifecycleParticipant,
+        owner: &ShutdownOwner,
         disposition: ParticipantDisposition,
     ) {
         self.shutdown_observations()
             .settlements
             .push(ParticipantSettlement {
-                participant: participant.to_string().into_boxed_str(),
+                participant: owner.to_string().into_boxed_str(),
                 disposition,
             });
     }
@@ -269,14 +414,17 @@ impl RuntimeSchedule {
         tracing::warn!("scheduling controller already has a runtime attached");
     }
 
-    /// The attached runtime, while it is still alive.
+    /// Whether exactly one runtime published itself to this controller.
     ///
-    /// The three failures are different bugs in the test that hit them — a
-    /// controller attached to two builders, one never attached to a builder,
-    /// and one whose runtime has already been torn down — so they are reported
-    /// apart rather than as one `NoRuntime`, which names a production absence
-    /// none of these is.
-    fn attached_runtime(&self) -> Result<Arc<RuntimeInner>, RuntimeError> {
+    /// The two failures are different bugs in the test that hit them — a
+    /// controller attached to two builders, and one never attached to a builder
+    /// at all — so they are reported apart rather than as one `NoRuntime`,
+    /// which names a production absence neither of these is.
+    ///
+    /// A torn-down runtime is NOT a failure here. What this guards is a set of
+    /// recorded facts, and a fact outlives the owner that recorded it: every
+    /// case that reads what a child settled as reads it after `run` returned.
+    fn attached(&self) -> Result<(), RuntimeError> {
         match (self.conflicted.load(Ordering::Acquire), self.runtime.get()) {
             (true, _) => Err(Self::invalid(
                 "scheduling controller was attached to more than one runtime",
@@ -284,9 +432,7 @@ impl RuntimeSchedule {
             (false, None) => Err(Self::invalid(
                 "scheduling controller has no runtime attached",
             )),
-            (false, Some(runtime)) => Weak::upgrade(runtime).ok_or_else(|| {
-                Self::invalid("scheduling controller's attached runtime was already dropped")
-            }),
+            (false, Some(_)) => Ok(()),
         }
     }
 
@@ -479,18 +625,15 @@ impl RuntimeController {
         self.schedule.disarm();
     }
 
-    /// How many children the attached runtime's root scope retains an entry
-    /// for: one joinable handle per async child, one tally entry per
-    /// non-preemptible blocking child. Read-only.
-    pub fn scope_registry_len(&self) -> Result<usize, RuntimeError> {
-        Ok(self.schedule.attached_runtime()?.scope_registry_len())
-    }
-
-    /// How many children the scope owner has awaited to Tokio-handle
-    /// completion — the join acknowledgment, which registry removal and a
-    /// zero count alone do not establish. Read-only.
-    pub fn scope_joined_count(&self) -> Result<usize, RuntimeError> {
-        Ok(self.schedule.attached_runtime()?.scope_joined_count())
+    /// The narrow controller for this runtime's root scope settlements.
+    ///
+    /// Owner-local: it names one child the scope admits and reads what that
+    /// child reached. It admits nothing, stops nothing, joins nothing, and
+    /// answers no question about how many children the runtime holds.
+    pub fn scope_settlement(&self) -> ScopeSettlementController {
+        ScopeSettlementController {
+            schedule: Arc::clone(&self.schedule),
+        }
     }
 
     /// Admit no worker for `resource`'s lifecycle callbacks.
@@ -549,6 +692,139 @@ impl RuntimeController {
 impl Drop for RuntimeController {
     fn drop(&mut self) {
         self.schedule.close();
+    }
+}
+
+/// The narrow controller over one runtime's root-scope settlements.
+///
+/// Three powers and no others: name the child the scope admits next, name a
+/// Camber-owned subsystem the runtime admitted for itself, and read whether the
+/// scope itself has drained. It cannot admit a child, stop one, join one, choose
+/// a drain window, or count what the runtime holds — so a case built on it
+/// states what happened to a child it named rather than what the whole runtime
+/// happened to contain while it looked.
+#[doc(hidden)]
+pub struct ScopeSettlementController {
+    schedule: Arc<RuntimeSchedule>,
+}
+
+impl ScopeSettlementController {
+    /// Name the child this runtime's root scope admits next.
+    ///
+    /// Taken before the child is started, so the claim binds to that admission
+    /// and not to whichever child the runtime happened to admit first. Claims
+    /// bind in the order they were taken.
+    pub fn name_next_admission(&self) -> AdmittedScope {
+        self.name(ScopeSubject::Admission(
+            self.schedule.claim_next_admission(),
+        ))
+    }
+
+    /// Name the Camber-owned subsystem this runtime admitted under `subsystem`.
+    ///
+    /// The only form that reaches a Camber-owned loop: the resource health
+    /// coordinator, the signal watcher, the renewal loops. The runtime admits
+    /// some of them during its own setup, and a doc-hidden seam admits the rest
+    /// from the case body. A startup admission is already past by the time that
+    /// body runs, so no claim could precede it. A named admission takes no
+    /// positional claim either way, so a case holding one keeps it for the child
+    /// it started. A name production never admitted answers "not yet" to every
+    /// fact, which fails the case that named it rather than passing on another
+    /// child.
+    ///
+    /// One name holds one child, and the last admission under it wins. A run
+    /// that admits two children under one string — a fixture admitting a second
+    /// signal watcher beside the one every startup admits — leaves this bound to
+    /// the later of the two. Name a subsystem the runtime admits once, or take a
+    /// positional claim through
+    /// [`name_next_admission`](Self::name_next_admission), which binds to the
+    /// admission it precedes whatever it is called.
+    pub fn name_subsystem(&self, subsystem: &str) -> AdmittedScope {
+        self.name(ScopeSubject::Subsystem(Box::from(subsystem)))
+    }
+
+    /// Attach one subject to this runtime's observations.
+    fn name(&self, subject: ScopeSubject) -> AdmittedScope {
+        AdmittedScope {
+            schedule: Arc::clone(&self.schedule),
+            subject,
+        }
+    }
+
+    /// Whether the root scope has drained: admission closed and no child left.
+    ///
+    /// The scope's own settled fact, published at the transition production
+    /// takes. It says nothing about how many children ever existed.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a controller attached to no runtime or to more than one.
+    pub fn drained(&self) -> Result<bool, RuntimeError> {
+        self.schedule.attached()?;
+        Ok(self.schedule.scope_observations().drained)
+    }
+}
+
+/// One named child of a runtime's root scope, and what it has reached.
+///
+/// Every answer is `false` until production admits the child this names, so a
+/// case that reads a fact before its subject exists sees "not yet" rather than
+/// another child's answer.
+#[doc(hidden)]
+pub struct AdmittedScope {
+    schedule: Arc<RuntimeSchedule>,
+    subject: ScopeSubject,
+}
+
+impl AdmittedScope {
+    /// Whether the scope has admitted this child.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a controller attached to no runtime or to more than one.
+    pub fn admitted(&self) -> Result<bool, RuntimeError> {
+        self.schedule.child_reached(&self.subject, |_, _| true)
+    }
+
+    /// Whether the scope owner retains a way to stop this child: its joinable
+    /// handle for an async child, its tally entry for a blocking one.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a controller attached to no runtime or to more than one.
+    pub fn retained(&self) -> Result<bool, RuntimeError> {
+        self.schedule
+            .child_reached(&self.subject, |observed, child| {
+                observed.retained.contains(&child)
+            })
+    }
+
+    /// Whether the scope owner awaited this child's Tokio handle to
+    /// completion.
+    ///
+    /// The join acknowledgment, which the child leaving the scope does not
+    /// establish on its own.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a controller attached to no runtime or to more than one.
+    pub fn joined(&self) -> Result<bool, RuntimeError> {
+        self.schedule
+            .child_reached(&self.subject, |observed, child| {
+                observed.joined.contains(&child)
+            })
+    }
+
+    /// Whether this child has left the scope.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a controller attached to no runtime or to more than one.
+    pub fn settled(&self) -> Result<bool, RuntimeError> {
+        self.schedule
+            .child_reached(&self.subject, |observed, child| {
+                observed.settled.contains(&child)
+            })
     }
 }
 

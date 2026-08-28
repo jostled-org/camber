@@ -2,8 +2,7 @@ use super::BufferConfig;
 use super::ServerPolicy;
 use super::router::{Router, ServerDispatch};
 use super::server_lifecycle::{
-    ServerContextSnapshot, ServerControl, ServerSupervisor, StopAuthority, SupervisorJoin,
-    poll_supervisor_join,
+    ServerContextSnapshot, ServerSupervisor, StopAuthority, SupervisorJoin, poll_supervisor_join,
 };
 use crate::task::spawn_async;
 use crate::{RuntimeError, net, runtime};
@@ -15,10 +14,12 @@ use std::task::{Context, Poll};
 /// Armed lifecycle owner for a background HTTP server.
 ///
 /// [`shutdown`](Self::shutdown) requests graceful shutdown, while
-/// [`cancel`](Self::cancel) requests forced cancellation. `Drop` records
-/// `Abort` before releasing control, so discarding an unfinished owner forces
-/// shutdown while the independently running supervisor continues to join its
-/// work.
+/// [`cancel`](Self::cancel) requests forced cancellation. Both commit their
+/// control fact before they return, so the outcome is fixed by the call rather
+/// than chosen later by whichever future the executor polls first. `Drop`
+/// commits the same forced cancellation before releasing control, so discarding
+/// an unfinished owner forces shutdown while the independently running
+/// supervisor continues to join its work.
 ///
 /// Awaiting this handle is equivalent to [`join`](Self::join) and returns one
 /// flat `Result<(), RuntimeError>`. A successful join proves that every owned
@@ -40,9 +41,12 @@ pub struct ServerHandle(ServerHandleFuture);
 impl ServerHandle {
     /// Request graceful shutdown without consuming the owner.
     ///
-    /// Admission stops, active HTTP work receives graceful protocol shutdown,
-    /// and the aggregate grace deadline starts once. Call [`join`](Self::join)
-    /// or await the handle to observe completion.
+    /// The graceful phase is committed before this call returns. Admission
+    /// stops, active HTTP work receives graceful protocol shutdown, and the
+    /// aggregate grace deadline starts once. Repeating it is a no-op, and it
+    /// does nothing at all once cancellation, the deadline, or settlement has
+    /// committed. Call [`join`](Self::join) or await the handle to observe
+    /// completion.
     pub fn shutdown(&self) {
         self.0.shutdown();
     }
@@ -64,9 +68,12 @@ impl ServerHandle {
 
     /// Request forced cancellation of the background server.
     ///
-    /// Cancellation is idempotent. The eventual result is
-    /// `RuntimeError::Cancelled` unless timeout or another immutable result was
-    /// already fixed. Awaiting still waits for cooperatively abortable owned
+    /// Forced cancellation is committed before this call returns, and it is the
+    /// one permitted escalation from a graceful shutdown. The eventual result is
+    /// `RuntimeError::Cancelled` whenever that commit lands before the server's
+    /// terminal result does; a deadline or a settlement that committed first
+    /// keeps its own result, and this call is then a no-op. Cancellation is
+    /// idempotent. Awaiting still waits for cooperatively abortable owned
     /// transports to be joined.
     pub fn cancel(&self) {
         self.0.cancel();
@@ -88,7 +95,7 @@ impl IntoFuture for ServerHandle {
 /// whether produced by [`ServerHandle::join`],
 /// [`ServerHandle::shutdown_and_join`], or `ServerHandle::into_future`. Polling
 /// a ready result disarms Drop before returning it; dropping a pending future
-/// requests forced cancellation and leaves the supervisor running to own and
+/// commits forced cancellation and leaves the supervisor running to own and
 /// join its tasks.
 ///
 /// Successful join proves completion of each owned accepted transport,
@@ -117,9 +124,10 @@ impl ServerHandleFuture {
 
     /// Request graceful shutdown while retaining this join future.
     ///
-    /// The one aggregate deadline is minted before the transition reaches any
-    /// participant, so a connection that observes the shutdown in the very next
-    /// turn reads the instant this call fixed rather than finding none.
+    /// The graceful phase is committed and the one aggregate deadline minted
+    /// before the transition reaches any participant, so a connection that
+    /// observes the shutdown in the very next turn reads the instant this call
+    /// fixed rather than finding none.
     pub fn shutdown(&self) {
         if let Some(stop) = self.stop.as_ref() {
             stop.request_graceful();
@@ -130,9 +138,10 @@ impl ServerHandleFuture {
     ///
     /// No fresh grace period is started: this server enters forced termination
     /// under the fixed forced-join window, whatever the aggregate shutdown had
-    /// left. The latch is set BEFORE the transition is published, so the
-    /// supervisor reading that transition already knows a caller asked for it
-    /// rather than inferring it from an abort an abandoned handle also sends.
+    /// left. The forced phase is committed BEFORE the transition is published,
+    /// so the supervisor reading that transition finds a decision it cannot
+    /// change, and it already knows a caller asked for it rather than inferring
+    /// that from an abort an abandoned handle also sends.
     pub fn cancel(&self) {
         if let Some(stop) = self.stop.as_ref() {
             stop.request_cancel();
@@ -336,7 +345,7 @@ impl ServerBuilder {
     /// propagate as `RuntimeError::Io`, including a failure to remove the Unix
     /// socket path this listener owns.
     pub fn serve_listener(self, listener: net::Listener) -> Result<(), RuntimeError> {
-        let (supervisor, control) = self.freeze(listener)?;
+        let (supervisor, stop) = self.freeze(listener)?;
         // The executor this server belongs to, named rather than resolved from
         // ambient context: `Handle::current()` panics with none established and
         // would silently run this supervisor on a foreign runtime when a
@@ -347,7 +356,7 @@ impl ServerBuilder {
             .clone()
             .ok_or(RuntimeError::NoRuntime)?;
         refuse_unless_multi_thread()?;
-        drop(control);
+        drop(stop);
         // `block_in_place` so the calling thread hands its worker core back
         // while it waits on the supervisor it owns.
         tokio::task::block_in_place(|| executor.block_on(supervisor.run()))
@@ -368,8 +377,8 @@ impl ServerBuilder {
         listener: tokio::net::TcpListener,
     ) -> Result<ServerHandleFuture, RuntimeError> {
         refuse_without_tokio()?;
-        let (supervisor, control) = self.freeze(net::Listener::from_tcp(listener))?;
-        drop(control);
+        let (supervisor, stop) = self.freeze(net::Listener::from_tcp(listener))?;
+        drop(stop);
         Ok(ServerHandleFuture::from_join(SupervisorJoin::Owned(
             Box::pin(supervisor.run()),
         )))
@@ -387,8 +396,7 @@ impl ServerBuilder {
         listener: tokio::net::TcpListener,
     ) -> Result<ServerHandle, RuntimeError> {
         refuse_without_tokio()?;
-        let (supervisor, control) = self.freeze(net::Listener::from_tcp(listener))?;
-        let stop = supervisor.stop_authority(control);
+        let (supervisor, stop) = self.freeze(net::Listener::from_tcp(listener))?;
         let join = match supervisor.is_camber() {
             true => SupervisorJoin::Camber(spawn_async(supervisor.run()).into_future()),
             false => SupervisorJoin::Tokio(tokio::spawn(supervisor.run())),
@@ -409,7 +417,7 @@ impl ServerBuilder {
     fn freeze(
         self,
         listener: net::Listener,
-    ) -> Result<(ServerSupervisor, tokio::sync::watch::Sender<ServerControl>), RuntimeError> {
+    ) -> Result<(ServerSupervisor, StopAuthority), RuntimeError> {
         let buffers = self.routes.buffer_config();
         let snapshot = ServerContextSnapshot::capture(buffers, self.policy);
         let tls_acceptor =

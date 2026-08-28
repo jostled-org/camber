@@ -1,5 +1,8 @@
 use camber::runtime::{self, RuntimeBuilder};
-use camber::runtime_test_support::{RuntimeCheckpoint, RuntimeController, runtime_schedule};
+use camber::runtime_test_support::{
+    AdmittedScope, RuntimeCheckpoint, RuntimeController, ScopeSettlementController,
+    runtime_schedule,
+};
 use camber::{Resource, RuntimeError};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -88,32 +91,43 @@ where
     }
 }
 
-/// How many entries the root scope retains, or `usize::MAX` when the seam
-/// cannot be read.
+/// Whether one named child has reached the owner-local fact `reached` reads.
 ///
 /// Read without unwrapping, because most readings are taken inside a paused
 /// window: a probe that panicked there would never release the pause and the
-/// runtime would never return. The sentinel fails the caller's assertion
-/// instead of hanging its test, and stating that here keeps every probe from
-/// re-deriving it.
-pub fn registry_len(controller: &RuntimeController) -> usize {
-    controller.scope_registry_len().unwrap_or(usize::MAX)
+/// runtime would never return. An unreadable seam answers "not yet", which
+/// fails the caller's assertion instead of hanging its test, and stating that
+/// here keeps every probe from re-deriving it.
+pub fn reached(
+    child: &AdmittedScope,
+    reached: impl Fn(&AdmittedScope) -> Result<bool, RuntimeError>,
+) -> bool {
+    reached(child).unwrap_or(false)
 }
 
-/// Wait, bounded, for the root scope to retain no more than `remaining`
-/// entries.
+/// Wait, bounded, for one named child to leave the root scope.
 ///
 /// The scope releases a child's slot only after it has finished with it — a
-/// panicking child records its fault first — so the registry falling to a known
-/// length is an ordering edge, not a wall-clock budget. A registry that cannot
-/// be read counts as not-yet-there, so an unreadable seam expires the bound
-/// instead of passing on a missing answer.
-pub fn wait_registry_at_most(
-    controller: &RuntimeController,
-    remaining: usize,
-    bound: Duration,
-) -> bool {
-    poll_until(bound, || registry_len(controller) <= remaining)
+/// panicking child records its fault first — so that child's settlement is an
+/// ordering edge, not a wall-clock budget.
+pub fn wait_child_settled(child: &AdmittedScope, bound: Duration) -> bool {
+    poll_until(bound, || reached(child, AdmittedScope::settled))
+}
+
+/// Wait, bounded, for the root scope itself to drain: admission closed and no
+/// child left.
+pub fn wait_scope_drained(settlement: &ScopeSettlementController, bound: Duration) -> bool {
+    poll_until(bound, || scope_drained(settlement))
+}
+
+/// Whether the root scope itself has drained, read the way [`reached`] reads a
+/// child.
+///
+/// The same "an unreadable seam answers not-yet" policy, and stated here rather
+/// than at each probe for the same reason: most readings are taken inside a
+/// paused window, where a panic would never release the pause.
+pub fn scope_drained(settlement: &ScopeSettlementController) -> bool {
+    settlement.drained().unwrap_or(false)
 }
 
 /// The result a forcibly aborted child's handle delivers.
@@ -587,17 +601,6 @@ where
     )
 }
 
-/// Root-scope children the runtime admits for itself, which every exact
-/// occupancy count must account for.
-///
-/// On Unix that is the OS signal watcher; elsewhere `signals` does not compile
-/// and the runtime admits none.
-#[cfg(unix)]
-pub const RUNTIME_OWNED_CHILDREN: usize = 1;
-/// Root-scope children the runtime admits for itself. See the Unix variant.
-#[cfg(not(unix))]
-pub const RUNTIME_OWNED_CHILDREN: usize = 0;
-
 /// The drain escalation boundary every [`prove_scope_owned`] run is built on.
 ///
 /// Proving the cooperative `ScopeClosing` exit means returning from the closure
@@ -608,13 +611,128 @@ pub const RUNTIME_OWNED_CHILDREN: usize = 0;
 /// [`ScopeOwnedProof::assert_owned`] reports under the subsystem's name.
 const DRAIN_ESCALATION: Duration = Duration::from_secs(1);
 
-/// What one [`prove_scope_owned`] run observed about the root scope.
+/// Where a [`prove_scope_owned`] body names the children this run is about.
+///
+/// One subject per name, and each is bound to one child: a claim taken
+/// immediately before the admission it names, or the subsystem name production
+/// admitted the child under. Either way what the proof reports is a child this
+/// case identified rather than whatever the runtime happened to be holding while
+/// somebody looked.
+pub struct ScopeSubjects {
+    settlement: ScopeSettlementController,
+    named: Mutex<Vec<AdmittedScope>>,
+}
+
+/// One child a case names from inside its runtime closure and reads from
+/// outside it.
+///
+/// [`ScopeSubjects`] for a case that observes through its own armed windows
+/// rather than through [`prove_scope_owned`]: the claim has to be taken inside
+/// the closure — the runtime admits its own children before the body runs, so a
+/// claim taken outside would name one of those — while every reading is taken
+/// by the observer thread. The slot crosses that boundary, and cloning it is
+/// how the closure and the observer come to share one subject.
+///
+/// Reading it names the caller rather than answering "not yet". A case whose
+/// closure never named a subject is a case with a missing line in it, and
+/// folding that into a `false` reports it as the runtime failing the claim.
+#[derive(Clone, Default)]
+pub struct NamedSubject(Arc<std::sync::OnceLock<AdmittedScope>>);
+
+impl NamedSubject {
+    /// An unnamed slot, ready to be cloned into a runtime closure.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Name the child the root scope admits next as this case's subject.
+    ///
+    /// A second naming is refused rather than taken: one slot is one child, and
+    /// a case that named twice would read whichever claim happened to win.
+    pub fn name_next(&self, controller: &RuntimeController) {
+        let first = self
+            .0
+            .set(controller.scope_settlement().name_next_admission());
+        assert!(
+            first.is_ok(),
+            "one slot names one child, and this one was already named"
+        );
+    }
+
+    /// The child this case named, or a failure saying it never named one.
+    pub fn get(&self, context: &str) -> &AdmittedScope {
+        self.0
+            .get()
+            .unwrap_or_else(|| panic!("{context}: the closure named no subject"))
+    }
+}
+
+impl ScopeSubjects {
+    fn new(controller: &RuntimeController) -> Self {
+        Self {
+            settlement: controller.scope_settlement(),
+            named: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Name the child the root scope admits next as one of this run's subjects.
+    pub fn name_next(&self) {
+        self.lock().push(self.settlement.name_next_admission());
+    }
+
+    /// Name the Camber-owned subsystem `subsystem` as one of this run's
+    /// subjects.
+    ///
+    /// The runtime admits its own loops during startup, before this body runs,
+    /// so `name_next` can never reach one: the claim it takes binds to the next
+    /// admission, and that admission is already past. The name production
+    /// admitted the child under is the claim that can.
+    pub fn name_subsystem(&self, subsystem: &str) {
+        self.lock().push(self.settlement.name_subsystem(subsystem));
+    }
+
+    /// Whether every named subject has reached the fact `reached` reads.
+    ///
+    /// A run that named nothing answers `false` rather than vacuously true, and
+    /// says so nowhere: this reading is taken inside a paused window, and a
+    /// panic here would never release the pause. [`ScopeOwnedProof::named`]
+    /// carries the count out to where it can be reported as the defect it is.
+    fn every_subject(
+        &self,
+        reached: impl Fn(&AdmittedScope) -> Result<bool, RuntimeError>,
+    ) -> bool {
+        let named = self.lock();
+        !named.is_empty() && named.iter().all(|child| self::reached(child, &reached))
+    }
+
+    /// The named subjects, recovered past a panicking body.
+    ///
+    /// The body runs on the runtime's closure thread, and a panic there is what
+    /// poisons this lock. Refusing it would leave the observer thread unable to
+    /// read the subjects it is waiting on, so the failure would arrive as a hang
+    /// rather than as the body's own panic.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<AdmittedScope>> {
+        self.named
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// What one [`prove_scope_owned`] run observed about the children its body
+/// named.
 pub struct ScopeOwnedProof {
-    /// Registry entries while the subject was running.
-    pub occupants: usize,
-    /// Registry entries the drain saw once only the holder remained, or
-    /// `None` when the drain never paused at that window.
-    pub entries_at_drain: Option<usize>,
+    /// How many subjects the body named.
+    ///
+    /// Reported rather than folded into the readings, because a body that named
+    /// none is a test that forgot to call `name_next`, not a runtime that
+    /// dropped a child. Without it that defect reaches the caller as
+    /// [`ScopeOwnedProof::assert_owned`]'s claim about production.
+    pub named: usize,
+    /// Whether the scope owner held every named subject while it ran.
+    pub retained_while_running: bool,
+    /// Whether every named subject had left the scope by the drain's
+    /// holder-only window, or `None` when the drain never paused there.
+    pub settled_at_drain: Option<bool>,
     /// What the run returned. `Err` means the drain did not finish
     /// cooperatively: a child was still retained at [`DRAIN_ESCALATION`] and
     /// had to be force-aborted.
@@ -622,25 +740,28 @@ pub struct ScopeOwnedProof {
 }
 
 impl ScopeOwnedProof {
-    /// Assert `subsystem` was one of `expected_occupants` root-scope children
-    /// while it ran, exited on `ScopeClosing` alone, and left no registry
-    /// entry behind.
-    pub fn assert_owned(&self, subsystem: &str, expected_occupants: usize) {
+    /// Assert `subsystem` was a root-scope child the owner held while it ran,
+    /// exited on `ScopeClosing` alone, and left no entry behind.
+    pub fn assert_owned(&self, subsystem: &str) {
+        assert!(
+            self.named > 0,
+            "{subsystem}: the proof body named no subject"
+        );
         match &self.drained {
             Ok(()) => {}
             Err(error) => {
                 panic!("{subsystem} did not exit on ScopeClosing: the drain escalated ({error})")
             }
         }
-        assert_eq!(
-            self.occupants, expected_occupants,
-            "{subsystem} was not a root-scope child while it ran"
+        assert!(
+            self.retained_while_running,
+            "{subsystem} was not a root-scope child the owner held while it ran"
         );
-        match self.entries_at_drain {
+        match self.settled_at_drain {
             None => panic!("{subsystem}: the drain never paused at its holder-only window"),
-            Some(entries) => assert_eq!(
-                entries, 1,
-                "{subsystem} was still registered when only the holder should remain"
+            Some(settled) => assert!(
+                settled,
+                "{subsystem} was still held when only the holder should remain"
             ),
         }
     }
@@ -659,19 +780,21 @@ where
 }
 
 fn reported_scope_owned<T>(
-    reported_rx: Receiver<(usize, T)>,
+    reported_rx: Receiver<(bool, T)>,
     bound: Duration,
+    named: usize,
     drained: Result<(), RuntimeError>,
-    entries_at_drain: Option<usize>,
+    settled_at_drain: Option<bool>,
 ) -> (ScopeOwnedProof, T) {
-    let (occupants, value) = match reported_rx.recv_timeout(bound) {
+    let (retained_while_running, value) = match reported_rx.recv_timeout(bound) {
         Ok(reported) => reported,
-        Err(_) => panic!("the runtime closure never reported its occupancy: {drained:?}"),
+        Err(_) => panic!("the runtime closure never reported what it named: {drained:?}"),
     };
     (
         ScopeOwnedProof {
-            occupants,
-            entries_at_drain,
+            named,
+            retained_while_running,
+            settled_at_drain,
             drained,
         },
         value,
@@ -681,11 +804,11 @@ fn reported_scope_owned<T>(
 /// Run one runtime whose closure admits Camber-owned loops and then returns
 /// WITHOUT requesting shutdown, so only `ScopeClosing` can end them.
 ///
-/// A holder child pins the drain at a count of one, which makes the registry
-/// reading at that pause exact: everything else must already have exited and
-/// been removed. `body` runs inside the closure with the controller the
-/// runtime is attached to, and its value is returned alongside the proof so a
-/// caller can assert on whatever its own subject reported.
+/// A holder child pins the drain at a count of one, which makes the reading at
+/// that pause exact: every other child must already have exited and been
+/// released. `body` runs inside the closure and names the subjects it admits,
+/// and its value is returned alongside the proof so a caller can assert on
+/// whatever its own subject reported.
 ///
 /// The closure reports its readings through a channel rather than through the
 /// run's own value, so an escalated drain still reaches the caller as a named
@@ -693,13 +816,15 @@ fn reported_scope_owned<T>(
 pub fn prove_scope_owned<C, B, T>(bound: Duration, configure: C, body: B) -> (ScopeOwnedProof, T)
 where
     C: FnOnce(RuntimeBuilder) -> RuntimeBuilder,
-    B: FnOnce(Arc<RuntimeController>) -> T,
+    B: FnOnce(&ScopeSubjects) -> T,
 {
     let controller = Arc::new(runtime_schedule());
     let holder_only = RuntimeCheckpoint::ScopeWaitObserved(1);
     let observer_controller = Arc::clone(&controller);
     let closure_controller = Arc::clone(&controller);
-    let body_controller = Arc::clone(&controller);
+    let subjects = Arc::new(ScopeSubjects::new(&controller));
+    let observer_subjects = Arc::clone(&subjects);
+    let body_subjects = Arc::clone(&subjects);
 
     let hold = Arc::new(tokio::sync::Notify::new());
     let observer_hold = Arc::clone(&hold);
@@ -707,7 +832,7 @@ where
     let closure_hold = Arc::clone(&hold);
 
     let (armed_tx, armed_rx) = channel::<()>();
-    let (reported_tx, reported_rx) = channel::<(usize, T)>();
+    let (reported_tx, reported_rx) = channel::<(bool, T)>();
 
     let builder = scope_owned_builder(configure, &controller);
 
@@ -717,7 +842,7 @@ where
     // nothing frees and `run` never returns, which is the hang a bounded wait
     // exists to rule out. Freeing it escalates the drain instead, and the
     // missing reading fails `assert_owned`.
-    let (drained, entries_at_drain) = observe_while_running(
+    let (drained, settled_at_drain) = observe_while_running(
         &controller,
         &move || abandon_hold.notify_one(),
         // `move`: the handshake receiver is `Send` but not `Sync`, so the
@@ -726,39 +851,37 @@ where
             // One deadline over both legs, so a handshake that arrives late
             // cannot buy the probe a second full budget.
             let deadline = Instant::now() + bound;
-            let entries = match armed_rx.recv_timeout(remaining(deadline)) {
+            let settled = match armed_rx.recv_timeout(remaining(deadline)) {
                 Err(_) => None,
                 Ok(()) => probe_paused_window(
                     &observer_controller,
                     holder_only,
                     remaining(deadline),
                     || {
-                        let entries = registry_len(&observer_controller);
+                        let settled = observer_subjects.every_subject(AdmittedScope::settled);
                         // Frees the holder, so releasing this window drains the
                         // scope.
                         observer_hold.notify_one();
-                        entries
+                        settled
                     },
                 ),
             };
-            match entries {
+            match settled {
                 Some(_) => {}
                 None => abandon.run(),
             }
-            entries
+            settled
         },
         || {
             builder.run(move || {
                 camber::spawn_async(async move { closure_hold.notified().await });
 
-                let value = body(body_controller);
+                let value = body(&body_subjects);
 
-                let occupants = closure_controller
-                    .scope_registry_len()
-                    .expect("the runtime schedule could not read the root scope registry");
+                let retained = body_subjects.every_subject(AdmittedScope::retained);
                 reported_tx
-                    .send((occupants, value))
-                    .expect("the caller stopped listening for the closure's occupancy");
+                    .send((retained, value))
+                    .expect("the caller stopped listening for what the closure named");
                 closure_controller
                     .pause_once(holder_only)
                     .expect("the runtime schedule refused to arm the holder-only window");
@@ -769,5 +892,8 @@ where
         },
     );
 
-    reported_scope_owned(reported_rx, bound, drained, entries_at_drain)
+    // Read after the run, so a body that named nothing is reported as the
+    // defect it is rather than as a scope that never held its children.
+    let named = subjects.lock().len();
+    reported_scope_owned(reported_rx, bound, named, drained, settled_at_drain)
 }

@@ -3,15 +3,18 @@
 //! Camber coordinates a gRPC call only until tonic commits a response head. Up
 //! to that head, [`GrpcRequestBody`] reports the terminal it fixed to the pre-head
 //! coordinator, which weighs it against the operation's own carried sources and
-//! tonic's answer under the one declared precedence. Past that head tonic owns
+//! tonic's answer in one turn: tonic's answer is that coordinator's own read and
+//! settles the turn it arrives in, and the reported terminal and the carried
+//! sources decide only a turn it left open. Past that head tonic owns
 //! the RPC: an upload terminal becomes the terminal error of tonic's request
 //! body and nothing else, and a download terminal ends [`GrpcDownload`] without
 //! synthesizing a `grpc-status`, replacing tonic's trailers, or reaching a
 //! rejection mapper.
 
 use super::body::BodyError;
-use super::mock::{LifecycleCheckpoint, LifecycleScript};
+use super::mock::{LifecycleScript, ResponseCommitmentEdge};
 use super::operation::{OperationEnvelope, PreCommitCause};
+use super::response_commitment::ResponseOrigin;
 use super::transfer::{
     IncomingSource, SourceStep, Transfer, TransferFailure, TransferOwner, TransferSource, step_of,
 };
@@ -320,9 +323,9 @@ pub(super) async fn produced_head<T>(
     observer: Option<&Arc<LifecycleScript>>,
 ) -> T {
     let produced = producing.await;
-    LifecycleScript::pause_at(
+    LifecycleScript::pause_at_response_commit(
         observer.map(Arc::as_ref),
-        LifecycleCheckpoint::GrpcHeadReady,
+        ResponseCommitmentEdge::GrpcHeadReady,
     )
     .await;
     produced
@@ -338,9 +341,14 @@ pub(super) async fn commit(
     operation: &OperationEnvelope,
     observer: Option<Arc<LifecycleScript>>,
 ) -> hyper::Response<GrpcDownload> {
-    LifecycleScript::pause_at(
+    // The handoff is the barrier, so the commitment is taken as it is crossed
+    // and before anything can be held here. Past it no Camber cause reaches a
+    // mapper: tonic owns the status, and a budget that expires afterwards is
+    // its own owner's to end rather than a second answer to this request.
+    operation.commit_response(ResponseOrigin::Grpc);
+    LifecycleScript::pause_at_response_commit(
         observer.as_deref(),
-        LifecycleCheckpoint::GrpcHandoffCommitted,
+        ResponseCommitmentEdge::GrpcHandoffCommitted,
     )
     .await;
     let download = operation.download(super::TransferBudget::unbounded(), observer);

@@ -1,21 +1,27 @@
 use std::future::{Future, IntoFuture};
 use std::io::Write;
 use std::net::SocketAddr;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use camber::RuntimeError;
 use camber::http::mock::{
-    LifecycleCheckpoint, LifecycleController, LifecycleFault, SupervisorJoinProbe, lifecycle,
+    self as mock, ConnectionFault, ConnectionOwnerController, ConnectionOwnerEdge,
+    ScopedFaultedSelection, ScopedServerStop, ScopedSupervisorSelection, ServerStopController,
+    ServerStopEdge, ServerTaskFault, SupervisorJoinProbe,
     supervisor_join_probe,
 };
+#[cfg(feature = "ws")]
+use camber::http::mock::{ScopedSupervisedRegistration, UpgradeOwnerController, UpgradeOwnerEdge};
 use camber::http::{Request, Response, Router, ServerHandle, ServerHandleFuture, SseWriter};
 use camber::runtime;
 use camber::runtime_test_support;
 use futures_util::FutureExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+
+use crate::common::{OwnerPoint, Owns};
 
 const HTTP_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
 const CLOSE_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
@@ -555,18 +561,20 @@ fn assert_io_kind(result: Result<(), RuntimeError>, expected: std::io::ErrorKind
     }
 }
 
-async fn release_after_shutdown_race(checkpoint: LifecycleCheckpoint, forced: bool) {
+async fn release_after_shutdown_race(checkpoint: ConnectionOwnerEdge, forced: bool) {
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
-    controller.pause_once(checkpoint).unwrap();
+    let owners = mock::supervisor_selection(addr).unwrap();
+    owners.connections
+        .pause_once(checkpoint)
+        .unwrap();
     let handle = camber::http::serve_background(listener, counting_router(Arc::clone(&counter)))
         .expect("owned server requires a Tokio runtime");
 
     let mut client = connect_request(addr).await;
     wait_until_paused_bounded(
-        &controller,
+        &owners,
         checkpoint,
         "shutdown race checkpoint timed out",
     )
@@ -574,7 +582,7 @@ async fn release_after_shutdown_race(checkpoint: LifecycleCheckpoint, forced: bo
     match forced {
         true => {
             handle.cancel();
-            controller.release(checkpoint).unwrap();
+            owners.connections.release(checkpoint).unwrap();
             let completion = handle.into_future();
             let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
                 tokio::join!(completion, assert_connection_closed(&mut client))
@@ -585,21 +593,19 @@ async fn release_after_shutdown_race(checkpoint: LifecycleCheckpoint, forced: bo
             assert_cancelled(result);
         }
         false => {
-            controller
-                .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+            owners.stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
                 .unwrap();
             runtime::request_shutdown();
-            controller.release(checkpoint).unwrap();
+            owners.connections.release(checkpoint).unwrap();
             wait_until_paused_bounded(
-                &controller,
-                LifecycleCheckpoint::BeforeSupervisorSelect,
+                &owners,
+                ServerStopEdge::BeforeSupervisorSelect,
                 "graceful shutdown race supervisor boundary timed out",
             )
             .await;
             assert_connection_closed(&mut client).await;
             assert_eq!(counter.load(Ordering::Acquire), 0);
-            controller
-                .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+            owners.stop.release(ServerStopEdge::BeforeSupervisorSelect)
                 .unwrap();
             let result = tokio::time::timeout(Duration::from_secs(5), handle.into_future())
                 .await
@@ -613,8 +619,12 @@ async fn release_after_shutdown_race(checkpoint: LifecycleCheckpoint, forced: bo
 #[camber::test]
 async fn lifecycle_controller_is_listener_scoped_and_fail_closed() {
     fn assert_traits<T: Copy + Clone + std::fmt::Debug + Eq + PartialEq>() {}
-    assert_traits::<LifecycleCheckpoint>();
-    assert_traits::<LifecycleFault>();
+    assert_traits::<ServerStopEdge>();
+    assert_traits::<ConnectionOwnerEdge>();
+    #[cfg(feature = "ws")]
+    assert_traits::<UpgradeOwnerEdge>();
+    assert_traits::<ConnectionFault>();
+    assert_traits::<ServerTaskFault>();
     assert_traits::<SupervisorJoinProbe>();
 
     let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -623,14 +633,14 @@ async fn lifecycle_controller_is_listener_scoped_and_fail_closed() {
     let first_addr = first.local_addr().unwrap();
     let second_addr = second.local_addr().unwrap();
     let third_addr = third.local_addr().unwrap();
-    let first_controller = lifecycle(first_addr).unwrap();
-    let second_controller = lifecycle(second_addr).unwrap();
-    assert_invalid(lifecycle(first_addr));
-    first_controller
-        .pause_once(LifecycleCheckpoint::AfterAccept)
+    let first_connections = mock::connection_owner(first_addr).unwrap();
+    let second_connections = mock::connection_owner(second_addr).unwrap();
+    assert_invalid(mock::connection_owner(first_addr));
+    first_connections
+        .pause_once(ConnectionOwnerEdge::AfterAccept)
         .unwrap();
-    second_controller
-        .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
+    second_connections
+        .inject_once(ConnectionFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
 
     let first_handle = camber::http::serve_background(first, ok_router())
@@ -641,8 +651,8 @@ async fn lifecycle_controller_is_listener_scoped_and_fail_closed() {
         .expect("owned server requires a Tokio runtime");
     let mut first_client = connect_request(first_addr).await;
     wait_until_paused_bounded(
-        &first_controller,
-        LifecycleCheckpoint::AfterAccept,
+        &first_connections,
+        ConnectionOwnerEdge::AfterAccept,
         "listener-scoped accept pause timed out",
     )
     .await;
@@ -653,8 +663,8 @@ async fn lifecycle_controller_is_listener_scoped_and_fail_closed() {
     assert_io_kind(second_handle.await, std::io::ErrorKind::Other);
     assert_ok_request(third_addr).await;
 
-    first_controller
-        .release(LifecycleCheckpoint::AfterAccept)
+    first_connections
+        .release(ConnectionOwnerEdge::AfterAccept)
         .unwrap();
     let response = read_http_head(&mut first_client).await;
     assert!(response.starts_with("HTTP/1.1 200"));
@@ -668,21 +678,19 @@ async fn lifecycle_controller_is_listener_scoped_and_fail_closed() {
 #[tokio::test]
 async fn lifecycle_controller_rejects_invalid_script_operations() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let controller = lifecycle(listener.local_addr().unwrap()).unwrap();
+    let owners = mock::armed_faults(listener.local_addr().unwrap()).unwrap();
     assert_invalid(
-        controller
-            .wait_until_paused(LifecycleCheckpoint::AfterAccept)
+        owners.connections.wait_until_paused(ConnectionOwnerEdge::AfterAccept)
             .await,
     );
-    assert_invalid(controller.release(LifecycleCheckpoint::AfterAccept));
-    controller
-        .pause_once(LifecycleCheckpoint::AfterAccept)
+    assert_invalid(owners.connections.release(ConnectionOwnerEdge::AfterAccept));
+    owners.connections.pause_once(ConnectionOwnerEdge::AfterAccept)
         .unwrap();
-    assert_invalid(controller.pause_once(LifecycleCheckpoint::AfterAccept));
-    controller
-        .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
+    assert_invalid(owners.connections.pause_once(ConnectionOwnerEdge::AfterAccept));
+    owners.connections
+        .inject_once(ConnectionFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
-    assert_invalid(controller.inject_once(LifecycleFault::PanicNextOwnedTask));
+    assert_invalid(owners.tasks.inject_once(ServerTaskFault::PanicNextOwnedTask));
 }
 
 // 1.T1
@@ -690,20 +698,19 @@ async fn lifecycle_controller_rejects_invalid_script_operations() {
 async fn dropping_controller_releases_waiter_and_allows_address_reuse() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterAccept)
+    let connections = mock::connection_owner(addr).unwrap();
+    connections.pause_once(ConnectionOwnerEdge::AfterAccept)
         .unwrap();
     let handle = camber::http::serve_background(listener, ok_router())
         .expect("owned server requires a Tokio runtime");
     let mut client = connect_request(addr).await;
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::AfterAccept,
-        "controller drop accept pause timed out",
+        &connections,
+        ConnectionOwnerEdge::AfterAccept,
+        "observer drop accept pause timed out",
     )
     .await;
-    drop(controller);
+    drop(connections);
     let response = read_http_head(&mut client).await;
     assert!(response.starts_with("HTTP/1.1 200"));
 
@@ -715,7 +722,7 @@ async fn dropping_controller_releases_waiter_and_allows_address_reuse() {
     let listener = rebind_within(addr, SETTLE_BOUND)
         .await
         .expect("the cancelled server's address was never bindable again");
-    let replacement = lifecycle(listener.local_addr().unwrap()).unwrap();
+    let replacement = mock::connection_owner(listener.local_addr().unwrap()).unwrap();
     drop(replacement);
 }
 
@@ -759,21 +766,19 @@ async fn supervisor_join_maps_every_source_result() {
 #[camber::test]
 async fn camber_background_join_flattens_success() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let controller = lifecycle(listener.local_addr().unwrap()).unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    let stop = mock::server_stop(listener.local_addr().unwrap()).unwrap();
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     let handle = camber::http::serve_background(listener, ok_router())
         .expect("owned server requires a Tokio runtime");
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &stop,
+        ServerStopEdge::BeforeSupervisorSelect,
         "background join supervisor boundary timed out",
     )
     .await;
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     let result: Result<(), RuntimeError> = handle.await;
     assert!(result.is_ok());
@@ -782,25 +787,25 @@ async fn camber_background_join_flattens_success() {
 // 1.T3
 #[camber::test]
 async fn graceful_shutdown_after_accept_never_dispatches() {
-    release_after_shutdown_race(LifecycleCheckpoint::AfterAccept, false).await;
+    release_after_shutdown_race(ConnectionOwnerEdge::AfterAccept, false).await;
 }
 
 // 1.T3
 #[camber::test]
 async fn forced_shutdown_after_accept_never_dispatches() {
-    release_after_shutdown_race(LifecycleCheckpoint::AfterAccept, true).await;
+    release_after_shutdown_race(ConnectionOwnerEdge::AfterAccept, true).await;
 }
 
 // 1.T3
 #[camber::test]
 async fn graceful_shutdown_after_permit_never_dispatches() {
-    release_after_shutdown_race(LifecycleCheckpoint::AfterPermit, false).await;
+    release_after_shutdown_race(ConnectionOwnerEdge::AfterPermit, false).await;
 }
 
 // 1.T3
 #[camber::test]
 async fn forced_shutdown_after_permit_never_dispatches() {
-    release_after_shutdown_race(LifecycleCheckpoint::AfterPermit, true).await;
+    release_after_shutdown_race(ConnectionOwnerEdge::AfterPermit, true).await;
 }
 
 // 1.T3
@@ -878,71 +883,6 @@ fn websocket_router() -> Router {
     router
 }
 
-#[cfg(feature = "ws")]
-async fn websocket_client(addr: SocketAddr, path: &str) -> tokio::net::TcpStream {
-    let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-    client
-        .write_all(common::ws_upgrade_request(path).as_bytes())
-        .await
-        .unwrap();
-    let response = read_http_head(&mut client).await;
-    assert!(
-        response.starts_with("HTTP/1.1 101"),
-        "unexpected response: {response}"
-    );
-    client
-}
-
-#[cfg(feature = "ws")]
-async fn write_websocket_text(stream: &mut tokio::net::TcpStream, text: &str) {
-    assert!(text.len() <= 125);
-    let mask = [0x12, 0x34, 0x56, 0x78];
-    let mut frame = Vec::with_capacity(text.len() + 6);
-    frame.push(0x81);
-    frame.push(0x80 | text.len() as u8);
-    frame.extend_from_slice(&mask);
-    frame.extend(
-        text.as_bytes()
-            .iter()
-            .enumerate()
-            .map(|(index, byte)| byte ^ mask[index % mask.len()]),
-    );
-    stream.write_all(&frame).await.unwrap();
-}
-
-#[cfg(feature = "ws")]
-async fn read_websocket_text(stream: &mut tokio::net::TcpStream) -> Box<str> {
-    let mut header = [0u8; 2];
-    stream.read_exact(&mut header).await.unwrap();
-    assert_eq!(header[0] & 0x0f, 1);
-    assert_eq!(header[1] & 0x80, 0);
-    let length = (header[1] & 0x7f) as usize;
-    assert!(length <= 125);
-    let mut payload = vec![0u8; length];
-    stream.read_exact(&mut payload).await.unwrap();
-    String::from_utf8(payload).unwrap().into_boxed_str()
-}
-
-#[cfg(feature = "ws")]
-async fn assert_websocket_close(stream: &mut tokio::net::TcpStream) {
-    let mut header = [0u8; 2];
-    stream.read_exact(&mut header).await.unwrap();
-    assert_eq!(header[0] & 0x0f, 0x08, "expected a WebSocket close frame");
-    assert_eq!(header[1] & 0x80, 0, "server close frame must not be masked");
-    let payload_len = usize::from(header[1] & 0x7f);
-    assert!(payload_len <= 125, "close frame used an extended payload");
-    let mut payload = vec![0u8; payload_len];
-    stream.read_exact(&mut payload).await.unwrap();
-}
-
-#[cfg(feature = "ws")]
-async fn write_websocket_close(stream: &mut tokio::net::TcpStream) {
-    stream
-        .write_all(&[0x88, 0x80, 0x12, 0x34, 0x56, 0x78])
-        .await
-        .unwrap();
-}
-
 // 1.T3
 #[cfg(feature = "ws")]
 #[camber::test]
@@ -951,48 +891,44 @@ async fn admitted_websocket_bridge_keeps_owner_pending_until_transport_closes() 
     let addr = listener.local_addr().unwrap();
     let handle = camber::http::serve_background(listener, websocket_router())
         .expect("owned server requires a Tokio runtime");
-    let mut client = websocket_client(addr, "/ws").await;
+    let mut client = common::upgraded_ws_peer(addr, "/ws", "the admitted bridge").await;
     runtime::request_shutdown();
     let mut completion = Box::pin(handle.into_future());
     assert!(completion.as_mut().now_or_never().is_none());
-    assert_websocket_close(&mut client).await;
-    write_websocket_close(&mut client).await;
-    assert_eof(&mut client).await;
+    common::assert_graceful_close_then_eof(&mut client, "admitted bridge").await;
     let result = completion.await;
     assert!(result.is_ok(), "unexpected server result: {result:?}");
 }
 
 async fn enter_default_grace_deadline(
-    controller: &LifecycleController,
+    owners: &impl Owns<ServerStopController>,
     addr: SocketAddr,
     server: &tokio::task::JoinHandle<Result<(), RuntimeError>>,
     dropped: &AtomicBool,
 ) {
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    let stop = owners.owner();
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedRuntime)
         .unwrap();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &stop,
+        ServerStopEdge::BeforeSupervisorSelect,
         "initial supervisor boundary timed out",
     )
     .await;
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &stop,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "runtime shutdown selection timed out",
     )
     .await;
     apply_selected(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        owners,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "graceful supervisor boundary timed out",
     )
     .await;
@@ -1021,7 +957,7 @@ async fn default_grace_deadline_aborts_joins_and_releases_direct_transport() {
     let dropped = Arc::new(AtomicBool::new(false));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let stop = mock::server_stop(addr).unwrap();
     let server = tokio::spawn(
         camber::http::server(held_router(entered_tx, release, Arc::clone(&dropped)))
             .policy(held_request_policy())
@@ -1035,29 +971,25 @@ async fn default_grace_deadline_aborts_joins_and_releases_direct_transport() {
     )
     .await;
 
-    enter_default_grace_deadline(&controller, addr, &server, &dropped).await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedDeadline)
+    enter_default_grace_deadline(&stop, addr, &server, &dropped).await;
+    stop.pause_once(ServerStopEdge::SupervisorSelectedDeadline)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     tokio::time::advance(Duration::from_millis(1)).await;
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedDeadline,
+        &stop,
+        ServerStopEdge::SupervisorSelectedDeadline,
         "grace deadline selection timed out",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedDeadline)
+    stop.release(ServerStopEdge::SupervisorSelectedDeadline)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::AfterSupervisorResultSend,
+        &stop,
+        ServerStopEdge::AfterSupervisorResultSend,
         "owned task drain timed out",
     )
     .await;
@@ -1072,8 +1004,7 @@ async fn default_grace_deadline_aborts_joins_and_releases_direct_transport() {
     );
     // The OS socket deadline stays independent from paused Tokio time.
     assert_eof_with_socket_deadline(client);
-    controller
-        .release(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.release(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(5), server)
         .await
@@ -1137,7 +1068,7 @@ fn shutdown_while_waiting_for_permit_closes_unadmitted_socket() {
                 let counter = Arc::new(AtomicUsize::new(0));
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let controller = lifecycle(addr).unwrap();
+                let owners = mock::supervisor_selection(addr).unwrap();
                 let handle =
                     camber::http::serve_background(listener, counting_router(Arc::clone(&counter)))
                         .expect("owned server requires a Tokio runtime");
@@ -1147,35 +1078,31 @@ fn shutdown_while_waiting_for_permit_closes_unadmitted_socket() {
                 assert!(response.starts_with("HTTP/1.1 200"));
                 assert_eq!(counter.load(Ordering::Acquire), 1);
 
-                controller
-                    .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                owners.connections.pause_once(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
                 let mut second =
                     tokio::time::timeout(Duration::from_secs(5), connect_request(addr))
                         .await
                         .expect("second connection timed out");
                 wait_until_paused_bounded(
-                    &controller,
-                    LifecycleCheckpoint::ConnectionPermitWaitPending,
+                    &owners,
+                    ConnectionOwnerEdge::PermitWaitPending,
                     "pending permit checkpoint timed out",
                 )
                 .await;
-                controller
-                    .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+                owners.stop.pause_once(ServerStopEdge::SupervisorSelectedRuntime)
                     .unwrap();
                 runtime::request_shutdown();
                 wait_until_paused_bounded(
-                    &controller,
-                    LifecycleCheckpoint::SupervisorSelectedRuntime,
+                    &owners,
+                    ServerStopEdge::SupervisorSelectedRuntime,
                     "runtime selection checkpoint timed out",
                 )
                 .await;
-                controller
-                    .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                owners.connections.release(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
                 drop(first);
-                controller
-                    .release(LifecycleCheckpoint::SupervisorSelectedRuntime)
+                owners.stop.release(ServerStopEdge::SupervisorSelectedRuntime)
                     .unwrap();
 
                 let completion = handle.into_future();
@@ -1198,40 +1125,36 @@ async fn shutdown_joins_incomplete_tls_handshake() {
     let tls_config = common::server_tls_config(&cert, &key);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterAccept)
+    let owners = mock::supervisor_selection(addr).unwrap();
+    owners.connections.pause_once(ConnectionOwnerEdge::AfterAccept)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterPermit)
+    owners.connections.pause_once(ConnectionOwnerEdge::AfterPermit)
         .unwrap();
     let handle = camber::http::serve_background_tls(listener, ok_router(), tls_config)
         .expect("owned server requires a Tokio runtime");
     let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::AfterAccept,
+        &owners,
+        ConnectionOwnerEdge::AfterAccept,
         "TLS handshake accept pause timed out",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::AfterAccept)
+    owners.connections.release(ConnectionOwnerEdge::AfterAccept)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::AfterPermit,
+        &owners,
+        ConnectionOwnerEdge::AfterPermit,
         "TLS handshake permit pause timed out",
     )
     .await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::AfterPermit,
+        &owners,
+        ConnectionOwnerEdge::AfterPermit,
         "TLS handshake supervisor boundary timed out",
     )
     .await;
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    owners.stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
 
     let result = tokio::time::timeout(Duration::from_secs(5), handle.into_future())
@@ -1243,26 +1166,24 @@ async fn shutdown_joins_incomplete_tls_handshake() {
 
 /// Serve `router` in the background and hold one request inside its handler.
 ///
-/// The retained fixtures differ only in the router they serve and the path they
-/// hold, so binding, registering the controller, connecting, and waiting for
-/// handler entry are written here once.
-async fn serve_with_held_request(
+/// The retained fixtures differ only in the router they serve, the path they
+/// hold, and which owners their case reads, so binding, registering, connecting,
+/// and waiting for handler entry are written here once. `observe` is the
+/// registration itself: each case passes the factory naming the owner families
+/// it reads, so the fixture widens nothing on its callers' behalf.
+async fn serve_with_held_request<Observer>(
+    observe: impl FnOnce(SocketAddr) -> Result<Observer, RuntimeError>,
     router: Router,
     path: &str,
     entered: tokio::sync::oneshot::Receiver<()>,
     context: &str,
-) -> (
-    LifecycleController,
-    SocketAddr,
-    ServerHandle,
-    tokio::net::TcpStream,
-) {
+) -> (Observer, SocketAddr, ServerHandle, tokio::net::TcpStream) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = observe(addr).unwrap();
     let handle = serve_held(listener, router);
     let client = hold_request(addr, path, entered, context).await;
-    (controller, addr, handle, client)
+    (owners, addr, handle, client)
 }
 
 /// Offer one request to a served fixture and wait until its handler holds it.
@@ -1281,8 +1202,10 @@ async fn hold_request(
     client
 }
 
-async fn retained_server() -> (
-    LifecycleController,
+async fn retained_server<Observer>(
+    observe: impl FnOnce(SocketAddr) -> Result<Observer, RuntimeError>,
+) -> (
+    Observer,
     SocketAddr,
     ServerHandle,
     tokio::net::TcpStream,
@@ -1295,14 +1218,15 @@ async fn retained_server() -> (
         Arc::clone(&release),
         Arc::new(AtomicBool::new(false)),
     );
-    let (controller, addr, handle, client) = serve_with_held_request(
+    let (owners, addr, handle, client) = serve_with_held_request(
+        observe,
         router,
         "/",
         entered_rx,
         "retained fixture request did not enter the handler",
     )
     .await;
-    (controller, addr, handle, client, release)
+    (owners, addr, handle, client, release)
 }
 
 /// A retained server that also holds a request whose release is an opaque
@@ -1317,7 +1241,7 @@ async fn retained_server() -> (
 /// A request admitted while nothing else is ready and released after the first
 /// reap settles both. Its task exists before that reap and panics after it.
 struct RetainedPanicServer {
-    controller: LifecycleController,
+    owners: ScopedFaultedSelection,
     addr: SocketAddr,
     handle: ServerHandle,
     peer: tokio::net::TcpStream,
@@ -1341,7 +1265,8 @@ async fn retained_panic_server() -> RetainedPanicServer {
         panic_entered_tx,
         Arc::clone(&panicking_release),
     );
-    let (controller, addr, handle, peer) = serve_with_held_request(
+    let (owners, addr, handle, peer) = serve_with_held_request(
+        mock::faulted_selection,
         router,
         "/",
         entered_rx,
@@ -1356,7 +1281,7 @@ async fn retained_panic_server() -> RetainedPanicServer {
     )
     .await;
     RetainedPanicServer {
-        controller,
+        owners,
         addr,
         handle,
         peer,
@@ -1367,7 +1292,7 @@ async fn retained_panic_server() -> RetainedPanicServer {
 }
 
 async fn retained_owner_server() -> (
-    LifecycleController,
+    ScopedServerStop,
     SocketAddr,
     ServerHandle,
     tokio::net::TcpStream,
@@ -1383,18 +1308,19 @@ async fn retained_owner_server() -> (
         Arc::clone(&dropped),
         Arc::new(AtomicUsize::new(0)),
     );
-    let (controller, addr, handle, client) = serve_with_held_request(
+    let (owners, addr, handle, client) = serve_with_held_request(
+        mock::server_stop,
         router,
         "/active",
         entered_rx,
         "retained owner fixture request did not enter the handler",
     )
     .await;
-    (controller, addr, handle, client, release, dropped)
+    (owners, addr, handle, client, release, dropped)
 }
 
 async fn assert_graceful_owner_waits<F>(
-    controller: &LifecycleController,
+    owners: &impl Owns<ServerStopController>,
     completion: F,
     addr: SocketAddr,
     mut client: tokio::net::TcpStream,
@@ -1418,8 +1344,8 @@ async fn assert_graceful_owner_waits<F>(
     .await
     .expect("graceful transport observations timed out");
     wait_and_release_bounded(
-        controller,
-        LifecycleCheckpoint::AfterSupervisorResultSend,
+        owners,
+        ServerStopEdge::AfterSupervisorResultSend,
         "graceful owner result send timed out",
     )
     .await;
@@ -1451,27 +1377,25 @@ async fn assert_forced_owner_joins<F>(
 // 1.T11
 #[camber::test]
 async fn fatal_accept_drains_peer_before_returning_io() {
-    let (controller, addr, handle, mut peer, release) = retained_server().await;
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    let (owners, addr, handle, mut peer, release) = retained_server(mock::supervisor_selection).await;
+    owners.stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &owners,
+        ServerStopEdge::BeforeSupervisorSelect,
         "fatal accept drain supervisor boundary timed out",
     )
     .await;
-    controller
-        .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
+    owners.connections
+        .inject_once(ConnectionFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        &owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "fatal accept selection timed out",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedAccept)
+    owners.stop.release(ServerStopEdge::SupervisorSelectedAccept)
         .unwrap();
 
     let mut completion = Box::pin(handle.into_future());
@@ -1485,9 +1409,9 @@ async fn fatal_accept_drains_peer_before_returning_io() {
 // 1.T11
 #[camber::test]
 async fn owned_task_panic_drains_retained_peer_before_returning() {
-    let (controller, addr, handle, mut peer, release) = retained_server().await;
-    controller
-        .inject_once(LifecycleFault::PanicNextOwnedTask)
+    let (owners, addr, handle, mut peer, release) = retained_server(mock::server_task).await;
+    owners
+        .inject_once(ServerTaskFault::PanicNextOwnedTask)
         .unwrap();
     let mut faulted = connect_request(addr).await;
     assert_connection_closed(&mut faulted).await;
@@ -1501,28 +1425,27 @@ async fn owned_task_panic_drains_retained_peer_before_returning() {
 // A fatal accept error installs a provisional outcome and starts the grace
 // deadline. This leaves the supervisor held at its select boundary with both
 // already applied, which is the state both escalation rows start from.
-async fn pause_after_fatal_accept_starts_grace(controller: &LifecycleController) {
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+async fn pause_after_fatal_accept_starts_grace(owners: &ScopedSupervisorSelection) {
+    owners.stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        owners,
+        ServerStopEdge::BeforeSupervisorSelect,
         "fatal accept initial supervisor boundary timed out",
     )
     .await;
-    controller
-        .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
+    owners.connections
+        .inject_once(ConnectionFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
     select_next(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "fatal accept selection timed out",
     )
     .await;
     apply_selected(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "fatal accept grace boundary timed out",
     )
     .await;
@@ -1532,14 +1455,13 @@ async fn pause_after_fatal_accept_starts_grace(controller: &LifecycleController)
 #[tokio::test(start_paused = true)]
 async fn fatal_outcome_is_replaced_by_timeout_after_peer_drain_escalation() {
     let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
-    let (controller, _addr, handle, peer, _release) = retained_server().await;
-    pause_after_fatal_accept_starts_grace(&controller).await;
+    let (owners, _addr, handle, peer, _release) = retained_server(mock::supervisor_selection).await;
+    pause_after_fatal_accept_starts_grace(&owners).await;
     tokio::time::advance(Duration::from_secs(30)).await;
-    select_deadline(&controller).await;
-    release_deadline_and_wait_for_drained_result(&controller).await;
+    select_deadline(&owners).await;
+    release_deadline_and_wait_for_drained_result(&owners).await;
     assert_eof_with_socket_deadline(peer);
-    controller
-        .release(LifecycleCheckpoint::AfterSupervisorResultSend)
+    owners.stop.release(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     assert_timeout(handle.await);
 }
@@ -1547,33 +1469,36 @@ async fn fatal_outcome_is_replaced_by_timeout_after_peer_drain_escalation() {
 // 1.T11, 1.T12
 #[camber::test]
 async fn explicit_cancel_replaces_provisional_fatal_outcome() {
-    let (controller, _addr, handle, mut peer, _release) = retained_server().await;
-    pause_after_fatal_accept_starts_grace(&controller).await;
+    let (owners, _addr, handle, mut peer, _release) = retained_server(mock::supervisor_selection).await;
+    pause_after_fatal_accept_starts_grace(&owners).await;
     handle.cancel();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    owners.stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     assert_eof(&mut peer).await;
     assert_cancelled(handle.await);
 }
 
-async fn wait_until_paused_bounded(
-    controller: &LifecycleController,
-    checkpoint: LifecycleCheckpoint,
+// Wait until production is held at `point`, on whichever owner holds it.
+//
+// `owners` is asked for that one owner and nothing else, so a case that
+// registered a stop owner and a connection owner lends exactly the one the
+// point belongs to.
+async fn wait_until_paused_bounded<P: OwnerPoint>(
+    owners: &impl Owns<P::Owner>,
+    point: P,
     context: &str,
 ) {
-    bounded(controller.wait_until_paused(checkpoint), context)
-        .await
-        .unwrap();
+    let held = owners.owner();
+    bounded(point.paused_at(&held), context).await.unwrap();
 }
 
-async fn wait_and_release_bounded(
-    controller: &LifecycleController,
-    checkpoint: LifecycleCheckpoint,
+async fn wait_and_release_bounded<P: OwnerPoint>(
+    owners: &impl Owns<P::Owner>,
+    point: P,
     context: &str,
 ) {
-    wait_until_paused_bounded(controller, checkpoint, context).await;
-    controller.release(checkpoint).unwrap();
+    wait_until_paused_bounded(owners, point, context).await;
+    point.release_at(&owners.owner()).unwrap();
 }
 
 // Step the supervisor from its select boundary to the branch it selects.
@@ -1582,79 +1507,96 @@ async fn wait_and_release_bounded(
 // boundary still holds the loop, so releasing the boundary cannot run the
 // iteration past the observation. `context` names the step, so an expired bound
 // reports which selection never arrived.
+//
+// Every branch a supervisor selects is one of its own edges, so this asks for
+// the stop owner alone.
 async fn select_next(
-    controller: &LifecycleController,
-    selected: LifecycleCheckpoint,
+    owners: &impl Owns<ServerStopController>,
+    selected: ServerStopEdge,
     context: &str,
 ) {
-    controller.pause_once(selected).unwrap();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
-        .unwrap();
-    wait_until_paused_bounded(controller, selected, context).await;
+    let stop = owners.owner();
+    selected.arm_at(&stop).unwrap();
+    stop.release(ServerStopEdge::BeforeSupervisorSelect).unwrap();
+    wait_until_paused_bounded(&stop, selected, context).await;
 }
 
 // Step the supervisor from a selected branch back to its select boundary.
 //
 // [`select_next`] mirrored, and armed in the same order for the same reason:
 // the boundary is armed before `selected` is released, so the loop cannot reach
-// its next iteration unobserved.
-async fn apply_selected(
-    controller: &LifecycleController,
-    selected: LifecycleCheckpoint,
+// its next iteration unobserved. What is released is not always the supervisor's
+// own edge — a connection held after its permit is applied the same way — so the
+// released point names its own owner and the boundary names the stop owner.
+async fn apply_selected<P: OwnerPoint>(
+    owners: &(impl Owns<ServerStopController> + Owns<P::Owner>),
+    selected: P,
     context: &str,
 ) {
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    let stop = Owns::<ServerStopController>::owner(owners);
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
-    controller.release(selected).unwrap();
-    wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
-        context,
-    )
-    .await;
+    selected
+        .release_at(&Owns::<P::Owner>::owner(owners))
+        .unwrap();
+    wait_until_paused_bounded(&stop, ServerStopEdge::BeforeSupervisorSelect, context).await;
 }
 
 #[cfg(feature = "ws")]
-async fn apply_selected_event_then_release_upgrade(
-    controller: &LifecycleController,
-    selected: LifecycleCheckpoint,
+async fn apply_selected_event_then_release_transfer<P: OwnerPoint>(
+    owners: &(impl Owns<ServerStopController> + Owns<UpgradeOwnerController> + Owns<P::Owner>),
+    selected: P,
     context: &str,
 ) {
-    apply_selected(controller, selected, context).await;
-    controller
-        .release(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+    apply_selected(owners, selected, context).await;
+    release_transfer_edge_and_resume(owners);
+}
+
+/// Let a held transfer answer, and let the supervisor take its next event.
+///
+/// Both releases belong to one step: the connection cannot answer while it is
+/// held, and the supervisor cannot reap the connection that answers while its
+/// own select boundary is held.
+#[cfg(feature = "ws")]
+fn release_transfer_edge_and_resume(
+    owners: &(impl Owns<ServerStopController> + Owns<UpgradeOwnerController>),
+) {
+    Owns::<UpgradeOwnerController>::owner(owners)
+        .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .unwrap();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    Owns::<ServerStopController>::owner(owners)
+        .release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
 }
 
-async fn prepare_completed_task(controller: &LifecycleController, addr: SocketAddr) {
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+
+async fn prepare_completed_task(
+    owners: &(impl Owns<ServerStopController> + Owns<ConnectionOwnerController>),
+    addr: SocketAddr,
+) {
+    Owns::<ServerStopController>::owner(owners)
+        .pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted)
+    Owns::<ConnectionOwnerController>::owner(owners)
+        .pause_once(ConnectionOwnerEdge::AfterConnectionFutureCompleted)
         .unwrap();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &Owns::<ServerStopController>::owner(owners),
+        ServerStopEdge::BeforeSupervisorSelect,
         "completed-task initial supervisor boundary timed out",
     )
     .await;
     let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
     client.write_all(CLOSE_REQUEST).await.unwrap();
     select_next(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "completed-task accept selection timed out",
     )
     .await;
     apply_selected(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "completed-task post-accept boundary timed out",
     )
     .await;
@@ -1663,89 +1605,86 @@ async fn prepare_completed_task(controller: &LifecycleController, addr: SocketAd
     assert_http_body(&mut client, b"ok").await;
     assert_eof(&mut client).await;
     wait_and_release_bounded(
-        controller,
-        LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted,
+        owners,
+        ConnectionOwnerEdge::AfterConnectionFutureCompleted,
         "completed task did not reach its terminal boundary",
     )
     .await;
 }
 
 async fn observe_deferred_task_reap(
-    controller: &LifecycleController,
-    selected_winner: LifecycleCheckpoint,
+    owners: &impl Owns<ServerStopController>,
+    selected_winner: ServerStopEdge,
 ) {
     apply_selected(
-        controller,
+        owners,
         selected_winner,
         "deferred reap supervisor boundary timed out",
     )
     .await;
     select_next(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        owners,
+        ServerStopEdge::SupervisorSelectedTask,
         "deferred task reap timed out",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedTask)
+    Owns::<ServerStopController>::owner(owners)
+        .release(ServerStopEdge::SupervisorSelectedTask)
         .unwrap();
 }
 
-async fn owned_task_fault_result(fault: LifecycleFault, expected: &str) {
+async fn owned_task_fault_result(fault: ServerTaskFault, expected: &str) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterPermit)
+    let owners = mock::faulted_selection(addr).unwrap();
+    owners.connections.pause_once(ConnectionOwnerEdge::AfterPermit)
         .unwrap();
-    controller.inject_once(fault).unwrap();
+    owners.tasks.inject_once(fault).unwrap();
     let handle = camber::http::serve_background(listener, ok_router())
         .expect("owned server requires a Tokio runtime");
     let mut client = connect_request(addr).await;
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::AfterPermit,
+        &owners,
+        ConnectionOwnerEdge::AfterPermit,
         "owned-task fault permit pause timed out",
     )
     .await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::AfterPermit,
+        &owners,
+        ConnectionOwnerEdge::AfterPermit,
         "owned-task fault supervisor boundary timed out",
     )
     .await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        &owners,
+        ServerStopEdge::SupervisorSelectedTask,
         "owned-task fault selection timed out",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedTask)
+    owners.stop.release(ServerStopEdge::SupervisorSelectedTask)
         .unwrap();
     assert_connection_closed(&mut client).await;
     assert_task_panicked(handle.await, expected);
 }
 
 async fn prepare_faulted_task(
-    controller: &LifecycleController,
+    owners: &ScopedFaultedSelection,
     addr: SocketAddr,
-    fault: LifecycleFault,
+    fault: ServerTaskFault,
 ) {
-    controller
-        .pause_once(LifecycleCheckpoint::AfterPermit)
+    owners.connections.pause_once(ConnectionOwnerEdge::AfterPermit)
         .unwrap();
-    controller.inject_once(fault).unwrap();
+    owners.tasks.inject_once(fault).unwrap();
     let client = connect_request(addr).await;
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::AfterPermit,
+        owners,
+        ConnectionOwnerEdge::AfterPermit,
         "faulted-task permit pause timed out",
     )
     .await;
     apply_selected(
-        controller,
-        LifecycleCheckpoint::AfterPermit,
+        owners,
+        ConnectionOwnerEdge::AfterPermit,
         "faulted-task supervisor boundary timed out",
     )
     .await;
@@ -1755,34 +1694,32 @@ async fn prepare_faulted_task(
 // 1.T12: real inserted-task panic join rows in Running.
 #[camber::test]
 async fn owned_task_string_panic_maps_exactly() {
-    owned_task_fault_result(LifecycleFault::PanicNextOwnedTask, OWNED_TASK_PANIC).await;
+    owned_task_fault_result(ServerTaskFault::PanicNextOwnedTask, OWNED_TASK_PANIC).await;
 }
 
 // 1.T12
 #[camber::test]
 async fn owned_task_opaque_panic_maps_to_unknown_panic() {
-    owned_task_fault_result(LifecycleFault::PanicNextOwnedTaskOpaque, "unknown panic").await;
+    owned_task_fault_result(ServerTaskFault::PanicNextOwnedTaskOpaque, "unknown panic").await;
 }
 
 // 1.T12: graceful without a candidate then panic installs the panic.
 #[camber::test]
 async fn graceful_then_owned_task_panic_installs_candidate() {
-    let (controller, addr, handle, mut peer, release) = retained_server().await;
-    prepare_faulted_task(&controller, addr, LifecycleFault::PanicNextOwnedTask).await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+    let (owners, addr, handle, mut peer, release) = retained_server(mock::faulted_selection).await;
+    prepare_faulted_task(&owners, addr, ServerTaskFault::PanicNextOwnedTask).await;
+    owners.stop.pause_once(ServerStopEdge::SupervisorSelectedRuntime)
         .unwrap();
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    owners.stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &owners,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "graceful-then-panic runtime selection timed out",
     )
     .await;
-    observe_deferred_task_reap(&controller, LifecycleCheckpoint::SupervisorSelectedRuntime).await;
+    observe_deferred_task_reap(&owners, ServerStopEdge::SupervisorSelectedRuntime).await;
     release_and_drain_peer(&release, &mut peer, b"released").await;
     assert_task_panicked(handle.await, OWNED_TASK_PANIC);
 }
@@ -1790,18 +1727,18 @@ async fn graceful_then_owned_task_panic_installs_candidate() {
 // 1.T12: IO selected first remains the candidate when a panic is ready.
 #[camber::test]
 async fn io_then_owned_task_panic_retains_io() {
-    let (controller, addr, handle, mut peer, release) = retained_server().await;
-    prepare_faulted_task(&controller, addr, LifecycleFault::PanicNextOwnedTask).await;
-    controller
-        .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
+    let (owners, addr, handle, mut peer, release) = retained_server(mock::faulted_selection).await;
+    prepare_faulted_task(&owners, addr, ServerTaskFault::PanicNextOwnedTask).await;
+    owners.connections
+        .inject_once(ConnectionFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        &owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "io-then-panic accept selection timed out",
     )
     .await;
-    observe_deferred_task_reap(&controller, LifecycleCheckpoint::SupervisorSelectedAccept).await;
+    observe_deferred_task_reap(&owners, ServerStopEdge::SupervisorSelectedAccept).await;
     release_and_drain_peer(&release, &mut peer, b"released").await;
     assert_io_kind(handle.await, std::io::ErrorKind::Other);
 }
@@ -1809,16 +1746,15 @@ async fn io_then_owned_task_panic_retains_io() {
 // 1.T12: panic selected first remains the candidate after repeated graceful.
 #[camber::test]
 async fn owned_task_panic_then_graceful_retains_panic() {
-    let (controller, addr, handle, mut peer, release) = retained_server().await;
-    prepare_faulted_task(&controller, addr, LifecycleFault::PanicNextOwnedTask).await;
+    let (owners, addr, handle, mut peer, release) = retained_server(mock::faulted_selection).await;
+    prepare_faulted_task(&owners, addr, ServerTaskFault::PanicNextOwnedTask).await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        &owners,
+        ServerStopEdge::SupervisorSelectedTask,
         "panic-then-graceful task selection timed out",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedTask)
+    owners.stop.release(ServerStopEdge::SupervisorSelectedTask)
         .unwrap();
     runtime::request_shutdown();
     release_and_drain_peer(&release, &mut peer, b"released").await;
@@ -1829,7 +1765,7 @@ async fn owned_task_panic_then_graceful_retains_panic() {
 #[camber::test]
 async fn owned_task_panic_then_opaque_panic_retains_first_payload() {
     let RetainedPanicServer {
-        controller,
+        owners,
         addr,
         handle,
         mut peer,
@@ -1837,16 +1773,16 @@ async fn owned_task_panic_then_opaque_panic_retains_first_payload() {
         mut panicking_peer,
         panicking_release,
     } = retained_panic_server().await;
-    prepare_faulted_task(&controller, addr, LifecycleFault::PanicNextOwnedTask).await;
+    prepare_faulted_task(&owners, addr, ServerTaskFault::PanicNextOwnedTask).await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        &owners,
+        ServerStopEdge::SupervisorSelectedTask,
         "faulted task selection timed out",
     )
     .await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        &owners,
+        ServerStopEdge::SupervisorSelectedTask,
         "faulted task reap boundary timed out",
     )
     .await;
@@ -1854,31 +1790,28 @@ async fn owned_task_panic_then_opaque_panic_retains_first_payload() {
     // returned instead of unwinding would answer its peer and reach the
     // terminal boundary armed here. Either one leaves the supervisor no second
     // candidate to keep out, and the retention below would pass on nothing.
-    controller
-        .pause_once(LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted)
+    owners.connections.pause_once(ConnectionOwnerEdge::AfterConnectionFutureCompleted)
         .unwrap();
     panicking_release.add_permits(1);
     assert_connection_closed(&mut panicking_peer).await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        &owners,
+        ServerStopEdge::SupervisorSelectedTask,
         "held panic task selection timed out",
     )
     .await;
     assert_eq!(
-        controller
-            .checkpoint_polls(LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted)
+        owners.connections.polls(ConnectionOwnerEdge::AfterConnectionFutureCompleted)
             .unwrap(),
         0,
         "the panicking handler's connection future reached its terminal boundary"
     );
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedTask)
+    owners.stop.release(ServerStopEdge::SupervisorSelectedTask)
         .unwrap();
     release.add_permits(1);
     wait_and_release_bounded(
-        &controller,
-        LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted,
+        &owners,
+        ConnectionOwnerEdge::AfterConnectionFutureCompleted,
         "retained peer terminal boundary timed out",
     )
     .await;
@@ -1890,7 +1823,7 @@ async fn owned_task_panic_then_opaque_panic_retains_first_payload() {
 #[camber::test]
 async fn unexpected_owned_task_cancellation_while_running_is_fatal() {
     owned_task_fault_result(
-        LifecycleFault::CancelNextOwnedTask,
+        ServerTaskFault::CancelNextOwnedTask,
         "owned HTTP task cancelled unexpectedly",
     )
     .await;
@@ -1900,64 +1833,57 @@ async fn unexpected_owned_task_cancellation_while_running_is_fatal() {
 #[tokio::test(start_paused = true)]
 async fn runtime_graceful_and_repeated_graceful_share_one_deadline() {
     let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
-    let (controller, _addr, handle, peer, _release) = retained_server().await;
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    let (stop, _addr, handle, peer, _release) = retained_server(mock::server_stop).await;
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &stop,
+        ServerStopEdge::BeforeSupervisorSelect,
         "runtime deadline initial boundary timed out",
     )
     .await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedRuntime)
         .unwrap();
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &stop,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "initial runtime graceful selection timed out",
     )
     .await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &stop,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "post-runtime-graceful boundary timed out",
     )
     .await;
     tokio::time::advance(Duration::from_secs(20)).await;
     runtime::request_shutdown();
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedDeadline)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedDeadline)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     tokio::time::advance(Duration::from_secs(10)).await;
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_and_release_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedDeadline,
+        &stop,
+        ServerStopEdge::SupervisorSelectedDeadline,
         "original runtime deadline was restarted",
     )
     .await;
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::AfterSupervisorResultSend,
+        &stop,
+        ServerStopEdge::AfterSupervisorResultSend,
         "runtime deadline owned-task drain timed out",
     )
     .await;
     // This checkpoint proves the server-side transport owner was joined. The
     // blocking socket deadline observes the independent OS peer notification.
     assert_eof_with_socket_deadline(peer);
-    controller
-        .release(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.release(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(5), handle)
         .await
@@ -1970,22 +1896,22 @@ async fn runtime_graceful_and_repeated_graceful_share_one_deadline() {
 async fn control_branch_wins_and_completed_task_is_reaped_next_iteration() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::supervisor_selection(addr).unwrap();
     let handle = camber::http::serve_background(listener, ok_router())
         .expect("owned server requires a Tokio runtime");
-    prepare_completed_task(&controller, addr).await;
-    controller
-        .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
+    prepare_completed_task(&owners, addr).await;
+    owners.connections
+        .inject_once(ConnectionFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
     runtime::request_shutdown();
     handle.cancel();
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "control selection over accept error and task timed out",
     )
     .await;
-    observe_deferred_task_reap(&controller, LifecycleCheckpoint::SupervisorSelectedControl).await;
+    observe_deferred_task_reap(&owners, ServerStopEdge::SupervisorSelectedControl).await;
     assert_cancelled(handle.await);
 }
 
@@ -1994,21 +1920,21 @@ async fn control_branch_wins_and_completed_task_is_reaped_next_iteration() {
 async fn runtime_branch_drops_losing_accept_error_and_reaps_task_next() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::supervisor_selection(addr).unwrap();
     let handle = camber::http::serve_background(listener, ok_router())
         .expect("owned server requires a Tokio runtime");
-    prepare_completed_task(&controller, addr).await;
-    controller
-        .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
+    prepare_completed_task(&owners, addr).await;
+    owners.connections
+        .inject_once(ConnectionFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
     runtime::request_shutdown();
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &owners,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "runtime selection over accept error and task timed out",
     )
     .await;
-    observe_deferred_task_reap(&controller, LifecycleCheckpoint::SupervisorSelectedRuntime).await;
+    observe_deferred_task_reap(&owners, ServerStopEdge::SupervisorSelectedRuntime).await;
     assert!(handle.await.is_ok());
 }
 
@@ -2017,18 +1943,18 @@ async fn runtime_branch_drops_losing_accept_error_and_reaps_task_next() {
 async fn accept_branch_wins_over_task_then_reaps_task() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::supervisor_selection(addr).unwrap();
     let handle = camber::http::serve_background(listener, ok_router())
         .expect("owned server requires a Tokio runtime");
-    prepare_completed_task(&controller, addr).await;
+    prepare_completed_task(&owners, addr).await;
     let mut second = connect_request(addr).await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        &owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "accept selection over completed task timed out",
     )
     .await;
-    observe_deferred_task_reap(&controller, LifecycleCheckpoint::SupervisorSelectedAccept).await;
+    observe_deferred_task_reap(&owners, ServerStopEdge::SupervisorSelectedAccept).await;
     let response = read_http_head(&mut second).await;
     assert!(response.starts_with("HTTP/1.1 200"));
     handle.cancel();
@@ -2040,18 +1966,17 @@ async fn accept_branch_wins_over_task_then_reaps_task() {
 async fn task_branch_is_selected_when_task_is_only_ready_work() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::supervisor_selection(addr).unwrap();
     let handle = camber::http::serve_background(listener, ok_router())
         .expect("owned server requires a Tokio runtime");
-    prepare_completed_task(&controller, addr).await;
+    prepare_completed_task(&owners, addr).await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        &owners,
+        ServerStopEdge::SupervisorSelectedTask,
         "sole-ready task selection timed out",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedTask)
+    owners.stop.release(ServerStopEdge::SupervisorSelectedTask)
         .unwrap();
     handle.cancel();
     assert_cancelled(handle.await);
@@ -2061,33 +1986,31 @@ async fn shutdown_wins_over_ready_accept(forced: bool) {
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    let stop = mock::server_stop(addr).unwrap();
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     let handle = camber::http::serve_background(listener, counting_router(Arc::clone(&counter)))
         .expect("owned server requires a Tokio runtime");
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &stop,
+        ServerStopEdge::BeforeSupervisorSelect,
         "shutdown-over-accept supervisor boundary timed out",
     )
     .await;
     let mut client = connect_request(addr).await;
     let selected = match forced {
-        true => LifecycleCheckpoint::SupervisorSelectedControl,
-        false => LifecycleCheckpoint::SupervisorSelectedRuntime,
+        true => ServerStopEdge::SupervisorSelectedControl,
+        false => ServerStopEdge::SupervisorSelectedRuntime,
     };
-    controller.pause_once(selected).unwrap();
+    selected.arm_at(&stop).unwrap();
     match forced {
         true => handle.cancel(),
         false => runtime::request_shutdown(),
     }
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_and_release_bounded(
-        &controller,
+        &stop,
         selected,
         "shutdown-over-accept selection timed out",
     )
@@ -2123,33 +2046,30 @@ fn control_branch_wins_over_ready_permit() {
                 let counter = Arc::new(AtomicUsize::new(0));
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let controller = lifecycle(addr).unwrap();
+                let owners = mock::supervisor_selection(addr).unwrap();
                 let handle =
                     camber::http::serve_background(listener, counting_router(Arc::clone(&counter)))
                         .expect("owned server requires a Tokio runtime");
                 let mut first = connect_request(addr).await;
                 assert!(read_http_head(&mut first).await.starts_with("HTTP/1.1 200"));
-                controller
-                    .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                owners.connections.pause_once(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
                 let mut second = connect_request(addr).await;
                 wait_until_paused_bounded(
-                    &controller,
-                    LifecycleCheckpoint::ConnectionPermitWaitPending,
+                    &owners,
+                    ConnectionOwnerEdge::PermitWaitPending,
                     "second connection did not wait for a permit",
                 )
                 .await;
-                controller
-                    .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+                owners.stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
                     .unwrap();
                 handle.cancel();
                 drop(first);
-                controller
-                    .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                owners.connections.release(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
                 wait_and_release_bounded(
-                    &controller,
-                    LifecycleCheckpoint::SupervisorSelectedControl,
+                    &owners,
+                    ServerStopEdge::SupervisorSelectedControl,
                     "control selection over a ready permit timed out",
                 )
                 .await;
@@ -2165,97 +2085,118 @@ fn control_branch_wins_over_ready_permit() {
 #[tokio::test(start_paused = true)]
 async fn deadline_branch_wins_over_cancel_and_remains_timeout() {
     let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
-    let (controller, _addr, handle, peer, _release) = retained_server().await;
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    let (stop, _addr, handle, peer, _release) = retained_server(mock::server_stop).await;
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &stop,
+        ServerStopEdge::BeforeSupervisorSelect,
         "deadline-over-cancel initial boundary timed out",
     )
     .await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedRuntime)
         .unwrap();
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_and_release_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &stop,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "deadline-over-cancel runtime selection timed out",
     )
     .await;
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &stop,
+        ServerStopEdge::BeforeSupervisorSelect,
         "deadline-over-cancel post-graceful boundary timed out",
     )
     .await;
     tokio::time::advance(Duration::from_secs(30)).await;
-    handle.cancel();
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedDeadline,
+        &stop,
+        ServerStopEdge::SupervisorSelectedDeadline,
         "deadline-over-cancel deadline selection timed out",
     )
     .await;
-    release_deadline_and_wait_for_drained_result(&controller).await;
+    // The barrier this row is about. Time passing is not a committed timeout,
+    // so the cancel is held until the expiry has actually committed; only then
+    // is "a committed timeout is not rewritten" a claim about commit order
+    // rather than about which ready branch the executor happened to poll.
+    stop.pause_once(ServerStopEdge::AfterCommit).unwrap();
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
+        .unwrap();
+    stop.release(ServerStopEdge::SupervisorSelectedDeadline)
+        .unwrap();
+    bounded(
+        stop.wait_until_paused(ServerStopEdge::AfterCommit),
+        "deadline-over-cancel timeout commit timed out",
+    )
+    .await
+    .unwrap();
+    assert_eq!(stop.observed().phase, "deadline-expired");
+    handle.cancel();
+    assert_eq!(
+        stop.observed().phase,
+        "deadline-expired",
+        "a cancellation committed after the timeout must not move the phase"
+    );
+    stop.release(ServerStopEdge::AfterCommit).unwrap();
+    wait_until_paused_bounded(
+        &stop,
+        ServerStopEdge::AfterSupervisorResultSend,
+        "deadline owned-task drain timed out",
+    )
+    .await;
     assert_eof_with_socket_deadline(peer);
-    controller
-        .release(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.release(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     assert_timeout(handle.await);
 }
 
 async fn pause_after_owned_panic_starts_grace() -> (
-    LifecycleController,
+    ScopedFaultedSelection,
     SocketAddr,
     ServerHandle,
     tokio::net::TcpStream,
     Arc<tokio::sync::Semaphore>,
 ) {
-    let (controller, addr, handle, peer, release) = retained_server().await;
-    prepare_faulted_task(&controller, addr, LifecycleFault::PanicNextOwnedTask).await;
+    let (owners, addr, handle, peer, release) = retained_server(mock::faulted_selection).await;
+    prepare_faulted_task(&owners, addr, ServerTaskFault::PanicNextOwnedTask).await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        &owners,
+        ServerStopEdge::SupervisorSelectedTask,
         "owned panic task selection timed out",
     )
     .await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        &owners,
+        ServerStopEdge::SupervisorSelectedTask,
         "owned panic grace boundary timed out",
     )
     .await;
-    (controller, addr, handle, peer, release)
+    (owners, addr, handle, peer, release)
 }
 
-async fn select_deadline(controller: &LifecycleController) {
+async fn select_deadline(owners: &impl Owns<ServerStopController>) {
     select_next(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedDeadline,
+        owners,
+        ServerStopEdge::SupervisorSelectedDeadline,
         "grace deadline selection timed out",
     )
     .await;
 }
 
-async fn release_deadline_and_wait_for_drained_result(controller: &LifecycleController) {
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+async fn release_deadline_and_wait_for_drained_result(owners: &impl Owns<ServerStopController>) {
+    let stop = owners.owner();
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedDeadline)
+    stop.release(ServerStopEdge::SupervisorSelectedDeadline)
         .unwrap();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::AfterSupervisorResultSend,
+        &stop,
+        ServerStopEdge::AfterSupervisorResultSend,
         "deadline owned-task drain timed out",
     )
     .await;
@@ -2265,14 +2206,13 @@ async fn release_deadline_and_wait_for_drained_result(controller: &LifecycleCont
 #[tokio::test(start_paused = true)]
 async fn deadline_branch_wins_over_runtime() {
     let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
-    let (controller, _addr, handle, peer, _release) = pause_after_owned_panic_starts_grace().await;
+    let (owners, _addr, handle, peer, _release) = pause_after_owned_panic_starts_grace().await;
     tokio::time::advance(Duration::from_secs(30)).await;
     runtime::request_shutdown();
-    select_deadline(&controller).await;
-    release_deadline_and_wait_for_drained_result(&controller).await;
+    select_deadline(&owners).await;
+    release_deadline_and_wait_for_drained_result(&owners).await;
     assert_eof_with_socket_deadline(peer);
-    controller
-        .release(LifecycleCheckpoint::AfterSupervisorResultSend)
+    owners.stop.release(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     assert_timeout(handle.await);
 }
@@ -2281,28 +2221,27 @@ async fn deadline_branch_wins_over_runtime() {
 #[tokio::test(start_paused = true)]
 async fn deadline_branch_wins_over_accept_success() {
     let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
-    let (controller, addr, handle, peer, _release) = retained_server().await;
-    prepare_faulted_task(&controller, addr, LifecycleFault::PanicNextOwnedTask).await;
+    let (owners, addr, handle, peer, _release) = retained_server(mock::faulted_selection).await;
+    prepare_faulted_task(&owners, addr, ServerTaskFault::PanicNextOwnedTask).await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        &owners,
+        ServerStopEdge::SupervisorSelectedTask,
         "deadline-over-accept task selection timed out",
     )
     .await;
     let waiting = connect_request(addr).await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        &owners,
+        ServerStopEdge::SupervisorSelectedTask,
         "deadline-over-accept grace boundary timed out",
     )
     .await;
     tokio::time::advance(Duration::from_secs(30)).await;
-    select_deadline(&controller).await;
-    release_deadline_and_wait_for_drained_result(&controller).await;
+    select_deadline(&owners).await;
+    release_deadline_and_wait_for_drained_result(&owners).await;
     assert_connection_closed_with_socket_deadline(waiting);
     assert_eof_with_socket_deadline(peer);
-    controller
-        .release(LifecycleCheckpoint::AfterSupervisorResultSend)
+    owners.stop.release(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     assert_timeout(handle.await);
 }
@@ -2311,16 +2250,15 @@ async fn deadline_branch_wins_over_accept_success() {
 #[tokio::test(start_paused = true)]
 async fn deadline_branch_wins_over_accept_error() {
     let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
-    let (controller, _addr, handle, peer, _release) = pause_after_owned_panic_starts_grace().await;
-    controller
-        .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
+    let (owners, _addr, handle, peer, _release) = pause_after_owned_panic_starts_grace().await;
+    owners.connections
+        .inject_once(ConnectionFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
     tokio::time::advance(Duration::from_secs(30)).await;
-    select_deadline(&controller).await;
-    release_deadline_and_wait_for_drained_result(&controller).await;
+    select_deadline(&owners).await;
+    release_deadline_and_wait_for_drained_result(&owners).await;
     assert_eof_with_socket_deadline(peer);
-    controller
-        .release(LifecycleCheckpoint::AfterSupervisorResultSend)
+    owners.stop.release(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     assert_timeout(handle.await);
 }
@@ -2329,12 +2267,12 @@ async fn deadline_branch_wins_over_accept_error() {
 #[tokio::test(start_paused = true)]
 async fn deadline_branch_wins_over_completed_task_then_reaps_it() {
     let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
-    let (controller, _addr, handle, mut peer, release) =
+    let (owners, _addr, handle, mut peer, release) =
         pause_after_owned_panic_starts_grace().await;
     release_and_drain_peer(&release, &mut peer, b"released").await;
     tokio::time::advance(Duration::from_secs(30)).await;
-    select_deadline(&controller).await;
-    observe_deferred_task_reap(&controller, LifecycleCheckpoint::SupervisorSelectedDeadline).await;
+    select_deadline(&owners).await;
+    observe_deferred_task_reap(&owners, ServerStopEdge::SupervisorSelectedDeadline).await;
     assert_timeout(handle.await);
 }
 
@@ -2350,7 +2288,7 @@ fn deadline_branch_wins_over_pending_permit_becoming_ready() {
                 let release = Arc::new(tokio::sync::Semaphore::new(0));
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let controller = lifecycle(addr).unwrap();
+                let owners = mock::supervisor_selection(addr).unwrap();
                 let handle = serve_held(
                     listener,
                     held_router(
@@ -2361,46 +2299,42 @@ fn deadline_branch_wins_over_pending_permit_becoming_ready() {
                 );
                 let mut first = connect_request(addr).await;
                 await_handler_entry(entered_rx, "first request did not enter the handler").await;
-                controller
-                    .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                owners.connections.pause_once(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
                 let mut waiting = connect_request(addr).await;
                 wait_until_paused_bounded(
-                    &controller,
-                    LifecycleCheckpoint::ConnectionPermitWaitPending,
+                    &owners,
+                    ConnectionOwnerEdge::PermitWaitPending,
                     "second request did not reach the pending permit wait",
                 )
                 .await;
-                controller
-                    .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+                owners.stop.pause_once(ServerStopEdge::SupervisorSelectedRuntime)
                     .unwrap();
                 runtime::request_shutdown();
-                controller
-                    .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                owners.connections.release(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
                 wait_until_paused_bounded(
-                    &controller,
-                    LifecycleCheckpoint::SupervisorSelectedRuntime,
+                    &owners,
+                    ServerStopEdge::SupervisorSelectedRuntime,
                     "supervisor did not select runtime shutdown",
                 )
                 .await;
                 apply_selected(
-                    &controller,
-                    LifecycleCheckpoint::SupervisorSelectedRuntime,
+                    &owners,
+                    ServerStopEdge::SupervisorSelectedRuntime,
                     "supervisor did not reach the deadline/permit selection boundary",
                 )
                 .await;
                 select_next(
-                    &controller,
-                    LifecycleCheckpoint::SupervisorSelectedDeadline,
+                    &owners,
+                    ServerStopEdge::SupervisorSelectedDeadline,
                     "supervisor did not select the configured deadline",
                 )
                 .await;
                 // Make the permit ready while the selected deadline branch is
                 // paused but before that branch applies abort.
                 release_and_drain_peer(&release, &mut first, b"released").await;
-                controller
-                    .release(LifecycleCheckpoint::SupervisorSelectedDeadline)
+                owners.stop.release(ServerStopEdge::SupervisorSelectedDeadline)
                     .unwrap();
                 assert_connection_closed(&mut waiting).await;
                 assert_timeout(handle.await);
@@ -2416,36 +2350,34 @@ async fn deadline_branch_wins_over_submitted_registration_and_joins_it() {
     let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::registration_selection(addr).unwrap();
     let handle = camber::http::serve_background(listener, websocket_router())
         .expect("owned server requires a Tokio runtime");
-    let mut client = prepare_submitted_upgrade(&controller, addr).await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+    let mut client = prepare_submitted_upgrade(&owners, addr).await;
+    owners.stop.pause_once(ServerStopEdge::SupervisorSelectedRuntime)
         .unwrap();
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    owners.stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &owners,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "registration deadline runtime selection timed out",
     )
     .await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &owners,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "registration deadline grace boundary timed out",
     )
     .await;
     tokio::time::advance(Duration::from_secs(30)).await;
-    select_deadline(&controller).await;
+    select_deadline(&owners).await;
     let mut completion = Box::pin(handle.into_future());
     assert!(completion.as_mut().now_or_never().is_none());
-    apply_selected_event_then_release_upgrade(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedDeadline,
+    apply_selected_event_then_release_transfer(
+        &owners,
+        ServerStopEdge::SupervisorSelectedDeadline,
         "deadline was not applied before releasing the submitted upgrade",
     )
     .await;
@@ -2461,44 +2393,40 @@ async fn deadline_branch_wins_over_submitted_registration_and_joins_it() {
 async fn control_after_result_send_does_not_replace_io_result() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    let owners = mock::supervisor_selection(addr).unwrap();
+    owners.stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+    owners.stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
-    controller
-        .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
+    owners.connections
+        .inject_once(ConnectionFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
     let handle = camber::http::serve_background(listener, ok_router())
         .expect("owned server requires a Tokio runtime");
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &owners,
+        ServerStopEdge::BeforeSupervisorSelect,
         "post-result-send initial boundary timed out",
     )
     .await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        &owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "post-result-send accept selection timed out",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedAccept)
+    owners.stop.release(ServerStopEdge::SupervisorSelectedAccept)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::AfterSupervisorResultSend,
+        &owners,
+        ServerStopEdge::AfterSupervisorResultSend,
         "post-result-send terminal send timed out",
     )
     .await;
     handle.cancel();
     handle.cancel();
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::AfterSupervisorResultSend)
+    owners.stop.release(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     assert_io_kind(handle.await, std::io::ErrorKind::Other);
 }
@@ -2506,45 +2434,40 @@ async fn control_after_result_send_does_not_replace_io_result() {
 // 1.T12: Ok task completion while Graceful remains a successful server result.
 #[camber::test]
 async fn completed_task_in_graceful_mode_is_reaped_before_success() {
-    let (controller, _addr, handle, mut peer, release) = retained_server().await;
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    let (stop, _addr, handle, mut peer, release) = retained_server(mock::server_stop).await;
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &stop,
+        ServerStopEdge::BeforeSupervisorSelect,
         "graceful reap initial boundary timed out",
     )
     .await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedRuntime)
         .unwrap();
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &stop,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "graceful reap runtime selection timed out",
     )
     .await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &stop,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "graceful reap post-runtime boundary timed out",
     )
     .await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedTask)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedTask)
         .unwrap();
     release.add_permits(1);
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_and_release_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
+        &stop,
+        ServerStopEdge::SupervisorSelectedTask,
         "graceful reap task selection timed out",
     )
     .await;
@@ -2555,22 +2478,20 @@ async fn completed_task_in_graceful_mode_is_reaped_before_success() {
 // 1.T12: CancelNextOwnedTask remains unexpected after runtime Graceful.
 #[camber::test]
 async fn unexpected_owned_task_cancellation_while_graceful_is_fatal() {
-    let (controller, addr, handle, mut peer, release) = retained_server().await;
-    prepare_faulted_task(&controller, addr, LifecycleFault::CancelNextOwnedTask).await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+    let (owners, addr, handle, mut peer, release) = retained_server(mock::faulted_selection).await;
+    prepare_faulted_task(&owners, addr, ServerTaskFault::CancelNextOwnedTask).await;
+    owners.stop.pause_once(ServerStopEdge::SupervisorSelectedRuntime)
         .unwrap();
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    owners.stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &owners,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "graceful cancellation runtime selection timed out",
     )
     .await;
-    observe_deferred_task_reap(&controller, LifecycleCheckpoint::SupervisorSelectedRuntime).await;
+    observe_deferred_task_reap(&owners, ServerStopEdge::SupervisorSelectedRuntime).await;
     release_and_drain_peer(&release, &mut peer, b"released").await;
     assert_task_panicked(handle.await, "owned HTTP task cancelled unexpectedly");
 }
@@ -2580,41 +2501,49 @@ async fn unexpected_owned_task_cancellation_while_graceful_is_fatal() {
 // that separates the two callers.
 #[cfg(feature = "ws")]
 async fn submit_upgrade_through_accept(
-    controller: &LifecycleController,
+    owners: &(impl Owns<ServerStopController> + Owns<UpgradeOwnerController>),
     addr: SocketAddr,
 ) -> tokio::net::TcpStream {
-    submit_offered_upgrade_through_accept(controller, addr, &common::ws_upgrade_request("/ws"))
-        .await
+    submit_offered_upgrade_through_accept(
+        owners,
+        addr,
+        &common::ws_upgrade_request("/ws"),
+        UpgradeOwnerEdge::BeforeTransferAcknowledge,
+    )
+    .await
 }
 
 // The same carry, for a case whose claim is about what the handshake offered.
 //
-// The request is a parameter rather than a second copy of this sequence: an
-// offer only changes what negotiation settles on, never how the ticket reaches
-// the supervisor, and a copy is where those two could drift apart.
+// Both the request and the edge the offer is held at are parameters rather than
+// second copies of this sequence: an offer only changes what negotiation settles
+// on, and the edge only changes which side of the answer a case reads, while how
+// the connection reaches the offer never changes. A copy is where those could
+// drift apart.
 #[cfg(feature = "ws")]
 async fn submit_offered_upgrade_through_accept(
-    controller: &LifecycleController,
+    owners: &(impl Owns<ServerStopController> + Owns<UpgradeOwnerController>),
     addr: SocketAddr,
     request: &str,
+    held: UpgradeOwnerEdge,
 ) -> tokio::net::TcpStream {
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedAccept)
+    let stop = Owns::<ServerStopController>::owner(owners);
+    stop.pause_once(ServerStopEdge::SupervisorSelectedAccept)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+    Owns::<UpgradeOwnerController>::owner(owners)
+        .pause_once(held)
         .unwrap();
     let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
     client.write_all(request.as_bytes()).await.unwrap();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        &stop,
+        ServerStopEdge::SupervisorSelectedAccept,
         "upgrade accept selection timed out",
     )
     .await;
     apply_selected(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "upgrade post-accept boundary timed out",
     )
     .await;
@@ -2623,23 +2552,29 @@ async fn submit_offered_upgrade_through_accept(
 
 #[cfg(feature = "ws")]
 async fn prepare_submitted_upgrade(
-    controller: &LifecycleController,
+    owners: &(impl Owns<ServerStopController> + Owns<UpgradeOwnerController>),
     addr: SocketAddr,
 ) -> tokio::net::TcpStream {
-    prepare_offered_submitted_upgrade(controller, addr, &common::ws_upgrade_request("/ws")).await
+    prepare_offered_submitted_upgrade(owners, addr, &common::ws_upgrade_request("/ws")).await
 }
 
 #[cfg(feature = "ws")]
 async fn prepare_offered_submitted_upgrade(
-    controller: &LifecycleController,
+    owners: &(impl Owns<ServerStopController> + Owns<UpgradeOwnerController>),
     addr: SocketAddr,
     request: &str,
 ) -> tokio::net::TcpStream {
-    let client = submit_offered_upgrade_through_accept(controller, addr, request).await;
+    let client = submit_offered_upgrade_through_accept(
+        owners,
+        addr,
+        request,
+        UpgradeOwnerEdge::BeforeTransferAcknowledge,
+    )
+    .await;
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
-        "submitted upgrade ticket confirmation timed out",
+        owners,
+        UpgradeOwnerEdge::BeforeTransferAcknowledge,
+        "offered upgrade transfer edge timed out",
     )
     .await;
     client
@@ -2647,26 +2582,26 @@ async fn prepare_offered_submitted_upgrade(
 
 #[cfg(feature = "ws")]
 async fn prepare_submitted_upgrade_with_limit(
-    controller: &LifecycleController,
+    owners: &(impl Owns<ServerStopController> + Owns<UpgradeOwnerController>),
     addr: SocketAddr,
 ) -> tokio::net::TcpStream {
-    let client = submit_upgrade_through_accept(controller, addr).await;
+    let client = submit_upgrade_through_accept(owners, addr).await;
     select_next(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedPermit,
+        owners,
+        ServerStopEdge::SupervisorSelectedPermit,
         "limited upgrade permit selection timed out",
     )
     .await;
     apply_selected(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedPermit,
+        owners,
+        ServerStopEdge::SupervisorSelectedPermit,
         "limited upgrade post-permit boundary timed out",
     )
     .await;
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
-        "limited upgrade ticket confirmation timed out",
+        owners,
+        UpgradeOwnerEdge::BeforeTransferAcknowledge,
+        "limited upgrade transfer edge timed out",
     )
     .await;
     client
@@ -2682,26 +2617,20 @@ async fn pending_registration_cancellation_is_expected_and_joined() {
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::registration_selection(addr).unwrap();
     let handle = camber::http::serve_background(listener, router)
         .expect("owned server requires a Tokio runtime");
-    let client = prepare_submitted_upgrade(&controller, addr).await;
+    let client = prepare_submitted_upgrade(&owners, addr).await;
     drop(client);
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRegistration)
+    owners.upgrades
+        .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .unwrap();
-    controller
-        .release(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+    owners.stop
+        .release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
-        .unwrap();
-    wait_and_release_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRegistration,
-        "pending registration cancellation selection timed out",
-    )
-    .await;
+    // The connection that offered the child is the only owner that can end it,
+    // and a server still serving is the proof that it did so without taking
+    // anything else down with it.
     assert_ok_request_path(addr, "/ok").await;
     runtime::request_shutdown();
     assert!(handle.await.is_ok());
@@ -2713,29 +2642,15 @@ async fn pending_registration_cancellation_is_expected_and_joined() {
 async fn control_wins_over_submitted_registration_and_joins_wrapper() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::registration_selection(addr).unwrap();
     let handle = camber::http::serve_background(listener, websocket_router())
         .expect("owned server requires a Tokio runtime");
-    let mut client = prepare_submitted_upgrade(&controller, addr).await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
-        .unwrap();
+    let mut client = prepare_submitted_upgrade(&owners, addr).await;
+    // The command commits its phase before it returns, so the answer this
+    // connection gives after the release reads a server that has already
+    // stopped admitting.
     handle.cancel();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
-        .unwrap();
-    wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
-        "registration control selection timed out",
-    )
-    .await;
-    apply_selected_event_then_release_upgrade(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
-        "forced control was not applied before releasing the submitted upgrade",
-    )
-    .await;
+    release_transfer_edge_and_resume(&owners);
     assert_refused_upgrade_wire(&mut client, "the control-refused upgrade").await;
     assert_cancelled(handle.await);
 }
@@ -2746,27 +2661,27 @@ async fn control_wins_over_submitted_registration_and_joins_wrapper() {
 async fn runtime_wins_over_submitted_registration_and_joins_wrapper() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::registration_selection(addr).unwrap();
     let handle = camber::http::serve_background(listener, websocket_router())
         .expect("owned server requires a Tokio runtime");
-    let mut client = prepare_submitted_upgrade(&controller, addr).await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+    let mut client = prepare_submitted_upgrade(&owners, addr).await;
+    owners.stop
+        .pause_once(ServerStopEdge::SupervisorSelectedRuntime)
         .unwrap();
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    owners.stop
+        .release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
-        "registration runtime selection timed out",
+        &owners,
+        ServerStopEdge::SupervisorSelectedRuntime,
+        "runtime shutdown selection timed out",
     )
     .await;
-    apply_selected_event_then_release_upgrade(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
-        "runtime shutdown was not applied before releasing the submitted upgrade",
+    apply_selected_event_then_release_transfer(
+        &owners,
+        ServerStopEdge::SupervisorSelectedRuntime,
+        "runtime shutdown was not applied before releasing the offered upgrade",
     )
     .await;
     assert_refused_upgrade_wire(&mut client, "the runtime-refused upgrade").await;
@@ -2783,41 +2698,39 @@ async fn accept_branch_wins_over_submitted_registration() {
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::registration_selection(addr).unwrap();
     let handle = camber::http::serve_background(listener, router)
         .expect("owned server requires a Tokio runtime");
-    let mut upgrade = prepare_submitted_upgrade(&controller, addr).await;
+    let mut upgrade = prepare_submitted_upgrade(&owners, addr).await;
     let mut ordinary = connect_request(addr).await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        &owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "ordinary accept selection over registration timed out",
     )
     .await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        &owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "ordinary accept post-selection boundary timed out",
     )
     .await;
     let response = read_http_head(&mut ordinary).await;
     assert!(response.starts_with("HTTP/1.1 200"));
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+    owners.stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
     handle.cancel();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    owners.stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "registration forced control selection timed out",
     )
     .await;
-    apply_selected_event_then_release_upgrade(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+    apply_selected_event_then_release_transfer(
+        &owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "forced control was not applied before releasing the deferred upgrade",
     )
     .await;
@@ -2827,7 +2740,7 @@ async fn accept_branch_wins_over_submitted_registration() {
 
 #[cfg(feature = "ws")]
 struct PermitRegistrationFixture {
-    controller: LifecycleController,
+    owners: ScopedSupervisedRegistration,
     handle: ServerHandle,
     release: Arc<tokio::sync::Semaphore>,
     ordinary: tokio::net::TcpStream,
@@ -2847,7 +2760,7 @@ async fn permit_registration_fixture() -> PermitRegistrationFixture {
     attach_drain_ws(&mut router);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::supervised_registration(addr).unwrap();
     let handle = serve_held(listener, router);
     let mut ordinary =
         tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
@@ -2858,7 +2771,7 @@ async fn permit_registration_fixture() -> PermitRegistrationFixture {
     await_handler_entry(entered_rx, "ordinary request dispatch timed out").await;
     let upgrade = tokio::time::timeout(
         Duration::from_secs(5),
-        prepare_submitted_upgrade_with_limit(&controller, addr),
+        prepare_submitted_upgrade_with_limit(&owners, addr),
     )
     .await
     .expect("upgrade ticket submission timed out");
@@ -2866,7 +2779,7 @@ async fn permit_registration_fixture() -> PermitRegistrationFixture {
         .await
         .expect("permit-waiting connection timed out");
     PermitRegistrationFixture {
-        controller,
+        owners,
         handle,
         release,
         ordinary,
@@ -2878,55 +2791,51 @@ async fn permit_registration_fixture() -> PermitRegistrationFixture {
 #[cfg(feature = "ws")]
 async fn select_permit_over_registration(fixture: &mut PermitRegistrationFixture) {
     select_next(
-        &fixture.controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        &fixture.owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "permit-waiting accept selection timed out",
     )
     .await;
     apply_selected(
-        &fixture.controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        &fixture.owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "pre-permit supervisor boundary timed out",
     )
     .await;
     wait_until_paused_bounded(
-        &fixture.controller,
-        LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
-        "submitted upgrade ticket confirmation timed out",
+        &fixture.owners,
+        UpgradeOwnerEdge::BeforeTransferAcknowledge,
+        "permit-waiting upgrade transfer edge timed out",
     )
     .await;
     fixture
-        .controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedPermit)
+        .owners.stop.pause_once(ServerStopEdge::SupervisorSelectedPermit)
         .unwrap();
     fixture
-        .controller
-        .pause_once(LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted)
+        .owners.connections.pause_once(ConnectionOwnerEdge::AfterConnectionFutureCompleted)
         .unwrap();
     release_and_drain_peer(&fixture.release, &mut fixture.ordinary, b"released").await;
     wait_until_paused_bounded(
-        &fixture.controller,
-        LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted,
+        &fixture.owners,
+        ConnectionOwnerEdge::AfterConnectionFutureCompleted,
         "ordinary connection completion timed out",
     )
     .await;
     fixture
-        .controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+        .owners.stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &fixture.controller,
-        LifecycleCheckpoint::SupervisorSelectedPermit,
+        &fixture.owners,
+        ServerStopEdge::SupervisorSelectedPermit,
         "permit selection timed out",
     )
     .await;
     fixture
-        .controller
-        .release(LifecycleCheckpoint::AfterOwnedConnectionFutureCompleted)
+        .owners.connections.release(ConnectionOwnerEdge::AfterConnectionFutureCompleted)
         .unwrap();
     apply_selected(
-        &fixture.controller,
-        LifecycleCheckpoint::SupervisorSelectedPermit,
+        &fixture.owners,
+        ServerStopEdge::SupervisorSelectedPermit,
         "post-permit supervisor boundary timed out",
     )
     .await;
@@ -2941,23 +2850,21 @@ async fn select_permit_over_registration(fixture: &mut PermitRegistrationFixture
 #[cfg(feature = "ws")]
 async fn reject_deferred_upgrade(mut fixture: PermitRegistrationFixture) {
     fixture
-        .controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+        .owners.stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
     fixture.handle.cancel();
     fixture
-        .controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+        .owners.stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &fixture.controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &fixture.owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "control selection timed out",
     )
     .await;
-    apply_selected_event_then_release_upgrade(
-        &fixture.controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+    apply_selected_event_then_release_transfer(
+        &fixture.owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "forced control was not applied before releasing the deferred upgrade",
     )
     .await;
@@ -2995,31 +2902,28 @@ fn permit_branch_wins_over_completed_task() {
             runtime::block_on(async {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let controller = lifecycle(addr).unwrap();
+                let owners = mock::supervisor_selection(addr).unwrap();
                 let handle = camber::http::serve_background(listener, ok_router())
                     .expect("owned server requires a Tokio runtime");
                 let mut first = connect_request(addr).await;
                 assert!(read_http_head(&mut first).await.starts_with("HTTP/1.1 200"));
-                controller
-                    .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                owners.connections.pause_once(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
                 let mut second = connect_request(addr).await;
                 wait_until_paused_bounded(
-                    &controller,
-                    LifecycleCheckpoint::ConnectionPermitWaitPending,
+                    &owners,
+                    ConnectionOwnerEdge::PermitWaitPending,
                     "second connection did not wait for a permit",
                 )
                 .await;
-                controller
-                    .pause_once(LifecycleCheckpoint::SupervisorSelectedPermit)
+                owners.stop.pause_once(ServerStopEdge::SupervisorSelectedPermit)
                     .unwrap();
                 drop(first);
-                controller
-                    .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                owners.connections.release(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
                 wait_and_release_bounded(
-                    &controller,
-                    LifecycleCheckpoint::SupervisorSelectedPermit,
+                    &owners,
+                    ServerStopEdge::SupervisorSelectedPermit,
                     "permit selection over a completed task timed out",
                 )
                 .await;
@@ -3036,102 +2940,77 @@ fn permit_branch_wins_over_completed_task() {
 }
 
 #[cfg(feature = "ws")]
-async fn submit_registration_over_completed_task(
-    controller: &LifecycleController,
+async fn submit_transfer_over_completed_task(
+    owners: &(impl Owns<ServerStopController> + Owns<UpgradeOwnerController>),
     addr: SocketAddr,
 ) -> tokio::net::TcpStream {
+    let stop = Owns::<ServerStopController>::owner(owners);
     let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
     client
         .write_all(common::ws_upgrade_request("/ws").as_bytes())
         .await
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedAccept)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedAccept)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+    Owns::<UpgradeOwnerController>::owner(owners)
+        .pause_once(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .unwrap();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
-        .unwrap();
+    stop.release(ServerStopEdge::BeforeSupervisorSelect).unwrap();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
-        "registration-over-task accept selection timed out",
+        &stop,
+        ServerStopEdge::SupervisorSelectedAccept,
+        "transfer-over-task accept selection timed out",
     )
     .await;
     apply_selected(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
-        "registration-over-task post-accept boundary timed out",
+        owners,
+        ServerStopEdge::SupervisorSelectedAccept,
+        "transfer-over-task post-accept boundary timed out",
     )
     .await;
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
-        "registration-over-task ticket submission timed out",
+        owners,
+        UpgradeOwnerEdge::BeforeTransferAcknowledge,
+        "transfer-over-task transfer edge timed out",
     )
     .await;
     client
 }
 
-// 1.T12: a submitted registration beats an already-completed task.
+// 1.T12: a connection's own transfer proceeds while a finished connection waits
+// to be reaped.
 #[cfg(feature = "ws")]
 #[camber::test]
-async fn registration_branch_wins_over_completed_task() {
+async fn connection_transfer_proceeds_over_completed_connection() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::supervised_registration(addr).unwrap();
     let mut router = websocket_router();
     router.get("/", |_request: &Request| async {
         Response::text(200, "ok")
     });
     let handle = camber::http::serve_background(listener, router)
         .expect("owned server requires a Tokio runtime");
-    prepare_completed_task(&controller, addr).await;
+    prepare_completed_task(&owners, addr).await;
 
-    let mut client = submit_registration_over_completed_task(&controller, addr).await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRegistration)
+    let mut client = submit_transfer_over_completed_task(&owners, addr).await;
+    // The transfer is the connection's own act, so it answers while the
+    // supervisor is still holding a finished connection it has not reaped. The
+    // reap that follows takes the completed owner and leaves the transferring
+    // one alone.
+    owners
+        .upgrades
+        .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
-        .unwrap();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
-        .unwrap();
-    wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRegistration,
-        "registration-over-task registration selection timed out",
-    )
-    .await;
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedRegistration)
-        .unwrap();
-    wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeUpgradeAcknowledge,
-        "registration-over-task acknowledge boundary timed out",
-    )
-    .await;
-    controller
-        .release(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
-        .unwrap();
-    apply_selected(
-        &controller,
-        LifecycleCheckpoint::BeforeUpgradeAcknowledge,
-        "registration-over-task post-acknowledge boundary timed out",
-    )
-    .await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedTask,
-        "registration-over-task reap selection timed out",
+        &owners,
+        ServerStopEdge::SupervisorSelectedTask,
+        "transfer-over-task reap selection timed out",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedTask)
+    owners
+        .stop
+        .release(ServerStopEdge::SupervisorSelectedTask)
         .unwrap();
     let response = read_http_head(&mut client).await;
     assert!(response.starts_with("HTTP/1.1 101"));
@@ -3167,38 +3046,42 @@ fn background_constructor_checks_tokio_before_stale_camber_marker() {
     }
 }
 
-async fn capture_standalone_default_keepalive(controller: &LifecycleController, addr: SocketAddr) {
-    controller
-        .pause_once(LifecycleCheckpoint::AfterAccept)
+async fn capture_standalone_default_keepalive(
+    owners: &impl Owns<ConnectionOwnerController>,
+    addr: SocketAddr,
+) {
+    let connections = owners.owner();
+    connections
+        .pause_once(ConnectionOwnerEdge::AfterAccept)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterPermit)
+    connections
+        .pause_once(ConnectionOwnerEdge::AfterPermit)
         .unwrap();
     let keepalive_checkpoint =
-        LifecycleCheckpoint::HeaderTimeoutConfigured(Duration::from_secs(60));
-    controller.pause_once(keepalive_checkpoint).unwrap();
+        ConnectionOwnerEdge::HeaderTimeoutConfigured(Duration::from_secs(60));
+    connections.pause_once(keepalive_checkpoint).unwrap();
     let mut partial = tokio::net::TcpStream::connect(addr).await.unwrap();
     partial.write_all(b"GET / HTTP/1.1\r\nHost:").await.unwrap();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::AfterAccept,
+        &connections,
+        ConnectionOwnerEdge::AfterAccept,
         "standalone default accept pause timed out",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::AfterAccept)
+    connections
+        .release(ConnectionOwnerEdge::AfterAccept)
         .unwrap();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::AfterPermit,
+        &connections,
+        ConnectionOwnerEdge::AfterPermit,
         "standalone default permit pause timed out",
     )
     .await;
-    controller
-        .release(LifecycleCheckpoint::AfterPermit)
+    connections
+        .release(ConnectionOwnerEdge::AfterPermit)
         .unwrap();
     wait_and_release_bounded(
-        controller,
+        &connections,
         keepalive_checkpoint,
         "standalone default keepalive timeout was not captured",
     )
@@ -3212,7 +3095,7 @@ async fn standalone_background_ignores_unrelated_camber_shutdown_and_uses_defaul
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::supervisor_selection(addr).unwrap();
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let mut router = held_router(entered_tx, release, Arc::new(AtomicBool::new(false)));
     router.get("/second", |_req: &Request| async {
@@ -3246,32 +3129,35 @@ async fn standalone_background_ignores_unrelated_camber_shutdown_and_uses_defaul
         assert_eq!(profiling.status(), 404);
     }
 
-    capture_standalone_default_keepalive(&controller, addr).await;
+    capture_standalone_default_keepalive(&owners, addr).await;
 
     // The checkpoints order the injected accept error against the supervisor's
     // observation of it, so the default grace deadline is already installed
     // before the clock moves.
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedAccept)
+    owners
+        .stop
+        .pause_once(ServerStopEdge::SupervisorSelectedAccept)
         .unwrap();
-    controller
-        .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
+    owners
+        .connections
+        .inject_once(ConnectionFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        &owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "standalone default supervisor did not select the injected accept error",
     )
     .await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
+        &owners,
+        ServerStopEdge::SupervisorSelectedAccept,
         "standalone default grace deadline was not installed",
     )
     .await;
     let mut completion = Box::pin(handle.into_future());
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    owners
+        .stop
+        .release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     tokio::time::advance(Duration::from_secs(30) - Duration::from_millis(1)).await;
     assert!(completion.as_mut().now_or_never().is_none());
@@ -3310,12 +3196,14 @@ fn configured_background_participates_in_runtime_task_accounting() {
         .shutdown_timeout(Duration::from_secs(1))
         .run(|| {
             let listener = runtime::block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
-            let controller = lifecycle(listener.local_addr().unwrap()).unwrap();
-            controller
-                .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+            let owners = mock::supervisor_selection(listener.local_addr().unwrap()).unwrap();
+            owners
+                .stop
+                .pause_once(ServerStopEdge::BeforeSupervisorSelect)
                 .unwrap();
-            controller
-                .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
+            owners
+                .connections
+                .inject_once(ConnectionFault::Accept(std::io::ErrorKind::Other))
                 .unwrap();
             let _handle = camber::http::serve_background(listener, ok_router())
                 .expect("owned server requires a Tokio runtime");
@@ -3328,15 +3216,16 @@ fn configured_background_participates_in_runtime_task_accounting() {
                     .unwrap();
                 tokio_runtime.block_on(async {
                     wait_until_paused_bounded(
-                        &controller,
-                        LifecycleCheckpoint::BeforeSupervisorSelect,
+                        &owners,
+                        ServerStopEdge::BeforeSupervisorSelect,
                         "task-accounting supervisor boundary timed out",
                     )
                     .await;
                     assert!(!returned.load(Ordering::Acquire));
                     paused.store(true, Ordering::Release);
-                    controller
-                        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+                    owners
+                        .stop
+                        .release(ServerStopEdge::BeforeSupervisorSelect)
                         .unwrap();
                 });
             });
@@ -3369,7 +3258,7 @@ fn configured_background_captures_limit_keepalive_health_metrics_and_shutdown() 
             runtime::block_on(async {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let controller = lifecycle(addr).unwrap();
+                let connections = mock::connection_owner(addr).unwrap();
                 let handle = camber::http::serve_background(listener, ok_router())
                     .expect("owned server requires a Tokio runtime");
                 let health = reqwest::get(format!("http://{addr}/health")).await.unwrap();
@@ -3381,44 +3270,44 @@ fn configured_background_captures_limit_keepalive_health_metrics_and_shutdown() 
                 assert_eq!(metrics.status(), 200);
                 drop(metrics);
 
-                controller
-                    .pause_once(LifecycleCheckpoint::AfterPermit)
+                connections
+                    .pause_once(ConnectionOwnerEdge::AfterPermit)
                     .unwrap();
                 let mut partial = tokio::net::TcpStream::connect(addr).await.unwrap();
                 wait_until_paused_bounded(
-                    &controller,
-                    LifecycleCheckpoint::AfterPermit,
+                    &connections,
+                    ConnectionOwnerEdge::AfterPermit,
                     "captured keepalive permit pause timed out",
                 )
                 .await;
-                controller
-                    .release(LifecycleCheckpoint::AfterPermit)
+                connections
+                    .release(ConnectionOwnerEdge::AfterPermit)
                     .unwrap();
                 partial.write_all(b"GET / HTTP/1.1\r\nHost:").await.unwrap();
-                controller
-                    .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                connections
+                    .pause_once(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
-                controller
-                    .pause_once(LifecycleCheckpoint::AfterPermit)
+                connections
+                    .pause_once(ConnectionOwnerEdge::AfterPermit)
                     .unwrap();
                 let mut blocked = connect_request(addr).await;
                 // The pending-permit checkpoint separates "held by the captured
                 // connection limit" from "the response has merely not arrived".
                 wait_until_paused_bounded(
-                    &controller,
-                    LifecycleCheckpoint::ConnectionPermitWaitPending,
+                    &connections,
+                    ConnectionOwnerEdge::PermitWaitPending,
                     "connection limit did not block a second dispatch",
                 )
                 .await;
-                controller
-                    .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+                connections
+                    .release(ConnectionOwnerEdge::PermitWaitPending)
                     .unwrap();
                 tokio::time::timeout(Duration::from_secs(1), assert_eof(&mut partial))
                     .await
                     .expect("configured keepalive timeout was not captured");
                 wait_and_release_bounded(
-                    &controller,
-                    LifecycleCheckpoint::AfterPermit,
+                    &connections,
+                    ConnectionOwnerEdge::AfterPermit,
                     "the released permit did not admit the blocked connection",
                 )
                 .await;
@@ -3462,7 +3351,7 @@ fn configured_background_captures_router_body_buffers() {
 }
 
 async fn assert_configured_sse_buffer(
-    controller: &LifecycleController,
+    owners: &impl Owns<ConnectionOwnerController>,
     addr: SocketAddr,
 ) -> tokio::net::TcpStream {
     let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -3471,8 +3360,8 @@ async fn assert_configured_sse_buffer(
         .await
         .unwrap();
     wait_and_release_bounded(
-        controller,
-        LifecycleCheckpoint::SseBufferConfigured(3),
+        owners,
+        ConnectionOwnerEdge::SseBufferConfigured(3),
         "captured SSE buffer size timed out",
     )
     .await;
@@ -3529,22 +3418,22 @@ fn configured_background_captures_sse_and_websocket_buffers() {
 
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let controller = lifecycle(addr).unwrap();
-                controller
-                    .pause_once(LifecycleCheckpoint::SseBufferConfigured(3))
+                let connections = mock::connection_owner(addr).unwrap();
+                connections
+                    .pause_once(ConnectionOwnerEdge::SseBufferConfigured(3))
                     .unwrap();
                 #[cfg(feature = "ws")]
                 {
-                    controller
-                        .pause_once(LifecycleCheckpoint::WebSocketOutgoingBufferConfigured(5))
+                    connections
+                        .pause_once(ConnectionOwnerEdge::WebSocketOutgoingBufferConfigured(5))
                         .unwrap();
-                    controller
-                        .pause_once(LifecycleCheckpoint::WebSocketIncomingBufferConfigured(5))
+                    connections
+                        .pause_once(ConnectionOwnerEdge::WebSocketIncomingBufferConfigured(5))
                         .unwrap();
                 }
                 let handle = camber::http::serve_background(listener, router)
                     .expect("owned server requires a Tokio runtime");
-                let sse_client = assert_configured_sse_buffer(&controller, addr).await;
+                let sse_client = assert_configured_sse_buffer(&connections, addr).await;
 
                 #[cfg(feature = "ws")]
                 {
@@ -3554,21 +3443,25 @@ fn configured_background_captures_sse_and_websocket_buffers() {
                         .await
                         .unwrap();
                     wait_and_release_bounded(
-                        &controller,
-                        LifecycleCheckpoint::WebSocketOutgoingBufferConfigured(5),
+                        &connections,
+                        ConnectionOwnerEdge::WebSocketOutgoingBufferConfigured(5),
                         "captured outgoing WebSocket buffer size timed out",
                     )
                     .await;
                     wait_and_release_bounded(
-                        &controller,
-                        LifecycleCheckpoint::WebSocketIncomingBufferConfigured(5),
+                        &connections,
+                        ConnectionOwnerEdge::WebSocketIncomingBufferConfigured(5),
                         "captured incoming WebSocket buffer size timed out",
                     )
                     .await;
                     let response = read_http_head(&mut client).await;
                     assert!(response.starts_with("HTTP/1.1 101"));
-                    write_websocket_text(&mut client, "ws-ok").await;
-                    assert_eq!(read_websocket_text(&mut client).await.as_ref(), "ws-ok");
+                    let echo = "the buffered bridge's echo";
+                    common::write_async_ws_frame(&mut client, 0x01, b"ws-ok", echo).await;
+                    let framed = common::read_async_ws_frame_or_eof(&mut client, echo)
+                        .await
+                        .expect("the buffered bridge gave its transport up without answering");
+                    assert_eq!(framed, (0x01, Box::from(*b"ws-ok")));
                 }
                 drop(sse_client);
                 runtime::request_shutdown();
@@ -3658,7 +3551,7 @@ async fn standalone_tls_background_marks_proxy_scheme_as_https() {
     router.proxy("/proxy", &format!("http://{backend_addr}"));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let stop = mock::server_stop(addr).unwrap();
     let handle = camber::http::serve_background_tls(listener, router, tls_config)
         .expect("owned server requires a Tokio runtime");
     let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -3673,25 +3566,22 @@ async fn standalone_tls_background_marks_proxy_scheme_as_https() {
     let mut body = [0u8; 5];
     stream.read_exact(&mut body).await.unwrap();
     assert_eq!(&body, b"https");
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &stop,
+        ServerStopEdge::BeforeSupervisorSelect,
         "standalone TLS supervisor boundary timed out",
     )
     .await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
     handle.cancel();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_and_release_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &stop,
+        ServerStopEdge::SupervisorSelectedControl,
         "standalone TLS control selection timed out",
     )
     .await;
@@ -3720,22 +3610,20 @@ fn configured_background_captures_request_tracing() {
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let controller = lifecycle(addr).unwrap();
+        let stop = mock::server_stop(addr).unwrap();
         let handle = camber::http::serve_background(listener, router)
             .expect("owned server requires a Tokio runtime");
         assert_ok_request_path(addr, "/standalone-untraced").await;
-        controller
-            .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+        stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
             .unwrap();
         wait_until_paused_bounded(
-            &controller,
-            LifecycleCheckpoint::BeforeSupervisorSelect,
+            &stop,
+            ServerStopEdge::BeforeSupervisorSelect,
             "untraced standalone supervisor boundary timed out",
         )
         .await;
         handle.cancel();
-        controller
-            .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+        stop.release(ServerStopEdge::BeforeSupervisorSelect)
             .unwrap();
         assert_cancelled(handle.await);
     });
@@ -3808,21 +3696,19 @@ fn configured_background_captures_profiling_route() {
 #[camber::test]
 async fn request_shutdown_cannot_be_missed_after_runtime_wait_registration() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let controller = lifecycle(listener.local_addr().unwrap()).unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeRuntimeWait)
+    let stop = mock::server_stop(listener.local_addr().unwrap()).unwrap();
+    stop.pause_once(ServerStopEdge::BeforeRuntimeWait)
         .unwrap();
     let handle = camber::http::serve_background(listener, ok_router())
         .expect("owned server requires a Tokio runtime");
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeRuntimeWait,
+        &stop,
+        ServerStopEdge::BeforeRuntimeWait,
         "request-shutdown runtime wait registration timed out",
     )
     .await;
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeRuntimeWait)
+    stop.release(ServerStopEdge::BeforeRuntimeWait)
         .unwrap();
     assert!(handle.await.is_ok());
 }
@@ -3831,15 +3717,14 @@ async fn request_shutdown_cannot_be_missed_after_runtime_wait_registration() {
 #[camber::test]
 async fn on_cancel_cannot_be_missed_after_runtime_wait_registration() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let controller = lifecycle(listener.local_addr().unwrap()).unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeRuntimeWait)
+    let stop = mock::server_stop(listener.local_addr().unwrap()).unwrap();
+    stop.pause_once(ServerStopEdge::BeforeRuntimeWait)
         .unwrap();
     let handle = camber::http::serve_background(listener, ok_router())
         .expect("owned server requires a Tokio runtime");
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeRuntimeWait,
+        &stop,
+        ServerStopEdge::BeforeRuntimeWait,
         "on-cancel runtime wait registration timed out",
     )
     .await;
@@ -3848,8 +3733,7 @@ async fn on_cancel_cannot_be_missed_after_runtime_wait_registration() {
         let _ = cancel_rx.await;
     });
     cancel_tx.send(()).unwrap();
-    controller
-        .release(LifecycleCheckpoint::BeforeRuntimeWait)
+    stop.release(ServerStopEdge::BeforeRuntimeWait)
         .unwrap();
     assert!(handle.await.is_ok());
 }
@@ -3861,255 +3745,77 @@ const CHILD_PROTOCOL_ENV: &str = "CAMBER_OWNED_SERVER_CHILD_PROTOCOL";
 const PROTOCOL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(unix)]
-const PROTOCOL_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
-#[cfg(unix)]
-#[derive(Debug, thiserror::Error)]
-enum ProtocolChildError {
-    #[error("protocol child did not exit before its deadline")]
-    ExitTimeout,
-    #[error("protocol child could not be inspected: {0:?}")]
-    TryWait(std::io::ErrorKind),
-    #[error("protocol child could not be terminated: {0:?}")]
-    Kill(std::io::ErrorKind),
-    #[error("protocol child was not reaped before its cleanup deadline")]
-    ReapTimeout,
-    #[error("protocol child did not print the requested checkpoint before its deadline")]
-    CheckpointTimeout,
-    #[error("protocol child stdout closed before the requested checkpoint")]
-    CheckpointStreamClosed,
-    #[error("protocol child stdout could not be read: {0:?}")]
-    StdoutRead(std::io::ErrorKind),
-    #[error("protocol child stdout receiver closed while the reader was active")]
-    StdoutReceiverClosed,
-    #[error("protocol child stdout reader did not finish before its cleanup deadline")]
-    StdoutReaderTimeout,
-    #[error("protocol child stdout reader panicked")]
-    StdoutReaderPanicked,
-}
-
-#[cfg(unix)]
-#[derive(Default)]
-struct ProtocolCleanupState {
-    process_reaped: AtomicBool,
-    stdout_eof: AtomicBool,
-    reader_joined: AtomicBool,
-    error: Mutex<Option<Box<str>>>,
-}
-
-#[cfg(unix)]
-struct ProtocolCleanupProbe(Arc<ProtocolCleanupState>);
-
-#[cfg(unix)]
-impl ProtocolCleanupProbe {
-    fn process_reaped(&self) -> bool {
-        self.0.process_reaped.load(Ordering::Acquire)
-    }
-
-    fn stdout_eof(&self) -> bool {
-        self.0.stdout_eof.load(Ordering::Acquire)
-    }
-
-    fn reader_joined(&self) -> bool {
-        self.0.reader_joined.load(Ordering::Acquire)
-    }
-
-    fn cleanup_error(&self) -> Option<Box<str>> {
-        self.0
-            .error
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-    }
-}
-
-#[cfg(unix)]
-struct ProtocolChild {
-    child: Option<Child>,
-    lines: std::sync::mpsc::Receiver<Box<str>>,
-    reader: Option<std::thread::JoinHandle<Result<(), ProtocolChildError>>>,
-    cleanup: Arc<ProtocolCleanupState>,
-}
-
-#[cfg(unix)]
-impl ProtocolChild {
-    fn cleanup_probe(&self) -> ProtocolCleanupProbe {
-        ProtocolCleanupProbe(Arc::clone(&self.cleanup))
-    }
-
-    fn wait_for_line(
-        &self,
-        prefix: &str,
-        timeout: Duration,
-    ) -> Result<Box<str>, ProtocolChildError> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match self.lines.recv_timeout(remaining) {
-                Ok(line) if line.starts_with(prefix) => return Ok(line),
-                Ok(_) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(ProtocolChildError::CheckpointTimeout);
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(ProtocolChildError::CheckpointStreamClosed);
-                }
-            }
-        }
-    }
-
-    fn wait_bounded(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<std::process::ExitStatus, ProtocolChildError> {
-        match self.reap_bounded(timeout)? {
-            Some(status) => {
-                self.join_reader_bounded(timeout)?;
-                Ok(status)
-            }
-            None => self.exit_timeout_after_cleanup(),
-        }
-    }
-
-    fn exit_timeout_after_cleanup(
-        &mut self,
-    ) -> Result<std::process::ExitStatus, ProtocolChildError> {
-        match self.cleanup_bounded(PROTOCOL_CLEANUP_TIMEOUT) {
-            Ok(()) => Err(ProtocolChildError::ExitTimeout),
-            Err(error) => Err(error),
-        }
-    }
-
-    fn reap_bounded(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Option<std::process::ExitStatus>, ProtocolChildError> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            match self.try_reap()? {
-                Some(status) => return Ok(Some(status)),
-                None if Instant::now() < deadline => std::thread::sleep(PROTOCOL_POLL_INTERVAL),
-                None => return Ok(None),
-            }
-        }
-    }
-
-    fn try_reap(&mut self) -> Result<Option<std::process::ExitStatus>, ProtocolChildError> {
-        let Some(child) = self.child.as_mut() else {
-            return Ok(None);
-        };
-        let status = child
-            .try_wait()
-            .map_err(|error| ProtocolChildError::TryWait(error.kind()))?;
-        if status.is_some() {
-            self.child.take();
-            self.cleanup.process_reaped.store(true, Ordering::Release);
-        }
-        Ok(status)
-    }
-
-    fn cleanup_bounded(&mut self, timeout: Duration) -> Result<(), ProtocolChildError> {
-        self.terminate_bounded(timeout)?;
-        self.join_reader_bounded(timeout)
-    }
-
-    fn terminate_bounded(&mut self, timeout: Duration) -> Result<(), ProtocolChildError> {
-        match self.try_reap()? {
-            Some(_) => return Ok(()),
-            None if self.child.is_none() => return Ok(()),
-            None => {}
-        }
-        let kill_result = self.child.as_mut().map(Child::kill);
-        match kill_result {
-            Some(Ok(())) => {}
-            Some(Err(error)) => return self.resolve_kill_error(error),
-            None => return Ok(()),
-        }
-        match self.reap_bounded(timeout)? {
-            Some(_) => Ok(()),
-            None => Err(ProtocolChildError::ReapTimeout),
-        }
-    }
-
-    fn resolve_kill_error(&mut self, error: std::io::Error) -> Result<(), ProtocolChildError> {
-        match self.try_reap()? {
-            Some(_) => Ok(()),
-            None => Err(ProtocolChildError::Kill(error.kind())),
-        }
-    }
-
-    fn join_reader_bounded(&mut self, timeout: Duration) -> Result<(), ProtocolChildError> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            match self.reader.as_ref() {
-                Some(reader) if reader.is_finished() => break,
-                Some(_) if Instant::now() < deadline => std::thread::sleep(PROTOCOL_POLL_INTERVAL),
-                Some(_) => return Err(ProtocolChildError::StdoutReaderTimeout),
-                None => return Ok(()),
-            }
-        }
-        let reader = self.reader.take();
-        let result = match reader {
-            Some(reader) => reader
-                .join()
-                .map_err(|_| ProtocolChildError::StdoutReaderPanicked)?,
-            None => return Ok(()),
-        };
-        self.cleanup.reader_joined.store(true, Ordering::Release);
-        result?;
-        self.cleanup.stdout_eof.store(true, Ordering::Release);
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ProtocolChild {
-    fn drop(&mut self) {
-        if self.child.is_none() && self.reader.is_none() {
-            return;
-        }
-        if let Err(error) = self.cleanup_bounded(PROTOCOL_CLEANUP_TIMEOUT) {
-            let mut cleanup_error = self
-                .cleanup
-                .error
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *cleanup_error = Some(error.to_string().into_boxed_str());
-        }
-    }
-}
-
-#[cfg(unix)]
-fn spawn_protocol_child(protocol: &str) -> ProtocolChild {
-    let mut child = Command::new(std::env::current_exe().unwrap())
+/// Spawn one protocol child, guarded.
+///
+/// The child is this same test binary re-entered at `lifecycle_signal_child`,
+/// which is `#[ignore]`d, so the filter has to say so. Everything past that —
+/// the piped streams, the line reader, the bounded reap, and the `Drop` that
+/// runs both on the unwind path — is [`ChildGuard`]'s, and this suite keeps no
+/// second copy of it.
+///
+/// The guard captures the child's stderr rather than letting it through to this
+/// process's own. Every failure below quotes it, because a child that panicked
+/// has no other way to say so from here.
+fn spawn_protocol_child(protocol: &str) -> ChildGuard {
+    let mut command = Command::new(std::env::current_exe().expect("this test binary has a path"));
+    command
         .arg("--exact")
         .arg("lifecycle_signal_child")
         .arg("--ignored")
         .arg("--nocapture")
         .env(CHILD_PROTOCOL_ENV, protocol)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let reader = std::io::BufReader::new(stdout);
-        for line in std::io::BufRead::lines(reader) {
-            let line = line.map_err(|error| ProtocolChildError::StdoutRead(error.kind()))?;
-            sender
-                .send(line.into_boxed_str())
-                .map_err(|_| ProtocolChildError::StdoutReceiverClosed)?;
+        .stdin(Stdio::null());
+    ChildGuard::spawn(command, PROTOCOL_CLEANUP_TIMEOUT).expect("the protocol child could not start")
+}
+
+/// Take the reap probe and the identity it will report, before either is spent.
+///
+/// The identity has to be read here: a guard that has reaped its child has given
+/// the handle up, and `id()` answers `0` from then on.
+#[cfg(unix)]
+fn protocol_reap_probe(child: &mut ChildGuard) -> (ReapProbe, u32) {
+    let child_id = child.id();
+    let probe = child
+        .take_reap_probe()
+        .expect("a freshly spawned guard owns its reap probe");
+    (probe, child_id)
+}
+
+/// Wait for the child's `prefix` checkpoint, and hand back the line it printed.
+///
+/// A checkpoint that never comes ends the child first. The guard fills its
+/// captured streams during that shutdown, so shutting down is what makes the
+/// child's own words available to quote — reporting only the expired wait would
+/// render a child that panicked as a child that would not start.
+#[cfg(unix)]
+fn protocol_line(child: &mut ChildGuard, prefix: &str, timeout: Duration) -> Box<str> {
+    match child.await_line(prefix, timeout) {
+        Ok(line) => line,
+        Err(error) => {
+            let _ = child.shutdown();
+            panic!(
+                "the protocol child never printed {prefix}: {error}\n{}",
+                String::from_utf8_lossy(child.stderr())
+            )
         }
-        Ok(())
-    });
-    ProtocolChild {
-        child: Some(child),
-        lines: receiver,
-        reader: Some(reader),
-        cleanup: Arc::new(ProtocolCleanupState::default()),
     }
+}
+
+/// Wait out the child, and require the exit status it reported to be a success.
+#[cfg(unix)]
+fn assert_protocol_exit(child: &mut ChildGuard, protocol: &str, timeout: Duration) {
+    let status = match child.wait_bounded(timeout) {
+        Ok(status) => status,
+        Err(error) => panic!(
+            "{protocol} child did not exit: {error}\n{}",
+            String::from_utf8_lossy(child.stderr())
+        ),
+    };
+    assert!(
+        status.success(),
+        "{protocol} child failed: {status}\n{}",
+        String::from_utf8_lossy(child.stderr())
+    );
 }
 
 #[cfg(unix)]
@@ -4142,18 +3848,13 @@ fn bounded_raw_request(addr: SocketAddr, timeout: Duration) -> Box<str> {
 #[test]
 fn active_runtime_signal_drains_owned_server_before_child_exit() {
     let mut child = spawn_protocol_child("active-signal");
-    let probe = child.cleanup_probe();
-    let ready = child
-        .wait_for_line("SERVER_READY", Duration::from_secs(5))
-        .unwrap();
+    let (probe, child_id) = protocol_reap_probe(&mut child);
+    let ready = protocol_line(&mut child, "SERVER_READY", Duration::from_secs(5));
     let control_addr = parse_address(&ready);
     connect_control(control_addr, b"RAISE", Duration::from_secs(5));
-    child
-        .wait_for_line("DRAINED", Duration::from_secs(5))
-        .unwrap();
-    let status = child.wait_bounded(Duration::from_secs(5)).unwrap();
-    assert!(status.success(), "active-signal child failed: {status}");
-    assert_protocol_cleanup(&probe);
+    protocol_line(&mut child, "DRAINED", Duration::from_secs(5));
+    assert_protocol_exit(&mut child, "active-signal", Duration::from_secs(5));
+    assert_protocol_cleanup(probe, child_id);
 }
 
 // 1.T16
@@ -4161,10 +3862,8 @@ fn active_runtime_signal_drains_owned_server_before_child_exit() {
 #[test]
 fn closure_return_does_not_transition_owned_server() {
     let mut child = spawn_protocol_child("closure-return");
-    let probe = child.cleanup_probe();
-    let returning = child
-        .wait_for_line("CLOSURE_RETURNING", Duration::from_secs(2))
-        .unwrap();
+    let (probe, child_id) = protocol_reap_probe(&mut child);
+    let returning = protocol_line(&mut child, "CLOSURE_RETURNING", Duration::from_secs(2));
     let mut fields = returning.split_whitespace();
     assert_eq!(fields.next(), Some("CLOSURE_RETURNING"));
     let http_addr: SocketAddr = fields.next().unwrap().parse().unwrap();
@@ -4172,12 +3871,9 @@ fn closure_return_does_not_transition_owned_server() {
     let response = bounded_raw_request(http_addr, Duration::from_secs(2));
     assert_eq!(common::status_from_raw(&response), 200);
     connect_control(control_addr, b"CANCEL", Duration::from_secs(2));
-    child
-        .wait_for_line("AFTER_RUN", Duration::from_secs(2))
-        .unwrap();
-    let status = child.wait_bounded(Duration::from_secs(2)).unwrap();
-    assert!(status.success(), "closure-return child failed: {status}");
-    assert_protocol_cleanup(&probe);
+    protocol_line(&mut child, "AFTER_RUN", Duration::from_secs(2));
+    assert_protocol_exit(&mut child, "closure-return", Duration::from_secs(2));
+    assert_protocol_cleanup(probe, child_id);
 }
 
 // 1.T16
@@ -4185,61 +3881,60 @@ fn closure_return_does_not_transition_owned_server() {
 #[test]
 fn signal_after_watcher_teardown_only_guarantees_process_survival() {
     let mut child = spawn_protocol_child("post-watcher");
-    let probe = child.cleanup_probe();
-    child
-        .wait_for_line("WATCHER_GONE", Duration::from_secs(5))
-        .unwrap();
-    child
-        .wait_for_line("SURVIVED", Duration::from_secs(5))
-        .unwrap();
-    let status = child.wait_bounded(Duration::from_secs(5)).unwrap();
-    assert!(status.success(), "post-watcher child failed: {status}");
-    assert_protocol_cleanup(&probe);
+    let (probe, child_id) = protocol_reap_probe(&mut child);
+    protocol_line(&mut child, "WATCHER_GONE", Duration::from_secs(5));
+    protocol_line(&mut child, "SURVIVED", Duration::from_secs(5));
+    assert_protocol_exit(&mut child, "post-watcher", Duration::from_secs(5));
+    assert_protocol_cleanup(probe, child_id);
 }
 
+/// Require the guard to have reaped the child it was given, and no other.
+///
+/// One reading rather than the four this suite used to take. The guard sends its
+/// reap only after joining both output readers, so a probe that answers at all
+/// says the process was reaped, the readers were joined, and their streams
+/// reached end of file; a cleanup that failed anywhere in that sequence arrives
+/// here as the error instead.
 #[cfg(unix)]
-fn assert_protocol_cleanup(probe: &ProtocolCleanupProbe) {
-    assert!(probe.process_reaped(), "protocol child was not reaped");
-    assert!(
-        probe.stdout_eof(),
-        "protocol child stdout did not reach EOF"
+fn assert_protocol_cleanup(probe: ReapProbe, child_id: u32) {
+    let reaped = probe
+        .wait(PROTOCOL_CLEANUP_TIMEOUT)
+        .expect("the protocol child's reap did not complete");
+    assert_eq!(
+        reaped.child_id(),
+        child_id,
+        "the reap probe reported a different child"
     );
-    assert!(
-        probe.reader_joined(),
-        "protocol stdout reader was not joined"
-    );
-    assert_eq!(probe.cleanup_error(), None, "protocol cleanup failed");
 }
 
 #[cfg(unix)]
 #[test]
 fn protocol_child_timeout_reaps_process_and_joins_stdout() {
     let mut child = spawn_protocol_child("cleanup-hold");
-    let probe = child.cleanup_probe();
-    child
-        .wait_for_line("CLEANUP_READY", Duration::from_secs(5))
-        .unwrap();
+    let (probe, child_id) = protocol_reap_probe(&mut child);
+    protocol_line(&mut child, "CLEANUP_READY", Duration::from_secs(5));
 
     let result = child.wait_bounded(Duration::ZERO);
-    assert!(matches!(result, Err(ProtocolChildError::ExitTimeout)));
-    assert_protocol_cleanup(&probe);
+    assert!(
+        matches!(result, Err(ProcessError::ExitTimeout { .. })),
+        "a child that never exits owes the bound it missed: {result:?}"
+    );
+    assert_protocol_cleanup(probe, child_id);
 }
 
 #[cfg(unix)]
 #[test]
 fn protocol_child_assertion_unwind_reaps_process_and_joins_stdout() {
-    let child = spawn_protocol_child("cleanup-hold");
-    let probe = child.cleanup_probe();
+    let mut child = spawn_protocol_child("cleanup-hold");
+    let (probe, child_id) = protocol_reap_probe(&mut child);
     let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let child = child;
-        child
-            .wait_for_line("CLEANUP_READY", Duration::from_secs(5))
-            .unwrap();
+        let mut child = child;
+        protocol_line(&mut child, "CLEANUP_READY", Duration::from_secs(5));
         panic!("intentional protocol assertion failure");
     }));
 
     assert!(unwind.is_err(), "protocol assertion did not unwind");
-    assert_protocol_cleanup(&probe);
+    assert_protocol_cleanup(probe, child_id);
 }
 
 // Not a case of its own: this is the body the protocol children run, selected
@@ -4271,9 +3966,8 @@ fn run_active_signal_child() {
             runtime::block_on(async {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let http_addr = listener.local_addr().unwrap();
-                let controller = lifecycle(http_addr).unwrap();
-                controller
-                    .pause_once(LifecycleCheckpoint::BeforeRuntimeWait)
+                let stop = mock::server_stop(http_addr).unwrap();
+                stop.pause_once(ServerStopEdge::BeforeRuntimeWait)
                     .unwrap();
                 let handle = camber::http::serve_background(listener, ok_router())
                     .expect("owned server requires a Tokio runtime");
@@ -4288,8 +3982,8 @@ fn run_active_signal_child() {
                 let control = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let control_addr = control.local_addr().unwrap();
                 wait_until_paused_bounded(
-                    &controller,
-                    LifecycleCheckpoint::BeforeRuntimeWait,
+                    &stop,
+                    ServerStopEdge::BeforeRuntimeWait,
                     "runtime waiter checkpoint timed out",
                 )
                 .await;
@@ -4306,8 +4000,7 @@ fn run_active_signal_child() {
                         .unwrap();
                     assert_eq!(&token, b"RAISE");
                     signal_hook::low_level::raise(signal_hook::consts::SIGTERM).unwrap();
-                    controller
-                        .release(LifecycleCheckpoint::BeforeRuntimeWait)
+                    stop.release(ServerStopEdge::BeforeRuntimeWait)
                         .unwrap();
                     tokio::time::timeout(Duration::from_secs(5), assert_eof(&mut retained))
                         .await
@@ -4431,7 +4124,7 @@ async fn unclean_websocket_peer_close_remains_connection_local() {
     let addr = listener.local_addr().unwrap();
     let handle = camber::http::serve_background(listener, router)
         .expect("owned server requires a Tokio runtime");
-    let websocket = websocket_client(addr, "/ws").await;
+    let websocket = common::upgraded_ws_peer(addr, "/ws", "the unclean peer").await;
     drop(websocket);
     assert_ok_request_path(addr, "/ok").await;
     runtime::request_shutdown();
@@ -4444,16 +4137,15 @@ async fn unclean_websocket_peer_close_remains_connection_local() {
 async fn supervisor_unwind_joins_acknowledged_and_buffered_upgrades() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::faulted_registration(addr).unwrap();
     let handle = camber::http::serve_background(listener, websocket_router())
         .expect("owned server requires a Tokio runtime");
-    let mut acknowledged = websocket_client(addr, "/ws").await;
+    let mut acknowledged =
+        common::upgraded_ws_peer(addr, "/ws", "the acknowledged upgrade").await;
 
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+    owners.upgrades.pause_once(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+    owners.upgrades.pause_once(UpgradeOwnerEdge::AfterHandoffSubmitted)
         .unwrap();
     let mut pending = tokio::net::TcpStream::connect(addr).await.unwrap();
     pending
@@ -4461,39 +4153,43 @@ async fn supervisor_unwind_joins_acknowledged_and_buffered_upgrades() {
         .await
         .unwrap();
     wait_and_release_bounded(
-        &controller,
-        LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
+        &owners,
+        UpgradeOwnerEdge::AfterHandoffSubmitted,
         "buffered upgrade ticket submission timed out",
     )
     .await;
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeUpgradeAcknowledge,
+        &owners,
+        UpgradeOwnerEdge::BeforeTransferAcknowledge,
         "acknowledged upgrade boundary timed out",
     )
     .await;
-    controller
-        .inject_once(LifecycleFault::PanicSupervisorCore)
-        .unwrap();
-    controller
-        .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+    crate::common::unwind_the_supervisor(&owners, "the unwinding supervisor").await;
+    // Released only once the unwind has committed its forced phase, so the
+    // connection's answer reads a server that has already stopped admitting
+    // rather than racing the panic it is meant to follow.
+    owners.upgrades.release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
         .unwrap();
 
     assert_eof(&mut acknowledged).await;
+    // A refusal rather than an internal failure: the connection that holds the
+    // offer reads the forced phase the unwinding supervisor committed, so it
+    // knows the server stopped admitting rather than only that its owner went
+    // away.
     let pending_response = read_http_head(&mut pending).await;
     assert!(
-        pending_response.starts_with("HTTP/1.1 500"),
+        pending_response.starts_with("HTTP/1.1 503"),
         "pending upgrade committed an unexpected response: {pending_response}"
     );
     assert!(
         pending_response
             .to_ascii_lowercase()
             .contains("connection: close"),
-        "supervisor-unavailable response did not close the connection: {pending_response}"
+        "the refused pending upgrade did not close the connection: {pending_response}"
     );
     common::assert_refusal_body_then_eof(
         &mut pending,
-        REDACTED_BODY,
+        common::UNAVAILABLE_BODY,
         "the unwound pending upgrade",
     )
     .await;
@@ -4503,13 +4199,12 @@ async fn supervisor_unwind_joins_acknowledged_and_buffered_upgrades() {
 // 2.T1
 #[tokio::test]
 async fn every_owner_form_waits_until_owned_tasks_are_empty() {
-    let (controller, addr, handle, client, release, dropped) = retained_owner_server().await;
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+    let (stop, addr, handle, client, release, dropped) = retained_owner_server().await;
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     handle.shutdown();
     assert_graceful_owner_waits(
-        &controller,
+        &stop,
         handle.into_future(),
         addr,
         client,
@@ -4518,20 +4213,18 @@ async fn every_owner_form_waits_until_owned_tasks_are_empty() {
     )
     .await;
 
-    let (controller, addr, handle, client, release, dropped) = retained_owner_server().await;
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+    let (stop, addr, handle, client, release, dropped) = retained_owner_server().await;
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     let future = handle.join();
     future.shutdown();
-    assert_graceful_owner_waits(&controller, future, addr, client, &release, &dropped).await;
+    assert_graceful_owner_waits(&stop, future, addr, client, &release, &dropped).await;
 
-    let (controller, addr, handle, client, release, dropped) = retained_owner_server().await;
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+    let (stop, addr, handle, client, release, dropped) = retained_owner_server().await;
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     let future = handle.shutdown_and_join();
-    assert_graceful_owner_waits(&controller, future, addr, client, &release, &dropped).await;
+    assert_graceful_owner_waits(&stop, future, addr, client, &release, &dropped).await;
 }
 
 // 2.T2
@@ -4540,7 +4233,7 @@ async fn join_transfers_control_without_stopping_admission() {
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let stop = mock::server_stop(addr).unwrap();
     let handle = camber::http::serve_background(listener, counting_router(Arc::clone(&counter)))
         .expect("owned server requires a Tokio runtime");
     let mut future = Box::pin(handle.join());
@@ -4550,28 +4243,25 @@ async fn join_transfers_control_without_stopping_admission() {
         .expect("admission after join timed out");
     assert_eq!(counter.load(Ordering::Acquire), 1);
 
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &stop,
+        ServerStopEdge::BeforeSupervisorSelect,
         "join admission boundary timed out",
     )
     .await;
     let mut waiting = tokio::time::timeout(Duration::from_secs(5), connect_request(addr))
         .await
         .expect("equal-ready accepted connection timed out");
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
     future.as_ref().get_ref().shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_and_release_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &stop,
+        ServerStopEdge::SupervisorSelectedControl,
         "joined future graceful selection timed out",
     )
     .await;
@@ -4591,48 +4281,45 @@ async fn join_transfers_control_without_stopping_admission() {
 async fn owner_graceful_wins_over_runtime_accept_error_and_completed_task() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::supervisor_selection(addr).unwrap();
     let handle = camber::http::serve_background(listener, ok_router())
         .expect("owned server requires a Tokio runtime");
     let mut future = Box::pin(handle.join());
     tokio::time::timeout(
         Duration::from_secs(5),
-        prepare_completed_task(&controller, addr),
+        prepare_completed_task(&owners, addr),
     )
     .await
     .expect("completed-task preparation timed out");
-    controller
-        .inject_once(LifecycleFault::Accept(std::io::ErrorKind::Other))
+    owners.connections.inject_once(ConnectionFault::Accept(std::io::ErrorKind::Other))
         .unwrap();
     runtime::request_shutdown();
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+    owners.stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
     future.as_ref().get_ref().shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    owners.stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "owner graceful selection timed out",
     )
     .await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "post-owner-graceful boundary timed out",
     )
     .await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &owners,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "equal-ready runtime selection timed out",
     )
     .await;
     tokio::time::timeout(
         Duration::from_secs(5),
-        observe_deferred_task_reap(&controller, LifecycleCheckpoint::SupervisorSelectedRuntime),
+        observe_deferred_task_reap(&owners, ServerStopEdge::SupervisorSelectedRuntime),
     )
     .await
     .expect("deferred completed-task reap timed out");
@@ -4657,7 +4344,7 @@ fn owner_graceful_wins_over_ready_permit() {
                 let release = Arc::new(tokio::sync::Semaphore::new(0));
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let controller = lifecycle(addr).unwrap();
+                let stop = mock::server_stop(addr).unwrap();
                 let handle = serve_held(
                     listener,
                     held_router(
@@ -4670,40 +4357,37 @@ fn owner_graceful_wins_over_ready_permit() {
                 first.write_all(CLOSE_REQUEST).await.unwrap();
                 await_handler_entry(entered_rx, "owner permit request did not enter the handler")
                     .await;
-                controller
-                    .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+                stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
                     .unwrap();
                 wait_until_paused_bounded(
-                    &controller,
-                    LifecycleCheckpoint::BeforeSupervisorSelect,
+                    &stop,
+                    ServerStopEdge::BeforeSupervisorSelect,
                     "owner permit initial boundary timed out",
                 )
                 .await;
                 let mut waiting = connect_request(addr).await;
                 select_next(
-                    &controller,
-                    LifecycleCheckpoint::SupervisorSelectedAccept,
+                    &stop,
+                    ServerStopEdge::SupervisorSelectedAccept,
                     "owner permit accept selection timed out",
                 )
                 .await;
                 apply_selected(
-                    &controller,
-                    LifecycleCheckpoint::SupervisorSelectedAccept,
+                    &stop,
+                    ServerStopEdge::SupervisorSelectedAccept,
                     "owner permit post-accept boundary timed out",
                 )
                 .await;
                 let mut future = Box::pin(handle.join());
-                controller
-                    .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+                stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
                     .unwrap();
                 release_and_drain_peer(&release, &mut first, b"released").await;
                 future.as_ref().get_ref().shutdown();
-                controller
-                    .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+                stop.release(ServerStopEdge::BeforeSupervisorSelect)
                     .unwrap();
                 wait_and_release_bounded(
-                    &controller,
-                    LifecycleCheckpoint::SupervisorSelectedControl,
+                    &stop,
+                    ServerStopEdge::SupervisorSelectedControl,
                     "owner permit control selection timed out",
                 )
                 .await;
@@ -4724,32 +4408,30 @@ fn owner_graceful_wins_over_ready_permit() {
 async fn owner_graceful_wins_over_submitted_registration() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let owners = mock::registration_selection(addr).unwrap();
     let handle = camber::http::serve_background(listener, websocket_router())
         .expect("owned server requires a Tokio runtime");
     let mut future = Box::pin(handle.join());
     let mut client = tokio::time::timeout(
         Duration::from_secs(5),
-        prepare_submitted_upgrade(&controller, addr),
+        prepare_submitted_upgrade(&owners, addr),
     )
     .await
     .expect("submitted-registration preparation timed out");
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+    owners.stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
     future.as_ref().get_ref().shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    owners.stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "owner registration precedence selection timed out",
     )
     .await;
-    apply_selected_event_then_release_upgrade(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+    apply_selected_event_then_release_transfer(
+        &owners,
+        ServerStopEdge::SupervisorSelectedControl,
         "owner graceful shutdown was not applied before releasing the submitted upgrade",
     )
     .await;
@@ -4767,78 +4449,70 @@ async fn owner_graceful_wins_over_submitted_registration() {
 #[tokio::test(start_paused = true)]
 async fn owner_graceful_and_runtime_graceful_share_one_deadline() {
     let _context = runtime_test_support::install_runtime_context_without_request_deadlines();
-    let (controller, _addr, handle, peer, _release) = retained_server().await;
+    let (stop, _addr, handle, peer, _release) = retained_server(mock::server_stop).await;
     let mut future = Box::pin(handle.join());
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &stop,
+        ServerStopEdge::BeforeSupervisorSelect,
         "owner deadline initial boundary timed out",
     )
     .await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
     future.as_ref().get_ref().shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &stop,
+        ServerStopEdge::SupervisorSelectedControl,
         "owner deadline graceful selection timed out",
     )
     .await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &stop,
+        ServerStopEdge::SupervisorSelectedControl,
         "owner deadline post-graceful boundary timed out",
     )
     .await;
     tokio::time::advance(Duration::from_secs(10)).await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedRuntime)
         .unwrap();
     runtime::request_shutdown();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &stop,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "owner deadline runtime selection timed out",
     )
     .await;
     apply_selected(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedRuntime,
+        &stop,
+        ServerStopEdge::SupervisorSelectedRuntime,
         "owner deadline final boundary timed out",
     )
     .await;
     tokio::time::advance(Duration::from_secs(20)).await;
     select_next(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedDeadline,
+        &stop,
+        ServerStopEdge::SupervisorSelectedDeadline,
         "original owner deadline was restarted",
     )
     .await;
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedDeadline)
+    stop.release(ServerStopEdge::SupervisorSelectedDeadline)
         .unwrap();
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::AfterSupervisorResultSend,
+        &stop,
+        ServerStopEdge::AfterSupervisorResultSend,
         "owner deadline task drain timed out",
     )
     .await;
     assert_eof_with_socket_deadline(peer);
-    controller
-        .release(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.release(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(5), &mut future)
         .await
@@ -4860,30 +4534,30 @@ async fn handle_and_future_cancel_abort_join_then_return_cancelled() {
 }
 
 async fn assert_dropped_owner_continues_abort(
-    controller: &LifecycleController,
+    owners: &impl Owns<ServerStopController>,
     addr: SocketAddr,
     client: tokio::net::TcpStream,
     dropped: &AtomicBool,
 ) {
+    let stop = owners.owner();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &stop,
+        ServerStopEdge::SupervisorSelectedControl,
         "dropped owner abort selection timed out",
     )
     .await;
     apply_selected(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &stop,
+        ServerStopEdge::SupervisorSelectedControl,
         "dropped owner abort application timed out",
     )
     .await;
     common::assert_admission_closed_blocking(addr, OBSERVATION_DEADLINE);
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::AfterSupervisorResultSend,
+        &stop,
+        ServerStopEdge::AfterSupervisorResultSend,
         "dropped owner result send timed out",
     )
     .await;
@@ -4892,77 +4566,69 @@ async fn assert_dropped_owner_continues_abort(
         "dropped owner reached finish before releasing transport state"
     );
     assert_connection_closed_with_socket_deadline(client);
-    controller
-        .release(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.release(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
 }
 
-async fn pause_after_owner_graceful<F>(controller: &LifecycleController, request: F, context: &str)
-where
+async fn pause_after_owner_graceful<F>(
+    owners: &impl Owns<ServerStopController>,
+    request: F,
+    context: &str,
+) where
     F: FnOnce(),
 {
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    let stop = owners.owner();
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
-    wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
-        context,
-    )
-    .await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+    wait_until_paused_bounded(&stop, ServerStopEdge::BeforeSupervisorSelect, context).await;
+    stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
     request();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &stop,
+        ServerStopEdge::SupervisorSelectedControl,
         "owner graceful selection timed out",
     )
     .await;
     apply_selected(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &stop,
+        ServerStopEdge::SupervisorSelectedControl,
         "post-owner-graceful boundary timed out",
     )
     .await;
 }
 
-async fn pause_after_success_result_send<F>(controller: &LifecycleController, request: F)
+async fn pause_after_success_result_send<F>(owners: &impl Owns<ServerStopController>, request: F)
 where
     F: FnOnce(),
 {
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+    let stop = owners.owner();
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::BeforeSupervisorSelect,
+        &stop,
+        ServerStopEdge::BeforeSupervisorSelect,
         "post-result initial boundary timed out",
     )
     .await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     request();
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_and_release_bounded(
-        controller,
-        LifecycleCheckpoint::SupervisorSelectedControl,
+        &stop,
+        ServerStopEdge::SupervisorSelectedControl,
         "post-result graceful selection timed out",
     )
     .await;
     wait_until_paused_bounded(
-        controller,
-        LifecycleCheckpoint::AfterSupervisorResultSend,
+        &stop,
+        ServerStopEdge::AfterSupervisorResultSend,
         "successful result send timed out",
     )
     .await;
@@ -5015,55 +4681,47 @@ impl PendingOwner {
 }
 
 async fn assert_owner_drop_forces_abort(form: OwnerForm) {
-    let (controller, addr, handle, client, _release, dropped) = retained_owner_server().await;
+    let (stop, addr, handle, client, _release, dropped) = retained_owner_server().await;
     let owner = PendingOwner::new(handle, form);
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     drop(owner);
-    assert_dropped_owner_continues_abort(&controller, addr, client, &dropped).await;
+    assert_dropped_owner_continues_abort(&stop, addr, client, &dropped).await;
 }
 
 async fn assert_owner_drop_after_graceful_forces_abort(form: OwnerForm) {
-    let (controller, addr, handle, client, _release, dropped) = retained_owner_server().await;
+    let (stop, addr, handle, client, _release, dropped) = retained_owner_server().await;
     let owner = PendingOwner::new(handle, form);
     let graceful_context = format!("{} graceful boundary timed out", form.label());
-    pause_after_owner_graceful(&controller, || owner.shutdown(), &graceful_context).await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedControl)
+    pause_after_owner_graceful(&stop, || owner.shutdown(), &graceful_context).await;
+    stop.pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     drop(owner);
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
-    assert_dropped_owner_continues_abort(&controller, addr, client, &dropped).await;
+    assert_dropped_owner_continues_abort(&stop, addr, client, &dropped).await;
 }
 
 async fn assert_owner_deadline_beats_drop(form: OwnerForm) {
-    let (controller, _addr, handle, client, _release, dropped) = retained_owner_server().await;
+    let (stop, _addr, handle, client, _release, dropped) = retained_owner_server().await;
     let owner = PendingOwner::new(handle, form);
     let graceful_context = format!("timeout {} graceful boundary timed out", form.label());
-    pause_after_owner_graceful(&controller, || owner.shutdown(), &graceful_context).await;
+    pause_after_owner_graceful(&stop, || owner.shutdown(), &graceful_context).await;
     tokio::time::advance(Duration::from_secs(30)).await;
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedDeadline)
+    stop.pause_once(ServerStopEdge::SupervisorSelectedDeadline)
         .unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     drop(owner);
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     wait_and_release_bounded(
-        &controller,
-        LifecycleCheckpoint::SupervisorSelectedDeadline,
+        &stop,
+        ServerStopEdge::SupervisorSelectedDeadline,
         &format!(
             "equal-ready {} deadline did not beat Drop abort",
             form.label()
@@ -5071,34 +4729,32 @@ async fn assert_owner_deadline_beats_drop(form: OwnerForm) {
     )
     .await;
     wait_until_paused_bounded(
-        &controller,
-        LifecycleCheckpoint::AfterSupervisorResultSend,
+        &stop,
+        ServerStopEdge::AfterSupervisorResultSend,
         &format!("fixed {} timeout result send timed out", form.label()),
     )
     .await;
     assert_connection_closed_with_socket_deadline(client);
     assert!(dropped.load(Ordering::Acquire));
-    controller
-        .release(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.release(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
 }
 
 async fn assert_post_result_owner_drop_continues(form: OwnerForm) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let controller = lifecycle(listener.local_addr().unwrap()).unwrap();
+    let stop = mock::server_stop(listener.local_addr().unwrap()).unwrap();
     let (dispatch_tx, mut dispatch_rx) = tokio::sync::oneshot::channel();
     let handle = camber::http::serve_background(listener, dispatch_drop_router(dispatch_tx))
         .expect("owned server requires a Tokio runtime");
     let owner = PendingOwner::new(handle, form);
-    pause_after_success_result_send(&controller, || owner.shutdown()).await;
+    pause_after_success_result_send(&stop, || owner.shutdown()).await;
     drop(owner);
     assert!(
         (&mut dispatch_rx).now_or_never().is_none(),
         "{} Drop destroyed the supervisor while result send was paused",
         form.label()
     );
-    controller
-        .release(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.release(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     let exit_context = format!("{} post-result supervisor exit timed out", form.label());
     wait_for_dispatch_drop(dispatch_rx, &exit_context).await;
@@ -5126,7 +4782,7 @@ async fn graceful_http1_finishes_current_response_then_closes_admission() {
     let next_requests = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
+    let stop = mock::server_stop(addr).unwrap();
     let handle = serve_held(
         listener,
         named_held_router(
@@ -5143,8 +4799,7 @@ async fn graceful_http1_finishes_current_response_then_closes_admission() {
     )
     .await;
     let mut future = Box::pin(handle.join());
-    controller
-        .pause_once(LifecycleCheckpoint::AfterSupervisorResultSend)
+    stop.pause_once(ServerStopEdge::AfterSupervisorResultSend)
         .unwrap();
     future.as_ref().get_ref().shutdown();
     assert!(future.as_mut().now_or_never().is_none());
@@ -5171,8 +4826,8 @@ async fn graceful_http1_finishes_current_response_then_closes_admission() {
     .await
     .expect("graceful HTTP/1 observations timed out");
     wait_and_release_bounded(
-        &controller,
-        LifecycleCheckpoint::AfterSupervisorResultSend,
+        &stop,
+        ServerStopEdge::AfterSupervisorResultSend,
         "graceful HTTP/1 result send timed out",
     )
     .await;

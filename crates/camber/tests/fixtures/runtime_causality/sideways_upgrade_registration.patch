@@ -1,0 +1,22 @@
+--- a/crates/camber/src/http/server_lifecycle/connections.rs
++++ b/crates/camber/src/http/server_lifecycle/connections.rs
+@@ -554,8 +554,7 @@ impl UpgradeOwner {
+     ) -> Self {
+         LifecycleScript::observe_ownership(
+             script.as_deref(),
+-            ConnectionOwnershipEvent::ConnectionUpgradeTransferred {
+-                connection: owner.connection,
++            ConnectionOwnershipEvent::ServerUpgradeRegistered {
+                 upgrade: owner.upgrade,
+             },
+         );
+@@ -603,8 +602,7 @@ impl UpgradeOwner {
+         }
+         LifecycleScript::observe_ownership(
+             self.script.as_deref(),
+-            ConnectionOwnershipEvent::ConnectionUpgradeSettled {
+-                connection: self.owner.connection,
++            ConnectionOwnershipEvent::ServerUpgradeSettled {
+                 upgrade: self.owner.upgrade,
+             },
+         );

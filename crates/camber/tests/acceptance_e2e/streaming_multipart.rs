@@ -18,6 +18,7 @@
 
 use crate::h2_client::{H2Offer, H2RequestStream, PersistentH2Client};
 use crate::http as wire;
+use crate::http::{OwnerPoint, Owns, arrived};
 use crate::multipart_support::{
     BOUNDARY, Escape, Escapes, Field, HandlerFuture, assert_escaped_inert, content_type,
     drain_field, drain_fields, escaping_handler, failing_handler, multipart_body, reading_handler,
@@ -26,7 +27,10 @@ use crate::multipart_support::{
 use crate::rejection_support::{Journal, Observed, drain, journal, only, recording_mapper};
 
 use camber::RuntimeError;
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController, MultipartObservation};
+use camber::http::mock::{
+    MultipartObservation, MultipartOwnerController, MultipartOwnerEdge, RequestBodyOwnerController,
+    ScopedMultipartBody, ScopedStoppedMultipart, ServerStopEdge,
+};
 use camber::http::{
     BodyAdmission, BodyAdmissionContext, Method, MultipartField, MultipartLimits, MultipartStream,
     RejectionKind, Request, RequestBudget, Response, Router, ServerPolicy, TransferBudget,
@@ -163,20 +167,6 @@ impl Gate {
     fn release(&self) {
         self.released.notify_waiters();
     }
-}
-
-/// Wait for `ready` off this runtime, and report whether it arrived in `bound`.
-///
-/// [`wire::poll_until`] sleeps the thread it polls on, so an `async fn` calling
-/// it directly holds a runtime worker for the whole bound — including a worker
-/// the server, the connection driver, or the handler being waited on needs in
-/// order to reach the arrival. On a machine with few workers that turns a
-/// bounded wait into a bound-length stall and then a failure. Every arrival here
-/// is therefore polled from the blocking pool instead.
-async fn arrived(bound: Duration, ready: impl FnMut() -> bool + Send + 'static) -> bool {
-    tokio::task::spawn_blocking(move || wire::poll_until(bound, ready))
-        .await
-        .expect("the bounded arrival was waited for")
 }
 
 /// What the held route's handlers leave behind for a case to read.
@@ -615,7 +605,7 @@ fn stall(producer: &mut Producer, socket: &mut TcpStream) -> bool {
 #[tokio::test(flavor = "multi_thread")]
 async fn http1_slow_consumer_stops_socket_progress_within_session_bounds() {
     let fixture = Fixture::new();
-    let port = wire::reserve_observed();
+    let port = wire::reserve_multipart_body();
     let controller = port.controller();
     let server = port.serve(live_router(&fixture));
 
@@ -640,7 +630,7 @@ async fn http1_slow_consumer_stops_socket_progress_within_session_bounds() {
     );
 
     let stalled = producer.sent();
-    let held = controller.multipart_observed();
+    let held = controller.sessions.observed();
     let progressed = offer_until(&mut producer, &mut socket, QUIET, |producer| {
         producer.sent() != stalled
     });
@@ -653,7 +643,7 @@ async fn http1_slow_consumer_stops_socket_progress_within_session_bounds() {
         producer.pending() > 0,
         "the socket refused no pending payload while the handler held"
     );
-    assert_held_within_session_bounds(&controller, held);
+    assert_held_within_session_bounds(&controller.sessions, held);
 
     producer.seal();
     let field_bytes = producer.field_bytes();
@@ -679,9 +669,12 @@ async fn http1_slow_consumer_stops_socket_progress_within_session_bounds() {
 
 /// Assert a held session polled nothing further and retained nothing past its
 /// own formula.
-fn assert_held_within_session_bounds(controller: &LifecycleController, held: MultipartObservation) {
+fn assert_held_within_session_bounds(
+    controller: &MultipartOwnerController,
+    held: MultipartObservation,
+) {
     let limits = held_limits();
-    let during = controller.multipart_observed();
+    let during = controller.observed();
     assert_eq!(
         during.body_frames_polled(),
         held.body_frames_polled(),
@@ -769,7 +762,7 @@ async fn open_upload(client: &mut PersistentH2Client, path: &str) -> H2RequestSt
 #[tokio::test(flavor = "multi_thread")]
 async fn http2_slow_consumer_withholds_flow_control_credit() {
     let fixture = Fixture::new();
-    let port = wire::reserve_observed();
+    let port = wire::reserve_multipart_body();
     let controller = port.controller();
     let server = port.serve(live_router(&fixture));
 
@@ -799,7 +792,7 @@ async fn http2_slow_consumer_withholds_flow_control_credit() {
         withheld,
         "a held handler leaves this stream without credit: {offered} bytes granted"
     );
-    let held = controller.multipart_observed();
+    let held = controller.sessions.observed();
 
     // Same connection, second stream: the backpressure belongs to the held
     // stream, not to the connection carrying it.
@@ -811,7 +804,7 @@ async fn http2_slow_consumer_withholds_flow_control_credit() {
         (200, "control".into()),
         "an ordinary stream completes while the held one has no credit"
     );
-    assert_held_within_session_bounds(&controller, held);
+    assert_held_within_session_bounds(&controller.sessions, held);
 
     fixture.gate.release();
     offer_rest(&mut upload, &body, &mut offered).await;
@@ -1105,7 +1098,7 @@ async fn assert_abandoned_h2_is_stream_local(client: &mut PersistentH2Client, fi
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_multipart_refusals_have_protocol_correct_disposition() {
     let fixture = Fixture::new();
-    let port = wire::reserve_observed();
+    let port = wire::reserve_multipart_body();
     let server = port.serve(live_router(&fixture));
     let addr = server.addr();
 
@@ -1232,14 +1225,15 @@ struct Ownership {
 fn assert_ownership_released(
     label: &str,
     fixture: &Fixture,
-    controller: &LifecycleController,
+    sessions: &MultipartOwnerController,
+    bodies: &RequestBodyOwnerController,
     before: MultipartObservation,
     released: usize,
     expected: &Ownership,
 ) {
     wire::assert_released(&fixture.released, released, label);
-    wire::assert_owners_released(controller, released, label);
-    let after = controller.multipart_observed();
+    wire::assert_owners_released(bodies, released, label);
+    let after = sessions.observed();
     let settled = after.drivers_terminated() - before.drivers_terminated();
     assert!(
         expected.settles.allows(settled),
@@ -1331,11 +1325,11 @@ fn assert_terminal_row(
     row: &Terminal,
     addr: SocketAddr,
     fixture: &Fixture,
-    controller: &LifecycleController,
+    controller: &ScopedMultipartBody,
     released: usize,
 ) {
     let label = row.label;
-    let before = controller.multipart_observed();
+    let before = controller.sessions.observed();
     let answered = upload(addr, row.path, &row.body.wire());
     assert_eq!(answered.status, row.status, "{label}: wire status");
     // The answer is already off the wire, so whatever selected it has run: a
@@ -1355,7 +1349,8 @@ fn assert_terminal_row(
     assert_ownership_released(
         label,
         fixture,
-        controller,
+        &controller.sessions,
+        &controller.bodies,
         before,
         released,
         &Ownership {
@@ -1409,10 +1404,10 @@ fn send_prefix(addr: SocketAddr, connection: &str, path: &str, body: &[u8]) -> T
 async fn assert_disconnect_releases(
     addr: SocketAddr,
     fixture: &Fixture,
-    controller: &LifecycleController,
+    controller: &ScopedMultipartBody,
     released: usize,
 ) {
-    let before = controller.multipart_observed();
+    let before = controller.sessions.observed();
     let held = fixture.gate.reached();
     let socket = send_prefix(addr, wire::CLOSE_AFTER_RESPONSE, "/hold", &held_body());
     let gate = Arc::clone(&fixture.gate);
@@ -1425,7 +1420,8 @@ async fn assert_disconnect_releases(
     assert_ownership_released(
         "a disconnect releases everything the session owned",
         fixture,
-        controller,
+        &controller.sessions,
+        &controller.bodies,
         before,
         released,
         &Ownership {
@@ -1451,10 +1447,10 @@ async fn assert_disconnect_releases(
 async fn assert_reset_releases(
     addr: SocketAddr,
     fixture: &Fixture,
-    controller: &LifecycleController,
+    controller: &ScopedMultipartBody,
     released: usize,
 ) {
-    let before = controller.multipart_observed();
+    let before = controller.sessions.observed();
     let accepted = before.commands_accepted();
     let body = held_body();
     let mut client = PersistentH2Client::connect(addr, BOUND).await;
@@ -1463,7 +1459,8 @@ async fn assert_reset_releases(
     // Two commands: the field, and the chunk read the reset interrupts.
     assert!(
         offer_frames_until(&mut upload, &body, &mut offered, || controller
-            .multipart_observed()
+            .sessions
+            .observed()
             .commands_accepted()
             >= accepted + 2)
         .await,
@@ -1471,11 +1468,20 @@ async fn assert_reset_releases(
     );
     upload.reset();
     drop(upload);
-    client.close().await;
+    // Settled rather than aborted, for the reason
+    // [`assert_handler_cancellation_releases`] states: the claim is that the
+    // peer's reset reached the server, and an aborted connection can take the
+    // queued `RST_STREAM` down with it. What is left is not a quieter version of
+    // the same event. A peer that goes with bytes it never sent leaves an
+    // out-of-window reset its host may discard, and the server then holds a live
+    // stream nothing will ever end. The stream just reset is the only one this
+    // connection opened, so nothing is left for the connection to wait on.
+    client.close_settled().await;
     assert_ownership_released(
         "a stream reset releases everything the session owned",
         fixture,
-        controller,
+        &controller.sessions,
+        &controller.bodies,
         before,
         released,
         &Ownership {
@@ -1531,14 +1537,14 @@ async fn assert_cancellation_row(
     after: Cancelled,
     addr: SocketAddr,
     fixture: &Fixture,
-    controller: &Arc<LifecycleController>,
+    controller: &Arc<ScopedMultipartBody>,
     released: usize,
 ) {
     let (path, kind) = match after {
         Cancelled::Report => ("/cancel-error", RejectionKind::Application),
         Cancelled::Retry => ("/cancel-retry", RejectionKind::Multipart),
     };
-    let before = controller.multipart_observed();
+    let before = controller.sessions.observed();
     let accepted = before.commands_accepted();
     let mut socket = send_prefix(addr, wire::CLOSE_AFTER_RESPONSE, path, &held_body());
     // Three commands: the field, the chunk that proves ingress is live, and the
@@ -1546,7 +1552,7 @@ async fn assert_cancellation_row(
     let observing = Arc::clone(controller);
     assert!(
         arrived(BOUND, move || {
-            observing.multipart_observed().commands_accepted() >= accepted + 3
+            observing.sessions.observed().commands_accepted() >= accepted + 3
         })
         .await,
         "{path}: the read the handler cancels was accepted first"
@@ -1563,7 +1569,8 @@ async fn assert_cancellation_row(
     assert_ownership_released(
         path,
         fixture,
-        controller,
+        &controller.sessions,
+        &controller.bodies,
         before,
         released,
         &Ownership {
@@ -1588,11 +1595,11 @@ const SHUTDOWN_BYTES: usize = 128 * 1024;
 /// with the rows after it would be deciding their transport for them.
 async fn assert_shutdown_drains_held_session() {
     let fixture = Fixture::new();
-    let port = wire::reserve_observed();
+    let port = wire::reserve_multipart_body();
     let controller = port.controller();
     let server = port.serve(live_router(&fixture));
     let addr = server.addr();
-    let before = controller.multipart_observed();
+    let before = controller.sessions.observed();
     let body = multipart_body(BOUNDARY, &[Field::bytes("upload", &[5u8; SHUTDOWN_BYTES])])
         .into_boxed_slice();
 
@@ -1637,7 +1644,8 @@ async fn assert_shutdown_drains_held_session() {
     assert_ownership_released(
         "a drained shutdown releases everything the session owned",
         &fixture,
-        &controller,
+        &controller.sessions,
+        &controller.bodies,
         before,
         1,
         &Ownership {
@@ -1665,10 +1673,10 @@ async fn assert_shutdown_drains_held_session() {
 async fn assert_handler_cancellation_releases(
     addr: SocketAddr,
     fixture: &Fixture,
-    controller: &LifecycleController,
+    controller: &ScopedMultipartBody,
     released: usize,
 ) {
-    let before = controller.multipart_observed();
+    let before = controller.sessions.observed();
     let (dropped, resumed) = (fixture.held.dropped(), fixture.held.resumed());
     let held = fixture.gate.reached();
     let body = held_body();
@@ -1694,7 +1702,8 @@ async fn assert_handler_cancellation_releases(
     assert_ownership_released(
         label,
         fixture,
-        controller,
+        &controller.sessions,
+        &controller.bodies,
         before,
         released,
         &Ownership {
@@ -1723,7 +1732,7 @@ async fn assert_handler_cancellation_releases(
 #[tokio::test(flavor = "multi_thread")]
 async fn disconnect_reset_shutdown_and_cancellation_release_multipart_ownership() {
     let fixture = Fixture::new();
-    let port = wire::reserve_observed();
+    let port = wire::reserve_multipart_body();
     let controller = port.controller();
     let server = port.serve(live_router(&fixture));
     let addr = server.addr();
@@ -1816,7 +1825,7 @@ struct Escaping {
 async fn assert_escape_row(
     row: &Escaping,
     fixture: &Fixture,
-    controller: &Arc<LifecycleController>,
+    controller: &Arc<ScopedMultipartBody>,
     released: usize,
 ) {
     let &Escaping {
@@ -1825,15 +1834,16 @@ async fn assert_escape_row(
         path,
         addr,
     } = row;
-    let checkpoint = LifecycleCheckpoint::BeforeMultipartResponseSelection;
-    let before = controller.multipart_observed();
+    let checkpoint = MultipartOwnerEdge::BeforeResponseSelection;
+    let before = controller.sessions.observed();
     controller
+        .sessions
         .pause_once(checkpoint)
         .expect("the response-selection checkpoint armed");
     let sending = send_escaping(transport, addr, path);
     wire::wait_until_paused_bounded(controller, checkpoint, path).await;
 
-    let observed = controller.multipart_observed();
+    let observed = controller.sessions.observed();
     assert_eq!(
         (observed.revocations(), observed.drivers_terminated()),
         (before.revocations() + 1, before.drivers_terminated() + 1),
@@ -1849,12 +1859,13 @@ async fn assert_escape_row(
         &fixture.escapes,
         escape,
         observed.body_frames_polled(),
-        controller,
+        &controller.sessions,
         path,
         BOUND,
     )
     .await;
     controller
+        .sessions
         .release(checkpoint)
         .expect("the checkpoint released");
 
@@ -1874,7 +1885,7 @@ async fn assert_escape_row(
 #[tokio::test(flavor = "multi_thread")]
 async fn escaped_stream_handle_is_inert_after_live_handler_completion() {
     let fixture = Fixture::new();
-    let port = wire::reserve_observed();
+    let port = wire::reserve_multipart_body();
     let controller = port.controller();
     let server = port.serve(live_router(&fixture));
     let addr = server.addr();
@@ -1934,12 +1945,12 @@ enum Stall {
 
 impl Stall {
     /// The production checkpoint this stall holds the session at.
-    const fn checkpoint(self) -> Option<LifecycleCheckpoint> {
+    const fn checkpoint(self) -> Option<MultipartOwnerEdge> {
         match self {
             Self::BeforeFrame => None,
-            Self::AfterAdmission => Some(LifecycleCheckpoint::MultipartCommandAccepted),
-            Self::ParserRetention => Some(LifecycleCheckpoint::MultipartIngressAdvanced),
-            Self::AfterReply => Some(LifecycleCheckpoint::MultipartReplyPublished),
+            Self::AfterAdmission => Some(MultipartOwnerEdge::CommandAccepted),
+            Self::ParserRetention => Some(MultipartOwnerEdge::IngressAdvanced),
+            Self::AfterReply => Some(MultipartOwnerEdge::ReplyPublished),
         }
     }
 }
@@ -2026,9 +2037,9 @@ impl SessionTerminal {
     /// session settles or is taken away mid-turn. The escalation is held at the
     /// production checkpoint the supervisor selects it from, so what ends this
     /// row is the bound it configured rather than that race.
-    const fn escalation(self) -> Option<LifecycleCheckpoint> {
+    const fn escalation(self) -> Option<ServerStopEdge> {
         match self {
-            Self::Shutdown => Some(LifecycleCheckpoint::SupervisorSelectedDeadline),
+            Self::Shutdown => Some(ServerStopEdge::SupervisorSelectedDeadline),
             Self::BodyIdle | Self::RequestTotal | Self::TransferTotal | Self::Disconnect => None,
         }
     }
@@ -2083,22 +2094,24 @@ fn multipart_deadline_revokes_without_a_second_byte_owner() {
 async fn assert_session_revoked(stall: Stall, terminal: SessionTerminal) {
     let label = format!("{stall:?} ended by {terminal:?}");
     let fixture = Fixture::new();
-    let port = wire::reserve_observed();
+    let port = wire::reserve_stopped_multipart();
     let controller = port.controller();
     let (listener, addr, _) = port.into_owned_parts();
     let handle = camber::http::server(live_router(&fixture))
         .policy(terminal.policy())
         .serve_background(listener)
         .expect("the owned server requires a Tokio runtime");
-    let before = controller.multipart_observed();
+    let before = controller.sessions.observed();
 
-    if let Some(checkpoint) = terminal.escalation() {
+    if let Some(edge) = terminal.escalation() {
         controller
-            .pause_once(checkpoint)
-            .expect("arm the supervisor's escalation checkpoint");
+            .stop
+            .pause_once(edge)
+            .expect("arm the supervisor's escalation edge");
     }
     if let Some(checkpoint) = stall.checkpoint() {
         controller
+            .sessions
             .pause_once(checkpoint)
             .expect("arm the session's stall checkpoint");
     }
@@ -2176,18 +2189,14 @@ async fn read_session_answer(mut socket: TcpStream) -> Option<wire::HttpResponse
 }
 
 /// Wait until the session has been held at its stall checkpoint.
-async fn wait_stalled(
-    controller: &LifecycleController,
-    checkpoint: LifecycleCheckpoint,
-    label: &str,
-) {
-    tokio::time::timeout(BOUND, controller.wait_until_paused(checkpoint))
+async fn wait_stalled<P: OwnerPoint>(owners: &impl Owns<P::Owner>, point: P, label: &str) {
+    tokio::time::timeout(BOUND, point.paused_on(owners))
         .await
-        .unwrap_or_else(|_| panic!("{label}: {checkpoint:?} was never reached"))
-        .unwrap_or_else(|error| panic!("{label}: waiting for {checkpoint:?} failed: {error}"));
-    controller
-        .release(checkpoint)
-        .expect("release the session's stall checkpoint");
+        .unwrap_or_else(|_| panic!("{label}: {point:?} was never reached"))
+        .unwrap_or_else(|error| panic!("{label}: waiting for {point:?} failed: {error}"));
+    point
+        .release_on(owners)
+        .expect("release the session's stall point");
 }
 
 /// Assert the answer this row's terminal declares, and the mapper calls it owes.
@@ -2250,22 +2259,23 @@ fn assert_mapped_once(kind: Option<RejectionKind>, recorded: &[Observed], label:
 /// session makes: the coordinator closed command admission exactly once, and the
 /// upload owner that ended it counted no bytes of its own.
 fn assert_session_released(
-    controller: &LifecycleController,
+    controller: &ScopedStoppedMultipart,
     fixture: &Fixture,
     before: MultipartObservation,
     terminal: SessionTerminal,
     label: &str,
 ) {
     let settled = wire::poll_until(BOUND, || {
-        controller.multipart_observed().revocations() > before.revocations()
+        controller.sessions.observed().revocations() > before.revocations()
             && fixture.released.load(Ordering::SeqCst) == 1
     });
-    let after = controller.multipart_observed();
+    let after = controller.sessions.observed();
     assert!(settled, "{label}: the session never revoked: {after:?}");
     assert_ownership_released(
         label,
         fixture,
-        controller,
+        &controller.sessions,
+        &controller.bodies,
         before,
         1,
         &Ownership {
@@ -2286,7 +2296,7 @@ fn assert_session_released(
     // The one byte-authority claim: this row's server policy declared an upload
     // maximum, and the owner carries its deadlines without it — so nothing
     // counted this request's payload but route-aware admission.
-    let transfers = controller.transfers_observed();
+    let transfers = controller.transfers.observed();
     assert_eq!(
         transfers.upload.max_bytes, None,
         "{label}: the upload owner is no second byte authority: {transfers:?}"

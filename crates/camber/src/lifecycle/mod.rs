@@ -18,8 +18,10 @@ mod resource_budget;
 mod resource_failure;
 mod resource_phase;
 mod shutdown;
+mod shutdown_owner;
 
 pub(crate) use shutdown::AggregateShutdown;
+pub(crate) use shutdown_owner::ShutdownOwner;
 
 pub use shutdown::FORCED_JOIN_GRACE;
 

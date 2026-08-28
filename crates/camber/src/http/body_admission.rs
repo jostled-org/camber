@@ -18,7 +18,7 @@
 #![deny(clippy::cast_possible_truncation)]
 
 use super::dispatch::ResolvedRouteAuthority;
-use super::mock::{LifecycleCheckpoint, LifecycleScript};
+use super::mock::{LifecycleScript, ResponseCommitmentEdge};
 use super::rejection::{Rejected, RequestId};
 use super::request::RequestHead;
 use crate::RuntimeError;
@@ -360,9 +360,9 @@ pub(super) async fn admit(
         Some(coding) => return Err(Rejected::undecodable_transfer_coding(coding)),
         None => admit_declared(plan, head, observer)?,
     };
-    LifecycleScript::pause_at(
+    LifecycleScript::pause_at_response_commit(
         observer.map(Arc::as_ref),
-        LifecycleCheckpoint::RequestBodyLimitConfigured(admitted.limit),
+        ResponseCommitmentEdge::RequestBodyLimitConfigured(admitted.limit),
     )
     .await;
     Ok(admitted)

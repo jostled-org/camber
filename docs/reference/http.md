@@ -444,18 +444,44 @@ committed `101`, after which the session reports through its own terminals. So t
 duration covers the whole span from admitted head to terminal, and a request that is
 still streaming has not been counted yet.
 
-Two fields name how it ended. `terminal` is the class the operation ended on —
-`completed`, `disconnect`, `stream_reset`, `server_shutdown`, or the deadline,
-cancellation, and byte-limit terminals. `boundary` is the configured bound that ended
-it, drawn from the same `DeadlineBoundary` and `ByteBoundary` vocabularies every typed
-failure names, or `none` when the operation crossed no bound. The highest-precedence
-terminal any owner fixed is the one recorded.
+Seven fields name how it ended:
+status, origin, rejection, delivery, connection_end, boundary, and shutdown.
+They are orthogonal, and setting one neither erases nor outranks another, because a
+request does not end on one thing.
+
+- `origin` is the producer that took the operation's response commitment —
+  `application`, `middleware`, `router`, `framework`, `upstream`, `static-file`, `sse`,
+  `grpc`, `websocket`, `internal`, or `protocol` for a head Hyper wrote with no Camber
+  producer behind it. It is `none` when the operation ended before any producer
+  committed a head.
+- `rejection` is the typed framework rejection its mapper applied, and only a
+  `framework` origin carries one. Every other record names `none`.
+- `delivery` is `not-committed`, `produced`, or `interrupted`.
+- `connection_end` is `peer-disconnected`, `stream-reset`, or `transport-failed`, and
+  `none` for an operation whose connection outlived it.
+- `boundary` is the configured bound that ended it, drawn from the same
+  `DeadlineBoundary` and `ByteBoundary` vocabularies every typed failure names, or
+  `none` when the operation crossed no bound.
+- `shutdown` is the last server phase committed before the operation finalized —
+  `graceful`, `cancelled`, or `deadline-expired` — and `none` for a running server.
+- `status` is the status the peer was given, and `none` when no head committed.
+
+Each fact is written once, by the one owner that can state it: the response commitment
+names the origin, the mapper names the rejection, the enforcer names the boundary, the
+connection owner names the connection end, and one finalizer names delivery and the
+shutdown it snapshotted. No single fact outranks the rest and none is folded into
+another, so an application response interrupted by a departing peer keeps its producer
+and a payload past its route maximum still says the refusal it produced reached the peer.
+Which fact ended the operation is the causal question, and the response commitment
+answers it: the first committed fact owns the answer.
 
 With metrics enabled, `http_rejections_total` counts refusals under two labels: `kind`
-and `status`. `http_requests_total` and `http_request_duration_seconds` carry five:
-`method`, `status`, `protocol`, `terminal`, and `boundary`. Every vocabulary is closed.
-A request identifier, a path, a route, a peer address, and an error string are never
-labels — they appear in the structured events, where cardinality is not a cost.
+and `status`. `http_requests_total` and `http_request_duration_seconds` carry nine, and
+they are causal facts rather than a ranking: `method`, `status`, `origin`, `rejection`,
+`delivery`, `connection_end`, `boundary`, and `shutdown`, beside `protocol`. Every
+vocabulary is closed. A request identifier, a path, a route, a peer address, and an
+error string are never labels — they appear in the structured events, where cardinality
+is not a cost.
 
 ## Cookies
 
@@ -726,11 +752,30 @@ when its deadline expires.
 ### Terminal causes
 
 A connection has one cause. It is set once, and every sender clone and the
-receiver read that same cause. When several terminal events are ready in one
-turn, the highest of these wins: `ServerCancelled`, `ServerShutdown`,
-`PeerClosed`, `PeerDisconnected`, `ReceiverDropped`, `SendersDropped`. A cause
-fixed in an earlier turn stays authoritative, so a shutdown deadline that
-escalates cannot rewrite `ServerShutdown` as `ServerCancelled`.
+receiver read that same cause. The cause is causal, not ranked: the first fact
+committed is the one both directions report, and nothing committed afterwards
+rewrites it. So a shutdown deadline that escalates cannot turn `ServerShutdown`
+into `ServerCancelled`, and a peer close the bridge has already answered stands
+under a later stop.
+
+Server control is ordered against the connection through the server's own stop
+state rather than through the notification that carries it. `cancel` commits
+forced termination before it returns, so a connection that had not committed a
+cause of its own by then reports `ServerCancelled`, whatever it notices next. A
+graceful `shutdown` closes admission and lets open connections finish, so a
+connection that ends during the drain reports why it ended; only one that ends
+for nothing else reports `ServerShutdown`.
+
+Two facts with no barrier between them are genuinely concurrent, and either may
+commit. A peer that disconnects while cancellation is being committed reports
+`PeerDisconnected` or `ServerCancelled`; both release the same owners.
+
+Which half the application let go of decides which cause it gets. Dropping the
+receiver alone ends the connection with `ReceiverDropped`, and dropping the last
+sender alone ends it with `SendersDropped`. Letting go of the whole connection —
+both halves, or the `WsConn` itself — is `SendersDropped`, not `ReceiverDropped`:
+an application that released everything is done producing rather than refusing to
+read, so the frames it already admitted are drained to the peer before the close.
 
 The cause fixes what happens to the frames each queue still holds:
 
@@ -757,13 +802,60 @@ The callback runs on the blocking pool. What it may admit through
 | Owned server started on bare Tokio | refused with `NoRuntime` |
 | Synchronous serving (`serve`, `serve_listener`) | admitted to the runtime the terminal call captured, which `serve` establishes when none is ambient |
 
-A refused spawn never runs its closure, so a receiver captured by that closure is
-dropped and the connection ends with `ReceiverDropped`.
+A refused spawn never runs its closure, so whatever that closure captured is
+dropped. A closure holding only the receiver ends the connection with
+`ReceiverDropped`; one holding the whole connection ends it with
+`SendersDropped`.
 
 The callback itself is not a root-scope child. The child it admits is, and
-runtime completion waits for that child. Server completion is separate: it owns
-the bridge, its two directional pumps, the transport, and the connection permit,
-and it makes no claim about the callback or about application-owned work.
+runtime completion waits for that child. Server completion owns the bridge, its
+two directional pumps, the transport, and the connection permit, and it makes no
+claim about application-owned work the callback started.
+
+### Callback settlement
+
+Camber starts the callback, so it keeps the handle. Every terminal closes the
+endpoints a callback is meant to wake on — the receive queue and send admission
+— and the connection then waits for the callback within one deadline, fixed at
+that close:
+
+| What the server had committed when the endpoints closed | The callback join waits until |
+|---|---|
+| Nothing: a peer, direction-owner, or transport terminal | that close, plus the fixed 100 ms forced-join grace |
+| A graceful stop | the later of the shutdown deadline and that close, plus that same 100 ms |
+| A cancellation | that close, plus that same 100 ms |
+| An expired shutdown deadline | that close, plus that same 100 ms |
+
+The graceful row takes the later of the two on purpose. A shutdown deadline that
+had already passed at the close would otherwise fix a deadline in the past, and
+the callback would be named outstanding without ever having been waited on.
+
+A cancellation accepted during a graceful drain brings the deadline forward to
+the grace, measured from the instant the join hears the escalation — not from
+the commit — so a bridge the executor reaches late still gets its whole grace.
+Only a commanded `cancel()` narrows it. An abandoned handle forces the same stop
+but keeps the aggregate's remaining time, because giving that time up is
+something a caller has to ask for. Nothing pushes the deadline back.
+
+A callback that returns inside its deadline is joined, and Camber says nothing
+about it. Application code still blocked at the deadline is named rather than
+waited on further: the connection emits one WARN event,
+`camber.websocket.callback.outstanding`, carrying
+`disposition="outstanding-after-forced-grace"`, the committed `cause`, and
+`shutdown=none|graceful|cancelled|deadline-expired`. That label is the whole
+observable form of the disposition — the internal
+`CallbackDisposition::OutstandingAfterForcedGrace` is private to the bridge and
+is not a name to look up. `shutdown` says which transition the callback entered
+under, so a callback that entered under a graceful stop and returned
+cooperatively reports `shutdown=graceful`; `deadline-expired` requires the
+callback to have still been outstanding at the deadline. Tokio cannot take a
+blocking thread back, so Camber stops waiting and does not claim the callback
+exited.
+
+The connection gives its permit back after that join or that disposition, and
+never before one of them. A blocked callback therefore holds its connection for
+its whole deadline, and a graceful stop waiting on one ends on the shutdown
+deadline it was given — which is the accepted command's own outcome.
 
 ## Server-Sent Events
 
@@ -1078,14 +1170,17 @@ Camber coordinates a gRPC call only until tonic commits its response head.
 Up to that head the call runs under the same admitted operation every other request
 does. Its payload reaches tonic as a `GrpcRequestBody`, which carries the effective
 upload budget — byte maximum, quiet interval, lifetime — and the request's own
-body-idle interval. One coordinator then weighs four sources under the shared
-precedence table: a terminal that body fixed, the request total, the server's
-shutdown or cancellation, and tonic's head. A local winner cancels the tonic future
-and answers through the route's rejection mapper, exactly once. Application work
+body-idle interval. One coordinator then reads four sources: a terminal that body
+fixed, the request total, the server's shutdown or cancellation, and tonic's head.
+They are not ranked against each other. Each reaches the operation's one set-once
+response commitment, and the first one there owns the answer — tonic takes it as
+it crosses the handoff, a cause takes it where it is read. A cause that took the
+commitment cancels the tonic future and answers through the route's rejection
+mapper, exactly once; a cause that finds it taken maps nothing. Application work
 inside tonic may already have run; cancellation makes no rollback claim.
 
-A head that wins alone is committed as tonic produced it, and the RPC is tonic's
-from there:
+A head that took the commitment is committed as tonic produced it, and the RPC is
+tonic's from there:
 
 - A later upload failure ends tonic's request stream with the typed `RuntimeError`
   the owner that measured the bound named. Tonic converts it to an RPC status.

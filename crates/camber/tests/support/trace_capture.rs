@@ -121,6 +121,7 @@ where
 /// Record `event` into each subscription whose needle appears in its fields.
 fn fan_out(event: &camber::tracing::Event<'_>, subscriptions: &[Subscription]) {
     let mut fields = FieldText(String::new());
+    named(&mut fields, event.metadata().name());
     event.record(&mut fields);
     let text = fields.0;
     for subscription in subscriptions
@@ -132,6 +133,28 @@ fn fan_out(event: &camber::tracing::Event<'_>, subscriptions: &[Subscription]) {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .push(text.as_str());
+    }
+}
+
+/// Open the transcript with `name=<event name>` when production named the event.
+///
+/// A `tracing` macro given no name generates `"event <file>:<line>"`, which is
+/// the call site rather than a claim about what the event is. Recording that
+/// would put a source path in front of every captured event and let a needle
+/// match on where the code lives. A name production chose carries no space, so
+/// the two are told apart by exactly the text the macro would have generated.
+fn opening_name(name: &'static str) -> Option<&'static str> {
+    match name.starts_with("event ") {
+        true => None,
+        false => Some(name),
+    }
+}
+
+/// Write the opening `name=` field, for an event that has a name of its own.
+fn named(fields: &mut FieldText, name: &'static str) {
+    if let Some(name) = opening_name(name) {
+        fields.0.push_str("name=");
+        fields.0.push_str(name);
     }
 }
 
@@ -326,11 +349,31 @@ pub fn assert_field_value(event: &str, name: &str, value: &str, label: &str) {
 /// it as a literal.
 pub fn field_value<'a>(event: &'a str, name: &str) -> Option<&'a str> {
     let needle = format!("{name}=");
-    let (at, _) = event
-        .match_indices(needle.as_str())
-        .find(|(at, _)| *at == 0 || event.as_bytes()[at - 1] == b' ')?;
+    let at = field_starts(event, needle.as_str()).next()?;
     let rest = &event[at + needle.len()..];
     Some(rest.split_once(' ').map_or(rest, |(value, _)| value))
+}
+
+/// How many times `event` opens a field called `name`.
+///
+/// A count rather than a first hit, for the rows whose claim is that a record
+/// carries one of something: an event that named a field twice and an event
+/// that named it once read the same to [`field_value`], which takes the first.
+pub fn field_occurrences(event: &str, name: &str) -> usize {
+    field_starts(event, &format!("{name}=")).count()
+}
+
+/// Where `event` opens a field spelled `needle`, at a field boundary.
+///
+/// The boundary is the whole of it. `name=` also appears inside
+/// `request_name=`, so a scan that matched anywhere would read a longer field's
+/// value as a shorter field's. A field starts the record or follows a space,
+/// and that rule is stated once here for the reader and the counter alike.
+fn field_starts<'a>(event: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
+    event
+        .match_indices(needle)
+        .filter(|(at, _)| *at == 0 || event.as_bytes()[at - 1] == b' ')
+        .map(|(at, _)| at)
 }
 
 /// Assert the fixed sentence is the whole message, with nothing spliced into it.

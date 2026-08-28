@@ -3,7 +3,7 @@
 
 use crate::common;
 
-use camber::http::mock::{self, LifecycleController};
+use camber::http::mock::{self, ScopedTransferOwner, TransferOwnerController};
 use camber::http::{ProxyPolicy, RejectionKind, Router};
 use camber::runtime;
 use std::net::SocketAddr;
@@ -177,8 +177,8 @@ fn rows() -> Box<[Row]> {
 
 /// Watch the upstream a case reads from, so the case reads what the production
 /// collector published while it collected that upstream's answer.
-fn watch(addr: SocketAddr) -> LifecycleController {
-    mock::lifecycle(addr).expect("one controller for this upstream")
+fn watch(addr: SocketAddr) -> ScopedTransferOwner {
+    mock::transfer_owner(addr).expect("one transfer-owner controller for this upstream")
 }
 
 /// Run one row end to end against a real upstream and a real peer.
@@ -266,7 +266,7 @@ fn assert_refused(
 /// the collection was permitted: a collector that appended the crossing frame
 /// and only then refused it would report those bytes here, and a peer-visible
 /// 502 would hide them.
-fn assert_retention(row: &str, observed: &LifecycleController, expected: &Retention) {
+fn assert_retention(row: &str, observed: &TransferOwnerController, expected: &Retention) {
     assert_eq!(
         observed.collected_chunks_polled() > 0,
         expected.polled,

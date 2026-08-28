@@ -11,6 +11,7 @@ use crate::common;
 use crate::http as wire;
 
 use camber::RuntimeError;
+use camber::http::mock::ScopedRequestBodyOwner;
 use camber::http::{BodyAdmission, BodyAdmissionContext, RejectionKind, Request, Response, Router};
 use camber::runtime;
 use common::{Journal, assert_no_private_text, drain, only, recording_mapper};
@@ -98,8 +99,8 @@ fn limited_server(
     calls: &Arc<AtomicUsize>,
     drops: &Arc<AtomicUsize>,
     mapped: &Journal,
-) -> wire::ObservedServer {
-    let port = wire::reserve_observed();
+) -> wire::ObservedServer<ScopedRequestBodyOwner> {
+    let port = wire::reserve_request_body_owner();
     let mut router = Router::new();
     router.post(PLAIN_ROUTE, counting_echo(handled));
     router.post(SELECTED_ROUTE, counting_echo(handled));
@@ -137,7 +138,7 @@ fn assert_released(drops: &Arc<AtomicUsize>, expected: usize, label: &str) {
 /// The peer asks for keep-alive, so the close the server applies is the
 /// framework's own decision and not an echo of a preference.
 fn assert_withheld_declaration_closes(
-    server: &wire::ObservedServer,
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
     path: &str,
     declared: &str,
     label: &str,
@@ -167,7 +168,10 @@ fn assert_withheld_declaration_closes(
 /// ever constructed and there is no Camber identity, policy call, or mapped
 /// rejection to claim for it. Stated here rather than assumed, because the
 /// boundary is the claim.
-fn assert_undecodable_declaration_is_hypers(server: &wire::ObservedServer, mapped: &Journal) {
+fn assert_undecodable_declaration_is_hypers(
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
+    mapped: &Journal,
+) {
     let before = mapped_count(mapped);
     let (refused, mut peer) = wire::send_withheld_declaration(
         server.addr(),
@@ -243,11 +247,11 @@ fn withheld_declared_oversize_refuses_and_closes_http1_before_arrival() {
                 "no withheld row reached a handler"
             );
             assert_eq!(
-                server.controller().body_frames_polled(),
+                server.controller().observed().frames_polled,
                 0,
                 "a declaration is refused before the first body poll"
             );
-            assert_eq!(server.controller().body_peak_retained_bytes(), 0);
+            assert_eq!(server.controller().observed().peak_retained_bytes, 0);
             assert_eq!(
                 mapped_count(&mapped),
                 3,
@@ -467,7 +471,7 @@ fn camber_owned_rows() -> Box<[FramingRow]> {
 
 /// Assert one framing row's answer and the observations its owner implies.
 fn assert_framing_row(
-    server: &wire::ObservedServer,
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
     row: &FramingRow,
     calls: &Arc<AtomicUsize>,
     handled: &Arc<AtomicUsize>,
@@ -685,11 +689,11 @@ fn live_chunked_buffered_crossing_never_reaches_handler() {
             assert_eq!(seen.kind, RejectionKind::BodyLimit);
             assert_eq!(seen.route.as_deref(), Some(PLAIN_ROUTE));
             assert!(
-                server.controller().body_frames_polled() >= 2,
+                server.controller().observed().frames_polled >= 2,
                 "the frames before the crossing were polled and counted"
             );
             assert_eq!(
-                server.controller().body_peak_retained_bytes(),
+                server.controller().observed().peak_retained_bytes,
                 CEILING - 4,
                 "the crossing frame was measured before it could be retained"
             );
@@ -713,8 +717,8 @@ const HELD_ROUTE: &str = "/held/:id";
 fn holding_server(
     entered: std::sync::mpsc::SyncSender<()>,
     drops: &Arc<AtomicUsize>,
-) -> wire::ObservedServer {
-    let port = wire::reserve_observed();
+) -> wire::ObservedServer<ScopedRequestBodyOwner> {
+    let port = wire::reserve_request_body_owner();
     let mut router = Router::new();
     router.post(HELD_ROUTE, move |_request: &Request| {
         let entered = entered.clone();
@@ -741,7 +745,7 @@ fn holding_server(
 
 /// Disconnect while the body is still arriving, and prove one release.
 fn assert_disconnect_during_collection(drops: &Arc<AtomicUsize>) {
-    let port = wire::reserve_observed();
+    let port = wire::reserve_request_body_owner();
     let mut router = Router::new();
     let handled = Arc::new(AtomicUsize::new(0));
     router.post(PLAIN_ROUTE, counting_echo(&handled));
@@ -771,7 +775,7 @@ fn assert_disconnect_during_collection(drops: &Arc<AtomicUsize>) {
         "an abandoned body reaches no handler"
     );
     assert_eq!(
-        server.controller().body_permit_owners_dropped(),
+        server.controller().observed().permit_owners_dropped,
         1,
         "the listener counted the same single release"
     );
@@ -810,7 +814,7 @@ fn buffered_disconnect_and_request_cancellation_release_permit_once() {
 
             drop(peer);
             assert_released(&cancelled, 1, "request-future cancellation");
-            assert_eq!(server.controller().body_permit_owners_dropped(), 1);
+            assert_eq!(server.controller().observed().permit_owners_dropped, 1);
 
             runtime::request_shutdown();
         })
@@ -1003,7 +1007,7 @@ fn http2_body_limit_refusals_are_stream_local_and_connection_remains_reusable() 
                 "the plain route's policy hands over no permit"
             );
             assert_eq!(
-                server.controller().body_peak_retained_bytes(),
+                server.controller().observed().peak_retained_bytes,
                 CEILING - 4,
                 "no refused stream retained past its bound"
             );
@@ -1104,8 +1108,8 @@ fn pre_read_server(
     calls: &Arc<AtomicUsize>,
     drops: &Arc<AtomicUsize>,
     mapped: &Journal,
-) -> wire::ObservedServer {
-    let port = wire::reserve_observed();
+) -> wire::ObservedServer<ScopedRequestBodyOwner> {
+    let port = wire::reserve_request_body_owner();
     let mut router = Router::new();
     router.post(DECLINED_ROUTE, counting_echo(handled));
     router.post(PANICKING_ROUTE, counting_echo(handled));
@@ -1128,8 +1132,12 @@ fn pre_read_server(
 }
 
 /// Assert one HTTP/1 row closes its connection behind the payload it withheld.
-fn assert_http1_disposition(server: &wire::ObservedServer, row: &PreRead, mapped: &Journal) {
-    let released = server.controller().body_permit_owners_dropped();
+fn assert_http1_disposition(
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
+    row: &PreRead,
+    mapped: &Journal,
+) {
+    let released = server.controller().observed().permit_owners_dropped;
     let (refused, mut peer) = wire::send_withheld_declaration(
         server.addr(),
         wire::KEEP_CONNECTION,
@@ -1148,7 +1156,7 @@ fn assert_http1_disposition(server: &wire::ObservedServer, row: &PreRead, mapped
     assert_no_private_text(&refused, &[POLICY_PANIC], row.label);
     assert_row_owner(row, mapped);
     assert_eq!(
-        server.controller().body_frames_polled(),
+        server.controller().observed().frames_polled,
         0,
         "{}: nothing polls a frame before a pre-read refusal",
         row.label
@@ -1183,16 +1191,20 @@ fn assert_row_owner(row: &PreRead, mapped: &Journal) {
 }
 
 /// Assert one row released exactly the permits it was handed.
-fn assert_permit_delta(server: &wire::ObservedServer, released: usize, row: &PreRead) {
+fn assert_permit_delta(
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
+    released: usize,
+    row: &PreRead,
+) {
     let settled = wire::poll_until(SETTLE_BOUND, || {
-        server.controller().body_permit_owners_dropped() == released + row.releases
+        server.controller().observed().permit_owners_dropped == released + row.releases
     });
     assert!(
         settled,
         "{}: expected {} permit releases, saw {}",
         row.label,
         row.releases,
-        server.controller().body_permit_owners_dropped() - released
+        server.controller().observed().permit_owners_dropped - released
     );
 }
 
@@ -1205,12 +1217,12 @@ fn assert_permit_delta(server: &wire::ObservedServer, released: usize, row: &Pre
 /// owner owed — are the same claims, made per row rather than in aggregate.
 fn assert_http2_disposition(
     client: &mut common::PersistentH2Client,
-    server: &wire::ObservedServer,
+    server: &wire::ObservedServer<ScopedRequestBodyOwner>,
     row: &PreRead,
     mapped: &Journal,
 ) {
-    let released = server.controller().body_permit_owners_dropped();
-    let polled = server.controller().body_frames_polled();
+    let released = server.controller().observed().permit_owners_dropped;
+    let polled = server.controller().observed().frames_polled;
     let refused = common::block_on(async {
         client
             .send_withheld(
@@ -1231,7 +1243,7 @@ fn assert_http2_disposition(
     assert_no_private_text(&refused, &[POLICY_PANIC], row.label);
     assert_row_owner(row, mapped);
     assert_eq!(
-        server.controller().body_frames_polled(),
+        server.controller().observed().frames_polled,
         polled,
         "{}: nothing polls a frame before a pre-read refusal",
         row.label
@@ -1315,7 +1327,7 @@ mod cross_class {
 
     use camber::http::{
         BodyAdmission, BodyAdmissionContext, GrpcRouter, RejectionKind, Request, RequestBodyMode,
-        Response, Router, SseWriter, StreamResponse, WsConn, mock::LifecycleController,
+        Response, Router, SseWriter, StreamResponse, WsConn, mock::ScopedRequestBodyOwner,
     };
     use camber::{Resource, RuntimeError};
     use common::{Journal, drain, recording_mapper};
@@ -1457,7 +1469,7 @@ mod cross_class {
     /// A policy that journals every request it is asked about, then admits it.
     fn journalling_policy(
         observations: &Observations,
-        controller: &Arc<LifecycleController>,
+        controller: &Arc<ScopedRequestBodyOwner>,
     ) -> impl Fn(&BodyAdmissionContext<'_>) -> Result<BodyAdmission, RuntimeError> + Send + Sync + 'static
     {
         let admitted = Arc::clone(&observations.admitted);
@@ -1470,7 +1482,7 @@ mod cross_class {
                 .push(Admitted {
                     route: context.route().into(),
                     streaming: context.mode() == RequestBodyMode::Streaming,
-                    polled: controller.body_frames_polled(),
+                    polled: controller.observed().frames_polled,
                 });
             Ok(BodyAdmission::with_permit(
                 CROSS_CEILING,
@@ -1545,8 +1557,10 @@ mod cross_class {
     /// single-router class in this codebase: a host table answers no gRPC
     /// handoff at all, and the handoff is one of the bodyless classes this case
     /// exists to measure. The authority row below is written to that same fact.
-    pub(super) fn full_feature_server(observations: &Observations) -> wire::ObservedServer {
-        let port = wire::reserve_observed();
+    pub(super) fn full_feature_server(
+        observations: &Observations,
+    ) -> wire::ObservedServer<ScopedRequestBodyOwner> {
+        let port = wire::reserve_request_body_owner();
         let controller = port.controller();
         let mut router = Router::new();
         full_feature_routes(
@@ -1774,7 +1788,7 @@ mod cross_class {
 
     /// Assert every consuming class answers exactly, admitted before its first poll.
     pub(super) fn assert_consuming_rows(
-        server: &wire::ObservedServer,
+        server: &wire::ObservedServer<ScopedRequestBodyOwner>,
         observations: &Observations,
     ) {
         let rows: [(&str, &str, bool); 4] = [
@@ -1784,7 +1798,7 @@ mod cross_class {
             ("/streaming/*proxy_path", "/streaming/echo", true),
         ];
         for (route, path, streaming) in rows {
-            let polled = server.controller().body_frames_polled();
+            let polled = server.controller().observed().frames_polled;
             let before = observations.admissions();
             let answered =
                 wire::request_to_host_with_body(server.addr(), "POST", path, HOST, &[], CONSUMED)
@@ -1852,12 +1866,12 @@ fn all_bodyless_and_pre_admission_terminal_classes_skip_policy_and_frames() {
                 "no bodyless or terminal class runs an ordinary handler"
             );
             assert_eq!(
-                server.controller().body_frames_polled(),
+                server.controller().observed().frames_polled,
                 0,
                 "no bodyless or terminal class polls a payload frame"
             );
             assert_eq!(
-                server.controller().body_peak_retained_bytes(),
+                server.controller().observed().peak_retained_bytes,
                 0,
                 "no bodyless or terminal class retains payload bytes"
             );
@@ -1870,11 +1884,11 @@ fn all_bodyless_and_pre_admission_terminal_classes_skip_policy_and_frames() {
                 "every consuming class was admitted exactly once"
             );
             assert!(
-                server.controller().body_frames_polled() > 0,
+                server.controller().observed().frames_polled > 0,
                 "the same counters move once a body-consuming class reads a payload"
             );
             assert_eq!(
-                server.controller().body_peak_retained_bytes(),
+                server.controller().observed().peak_retained_bytes,
                 cross_class::CONSUMED.len(),
                 "a buffered consumer retains exactly what it was sent"
             );

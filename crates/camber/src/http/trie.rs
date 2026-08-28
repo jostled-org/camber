@@ -4,6 +4,7 @@ use super::multipart::{MultipartLimits, MultipartStream};
 use super::proxy_upstream::ProxyUpstream;
 use super::request::Params;
 use super::response::HandlerOutcome;
+use super::response_commitment::ResponseOrigin;
 use super::sse::SseWriter;
 use super::stream::StreamResponse;
 #[cfg(feature = "ws")]
@@ -115,7 +116,14 @@ impl MultipartRegistration {
 
 /// Distinguishes normal request handlers from streaming handlers.
 pub(super) enum RouteHandler {
-    Async(Handler),
+    /// A buffered handler, and the producer it answers as.
+    ///
+    /// The origin travels with the registration because the handler shape does
+    /// not name it: an application route and a served static file are the same
+    /// boxed future, and a class that derived the origin from the shape had to
+    /// answer `application` for both. Registration is the one place that knows
+    /// which producer it mounted.
+    Async(Handler, ResponseOrigin),
     Stream(StreamHandler),
     Sse(SseHandler),
     /// A streaming multipart route, held as one shared registration.
@@ -157,7 +165,7 @@ impl RouteHandler {
     /// its own answer instead of inheriting this one.
     fn answers_head(&self) -> bool {
         match self {
-            Self::Async(_)
+            Self::Async(..)
             | Self::Stream(_)
             | Self::Sse(_)
             | Self::Proxy { .. }

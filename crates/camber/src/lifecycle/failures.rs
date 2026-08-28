@@ -5,45 +5,31 @@ use super::{LifecycleFailure, LifecycleFailureKind, LifecycleParticipant, Lifecy
 use crate::RuntimeError;
 use std::sync::Arc;
 
-/// Every framework-owned participant that failed during one startup or one
+/// Every direct runtime-owned failure recorded during one startup or one
 /// teardown.
 ///
 /// Never empty: a clean run mints no aggregate at all, so a caller holding one
-/// always has at least the failure [`primary`](Self::primary) names. Entries
-/// are frozen in deterministic owner order — root scope, servers, their
-/// connections and upgrades, background children, resources, exporter, then
-/// executor — whatever order teardown happened to record them in, and keep
-/// their recording sequence inside one owner class.
+/// always has at least one failure to read. Every entry is a failure the
+/// runtime reports; none of them is elected the one to act on. A caller acts on
+/// the whole collection, through [`iter`](Self::iter) or the rendering below.
 ///
-/// The value is shared, not copied: `RuntimeError::Lifecycle` carries it behind
-/// an `Arc` so a caller may retain the whole account past the runtime that
-/// produced it.
+/// Entries are frozen in a stable rendering order — root scope, background
+/// children, resources, then the exporter — whatever order teardown happened to
+/// record them in, and keep their recording sequence inside one owner class.
+/// That order is reproducible output and nothing else: it is not causal
+/// precedence, and the first entry is not more responsible than the last.
+///
+/// The value is shared, not copied: the entries sit behind one `Arc`, so
+/// cloning the account is a refcount bump and a caller may retain the whole
+/// thing past the runtime that produced it.
 #[derive(Clone, Debug)]
 pub struct LifecycleFailures {
-    /// Every recorded failure in owner order.
+    /// Every recorded failure in the stable rendering order.
     entries: Arc<[LifecycleFailure]>,
-    /// The first failure in deterministic owner order.
-    ///
-    /// Held by value rather than as an index into `entries`. Both say the same
-    /// thing about a slice this type freezes and never mutates, but only the
-    /// value makes [`primary`](Self::primary) total: an index would leave the
-    /// one accessor a caller reaches for first as the only place in this crate
-    /// that could panic on an invariant no type states. The clone shares the
-    /// entry's payloads rather than copying them.
-    primary: LifecycleFailure,
 }
 
 impl LifecycleFailures {
-    /// The failure a caller should act on.
-    ///
-    /// Chosen by owner order, so the outermost failed owner is primary whatever
-    /// its failure kind. The rest stay available through [`iter`](Self::iter).
-    #[must_use]
-    pub const fn primary(&self) -> &LifecycleFailure {
-        &self.primary
-    }
-
-    /// Every recorded failure, in owner order.
+    /// Every recorded failure, in the stable rendering order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &LifecycleFailure> {
         self.entries.iter()
     }
@@ -63,9 +49,20 @@ impl LifecycleFailures {
     }
 }
 
+/// Every recorded failure on one operator line, in the stable rendering order.
+///
+/// All of them, not a chosen one and a count: an account that rendered a single
+/// entry would put the runtime back in the business of deciding which owner an
+/// operator should read, which is exactly what having no primary means it does
+/// not do. The count leads so a reader knows how many entries follow before
+/// reading them.
 impl std::fmt::Display for LifecycleFailures {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} [{} recorded]", self.primary, self.entries.len())
+        write!(f, "[{} recorded]", self.entries.len())?;
+        for failure in self.entries.iter() {
+            write!(f, " {failure};")?;
+        }
+        Ok(())
     }
 }
 
@@ -73,8 +70,8 @@ impl std::fmt::Display for LifecycleFailures {
 ///
 /// Owned by the coordinator running that lifecycle: it records as each
 /// participant is decided, in whatever order the waits finish, and freezes once
-/// at the end. Ordering and precedence are applied at the freeze, so no caller
-/// has to record in owner order to be reported in it.
+/// at the end. Rendering order is applied at the freeze, so no caller has to
+/// record in that order to be reported in it.
 #[doc(hidden)]
 #[derive(Debug, Default)]
 pub struct LifecycleFailureLog {
@@ -102,20 +99,21 @@ impl LifecycleFailureLog {
     /// Freeze the log into the error a lifecycle returns, or `None` when
     /// nothing failed.
     ///
-    /// The only way an aggregate is built, so ordering is decided once here
-    /// rather than at each coordinator that records into it. Owner order alone
-    /// picks the primary: the entry a caller acts on is the outermost owner
-    /// that failed, whatever it failed with.
+    /// The only way an aggregate is built, so the rendering order is decided
+    /// once here rather than at each coordinator that records into it. Nothing
+    /// is elected: every recorded failure crosses into the aggregate, and the
+    /// order only makes two identical runs render identically.
     #[must_use]
     pub fn into_error(self) -> Option<RuntimeError> {
         let mut recorded = self.recorded;
+        if recorded.is_empty() {
+            return None;
+        }
         // Stable, so the admission sequence a runtime already owns decides the
         // order inside one owner class and this only decides the classes.
-        recorded.sort_by_key(|failure| failure.participant().owner_rank());
-        let primary = recorded.first()?.clone();
-        Some(RuntimeError::Lifecycle(Arc::new(LifecycleFailures {
+        recorded.sort_by_key(|failure| failure.participant().report_order());
+        Some(RuntimeError::Lifecycle(LifecycleFailures {
             entries: recorded.into(),
-            primary,
-        })))
+        }))
     }
 }

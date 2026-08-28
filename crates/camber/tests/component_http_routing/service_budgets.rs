@@ -2,7 +2,11 @@
 
 use crate::http as http_support;
 
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController};
+use camber::http::mock::{
+    ConnectionOwnerEdge, RequestBodyOwnerController, ResponseCommit, ResponseCommitmentController,
+    ResponseCommitmentEdge, ResponseCommitmentObservation, ResponseOrigin, ScopedStagedCommitment,
+    ServerStopEdge,
+};
 use camber::http::{
     HostRouter, Request, RequestBudget, Response, Router, ServerPolicy, TransferBudget,
 };
@@ -58,16 +62,18 @@ fn budget_route() -> Router {
 /// Hyper and from the routing owner that resolves the budgets — no helper here
 /// recomputes either.
 async fn assert_row(row: PolicyRow, hosts: Option<HostRouter>) {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_committed_answer();
     let (listener, addr, controller) = port.into_owned_parts();
 
     controller
-        .pause_once(LifecycleCheckpoint::HeaderTimeoutConfigured(
+        .connections
+        .pause_once(ConnectionOwnerEdge::HeaderTimeoutConfigured(
             row.expected_header,
         ))
         .expect("arm the header-timeout observation");
     controller
-        .pause_once(LifecycleCheckpoint::RouteBudgetsResolved {
+        .commitment
+        .pause_once(ResponseCommitmentEdge::RouteBudgetsResolved {
             request: row.expected_request,
             upload: row.expected_upload,
             download: row.expected_download,
@@ -89,7 +95,7 @@ async fn assert_row(row: PolicyRow, hosts: Option<HostRouter>) {
             .await
     });
 
-    let configured = LifecycleCheckpoint::HeaderTimeoutConfigured(row.expected_header);
+    let configured = ConnectionOwnerEdge::HeaderTimeoutConfigured(row.expected_header);
     http_support::wait_until_paused_bounded(
         &controller,
         configured,
@@ -97,10 +103,11 @@ async fn assert_row(row: PolicyRow, hosts: Option<HostRouter>) {
     )
     .await;
     controller
+        .connections
         .release(configured)
         .expect("release the header-timeout observation");
 
-    let budgets = LifecycleCheckpoint::RouteBudgetsResolved {
+    let budgets = ResponseCommitmentEdge::RouteBudgetsResolved {
         request: row.expected_request,
         upload: row.expected_upload,
         download: row.expected_download,
@@ -112,6 +119,7 @@ async fn assert_row(row: PolicyRow, hosts: Option<HostRouter>) {
     )
     .await;
     controller
+        .commitment
         .release(budgets)
         .expect("release the resolved-budget observation");
 
@@ -489,8 +497,16 @@ fn carried_upstream() -> http_support::ReadyServer {
 }
 
 /// One admitted row's envelope reading, taken from the production owners.
-fn observed_envelope(controller: &LifecycleController) -> OperationObservation {
+fn observed_envelope(controller: &ResponseCommitmentController) -> OperationObservation {
     controller.operations_observed()
+}
+
+/// How many payload frames this listener's collectors have polled out.
+///
+/// Read from the request-body owner rather than the hub, because what a frame
+/// count claims is one admitted payload's own reading.
+fn frames_polled(controller: &RequestBodyOwnerController) -> usize {
+    controller.observed().frames_polled
 }
 
 /// What one admitted row must be able to say about the envelope its head minted.
@@ -509,7 +525,7 @@ struct CarriedClaim<'a> {
 
 /// Read the one envelope back from every production owner that carried it.
 fn assert_carried_envelope(
-    controller: &LifecycleController,
+    controller: &ResponseCommitmentController,
     runs: &Arc<AtomicUsize>,
     claim: CarriedClaim<'_>,
 ) {
@@ -592,7 +608,7 @@ async fn answer_admitted(addr: SocketAddr, request: &AdmittedRequest<'_>, row: &
 async fn assert_one_envelope(request: AdmittedRequest<'_>, body_reads: usize, row: &str) {
     let upstream = carried_upstream();
     let backend = format!("http://{}", upstream.local_addr());
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_admitted_commitment();
     let controller = port.controller();
     let runs = Arc::new(AtomicUsize::new(0));
     let server = port.serve_with_policy(
@@ -605,7 +621,7 @@ async fn assert_one_envelope(request: AdmittedRequest<'_>, body_reads: usize, ro
     );
     answer_admitted(server.addr(), &request, row).await;
     assert_carried_envelope(
-        &controller,
+        &controller.commitment,
         &runs,
         CarriedClaim {
             row,
@@ -632,7 +648,7 @@ async fn assert_host_child_envelope() {
     let row = "host and child policy";
     let upstream = carried_upstream();
     let backend = format!("http://{}", upstream.local_addr());
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_admitted_commitment();
     let controller = port.controller();
     let runs = Arc::new(AtomicUsize::new(0));
     let child = carried_routes(&runs, &backend).request_budget(
@@ -660,7 +676,7 @@ async fn assert_host_child_envelope() {
     )
     .await;
     assert_carried_envelope(
-        &controller,
+        &controller.commitment,
         &runs,
         CarriedClaim {
             row,
@@ -683,7 +699,7 @@ async fn assert_host_child_envelope() {
 /// fail to resolve at all: a single router claims every authority, so a head it
 /// cannot match is still a head it selected a policy for.
 async fn assert_negative_control(head: &[u8], row: &str) {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_admitted_commitment();
     let controller = port.controller();
     let runs = Arc::new(AtomicUsize::new(0));
     let mut hosts = HostRouter::new();
@@ -701,7 +717,7 @@ async fn assert_negative_control(head: &[u8], row: &str) {
     .await
     .unwrap_or_else(|error| panic!("{row}: the control peer failed: {error}"));
 
-    let observed = observed_envelope(&controller);
+    let observed = observed_envelope(&controller.commitment);
     assert_eq!(
         observed.admitted, 0,
         "{row}: a head that resolved no route authority must expose no operation",
@@ -917,6 +933,30 @@ struct PrecedenceExpectation {
     frames_polled: usize,
 }
 
+/// One unordered row's closed result set, and the cleanup every member owes.
+///
+/// Two facts that first became observable in the same turn have nothing between
+/// them — no public command, no owner commit, no protocol acknowledgement — so
+/// neither of them is *the* answer. What a row can state is the set production
+/// may commit from, and that whichever member took the cell left the same
+/// request behind it. A row that named one member instead would be asserting the
+/// order its own scan happens to walk in.
+#[derive(Clone, Copy)]
+struct ClosedSetExpectation {
+    /// The causes this race may commit, and nothing else.
+    accepts: &'static [InboundTerminal],
+    /// The status the peer reads, whichever member committed.
+    answers: u16,
+    /// The mapper calls every member owes.
+    mapper_calls: usize,
+    /// The data frames the coordinator had polled when the request ended.
+    ///
+    /// Part of the cleanup and not the selection: a member that read a frame the
+    /// other did not would leave two different requests behind, which is the
+    /// thing a closed set is only allowed to state if it is untrue.
+    frames_polled: usize,
+}
+
 /// One staged row's served table, the observer registered for its listener, and
 /// the counters production writes into.
 ///
@@ -924,7 +964,7 @@ struct PrecedenceExpectation {
 /// shutdown transition while their request is in flight, and that authority is
 /// the handle's alone.
 struct StagedServer {
-    controller: Arc<LifecycleController>,
+    controller: Arc<ScopedStagedCommitment>,
     handle: ServerHandle,
     addr: SocketAddr,
     released: Arc<AtomicUsize>,
@@ -933,7 +973,7 @@ struct StagedServer {
 
 /// Serve one staged row's table under the budget and shutdown deadline it names.
 fn stage_server(budget: RequestBudget, shutdown: Duration) -> StagedServer {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_staged_commitment();
     let (listener, addr, controller) = port.into_owned_parts();
     let released = Arc::new(AtomicUsize::new(0));
     let mapper_calls = Arc::new(AtomicUsize::new(0));
@@ -957,18 +997,24 @@ impl StagedServer {
         tokio::task::spawn_blocking(move || staged_peer(addr, wire))
     }
 
-    /// Arm one checkpoint this row stages against.
-    fn arm(&self, checkpoint: LifecycleCheckpoint, row: &str) {
-        self.controller
-            .pause_once(checkpoint)
-            .unwrap_or_else(|error| panic!("{row}: arming {checkpoint:?} failed: {error}"));
+    /// Arm one pause point this row stages against.
+    fn arm<P: http_support::OwnerPoint>(&self, point: P, row: &str)
+    where
+        ScopedStagedCommitment: http_support::Owns<P::Owner>,
+    {
+        point
+            .arm_on(&self.controller)
+            .unwrap_or_else(|error| panic!("{row}: arming {point:?} failed: {error}"));
     }
 
-    /// Let go of one checkpoint this row was holding.
-    fn release(&self, checkpoint: LifecycleCheckpoint, row: &str) {
-        self.controller
-            .release(checkpoint)
-            .unwrap_or_else(|error| panic!("{row}: releasing {checkpoint:?} failed: {error}"));
+    /// Let go of one pause point this row was holding.
+    fn release<P: http_support::OwnerPoint>(&self, point: P, row: &str)
+    where
+        ScopedStagedCommitment: http_support::Owns<P::Owner>,
+    {
+        point
+            .release_on(&self.controller)
+            .unwrap_or_else(|error| panic!("{row}: releasing {point:?} failed: {error}"));
     }
 
     /// Record one checkpoint's release without waking what waits there.
@@ -976,10 +1022,11 @@ impl StagedServer {
     /// The held owner stays parked until something else provokes its next poll,
     /// which is what lets a row re-arm the same checkpoint before that owner can
     /// take the turn the re-arm is meant for.
-    fn stage_release(&self, checkpoint: LifecycleCheckpoint, row: &str) {
+    fn release_without_waking(&self, edge: ResponseCommitmentEdge, row: &str) {
         self.controller
-            .stage_release(checkpoint)
-            .unwrap_or_else(|error| panic!("{row}: staging {checkpoint:?} failed: {error}"));
+            .commitment
+            .release_without_waking(edge)
+            .unwrap_or_else(|error| panic!("{row}: staging {edge:?} failed: {error}"));
     }
 
     /// Read back the terminal production selected, and take the fixture down.
@@ -993,20 +1040,60 @@ impl StagedServer {
         expect: PrecedenceExpectation,
         row: &str,
     ) {
-        let selected = LifecycleCheckpoint::InboundTerminalSelected(expect.terminal);
+        let (answered, polled) = self.answered(peer, expect.terminal, row).await;
+        self.finished(answered, polled, expect, row);
+    }
+
+    /// Wait at production's own selection checkpoint, let it go, and read back
+    /// what the peer was answered with and what it had polled.
+    ///
+    /// Apart from the cleanup assertions because one row has something to do
+    /// between them: an answer that has crossed is what makes a released abort
+    /// safe to apply.
+    async fn answered(
+        &self,
+        peer: tokio::task::JoinHandle<u16>,
+        terminal: InboundTerminal,
+        row: &str,
+    ) -> (u16, usize) {
+        let selected = ResponseCommitmentEdge::CauseCommitted(terminal);
         http_support::wait_until_paused_bounded(
             &self.controller,
             selected,
             &format!("{row}: {selected:?}"),
         )
         .await;
-        let polled = self.controller.body_frames_polled();
+        let polled = frames_polled(&self.controller.bodies);
         self.release(selected, row);
 
-        let answered = tokio::time::timeout(EVENT_TIMEOUT, peer)
-            .await
-            .unwrap_or_else(|_| panic!("{row}: the staged peer never settled"))
-            .unwrap_or_else(|error| panic!("{row}: the staged peer task failed: {error}"));
+        let answered = self.await_peer(peer, row).await;
+        (answered, polled)
+    }
+
+    /// Take back the status this row's peer read, under the event bound.
+    ///
+    /// Four rows made the same two-panic wait inline. Both failures stay
+    /// distinct here: a peer that never settled is the bound expiring, and a
+    /// peer whose task failed carries the panic it failed with.
+    async fn await_peer(&self, peer: tokio::task::JoinHandle<u16>, row: &str) -> u16 {
+        http_support::bounded(
+            peer,
+            EVENT_TIMEOUT,
+            &format!("{row}: the staged peer settling"),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{row}: the staged peer task failed: {error}"))
+    }
+
+    /// Take this row's fixture down under the shared shutdown bound.
+    fn teardown(self, row: &str) {
+        http_support::ReadyServer::adopt(self.addr, self.handle)
+            .shutdown_bounded(SHUTDOWN_TIMEOUT)
+            .unwrap_or_else(|error| panic!("{row}: teardown failed: {error}"));
+    }
+
+    /// Assert the cleanup every staged row owes, and take the fixture down.
+    fn finished(self, answered: u16, polled: usize, expect: PrecedenceExpectation, row: &str) {
         assert_eq!(
             answered, expect.answers,
             "{row}: the staged terminal answered {answered}"
@@ -1016,7 +1103,7 @@ impl StagedServer {
             "{row}: the turn that selected had polled {polled} data frames",
         );
         assert_eq!(
-            self.controller.body_frames_polled(),
+            frames_polled(&self.controller.bodies),
             polled,
             "{row}: no frame may be polled after a terminal is selected",
         );
@@ -1028,9 +1115,75 @@ impl StagedServer {
         );
         http_support::assert_released(&self.released, 1, row);
 
-        http_support::ReadyServer::adopt(self.addr, self.handle)
-            .shutdown_bounded(SHUTDOWN_TIMEOUT)
-            .unwrap_or_else(|error| panic!("{row}: teardown failed: {error}"));
+        self.teardown(row);
+    }
+
+    /// Read back which member of a closed set production committed.
+    ///
+    /// Nothing is held at the commitment here, and deliberately: a row that
+    /// paused at one named cause would have to name it first, which is the claim
+    /// this row exists not to make. The commitment is read after the fact, from
+    /// the cell production wrote, and every member owes the same cleanup.
+    ///
+    /// The status arrives already taken, because one caller has something to do
+    /// between the peer's answer and this cleanup: a held abort is only safe to
+    /// release once the committed answer has crossed the wire.
+    async fn settle_closed_set(self, answered: u16, expect: ClosedSetExpectation, row: &str) {
+        assert_eq!(
+            answered, expect.answers,
+            "{row}: every member of this closed set answers {}",
+            expect.answers
+        );
+
+        let observed = self.committed(row).await;
+        let committed = observed
+            .committed
+            .unwrap_or_else(|| panic!("{row}: nothing committed this operation: {observed:?}"));
+        assert!(
+            expect
+                .accepts
+                .iter()
+                .any(|terminal| committed == ResponseCommit::Cause(*terminal)),
+            "{row}: the closed set is {:?}, and production committed {committed:?}",
+            expect.accepts
+        );
+        assert_eq!(
+            observed.commits, 1,
+            "{row}: exactly one producer took this operation's commitment: {observed:?}"
+        );
+        assert_eq!(
+            self.mapper_calls.load(Ordering::SeqCst),
+            expect.mapper_calls,
+            "{row}: every member of this closed set owes {} mapper call(s)",
+            expect.mapper_calls
+        );
+        assert_eq!(
+            frames_polled(&self.controller.bodies),
+            expect.frames_polled,
+            "{row}: every member of this closed set leaves the same frames read",
+        );
+        http_support::assert_released(&self.released, 1, row);
+
+        self.teardown(row);
+    }
+
+    /// Wait, bounded, until this row's operation has committed something.
+    ///
+    /// The poll is taken off this runtime: an in-runtime sleep loop holds a
+    /// worker the producer being waited on may itself need to reach the
+    /// commitment.
+    async fn committed(&self, row: &str) -> ResponseCommitmentObservation {
+        let polled = Arc::clone(&self.controller);
+        http_support::arrived(EVENT_TIMEOUT, move || {
+            polled.commitment.observed().committed.is_some()
+        })
+        .await;
+        let observed = self.controller.commitment.observed();
+        assert!(
+            observed.committed.is_some(),
+            "{row}: no producer ever reached this operation's commitment: {observed:?}"
+        );
+        observed
     }
 }
 
@@ -1043,7 +1196,7 @@ async fn assert_live_row(budget: RequestBudget, wire: StagedWire, expect: Preced
     let row = format!("{:?}", expect.terminal);
     let server = stage_server(budget, SHUTDOWN_TIMEOUT);
     server.arm(
-        LifecycleCheckpoint::InboundTerminalSelected(expect.terminal),
+        ResponseCommitmentEdge::CauseCommitted(expect.terminal),
         &row,
     );
     let peer = server.peer(wire);
@@ -1054,11 +1207,11 @@ async fn assert_live_row(budget: RequestBudget, wire: StagedWire, expect: Preced
 /// makes every source it wants weighed ready while it waits.
 async fn assert_held_row(budget: RequestBudget, wire: StagedWire, expect: PrecedenceExpectation) {
     let row = format!("{:?}", expect.terminal);
-    let held = LifecycleCheckpoint::BeforeInboundTerminalSelection;
+    let held = ResponseCommitmentEdge::BeforeResponseCommit;
     let server = stage_server(budget, SHUTDOWN_TIMEOUT);
     server.arm(held, &row);
     server.arm(
-        LifecycleCheckpoint::InboundTerminalSelected(expect.terminal),
+        ResponseCommitmentEdge::CauseCommitted(expect.terminal),
         &row,
     );
     let peer = server.peer(wire);
@@ -1073,7 +1226,14 @@ async fn assert_held_row(budget: RequestBudget, wire: StagedWire, expect: Preced
     server.settle(peer, expect, &row).await;
 }
 
-/// Forced cancellation outranks both carried deadlines that expired beside it.
+/// A cancellation committed before the coordinator's turn is that turn's answer.
+///
+/// The one causal edge is the whole row: the public `cancel()` returns and the
+/// supervisor commits the transition while the coordinator is still held in
+/// front of its own commit edge, so the cancellation is already a fact when the
+/// released turn reads it. Nothing else is ready — the carried deadlines are
+/// named far past this row's life — so the cancellation is not competing with a
+/// second fact and the row states no order between two of them.
 ///
 /// The supervisor is held at the control transition it selected, so the abort it
 /// is about to apply cannot take this connection's task away before the
@@ -1087,16 +1247,17 @@ async fn assert_forced_cancellation_row() {
         frames_polled: 0,
     };
     let row = format!("{:?}", expect.terminal);
-    let supervisor = LifecycleCheckpoint::SupervisorSelectedControl;
-    let held = LifecycleCheckpoint::BeforeInboundTerminalSelection;
+    let supervisor = ServerStopEdge::SupervisorSelectedControl;
+    let held = ResponseCommitmentEdge::BeforeResponseCommit;
     let server = stage_server(
-        RequestBudget::bounded(STAGED_IDLE, STAGED_TOTAL).expect("the staged request budget"),
+        RequestBudget::bounded(STAGED_UNREACHED, STAGED_UNREACHED)
+            .expect("deadlines the cancellation row must not reach"),
         STAGED_SHUTDOWN,
     );
     server.arm(supervisor, &row);
     server.arm(held, &row);
     server.arm(
-        LifecycleCheckpoint::InboundTerminalSelected(expect.terminal),
+        ResponseCommitmentEdge::CauseCommitted(expect.terminal),
         &row,
     );
     let peer = server.peer(StagedWire::Withheld);
@@ -1110,22 +1271,34 @@ async fn assert_forced_cancellation_row() {
         &format!("{row}: {supervisor:?}"),
     )
     .await;
-    tokio::time::sleep(STAGED_IDLE * 2).await;
     server.release(held, &row);
 
-    let selected = LifecycleCheckpoint::InboundTerminalSelected(expect.terminal);
+    let selected = ResponseCommitmentEdge::CauseCommitted(expect.terminal);
     http_support::wait_until_paused_bounded(
         &server.controller,
         selected,
         &format!("{row}: {selected:?}"),
     )
     .await;
+    // The coordinator has weighed the cancellation by the time it stands here,
+    // which is everything the held supervisor was holding for. The abort itself
+    // waits until the committed answer has crossed: released any earlier it
+    // takes the connection with it, and the row would be racing production's
+    // write rather than stating the order it was released in.
+    let (answered, polled) = server.answered(peer, expect.terminal, &row).await;
     server.release(supervisor, &row);
-    server.settle(peer, expect, &row).await;
+    server.finished(answered, polled, expect, &row);
 }
 
-/// The aggregate shutdown deadline outranks the forced cancellation that became
-/// ready in the same turn.
+/// The aggregate shutdown deadline and the cancellation published beside it.
+///
+/// Neither is the answer, because nothing separates them: the expiry is a clock
+/// this request read, the cancellation is a command its server accepted, and the
+/// two first became observable in the same held turn. So the row states the set
+/// — a stopping server ends this request as one of exactly two facts — and then
+/// requires every member to leave the same request behind: the same `503` on the
+/// wire, no mapper call for either silent cause, one producer holding the
+/// commitment, and the admission permit back.
 ///
 /// Three moments have to fall in this order for the pair to exist at all, and
 /// each is anchored on production rather than on timing. The graceful transition
@@ -1134,27 +1307,26 @@ async fn assert_forced_cancellation_row() {
 /// held next, and it is written only after the coordinator has had that
 /// transition. The cancellation is published last, while that turn is held and
 /// after the minted deadline has passed.
-async fn assert_shutdown_deadline_row() {
-    let expect = PrecedenceExpectation {
-        terminal: InboundTerminal::ShutdownDeadline,
+async fn assert_concurrent_stop_facts_row() {
+    let expect = ClosedSetExpectation {
+        accepts: &[
+            InboundTerminal::ShutdownDeadline,
+            InboundTerminal::ForcedCancellation,
+        ],
         answers: 503,
         mapper_calls: 0,
         frames_polled: 1,
     };
-    let row = format!("{:?}", expect.terminal);
-    let supervisor = LifecycleCheckpoint::SupervisorSelectedControl;
-    let held = LifecycleCheckpoint::BeforeInboundTerminalSelection;
+    let row = "a stop deadline against the cancellation beside it";
+    let supervisor = ServerStopEdge::SupervisorSelectedControl;
+    let held = ResponseCommitmentEdge::BeforeResponseCommit;
     let server = stage_server(
         RequestBudget::bounded(STAGED_UNREACHED, STAGED_UNREACHED)
             .expect("deadlines the shutdown row must not reach"),
         STAGED_SHUTDOWN,
     );
-    server.arm(supervisor, &row);
-    server.arm(held, &row);
-    server.arm(
-        LifecycleCheckpoint::InboundTerminalSelected(expect.terminal),
-        &row,
-    );
+    server.arm(supervisor, row);
+    server.arm(held, row);
     let (gate, staged) = std::sync::mpsc::channel();
     let peer = server.peer(StagedWire::Gated(staged));
 
@@ -1172,8 +1344,8 @@ async fn assert_shutdown_deadline_row() {
     // standing on it while the same checkpoint is armed for the turn after. A
     // release that woke it would leave that re-arm racing the owner, and a turn
     // the row did not stage could be the one held.
-    server.stage_release(held, &row);
-    server.arm(held, &row);
+    server.release_without_waking(held, row);
+    server.arm(held, row);
 
     // The frame is what provokes the poll that observes the staged release, so
     // the turn it opens is the one held — while the minted deadline expires and
@@ -1183,17 +1355,14 @@ async fn assert_shutdown_deadline_row() {
         .await;
     tokio::time::sleep(STAGED_SHUTDOWN + STAGED_SETTLE).await;
     server.handle.cancel();
-    server.release(held, &row);
-
-    let selected = LifecycleCheckpoint::InboundTerminalSelected(expect.terminal);
-    http_support::wait_until_paused_bounded(
-        &server.controller,
-        selected,
-        &format!("{row}: {selected:?}"),
-    )
-    .await;
-    server.release(supervisor, &row);
-    server.settle(peer, expect, &row).await;
+    server.release(held, row);
+    // The abort waits behind the peer's status, for the reason the forced
+    // cancellation row states: released before the committed answer has
+    // crossed, it takes the connection with it, and the closed-set claim below
+    // loses its status to an EOF instead.
+    let answered = server.await_peer(peer, row).await;
+    server.release(supervisor, row);
+    server.settle_closed_set(answered, expect, row).await;
 }
 
 /// The three rows whose ready sources are the route's own ceiling and the
@@ -1216,52 +1385,116 @@ async fn assert_carried_deadline_rows() {
     )
     .await;
     // Nothing is on the wire, so the two carried deadlines are the whole of the
-    // turn's ready set and idle outranks total.
-    assert_held_row(
+    // turn's ready set — and nothing separates them, so the row states the set.
+    assert_concurrent_carried_deadlines_row().await;
+    // The payload ended in the same turn the total expired. The reader's own
+    // read is what the turn started with, so the payload's end takes the
+    // commitment and the deadline that became observable beside it maps
+    // nothing. This row contradicts the removed rank, which put the total above
+    // the response head it was weighed against.
+    assert_committed_head_row().await;
+}
+
+/// The two carried deadlines that expired inside one held turn.
+///
+/// The quiet interval and the request lifetime are both this operation's own
+/// clocks, both crossed while the coordinator was held in front of its commit
+/// edge, and no act of the peer, the server, or the route falls between them.
+/// Either is a correct answer. The row requires the set, and requires the same
+/// request behind both members: the same `408` mapped once, one producer holding
+/// the commitment, and the permit back.
+async fn assert_concurrent_carried_deadlines_row() {
+    let row = "a quiet interval against a request lifetime";
+    let held = ResponseCommitmentEdge::BeforeResponseCommit;
+    let server = stage_server(
         RequestBudget::bounded(STAGED_IDLE, STAGED_TOTAL).expect("the staged request budget"),
-        StagedWire::Withheld,
-        PrecedenceExpectation {
-            terminal: InboundTerminal::BodyIdle,
-            answers: 408,
-            mapper_calls: 1,
-            frames_polled: 0,
-        },
-    )
-    .await;
-    // The payload ended in the same turn the total expired, and no data frame
-    // was polled to reach that end: the total outranks the response head it was
-    // weighed against.
-    assert_held_row(
+        SHUTDOWN_TIMEOUT,
+    );
+    server.arm(held, row);
+    let peer = server.peer(StagedWire::Withheld);
+
+    http_support::wait_until_paused_bounded(&server.controller, held, &format!("{row}: {held:?}"))
+        .await;
+    // Staged while the coordinator is held: both clocks are crossed before the
+    // turn that reads them begins.
+    tokio::time::sleep(STAGED_IDLE * 2).await;
+    server.release(held, row);
+
+    let answered = server.await_peer(peer, row).await;
+    server
+        .settle_closed_set(
+            answered,
+            ClosedSetExpectation {
+                accepts: &[InboundTerminal::BodyIdle, InboundTerminal::RequestTotal],
+                answers: 408,
+                mapper_calls: 1,
+                frames_polled: 0,
+            },
+            row,
+        )
+        .await;
+}
+
+/// The row whose committed response head survives a deadline read beside it.
+///
+/// The coordinator is held at its own commit edge, the carried total expires
+/// while it waits, and the release puts both facts in one turn. The reader
+/// commits the payload's end, so the request is answered and the total that
+/// expired takes no commitment: it reaches a cell another producer holds and
+/// maps nothing.
+async fn assert_committed_head_row() {
+    let row = "committed response head";
+    let held = ResponseCommitmentEdge::BeforeResponseCommit;
+    let server = stage_server(
         RequestBudget::unbounded()
             .with_total(STAGED_TOTAL)
             .expect("the staged request total"),
-        StagedWire::Ended,
-        PrecedenceExpectation {
-            terminal: InboundTerminal::RequestTotal,
-            answers: 408,
-            mapper_calls: 1,
-            frames_polled: 0,
-        },
-    )
-    .await;
+        SHUTDOWN_TIMEOUT,
+    );
+    server.arm(held, row);
+    let peer = server.peer(StagedWire::Ended);
+
+    http_support::wait_until_paused_bounded(&server.controller, held, &format!("{row}: {held:?}"))
+        .await;
+    // Staged while the reader is held: the total expires before the turn that
+    // reads the payload's end begins, so both are facts of that one turn.
+    tokio::time::sleep(STAGED_TOTAL + STAGED_SETTLE).await;
+    server.release(held, row);
+
+    let answered = server.await_peer(peer, row).await;
+    // The cell is read before the wire, because the cell is what this row
+    // claims: which producer took the commitment is the decision, and the status
+    // the peer holds is what that decision left behind. A row that read only the
+    // status would be inferring the owner from its consequence.
+    let observed = server.controller.commitment.observed();
+    assert_eq!(
+        observed.committed,
+        Some(ResponseCommit::Head(ResponseOrigin::Application)),
+        "{row}: the payload's end released the owner that took this commitment"
+    );
+    assert_eq!(
+        observed.commits, 1,
+        "{row}: exactly one producer took this operation's commitment"
+    );
+    assert_eq!(
+        answered, 200,
+        "{row}: the committed response head is the answer the peer reads"
+    );
+    assert_eq!(
+        server.mapper_calls.load(Ordering::SeqCst),
+        0,
+        "{row}: a deadline that reached a taken commitment maps nothing"
+    );
+    http_support::assert_released(&server.released, 1, row);
+
+    server.teardown(row);
 }
 
 /// The two rows the wire decides on its own, and the two dispositions that
 /// separate them: a payload's end refuses nothing, and framing that cannot be
 /// parsed is mapped under the refusal the wire itself minted.
 async fn assert_wire_answer_rows() {
-    assert_live_row(
-        RequestBudget::bounded(STAGED_UNREACHED, STAGED_UNREACHED)
-            .expect("deadlines the completed row must not reach"),
-        StagedWire::Complete,
-        PrecedenceExpectation {
-            terminal: InboundTerminal::ResponseHead,
-            answers: 200,
-            mapper_calls: 0,
-            frames_polled: 1,
-        },
-    )
-    .await;
+    assert_completed_wire_row().await;
     assert_live_row(
         RequestBudget::bounded(STAGED_UNREACHED, STAGED_UNREACHED)
             .expect("deadlines the unreadable row must not reach"),
@@ -1276,26 +1509,70 @@ async fn assert_wire_answer_rows() {
     .await;
 }
 
-/// 6.T5
+/// The row whose payload simply ends, with nothing else observable beside it.
 ///
-/// Sources that become ready in one scheduling turn are resolved by the one
-/// declared precedence table, not by poll order. Each row holds the production
-/// coordinator at its pre-selection checkpoint, or lets the wire open the turn
-/// itself, and then reads back the terminal production selected together with the
-/// disposition that terminal declares: a mapped cause owes the peer one mapper
-/// call, and a silent cause owes it none.
+/// A payload's end commits no cause: it releases the owner that produces this
+/// request's head, and that owner takes the commitment where it produces one. So
+/// the claim is what the peer reads and what the route's mapper was never asked
+/// for, with one data frame polled to reach the end.
+async fn assert_completed_wire_row() {
+    let row = "completed payload";
+    let server = stage_server(
+        RequestBudget::bounded(STAGED_UNREACHED, STAGED_UNREACHED)
+            .expect("deadlines the completed row must not reach"),
+        SHUTDOWN_TIMEOUT,
+    );
+    let peer = server.peer(StagedWire::Complete);
+    let answered = server.await_peer(peer, row).await;
+    assert_eq!(answered, 200, "{row}: a complete payload is answered");
+    assert_eq!(
+        frames_polled(&server.controller.bodies),
+        1,
+        "{row}: one data frame was polled to reach the payload's end"
+    );
+    assert_eq!(
+        server.mapper_calls.load(Ordering::SeqCst),
+        0,
+        "{row}: a payload that ended inside every bound refuses nothing"
+    );
+    http_support::assert_released(&server.released, 1, row);
+
+    server.teardown(row);
+}
+
+/// Invariant 11
 ///
-/// The rows are the pairs this step's own sources can reach. Step 11 extends the
-/// same selector with its transfer sources once their adapters exist.
+/// No production outcome depends on a global terminal order. Which fact ends an
+/// admitted request is decided by which producer took that operation's response
+/// commitment first, and the rows here are the two directions of that claim.
+///
+/// One row commits a cancellation while the response producer is still held in
+/// front of its own commit edge, and requires the cancellation: it committed
+/// first, so it is the answer. The reverse row lets the reader commit the
+/// payload's end and only then makes a carried deadline observable, and requires
+/// the committed head to remain — which the removed rank contradicted, having
+/// put every deadline above the response head it was weighed against.
+///
+/// Two rows carry the other half of the same claim. Where two facts became
+/// observable in one turn with nothing between them — the two carried deadlines,
+/// and a stop's expiry against the cancellation published beside it — the row
+/// states the closed set production may commit from and requires identical
+/// cleanup from every member. Naming one of them would be asserting the scan
+/// order, which is the thing this step removed.
+///
+/// The remaining rows are retained regressions over the same seam: each still
+/// reads back the cause production committed and the disposition that cause
+/// declares, so a mapped cause owes the peer one mapper call and a silent cause
+/// owes it none.
 #[test]
-fn equal_ready_inbound_events_follow_the_declared_precedence() {
+fn operation_commit_order_overrides_legacy_terminal_rank() {
     camber::runtime::builder()
         .run(|| {
             camber::runtime::block_on(async {
                 assert_carried_deadline_rows().await;
                 assert_wire_answer_rows().await;
                 assert_forced_cancellation_row().await;
-                assert_shutdown_deadline_row().await;
+                assert_concurrent_stop_facts_row().await;
             });
         })
         .expect("the precedence runtime ran");

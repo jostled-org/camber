@@ -23,7 +23,7 @@ use crate::http as http_support;
 #[cfg(feature = "profiling")]
 use camber::__private::DEFAULT_PROFILING_RESPONSE_LIMIT;
 #[cfg(feature = "profiling")]
-use camber::http::mock::{self, LifecycleCheckpoint, LifecycleController};
+use camber::http::mock::{self, BlockingWorkerEdge, ScopedUnwatched};
 use camber::http::{Request, Response};
 #[cfg(feature = "profiling")]
 use camber::http::{Router, ServerPolicy};
@@ -97,12 +97,12 @@ struct Rendered {
 
 #[cfg(feature = "profiling")]
 impl Rendered {
-    fn of(controller: &LifecycleController) -> Self {
+    fn of(controller: &mock::WorkerRetention) -> Self {
         Self {
-            ceiling: controller.profiling_observed().frozen_ceiling,
-            first_write: controller.collected_first_retained_bytes(),
-            peak: controller.collected_peak_retained_bytes(),
-            writes: controller.collected_chunks_polled(),
+            ceiling: controller.worker.profiling_observed().frozen_ceiling,
+            first_write: controller.collected.collected_first_retained_bytes(),
+            peak: controller.collected.collected_peak_retained_bytes(),
+            writes: controller.collected.collected_chunks_polled(),
         }
     }
 }
@@ -112,8 +112,11 @@ impl Rendered {
 /// The fixture runtime has exactly one worker and the request awaiting this
 /// worker runs on it, so "not the awaiting thread" is "no Tokio worker at all".
 #[cfg(feature = "profiling")]
-fn assert_one_worker_ran_off_the_only_tokio_worker(controller: &LifecycleController, label: &str) {
-    let observed = controller.profiling_observed();
+fn assert_one_worker_ran_off_the_only_tokio_worker(
+    controller: &mock::WorkerRetention,
+    label: &str,
+) {
+    let observed = controller.worker.profiling_observed();
     assert_eq!(observed.workers_entered, 1, "{label}: workers entered");
     assert_eq!(observed.workers_returned, 1, "{label}: workers returned");
     assert_eq!(
@@ -146,8 +149,8 @@ fn served_routes() -> Router {
 
 /// Serve one profiling row under `policy` and hand back its address.
 #[cfg(feature = "profiling")]
-fn serve(policy: ServerPolicy) -> http_support::ObservedServer {
-    http_support::reserve_observed().serve_with_policy(served_routes(), policy)
+fn serve(policy: ServerPolicy) -> http_support::ObservedServer<ScopedUnwatched> {
+    http_support::reserve_unwatched().serve_with_policy(served_routes(), policy)
 }
 
 /// The unnamed spelling is not a spelling of unbounded.
@@ -161,7 +164,7 @@ fn serve(policy: ServerPolicy) -> http_support::ObservedServer {
 #[cfg(feature = "profiling")]
 async fn assert_the_unnamed_spelling_freezes_the_documented_maximum() {
     let label = "the defaulted render";
-    let controller = mock::profiling_lifecycle().expect("one profiling observer");
+    let controller = mock::profiling_worker().expect("one profiling observer");
     let server = serve(base_policy());
     let addr = server.addr();
 
@@ -211,20 +214,22 @@ async fn assert_the_unnamed_spelling_freezes_the_documented_maximum() {
 #[cfg(feature = "profiling")]
 async fn assert_held_entry_renders_whole_under_the_opt_out() -> usize {
     let label = "the opt-out render";
-    let controller = mock::profiling_lifecycle().expect("one profiling observer");
+    let controller = mock::profiling_worker().expect("one profiling observer");
     let server = serve(base_policy().unbounded_profiling_response());
     let addr = server.addr();
     controller
-        .pause_once(LifecycleCheckpoint::ProfilingWorkerEntered)
+        .worker
+        .pause_once(BlockingWorkerEdge::ProfilingWorkerEntered)
         .expect("one armed profiling worker checkpoint");
 
     let profiling = tokio::spawn(profile(addr));
     controller
-        .wait_until_paused(LifecycleCheckpoint::ProfilingWorkerEntered)
+        .worker
+        .wait_until_paused(BlockingWorkerEdge::ProfilingWorkerEntered)
         .await
         .expect("the profiling worker entered");
 
-    let held = controller.profiling_observed();
+    let held = controller.worker.profiling_observed();
     assert_eq!(held.workers_entered, 1, "{label}: the worker entered");
     assert_eq!(
         held.workers_returned, 0,
@@ -245,7 +250,8 @@ async fn assert_held_entry_renders_whole_under_the_opt_out() -> usize {
     );
 
     controller
-        .release(LifecycleCheckpoint::ProfilingWorkerEntered)
+        .worker
+        .release(BlockingWorkerEdge::ProfilingWorkerEntered)
         .expect("the held worker resumes");
     let answered = profiling
         .await
@@ -303,7 +309,7 @@ async fn assert_the_crossing_write_is_dropped_and_named(
     ceiling: usize,
     label: &str,
 ) {
-    let controller = mock::profiling_lifecycle().expect("one profiling observer");
+    let controller = mock::profiling_worker().expect("one profiling observer");
     let server = serve(policy);
     let addr = server.addr();
 
@@ -483,6 +489,37 @@ const LIMITED_PATH: &str = "/completion/limited";
 const UNANSWERED_PATH: &str = "/completion/unanswered";
 const DEAD_PREFIX: &str = "/completion/dead";
 const DEAD_PATH: &str = "/completion/dead/echo";
+const BOUNDED_PATH: &str = "/completion/bounded";
+const FLOOD_PATH: &str = "/completion/flood";
+const DOWN_PREFIX: &str = "/completion/down";
+const DOWN_PATH: &str = "/completion/down/echo";
+const HOSTED_PATH: &str = "/completion/hosted";
+
+/// The download payload maximum the post-commit row's own body crosses.
+///
+/// Small enough that the producer below crosses it after its head is already on
+/// the wire, which is the only state a post-commit boundary can be observed in.
+const COMPLETION_DOWNLOAD_MAX: usize = 24;
+
+/// One frame of the payload every download row produces.
+const DOWNLOAD_FRAME: &str = "12345678";
+
+/// The quiet interval between produced download frames.
+///
+/// Paced so each frame is its own write: a producer that filled the channel in
+/// one turn would leave Hyper holding every frame in one unflushed buffer, and
+/// the write that fails would then be a write that never happened.
+const DOWNLOAD_PACE: Duration = Duration::from_millis(5);
+
+/// A bound no download row is meant to reach, named where the shape needs one.
+const UNREACHED: Duration = Duration::from_secs(3600);
+
+/// An authority no HTTP request can name.
+///
+/// The port is not a number, so Camber resolves no router from it. Deciding that
+/// is itself the routing answer, which is why the refusal it earns belongs to the
+/// router and not to a route that was never reached.
+const UNPARSEABLE_AUTHORITY: &str = "example.com:not-a-port";
 
 /// A backend nothing listens on.
 ///
@@ -510,28 +547,87 @@ const UNANSWERED_METHOD: &str = "POST";
 const DEAD_METHOD: &str = "GET";
 
 /// What one row must have been recorded as, once.
+///
+/// Seven dimensions and no eighth that ranks them. A row states each one it
+/// expects, including the ones it expects to be absent, because "absent" is what
+/// this record replaced a fold with: an application response interrupted by a
+/// departing peer and a peer that left before any answer existed differ in
+/// exactly the fields a strongest terminal used to collapse.
 struct Expected<'a> {
     label: &'a str,
     method: &'a str,
-    status: u16,
+    /// The status the peer was given, or `None` when no head committed.
+    status: Option<u16>,
     protocol: &'a str,
-    terminal: &'a str,
+    origin: &'a str,
+    rejection: &'a str,
+    delivery: &'a str,
+    connection_end: &'a str,
     boundary: &'a str,
+    shutdown: &'a str,
 }
 
+/// The name every absent completion dimension is published under.
+const ABSENT: &str = "none";
+
 impl Expected<'_> {
+    /// One row's dimensions, with everything this row does not name absent.
+    ///
+    /// A row states what it is about and inherits the absences, so adding a
+    /// dimension is one edit here rather than one per row — and a row that meant
+    /// to name a dimension and did not says `none` rather than saying nothing.
+    const fn of(label: &'static str, method: &'static str, protocol: &'static str) -> Self {
+        Self {
+            label,
+            method,
+            status: Some(200),
+            protocol,
+            origin: ABSENT,
+            rejection: ABSENT,
+            delivery: "produced",
+            connection_end: ABSENT,
+            boundary: ABSENT,
+            shutdown: ABSENT,
+        }
+    }
+
+    /// The same row, produced by a named origin.
+    const fn from(self, origin: &'static str) -> Self {
+        Self { origin, ..self }
+    }
+
+    /// The same row, answered with `status`.
+    const fn answering(self, status: u16) -> Self {
+        Self {
+            status: Some(status),
+            ..self
+        }
+    }
+
     /// The whole label set this row's record carries.
     ///
     /// Built as one value because it is one claim: a delta taken over a subset
     /// of the labels would count a record another class produced.
-    fn labels<'a>(&'a self, status: &'a str) -> [(&'a str, &'a str); 5] {
+    fn labels<'a>(&'a self, status: &'a str) -> [(&'a str, &'a str); 9] {
         [
             ("method", self.method),
             ("status", status),
             ("protocol", self.protocol),
-            ("terminal", self.terminal),
+            ("origin", self.origin),
+            ("rejection", self.rejection),
+            ("delivery", self.delivery),
+            ("connection_end", self.connection_end),
             ("boundary", self.boundary),
+            ("shutdown", self.shutdown),
         ]
+    }
+
+    /// The status label this row's record carries, as production spells it.
+    fn status_label(&self) -> Box<str> {
+        match self.status {
+            Some(status) => status.to_string().into(),
+            None => ABSENT.into(),
+        }
     }
 }
 
@@ -561,7 +657,7 @@ impl Recorded {
 /// while the duration family did not is a completion recorded under a label set
 /// no operator can read a latency for.
 fn moved(before: &Recorded, after: &Recorded, expected: &Expected<'_>) -> u64 {
-    let status = expected.status.to_string();
+    let status = expected.status_label();
     let labels = expected.labels(&status);
     let counted = common::delta(&before.completions, &after.completions, &labels);
     let timed = common::delta(&before.durations, &after.durations, &labels);
@@ -578,8 +674,10 @@ fn assert_recorded_once(before: &Recorded, after: &Recorded, expected: &Expected
     assert_eq!(
         moved(before, after, expected),
         1,
-        "{}: exactly one record was expected at this row's terminal",
+        "{}: exactly one record was expected under {:?}, and the scrape holds {:?}",
         expected.label,
+        expected.labels(&expected.status_label()),
+        after.completions,
     );
 }
 
@@ -599,13 +697,21 @@ fn only_completion(capture: &common::TraceCapture, label: &str) -> Box<str> {
     common::only_event(&events, COMPLETION_EVENT, label).into()
 }
 
-/// Assert one completion event names this row's status, class, and boundary.
+/// Assert one completion event states every dimension this row expects.
+///
+/// All seven, not a chosen few: the whole claim is that the dimensions are
+/// orthogonal, and a check that read only the ones a row varies could not tell a
+/// record that left the rest absent from one that folded them away.
 fn assert_event_matches(event: &str, expected: &Expected<'_>) {
     let stated = [
-        format!("status={}", expected.status),
+        format!("status={}", expected.status_label()),
         format!("protocol={}", expected.protocol),
-        format!("terminal={}", expected.terminal),
+        format!("origin={}", expected.origin),
+        format!("rejection={}", expected.rejection),
+        format!("delivery={}", expected.delivery),
+        format!("connection_end={}", expected.connection_end),
         format!("boundary={}", expected.boundary),
+        format!("shutdown={}", expected.shutdown),
     ];
     let stated: Box<[&str]> = stated.iter().map(String::as_str).collect();
     common::assert_fields(event, &stated, expected.label);
@@ -655,6 +761,60 @@ fn register_held_stream(router: &mut camber::http::Router, path: &'static str) -
         })
     });
     Release(release)
+}
+
+/// Register a streaming route whose body crosses its own download maximum.
+///
+/// The bound belongs to the download and the head is already committed when the
+/// producer crosses it, so this is the one shape a post-commit boundary can be
+/// named in: the status the peer holds is fixed, and the crossing can only end
+/// the body under it.
+fn register_bounded_download(router: &mut camber::http::Router, path: &'static str) {
+    router.get_stream(path, |_req: &Request| {
+        Box::pin(async move {
+            let (response, sender) = camber::http::StreamResponse::with_budget(
+                200,
+                4,
+                camber::http::TransferBudget::bounded(
+                    COMPLETION_DOWNLOAD_MAX,
+                    UNREACHED,
+                    UNREACHED,
+                )
+                .expect("the download row's budget"),
+            )
+            .expect("a positive stream capacity");
+            spawn_paced_download(sender, COMPLETION_DOWNLOAD_MAX / DOWNLOAD_FRAME.len() + 2);
+            response.with_header("Content-Type", "text/x-bounded")
+        })
+    });
+}
+
+/// Register a streaming route that produces until its peer stops taking bytes.
+///
+/// Unbounded on purpose: what ends this row is the transport under it, not a
+/// maximum it crossed. The producer keeps writing after the peer is gone, which
+/// is what turns a closed socket into a write that actually fails.
+fn register_flooding_download(router: &mut camber::http::Router, path: &'static str) {
+    router.get_stream(path, |_req: &Request| {
+        Box::pin(async move {
+            let (response, sender) = camber::http::StreamResponse::new(200);
+            spawn_paced_download(sender, usize::MAX);
+            response.with_header("Content-Type", "text/x-flood")
+        })
+    });
+}
+
+/// Produce `frames` paced frames, then hold the stream open.
+fn spawn_paced_download(sender: camber::http::StreamSender, frames: usize) {
+    tokio::spawn(async move {
+        for _ in 0..frames {
+            if sender.send(DOWNLOAD_FRAME).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(DOWNLOAD_PACE).await;
+        }
+        std::future::pending::<()>().await;
+    });
 }
 
 /// Register an SSE feed whose one event waits for its release.
@@ -747,8 +907,8 @@ fn detailing_mapper(
 /// The whole completion service: every class, and the upstream one of them
 /// forwards to.
 struct CompletionFixture {
-    server: http_support::ObservedServer,
-    upstream: http_support::ObservedServer,
+    server: http_support::ObservedServer<ScopedUnwatched>,
+    upstream: http_support::ObservedServer<ScopedUnwatched>,
     stream: Release,
     sse: Release,
     upstream_stream: Release,
@@ -759,7 +919,7 @@ impl CompletionFixture {
     fn serve() -> Self {
         let mut upstream_routes = camber::http::Router::new();
         let upstream_stream = register_held_stream(&mut upstream_routes, HELD_UPSTREAM_PATH);
-        let upstream = http_support::reserve_observed().serve(upstream_routes);
+        let upstream = http_support::reserve_unwatched().serve(upstream_routes);
 
         let mapper = std::sync::Arc::new(MapperRecord::default());
         let mut routes = camber::http::Router::new();
@@ -768,6 +928,17 @@ impl CompletionFixture {
         });
         let stream = register_held_stream(&mut routes, STREAM_PATH);
         let sse = register_held_sse(&mut routes, SSE_PATH);
+        register_bounded_download(&mut routes, BOUNDED_PATH);
+        register_flooding_download(&mut routes, FLOOD_PATH);
+        // Registered unhealthy and never flipped. A route whose every backend is
+        // failing its check is refused where the head is classified, before any
+        // operation exists to carry a commitment — and the mapper that answers it
+        // is still the producer of the head the peer receives.
+        routes.proxy_checked_stream(
+            DOWN_PREFIX,
+            DEAD_BACKEND,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
         routes.proxy_stream(PROXY_PREFIX, &format!("http://{}", upstream.addr()));
         // Nothing listens on this backend, so the row that forwards here is
         // refused with the upstream's own diagnostic and the fixture's mapper
@@ -794,7 +965,7 @@ impl CompletionFixture {
             )
             .rejection_mapper(detailing_mapper(&mapper));
         Self {
-            server: http_support::reserve_observed().serve(routes),
+            server: http_support::reserve_unwatched().serve(routes),
             upstream,
             stream,
             sse,
@@ -807,14 +978,35 @@ impl CompletionFixture {
         self.server.addr()
     }
 
-    /// Stop both owners in bounded order.
+    /// Stop both owners in bounded order and prove each left its address free.
+    ///
+    /// A bounded join says every operation the server still owned settled. It
+    /// says nothing about the listener underneath them, and a head refused
+    /// below Camber's admitted-operation constructor is exactly the path with
+    /// no Camber owner to release anything. The bind again is the one thing an
+    /// out-of-process observer can check about a completed server without
+    /// asking Camber, so it is taken here rather than in any single row.
     fn tear_down(self, label: &str) {
+        let served = [
+            (self.server.addr(), "completion"),
+            (self.upstream.addr(), "upstream"),
+        ];
         for (owner, name) in [(self.server, "completion"), (self.upstream, "upstream")] {
             owner
                 .shutdown_bounded(SHUTDOWN_BOUND)
                 .unwrap_or_else(|error| {
                     panic!("{label}: the {name} owner did not end gracefully: {error}")
                 });
+        }
+        for (addr, name) in served {
+            let rebound = common::block_on(http_support::rebind_within(
+                addr,
+                http_support::SETTLE_BOUND,
+            ));
+            assert!(
+                rebound.is_ok(),
+                "{label}: the {name} owner held its address past its own stop: {rebound:?}",
+            );
         }
     }
 }
@@ -876,14 +1068,9 @@ fn register_completion_upgrade(_router: &mut camber::http::Router) {}
 /// reports through its own terminals rather than through this record.
 #[cfg(feature = "ws")]
 fn assert_upgrade_records_at_its_handoff(fixture: &CompletionFixture) {
-    let expected = Expected {
-        label: "upgrade",
-        method: "GET",
-        status: 101,
-        protocol: "websocket",
-        terminal: "completed",
-        boundary: "none",
-    };
+    let expected = Expected::of("upgrade", "GET", "websocket")
+        .from("websocket")
+        .answering(101);
     let before = Recorded::scraped(fixture.addr());
     let head = common::ws_upgrade_request_to("localhost", UPGRADE_PATH);
     let mut peer = common::start_upgrade_with(fixture.addr(), &head);
@@ -936,14 +1123,7 @@ fn peer_reading_head(addr: std::net::SocketAddr, path: &str, label: &str) -> std
 
 /// 15.T1: a buffered answer is recorded once, at the body Hyper wrote.
 fn assert_buffered_records_once(fixture: &CompletionFixture) {
-    let expected = Expected {
-        label: "buffered",
-        method: BUFFERED_METHOD,
-        status: 200,
-        protocol: "ordinary_http",
-        terminal: "completed",
-        boundary: "none",
-    };
+    let expected = Expected::of("buffered", BUFFERED_METHOD, "ordinary_http").from("application");
     let capture = common::capture_events(&format!("path={BUFFERED_PATH}"));
     let before = Recorded::scraped(fixture.addr());
     let answered = exchange(fixture.addr(), BUFFERED_METHOD, BUFFERED_PATH, b"ok");
@@ -1011,13 +1191,13 @@ fn assert_held_class_records_at_its_body(
 
 /// 15.T1: a peer that leaves mid-body is recorded under its own terminal.
 fn assert_disconnect_records_the_peer_that_left(fixture: &CompletionFixture) {
+    // Four dimensions at once, and no rank between them: the application still
+    // produced this head, the body it committed did not finish, the peer is what
+    // ended the connection, and the server was never stopping.
     let expected = Expected {
-        label: "disconnected",
-        method: "GET",
-        status: 200,
-        protocol: "streaming_http",
-        terminal: "disconnect",
-        boundary: "none",
+        delivery: "interrupted",
+        connection_end: "peer-disconnected",
+        ..Expected::of("disconnected", "GET", "streaming_http").from("application")
     };
     let before = Recorded::scraped(fixture.addr());
     let peer = peer_reading_head(fixture.addr(), STREAM_PATH, expected.label);
@@ -1035,14 +1215,12 @@ fn assert_disconnect_records_the_peer_that_left(fixture: &CompletionFixture) {
 
 /// 15.T1: a refusal is recorded under the answer the peer was given.
 fn assert_refusal_records_its_answer(fixture: &CompletionFixture) {
-    let expected = Expected {
-        label: "refused",
-        method: ABSENT_METHOD,
-        status: 404,
-        protocol: "unclassified",
-        terminal: "completed",
-        boundary: "none",
-    };
+    // The router's own not-found terminal, and no typed framework rejection
+    // beside it: a category is what the rejection counter is for, and repeating
+    // it here would say a framework mapper answered a request it never saw.
+    let expected = Expected::of("refused", ABSENT_METHOD, "unclassified")
+        .from("router")
+        .answering(404);
     let before = Recorded::scraped(fixture.addr());
     let refused = exchange(fixture.addr(), ABSENT_METHOD, ABSENT_PATH, b"");
     assert_eq!(refused.status, 404, "refused: wire status");
@@ -1052,12 +1230,11 @@ fn assert_refusal_records_its_answer(fixture: &CompletionFixture) {
 /// 15.T1: a payload past the route maximum names the bound it crossed.
 fn assert_body_limit_records_its_boundary(fixture: &CompletionFixture) {
     let expected = Expected {
-        label: "limited",
-        method: LIMITED_METHOD,
-        status: 413,
-        protocol: "ordinary_http",
-        terminal: "route_body_limit",
+        rejection: "body_limit",
         boundary: "request_body",
+        ..Expected::of("limited", LIMITED_METHOD, "ordinary_http")
+            .from("framework")
+            .answering(413)
     };
     let capture = common::capture_events(&format!("path={LIMITED_PATH}"));
     let before = Recorded::scraped(fixture.addr());
@@ -1075,12 +1252,11 @@ fn assert_body_limit_records_its_boundary(fixture: &CompletionFixture) {
 /// 15.T1: an operation that outlives its lifetime names that lifetime.
 fn assert_request_total_records_its_boundary(fixture: &CompletionFixture) {
     let expected = Expected {
-        label: "cancelled",
-        method: UNANSWERED_METHOD,
-        status: 408,
-        protocol: "ordinary_http",
-        terminal: "request_total",
+        rejection: "request_timeout",
         boundary: "request_total",
+        ..Expected::of("cancelled", UNANSWERED_METHOD, "ordinary_http")
+            .from("framework")
+            .answering(408)
     };
     let capture = common::capture_events(&format!("path={UNANSWERED_PATH}"));
     let before = Recorded::scraped(fixture.addr());
@@ -1090,17 +1266,233 @@ fn assert_request_total_records_its_boundary(fixture: &CompletionFixture) {
     assert_event_matches(&only_completion(&capture, "cancelled"), &expected);
 }
 
+/// 10.T2: a bound crossed after the head keeps the answer the peer already has.
+///
+/// The Step 7 post-commit journey, read as a completion record. The download
+/// owner crosses its own payload maximum with the `200` already on the wire, so
+/// no mapper runs and no second status is written: what changes is the body,
+/// which ends interrupted under the bound that ended it. Four dimensions state
+/// that at once and none of them ranks the rest — the application still produced
+/// this head, the delivery was cut short, the stream was reset rather than the
+/// peer leaving, and the boundary names the download bound and not the upload's.
+fn assert_postcommit_boundary_keeps_the_committed_status(fixture: &CompletionFixture) {
+    let expected = Expected {
+        delivery: "interrupted",
+        connection_end: "stream-reset",
+        boundary: "transfer_download",
+        ..Expected::of("post-commit bound", "GET", "streaming_http").from("application")
+    };
+    let capture = common::capture_events(&format!("path={BOUNDED_PATH}"));
+    let before = Recorded::scraped(fixture.addr());
+    let mut peer = peer_reading_head(fixture.addr(), BOUNDED_PATH, expected.label);
+    let rest = http_support::read_until_closed(&mut peer, COMPLETION_BOUND)
+        .unwrap_or_else(|error| panic!("post-commit bound: the body never ended: {error}"));
+    drop(peer);
+    // The committed status is the peer's, and a crossing after it can only end
+    // the framing. A replacement answer would have to arrive as a second head on
+    // this same connection, and none does.
+    assert!(
+        !String::from_utf8_lossy(&rest).contains("HTTP/1.1"),
+        "post-commit bound: a second answer was written over the committed head: {:?}",
+        String::from_utf8_lossy(&rest),
+    );
+
+    let settled = http_support::poll_until(COMPLETION_BOUND, || {
+        moved(&before, &Recorded::scraped(fixture.addr()), &expected) >= 1
+    });
+    assert!(
+        settled,
+        "post-commit bound: the crossed download bound was never recorded",
+    );
+    assert_recorded_once(&before, &Recorded::scraped(fixture.addr()), &expected);
+    assert_event_matches(&only_completion(&capture, expected.label), &expected);
+}
+
+/// 10.T2: a transport that broke under a body is named as the transport.
+///
+/// The peer stops taking bytes and closes while produced payload is still
+/// sitting unread in its own buffer, so its close is a reset rather than an
+/// orderly one and the next write this server makes fails. That is a different
+/// connection end from the peer that simply left, and the record has to tell
+/// them apart: both end the connection, and only the transport's own report says
+/// which one happened.
+///
+/// Read off the structured event as well as off the metric, for the reason the
+/// post-commit row beside it is: a label set says how many records carry the
+/// pair, and the event is where an operator reads that this one record carries
+/// `transport-failed` and `interrupted` together.
+fn assert_broken_transport_names_its_connection_end(fixture: &CompletionFixture) {
+    let expected = Expected {
+        delivery: "interrupted",
+        connection_end: "transport-failed",
+        ..Expected::of("broken transport", "GET", "streaming_http").from("application")
+    };
+    let capture = common::capture_events(&format!("path={FLOOD_PATH}"));
+    let before = Recorded::scraped(fixture.addr());
+    let peer = peer_reading_head(fixture.addr(), FLOOD_PATH, expected.label);
+    peek_until_payload_arrives(&peer, expected.label);
+    drop(peer);
+
+    let settled = http_support::poll_until(COMPLETION_BOUND, || {
+        moved(&before, &Recorded::scraped(fixture.addr()), &expected) >= 1
+    });
+    assert!(
+        settled,
+        "broken transport: the failed transport was never recorded",
+    );
+    assert_recorded_once(&before, &Recorded::scraped(fixture.addr()), &expected);
+    assert_event_matches(&only_completion(&capture, expected.label), &expected);
+}
+
+/// Wait until produced payload is sitting unread in this peer's own buffer.
+///
+/// Peeked rather than read: a socket closed while it still holds payload nobody
+/// took answers with a reset instead of an orderly close, and reading the bytes
+/// would take that away. Bounded rather than slept for, so the row waits on the
+/// producer having actually reached this peer.
+///
+/// The two ways a peek can fail to see a byte are kept apart. An expired read
+/// deadline is the wait itself and is retried; anything else is this fixture's
+/// own socket breaking, and retrying it until the bound runs out would report
+/// the producer as silent and throw away the error that says otherwise.
+fn peek_until_payload_arrives(peer: &std::net::TcpStream, label: &str) {
+    peer.set_read_timeout(Some(DOWNLOAD_PACE))
+        .unwrap_or_else(|error| panic!("{label}: the peer could not bound its peek: {error}"));
+    let mut failed = None;
+    let arrived = http_support::poll_until(COMPLETION_BOUND, || {
+        let mut byte = [0_u8; 1];
+        match peer.peek(&mut byte) {
+            Ok(1) => true,
+            Ok(_) => false,
+            Err(error) if http_support::is_deadline_expiry(&error) => false,
+            Err(error) => {
+                failed = Some(error);
+                true
+            }
+        }
+    });
+    if let Some(error) = failed {
+        panic!("{label}: the peek this peer was waiting on failed: {error}");
+    }
+    assert!(
+        arrived,
+        "{label}: no produced payload ever reached this peer",
+    );
+}
+
+/// 10.T2: a refusal raised before admission still names the producer of its head.
+///
+/// A route whose every backend is failing its check is refused where the head is
+/// classified, before any operation exists to carry a commitment. The mapper is
+/// still what answers the peer, so the record names the framework and the typed
+/// category it applied — the one producerless-looking case that has a producer.
+fn assert_unhealthy_backend_records_its_framework_refusal(fixture: &CompletionFixture) {
+    let expected = Expected {
+        rejection: "proxy",
+        ..Expected::of("unhealthy backend", DEAD_METHOD, "proxy")
+            .from("framework")
+            .answering(503)
+    };
+    let capture = common::capture_events(&format!("path={DOWN_PATH}"));
+    let before = Recorded::scraped(fixture.addr());
+    let refused = exchange(fixture.addr(), DEAD_METHOD, DOWN_PATH, b"");
+    assert_eq!(refused.status, 503, "unhealthy backend: wire status");
+    assert_recorded_once(&before, &Recorded::scraped(fixture.addr()), &expected);
+    assert_event_matches(&only_completion(&capture, expected.label), &expected);
+}
+
+/// 10.T2: an authority that is not one is the routing decision that refused it.
+///
+/// The peer names an authority Camber cannot parse, so the head is refused where
+/// the route is classified and no operation is ever minted. The producer is still
+/// the router: nothing this request named was entered, and "this is not an
+/// authority" is the same routing terminal an internal route publishes as
+/// `router` when it answers the identical `Host`. Answering from the head is an
+/// optimisation, and an optimisation must not change what an operator reads.
+///
+/// The typed `Routing` category the mapper applied stays off the record, because
+/// only a framework origin carries a rejection: two dimensions naming one cause
+/// would be the fold this step removed.
+///
+/// Served by its own host-routed owner because the fixture's single router
+/// resolves every authority. Its records reach the same process registry, so the
+/// fixture's scrape reads them.
+fn assert_unrouted_authority_records_its_router_terminal(fixture: &CompletionFixture) {
+    let expected = Expected::of("unrouted authority", "GET", "unclassified")
+        .from("router")
+        .answering(400);
+    let capture = common::capture_events(&format!("path={HOSTED_PATH}"));
+    let before = Recorded::scraped(fixture.addr());
+
+    let mut claimed = camber::http::Router::new();
+    claimed.get(HOSTED_PATH, |_req: &Request| async {
+        Response::text(200, "hosted")
+    });
+    let mut hosts = camber::http::HostRouter::new();
+    hosts.set_default(claimed);
+    let hosted = http_support::reserve_unwatched().serve_hosts(hosts);
+
+    // Raw, because the authority is the wire contract: a request builder that
+    // validated it could not send the one this row is about.
+    let mut peer = http_support::connect(hosted.addr())
+        .unwrap_or_else(|error| panic!("unrouted authority: the peer could not connect: {error}"));
+    let head = format!(
+        "GET {HOSTED_PATH} HTTP/1.1\r\nHost: {UNPARSEABLE_AUTHORITY}\r\nConnection: close\r\n\r\n",
+    );
+    std::io::Write::write_all(&mut peer, head.as_bytes())
+        .unwrap_or_else(|error| panic!("unrouted authority: the peer could not send: {error}"));
+    let answered = http_support::read_head(&mut peer, COMPLETION_BOUND)
+        .unwrap_or_else(|error| panic!("unrouted authority: no head arrived: {error}"));
+    assert!(
+        String::from_utf8_lossy(&answered).starts_with("HTTP/1.1 400"),
+        "unrouted authority: the malformed authority was routed: {:?}",
+        String::from_utf8_lossy(&answered),
+    );
+    drop(http_support::read_until_closed(&mut peer, COMPLETION_BOUND));
+    drop(peer);
+
+    let settled = http_support::poll_until(COMPLETION_BOUND, || {
+        moved(&before, &Recorded::scraped(fixture.addr()), &expected) >= 1
+    });
+    assert!(
+        settled,
+        "unrouted authority: the routing terminal was never recorded",
+    );
+    assert_recorded_once(&before, &Recorded::scraped(fixture.addr()), &expected);
+    assert_event_matches(&only_completion(&capture, expected.label), &expected);
+    hosted
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the host-routed owner ended gracefully");
+}
+
+/// 10.T2: no served request is recorded as a producer Camber never had.
+///
+/// `protocol` names a head Hyper wrote for an operation Camber had already
+/// admitted. Hyper answers on its own only below the admitted-operation
+/// constructor, and such a request is recorded nowhere at all; past that point
+/// every answer is staged by the exit that produced it, and every one of those
+/// exits names its producer. So the variant is unreachable by construction, and
+/// this is the whole of its claim: the drive above walks every producer family
+/// the fixture serves, and none of them publishes it.
+///
+/// Read over the process registry rather than as a delta, because the claim is
+/// an absence: a delta of zero is also what a label that never existed reports.
+fn assert_no_record_names_a_producerless_head(fixture: &CompletionFixture) {
+    let named = Recorded::scraped(fixture.addr())
+        .completions
+        .iter()
+        .filter(|sample| sample.label("origin") == Some("protocol"))
+        .count();
+    assert_eq!(
+        named, 0,
+        "producerless head: {named} completion samples name a producer Camber never had",
+    );
+}
+
 /// 15.T1: tonic's answer is recorded once, at the body Camber wrapped it in.
 #[cfg(feature = "grpc")]
 fn assert_grpc_records_at_its_terminal(fixture: &CompletionFixture) {
-    let expected = Expected {
-        label: "grpc",
-        method: "POST",
-        status: 200,
-        protocol: "grpc",
-        terminal: "completed",
-        boundary: "none",
-    };
+    let expected = Expected::of("grpc", "POST", "grpc").from("grpc");
     let before = Recorded::scraped(fixture.addr());
     let answered = common::block_on(completion_rpc(fixture.addr()));
     assert_eq!(answered.status, 200, "grpc: wire status");
@@ -1145,24 +1537,84 @@ fn completion_grpc_message(name: &str) -> Box<[u8]> {
     framed.into_boxed_slice()
 }
 
-/// 15.T1
+/// 10.T2 — invariant 16
 ///
 /// One completion owner follows each admitted operation to its true terminal.
-/// A buffered answer, a streaming body, an SSE feed, a proxied download, and a
-/// gRPC answer are each recorded once — never at the head — under the status the
-/// peer was given, the whole head-to-terminal span, and the highest-precedence
-/// typed boundary any owner fixed. A refusal, a peer that leaves, a payload past
-/// its maximum, and an operation that outlives its lifetime are recorded the
-/// same way, under the terminals that are theirs.
+/// A buffered answer, a streaming body, an SSE feed, a proxied download, a gRPC
+/// answer, and a committed `101` handoff are each recorded once — never at the
+/// head — under the whole head-to-terminal span and the orthogonal facts their
+/// owners named. A refusal, a peer that leaves, a payload past its maximum, and
+/// an operation that outlives its lifetime are recorded the same way. A bound
+/// crossed after the head keeps the status the peer already holds and records
+/// only the interrupted delivery and the download bound under it; a transport
+/// that broke is named apart from a peer that left; a refusal raised before
+/// admission still names the mapper that produced its head; and an authority no
+/// router can be resolved from is recorded under the routing terminal that
+/// refused it. A head Hyper refuses below Camber's admitted-operation
+/// constructor is recorded not at all, and no record anywhere names a producer
+/// Camber never had.
 #[test]
-fn completion_metrics_and_events_emit_once_at_true_terminal() {
+fn completion_metrics_and_events_emit_once_for_every_origin_and_terminal_lifetime() {
     common::run_in_child(
-        "service_operation_observability::completion_metrics_and_events_emit_once_at_true_terminal",
+        "service_operation_observability::\
+         completion_metrics_and_events_emit_once_for_every_origin_and_terminal_lifetime",
         "completion-metrics-and-events",
         "COMPLETION_METRICS_AND_EVENTS_COMPLETE",
         COMPLETION_MATRIX_BOUND,
         assert_completion_metrics_and_events,
     );
+}
+
+/// A request line no HTTP version can parse.
+///
+/// Hyper answers it from inside its own connection loop, below the constructor
+/// that would admit a Camber operation, so no account exists to record.
+const MALFORMED_HEAD: &[u8] = b"\x16\x03\x01 not-a-request-line\r\n\r\n";
+
+/// 10.T2: a head Hyper refuses before admission produces no Camber record.
+///
+/// The absence is checked over the two dimensions only an unadmitted head could
+/// carry — a record with no Camber producer behind it, and a record with no
+/// status the peer was given — rather than over one row's own label set, because
+/// a record for an operation that never existed could carry any labels at all.
+/// The scrapes this row takes are themselves admitted operations, and they are
+/// the reason the claim is scoped this way rather than to a bare total.
+///
+/// Both readings are taken while the server still serves. What the refusal left
+/// behind is settled afterwards by `CompletionFixture::tear_down`: the bounded
+/// stop and join cover every operation Camber owned, and the bind again covers
+/// the listener underneath a refusal Camber never owned at all.
+fn assert_unadmitted_head_records_nothing(fixture: &CompletionFixture) {
+    let label = "unadmitted";
+    let capture = common::capture_events(COMPLETION_EVENT);
+    let before = Recorded::scraped(fixture.addr());
+
+    let mut peer = http_support::connect(fixture.addr())
+        .unwrap_or_else(|error| panic!("{label}: the peer could not connect: {error}"));
+    std::io::Write::write_all(&mut peer, MALFORMED_HEAD)
+        .unwrap_or_else(|error| panic!("{label}: the malformed head could not be sent: {error}"));
+    // Hyper answers or closes; either is its disposition and neither is Camber's.
+    // Reading to the end is what makes the connection over before the scrape.
+    drop(http_support::read_until_closed(&mut peer, COMPLETION_BOUND));
+    drop(peer);
+
+    let after = Recorded::scraped(fixture.addr());
+    for (name, value) in [("origin", "protocol"), ("status", ABSENT)] {
+        assert_eq!(
+            common::delta_by(&before.completions, &after.completions, name, value),
+            0,
+            "{label}: a request Hyper refused below admission was recorded as {name}={value}",
+        );
+    }
+    // Every operation admitted while this row ran was one of its own scrapes,
+    // so any other completion event is one this row proved must not exist.
+    for event in capture.events().iter() {
+        assert_eq!(
+            common::field_value(event, "path"),
+            Some("/metrics"),
+            "{label}: a completion event was emitted for an unadmitted head: {event}",
+        );
+    }
 }
 
 /// Run the process-global completion-metrics claim without sibling samples.
@@ -1178,47 +1630,32 @@ fn assert_completion_metrics_and_events() {
                 &fixture,
                 STREAM_PATH,
                 &fixture.stream,
-                &Expected {
-                    label: "streaming",
-                    method: "GET",
-                    status: 200,
-                    protocol: "streaming_http",
-                    terminal: "completed",
-                    boundary: "none",
-                },
+                &Expected::of("streaming", "GET", "streaming_http").from("application"),
             );
             assert_held_class_records_at_its_body(
                 &fixture,
                 SSE_PATH,
                 &fixture.sse,
-                &Expected {
-                    label: "sse",
-                    method: "GET",
-                    status: 200,
-                    protocol: "server_sent_events",
-                    terminal: "completed",
-                    boundary: "none",
-                },
+                &Expected::of("sse", "GET", "server_sent_events").from("sse"),
             );
             assert_held_class_records_at_its_body(
                 &fixture,
                 PROXY_PATH,
                 &fixture.upstream_stream,
-                &Expected {
-                    label: "streaming proxy",
-                    method: "GET",
-                    status: 200,
-                    protocol: "proxy",
-                    terminal: "completed",
-                    boundary: "none",
-                },
+                &Expected::of("streaming proxy", "GET", "proxy").from("upstream"),
             );
             assert_grpc_records_at_its_terminal(&fixture);
             assert_upgrade_records_at_its_handoff(&fixture);
             assert_refusal_records_its_answer(&fixture);
             assert_disconnect_records_the_peer_that_left(&fixture);
+            assert_postcommit_boundary_keeps_the_committed_status(&fixture);
+            assert_broken_transport_names_its_connection_end(&fixture);
             assert_body_limit_records_its_boundary(&fixture);
             assert_request_total_records_its_boundary(&fixture);
+            assert_unhealthy_backend_records_its_framework_refusal(&fixture);
+            assert_unrouted_authority_records_its_router_terminal(&fixture);
+            assert_unadmitted_head_records_nothing(&fixture);
+            assert_no_record_names_a_producerless_head(&fixture);
             fixture.tear_down("completion");
             runtime::request_shutdown();
         })
@@ -1226,14 +1663,26 @@ fn assert_completion_metrics_and_events() {
 }
 
 // ---------------------------------------------------------------------------
-// 15.T2: what a completion label is allowed to carry
+// 10.T3: what a completion label is allowed to carry
 // ---------------------------------------------------------------------------
 
 /// The label names every completion sample carries, declared in sorted order.
 ///
 /// The order is part of the declaration: the check below sorts only the names it
-/// scraped and compares them against this as it stands.
-const COMPLETION_LABELS: [&str; 5] = ["boundary", "method", "protocol", "status", "terminal"];
+/// scraped and compares them against this as it stands. There is no `terminal`
+/// among them, and that absence is the claim: nine independent names, none of
+/// which is a fold over the others.
+const COMPLETION_LABELS: [&str; 9] = [
+    "boundary",
+    "connection_end",
+    "delivery",
+    "method",
+    "origin",
+    "protocol",
+    "rejection",
+    "shutdown",
+    "status",
+];
 
 /// A request identifier a peer supplies, which Camber must not adopt.
 const SUPPLIED_REQUEST_ID: &str = "peer-supplied-identity-0123456789";
@@ -1462,25 +1911,39 @@ fn assert_bounded_completion_labels(samples: &[common::Sample], forbidden: &[&st
         assert_closed_label_names(sample);
         assert_closed_value(sample, "method", &vocabulary.methods);
         assert_closed_value(sample, "protocol", &vocabulary.protocols);
-        assert_closed_value(sample, "terminal", &vocabulary.terminals);
+        assert_closed_value(sample, "origin", &vocabulary.origins);
+        assert_closed_value(sample, "rejection", &vocabulary.rejections);
+        assert_closed_value(sample, "delivery", &vocabulary.deliveries);
+        assert_closed_value(sample, "connection_end", &vocabulary.connection_ends);
         assert_closed_value(sample, "boundary", &vocabulary.boundaries);
+        assert_closed_value(sample, "shutdown", &vocabulary.shutdowns);
         assert_bounded_values(sample, forbidden);
     }
 }
 
 /// Assert the required closed labels are actually present and populated.
 ///
-/// The vocabulary checks above hold vacuously over a scrape carrying neither
-/// label, which is exactly the tree this step started from. This is the half
-/// that fails there: the terminal and the boundary must exist, and between them
-/// the drive below must have produced a named bound rather than only absences.
+/// The vocabulary checks above hold vacuously over a scrape whose labels are all
+/// absent, which is exactly what a folded record would leave behind. This is the
+/// half that fails there: the drive must have produced a named bound, and both
+/// the origin and the rejection must distinguish more than one value. The
+/// rejection can be asked for because this drive varies it — two of its rows are
+/// answered with no refusal at all, one crosses a payload maximum, and one is
+/// refused on an upstream it cannot reach.
+///
+/// Delivery, connection_end, and shutdown are deliberately not asked for here.
+/// Every row this drive runs is answered in full under a running server, so all
+/// three of them are the same value on every sample by construction, and asking
+/// a label that cannot vary to vary is a check that can only ever fail. 10.T1
+/// and 10.T2 are where an interrupted delivery and a named connection end are
+/// proved, and the shutdown rows are where a draining server is.
 fn assert_required_labels_are_populated(samples: &[common::Sample]) {
     let named = samples
         .iter()
         .filter(|sample| {
             sample
                 .label("boundary")
-                .is_some_and(|value| value != "none")
+                .is_some_and(|value| value != ABSENT)
         })
         .count();
     assert!(
@@ -1488,15 +1951,17 @@ fn assert_required_labels_are_populated(samples: &[common::Sample]) {
         "no completion sample names a crossed bound, so the boundary label proves nothing: \
          {samples:?}",
     );
-    let terminals = samples
-        .iter()
-        .filter_map(|sample| sample.label("terminal"))
-        .collect::<std::collections::BTreeSet<_>>();
-    assert!(
-        terminals.len() > 1,
-        "every completion sample reports the same terminal, so the terminal label \
-         distinguishes nothing: {terminals:?}",
-    );
+    for name in ["origin", "rejection"] {
+        let named = samples
+            .iter()
+            .filter_map(|sample| sample.label(name))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            named.len() > 1,
+            "every completion sample reports the same {name}, so that label \
+             distinguishes nothing: {named:?}",
+        );
+    }
 }
 
 /// Drive every varied journey and report the identities production recorded.
@@ -1547,16 +2012,36 @@ fn drive_varied_rows(addr: std::net::SocketAddr) -> Box<[Box<str>]> {
     recorded.into_boxed_slice()
 }
 
-/// 15.T2
+/// 10.T3 — invariant 17
 ///
 /// Varied request identifiers, raw paths, peer addresses, upstream diagnostics,
 /// and mapper detail reach a live service. Every one of them is recorded in the
 /// structured event, which is where variable data is allowed. What the
 /// completion counters carry is only the closed method, status, dispatch-class,
-/// terminal, and boundary vocabularies production itself publishes, and no
-/// value this drive proved production was holding reaches a label.
+/// origin, rejection, delivery, connection-end, boundary, and shutdown
+/// vocabularies production itself publishes — there is no `terminal` among them
+/// — and no value this drive proved production was holding reaches a label.
 #[test]
-fn completion_labels_exclude_unbounded_identity_and_diagnostics() {
+fn completion_labels_use_closed_vocabulary_without_terminal_or_identity() {
+    common::run_in_child(
+        "service_operation_observability::\
+         completion_labels_use_closed_vocabulary_without_terminal_or_identity",
+        "completion-labels",
+        "COMPLETION_LABELS_COMPLETE",
+        COMPLETION_MATRIX_BOUND,
+        assert_completion_labels_are_bounded,
+    );
+}
+
+/// Run the label claim over a registry no sibling test has written into.
+///
+/// The recorder is installed once per process, so a scrape taken in the shared
+/// binary reads every other test's completions too. The exclusions below would
+/// only be strengthened by that, but the populated-label check would not: a
+/// sibling's named bound and second origin would satisfy it while this drive's
+/// own records said `none` everywhere, which is exactly what a folded record
+/// leaves behind.
+fn assert_completion_labels_are_bounded() {
     common::test_runtime()
         .with_metrics()
         .with_tracing()
@@ -1789,8 +2274,9 @@ const DISPLACED_RESOURCE: &str = "displaced-teardown";
 /// A closure's panic is the caller's answer and nothing replaces it — not a
 /// `Result`, and not the teardown failures that happened during its unwind. The
 /// account those failures froze into has no return path left at all, so one
-/// production event carries it, through the same public accessors a caller
-/// would have read off the error.
+/// production event carries it, rendered exactly as a caller reading the error
+/// would have seen it: how many owners failed, and every one of them. The event
+/// names no chosen participant, because the account elects none.
 #[test]
 fn user_panic_resumes_after_displaced_lifecycle_event() {
     let capture = common::capture_events(DISPLACED_EVENT);
@@ -1809,14 +2295,21 @@ fn user_panic_resumes_after_displaced_lifecycle_event() {
         .find(|event| event.contains(DISPLACED_EVENT))
         .unwrap_or_else(|| panic!("no displaced-lifecycle event was emitted: {events:?}"));
     common::assert_field_value(reported, "recorded", "1", DISPLACED_EVENT);
-    common::assert_field_value(reported, "phase", "shutdown", DISPLACED_EVENT);
     assert!(
-        reported.contains(&format!("participant=resource {DISPLACED_RESOURCE}")),
+        reported.contains(&format!("resource {DISPLACED_RESOURCE}")),
         "the displaced event did not name the owner that failed: {reported}"
+    );
+    assert!(
+        reported.contains("shutdown"),
+        "the displaced event dropped the stage the failure happened in: {reported}"
     );
     assert!(
         reported.contains(common::SCRIPTED_REFUSAL),
         "the displaced event dropped the failure's own cause: {reported}"
+    );
+    assert!(
+        !reported.contains("participant="),
+        "the displaced event elected one participant out of the account: {reported}"
     );
 }
 
@@ -1852,4 +2345,346 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
             .copied()
             .unwrap_or("the payload carried no readable text"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 10.T4: one snapshot per operation, however the server escalated
+// ---------------------------------------------------------------------------
+
+/// The route every escalation row holds an operation on.
+const ESCALATION_PATH: &str = "/escalation/held";
+
+/// The aggregate this fixture's graceful drains are bounded by.
+///
+/// Short enough that the deadline row spends it rather than the suite's, and far
+/// above what the two rows that never wait for it take.
+const ESCALATION_GRACE: Duration = Duration::from_millis(600);
+
+/// How long an escalation row waits for a held operation to be recorded.
+const ESCALATION_BOUND: Duration = Duration::from_secs(10);
+
+/// How a graceful stop was escalated before the held operation finalized.
+#[derive(Clone, Copy)]
+enum Escalation {
+    /// A public cancellation committed inside the drain.
+    Cancel,
+    /// The one aggregate deadline expired inside the drain.
+    Deadline,
+}
+
+impl Escalation {
+    /// The shutdown observation the escalated phase must be recorded under.
+    const fn observed(self) -> &'static str {
+        match self {
+            Self::Cancel => "cancelled",
+            Self::Deadline => "deadline-expired",
+        }
+    }
+}
+
+/// A server whose one route answers only when released, and the signal that it
+/// was entered.
+///
+/// The handler is entered before any row escalates, resets, or stops, so the
+/// operation being finalized is one the server was genuinely still carrying: a
+/// stop committed against a server with nothing in flight would record nothing
+/// at all, and a reset sent before dispatch would prove no more.
+///
+/// One shape for every row because the difference between them is only what
+/// happens while the operation is held: the escalation and reset rows never
+/// release it, and the graceful row does.
+struct HeldOperation {
+    handle: camber::http::ServerHandle,
+    addr: std::net::SocketAddr,
+    /// Resolved by the handler itself, awaited rather than blocked on.
+    ///
+    /// A blocking receive here would hold the very worker the handler needs to
+    /// run on, so the entry it waits for could never arrive.
+    entered: tokio::sync::mpsc::UnboundedReceiver<()>,
+    release: Release,
+}
+
+impl HeldOperation {
+    /// Serve one held route and hand back its raw handle.
+    fn serve() -> Self {
+        let (entered, arrived) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (release, releases) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let releases = std::sync::Arc::new(tokio::sync::Mutex::new(releases));
+        let mut routes = camber::http::Router::new();
+        routes.get(ESCALATION_PATH, move |_req: &Request| {
+            let entered = entered.clone();
+            let releases = std::sync::Arc::clone(&releases);
+            async move {
+                // Best effort: the row that already read the entry has let its
+                // receiver go, and the handler still has nothing to answer with.
+                match entered.send(()) {
+                    Ok(()) | Err(_) => {}
+                }
+                match releases.lock().await.recv().await {
+                    Some(()) => Response::text(200, "released"),
+                    // Nothing will release this operation, so it is still in
+                    // flight whenever its row ends — which is the state the
+                    // escalation and reset rows are about.
+                    None => std::future::pending().await,
+                }
+            }
+        });
+        let (listener, addr, _observer) = http_support::reserve_unwatched().into_owned_parts();
+        let handle = camber::http::serve_background(listener, routes)
+            .expect("an owned server for the escalation row");
+        Self {
+            handle,
+            addr,
+            entered: arrived,
+            release: Release(release),
+        }
+    }
+
+    /// Wait for the held handler to have been entered.
+    async fn await_entry(&mut self, label: &str) {
+        let entered = tokio::time::timeout(ESCALATION_BOUND, self.entered.recv()).await;
+        assert!(
+            matches!(entered, Ok(Some(()))),
+            "{label}: the held handler was never entered: {entered:?}",
+        );
+    }
+}
+
+/// 10.T4: an operation that finalizes inside a graceful drain records it.
+///
+/// The stop is committed while the operation is provably still in flight, and
+/// the operation then answers in full. Nothing escalates, so the phase the
+/// finalizer snapshots is the graceful one — a fact a running server does not
+/// carry — and the record states it beside a delivery that was produced. The two
+/// are orthogonal: a server that was stopping is not a request that failed, and
+/// the escalated phases this drive never reached are recorded for no row.
+fn assert_graceful_stop_records_the_phase_it_observed(scrape: std::net::SocketAddr) {
+    let label = "graceful";
+    let expected = Expected {
+        shutdown: "graceful",
+        ..Expected::of(label, "GET", "ordinary_http").from("application")
+    };
+    let before = Recorded::scraped(scrape);
+    let mut held = HeldOperation::serve();
+    let mut peer = http_support::connect(held.addr)
+        .unwrap_or_else(|error| panic!("{label}: the holding peer could not connect: {error}"));
+    http_support::write_request(&mut peer, "GET", ESCALATION_PATH, &[], b"")
+        .unwrap_or_else(|error| panic!("{label}: the holding peer could not send: {error}"));
+    common::block_on(held.await_entry(label));
+
+    held.handle.shutdown();
+    held.release.release(label);
+    http_support::read_until_closed(&mut peer, ESCALATION_BOUND)
+        .unwrap_or_else(|error| panic!("{label}: the released answer never arrived: {error}"));
+    drop(peer);
+
+    let settled = http_support::poll_until(ESCALATION_BOUND, || {
+        moved(&before, &Recorded::scraped(scrape), &expected) >= 1
+    });
+    assert!(
+        settled,
+        "{label}: no completion was recorded under the graceful phase",
+    );
+    let after = Recorded::scraped(scrape);
+    assert_recorded_once(&before, &after, &expected);
+    for escalated in ["cancelled", "deadline-expired"] {
+        assert_eq!(
+            escalations_recorded(&before, &after, escalated),
+            0,
+            "{label}: a stop that never escalated was recorded as {escalated}",
+        );
+    }
+    drop(held);
+}
+
+/// 10.T4: a graceful stop escalated before finalization records one phase.
+///
+/// The escalation is committed while the operation is provably still in flight,
+/// so the phase the finalizer snapshots is the escalated one and not the
+/// graceful one it replaced. Exactly one record carries it, and no record for
+/// this drive carries `graceful`: a snapshot rewritten by the later commit, or
+/// taken twice, would show up as either a second sample or a stale one beside
+/// it.
+fn assert_escalation_records_one_snapshot(
+    scrape: std::net::SocketAddr,
+    escalation: Escalation,
+    label: &str,
+) {
+    let observed = escalation.observed();
+    let before = Recorded::scraped(scrape);
+    let mut held = HeldOperation::serve();
+    let mut peer = http_support::connect(held.addr)
+        .unwrap_or_else(|error| panic!("{label}: the holding peer could not connect: {error}"));
+    http_support::write_request(&mut peer, "GET", ESCALATION_PATH, &[], b"")
+        .unwrap_or_else(|error| panic!("{label}: the holding peer could not send: {error}"));
+    common::block_on(held.await_entry(label));
+
+    held.handle.shutdown();
+    match escalation {
+        Escalation::Cancel => held.handle.cancel(),
+        // Nothing else to commit: the aggregate this graceful stop minted is
+        // what expires, and the wait below is the wait for it.
+        Escalation::Deadline => {}
+    }
+
+    let settled = http_support::poll_until(ESCALATION_BOUND, || {
+        escalations_recorded(&before, &Recorded::scraped(scrape), observed) >= 1
+    });
+    assert!(
+        settled,
+        "{label}: no completion was recorded under shutdown={observed}",
+    );
+    let after = Recorded::scraped(scrape);
+    assert_eq!(
+        escalations_recorded(&before, &after, observed),
+        1,
+        "{label}: the escalated phase was recorded more than once",
+    );
+    assert_eq!(
+        escalations_recorded(&before, &after, "graceful"),
+        0,
+        "{label}: the phase the escalation replaced was recorded beside it",
+    );
+    drop(peer);
+    drop(held);
+}
+
+/// How many completions were recorded under one shutdown observation.
+fn escalations_recorded(before: &Recorded, after: &Recorded, observed: &str) -> u64 {
+    common::delta_by(
+        &before.completions,
+        &after.completions,
+        "shutdown",
+        observed,
+    )
+}
+
+/// The closed set a pre-commit reset settles into.
+///
+/// Two members, and no barrier between them to choose one. The peer's reset and
+/// the operation's own cause table are both racing to end the same request: if
+/// the cause table gets there first Camber answers `408` from it, and if Hyper
+/// drops the per-request future first no exit answers at all. Both are locally
+/// valid, and what the row asserts is what they agree on — a record with no
+/// producer, because no producer ever reached this operation's commitment.
+fn precommit_reset_results(label: &'static str) -> [Expected<'static>; 2] {
+    [
+        Expected {
+            // Camber's own cause table answered, so there is a status and a
+            // delivered answer, and still no producer behind it.
+            origin: ABSENT,
+            ..Expected::of(label, "GET", "ordinary_http").answering(408)
+        },
+        Expected {
+            // Hyper dropped the request first, so nothing was ever committed.
+            status: None,
+            origin: ABSENT,
+            delivery: "not-committed",
+            connection_end: "stream-reset",
+            ..Expected::of(label, "GET", "unclassified")
+        },
+    ]
+}
+
+/// 10.T4: an operation that ends before commitment names no producer.
+///
+/// The peer resets its own stream while the handler is still held, so nothing
+/// reached this operation's response commitment as a producer. Exactly one
+/// record appears, it is one of the two locally valid results, and no record for
+/// this drive claims `protocol` — which is the producerless case that belongs to
+/// a head Hyper wrote, not to an operation Camber ended from its cause table.
+fn assert_precommit_reset_records_no_producer(scrape: std::net::SocketAddr) {
+    let label = "pre-commit reset";
+    let results = precommit_reset_results(label);
+    let before = Recorded::scraped(scrape);
+    let mut held = HeldOperation::serve();
+
+    // The client outlives the reset deliberately. Closing it would end the whole
+    // connection in the same breath, and the peer's EOF and its stream reset
+    // would then be two unordered facts about what ended this request; holding
+    // the connection open leaves the reset as the only one.
+    let mut client = common::block_on(common::PersistentH2Client::connect(
+        held.addr,
+        ESCALATION_BOUND,
+    ));
+    let mut stream = common::block_on(client.open_paced("GET", ESCALATION_PATH, "localhost", &[]));
+    common::block_on(async {
+        // The request body is ended before the entry is awaited: this route
+        // consumes its body, so a stream still owing frames would hold the
+        // operation in collection and never reach the handler at all.
+        stream.finish();
+        held.await_entry(label).await;
+        stream.reset();
+    });
+
+    let settled = http_support::poll_until(ESCALATION_BOUND, || {
+        let after = Recorded::scraped(scrape);
+        results
+            .iter()
+            .map(|expected| moved(&before, &after, expected))
+            .sum::<u64>()
+            >= 1
+    });
+    let after = Recorded::scraped(scrape);
+    let recorded: u64 = results
+        .iter()
+        .map(|expected| moved(&before, &after, expected))
+        .sum();
+    assert_eq!(
+        recorded, 1,
+        "{label}: exactly one of the two valid results was expected \
+         (settled={settled}), and the scrape holds {:?}",
+        after.completions,
+    );
+    assert_eq!(
+        common::delta_by(
+            &before.completions,
+            &after.completions,
+            "origin",
+            "protocol"
+        ),
+        0,
+        "{label}: an operation Camber ended from its own cause table was recorded \
+         as a head Hyper wrote",
+    );
+    common::block_on(client.close());
+    held.handle.shutdown();
+    drop(held);
+}
+
+/// 10.T4 — invariants 15 to 17
+#[test]
+fn precommit_disconnect_and_shutdown_escalation_finalize_one_snapshot() {
+    common::run_in_child(
+        "service_operation_observability::\
+         precommit_disconnect_and_shutdown_escalation_finalize_one_snapshot",
+        "completion-escalation",
+        "COMPLETION_ESCALATION_COMPLETE",
+        COMPLETION_MATRIX_BOUND,
+        assert_precommit_and_escalation_snapshots,
+    );
+}
+
+/// Run the escalation claim without sibling samples in the same registry.
+fn assert_precommit_and_escalation_snapshots() {
+    common::test_runtime()
+        .with_metrics()
+        .with_tracing()
+        .shutdown_timeout(ESCALATION_GRACE)
+        .run(|| {
+            // One long-lived server answers `/metrics` for every row, because a
+            // row's own server is the one being stopped and cannot be scraped
+            // after it has been.
+            let scrapes = http_support::reserve_unwatched().serve(camber::http::Router::new());
+            let scrape = scrapes.addr();
+            assert_precommit_reset_records_no_producer(scrape);
+            assert_graceful_stop_records_the_phase_it_observed(scrape);
+            assert_escalation_records_one_snapshot(scrape, Escalation::Cancel, "cancelled");
+            assert_escalation_records_one_snapshot(scrape, Escalation::Deadline, "deadline");
+            scrapes
+                .shutdown_bounded(SHUTDOWN_BOUND)
+                .expect("the scrape owner ended gracefully");
+            runtime::request_shutdown();
+        })
+        .expect("the escalation fixture runtime ran to completion");
 }

@@ -1,7 +1,10 @@
 use crate::common;
 
 use camber::RuntimeError;
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController, lifecycle};
+use camber::http::mock::{
+    ConnectionOwnerEdge, ScopedConnectionOwner, ScopedServerStop, ServerStopEdge, connection_owner,
+    server_stop,
+};
 use camber::http::{
     HostRouter, Request, Response, Router, ServerHandle, ServerHandleFuture, ServerPolicy,
 };
@@ -85,8 +88,8 @@ async fn http_get(
     Ok((status, body))
 }
 
-async fn wait_for_checkpoint(controller: &LifecycleController, checkpoint: LifecycleCheckpoint) {
-    tokio::time::timeout(EVENT_TIMEOUT, controller.wait_until_paused(checkpoint))
+async fn wait_for_checkpoint(stop: &ScopedServerStop, edge: ServerStopEdge) {
+    tokio::time::timeout(EVENT_TIMEOUT, stop.wait_until_paused(edge))
         .await
         .unwrap()
         .unwrap();
@@ -198,9 +201,9 @@ fn serve_widened_policy_on_a_reserved_port() -> bool {
     let addr = probe.local_addr().expect("reserved address");
     drop(probe);
 
-    let controller = lifecycle(addr).expect("register the reserved port's observer");
-    controller
-        .pause_once(LifecycleCheckpoint::HeaderTimeoutConfigured(
+    let connections = connection_owner(addr).expect("register the reserved port's observer");
+    connections
+        .pause_once(ConnectionOwnerEdge::HeaderTimeoutConfigured(
             WIDENED_HEADER_TIMEOUT,
         ))
         .expect("arm the widened header timeout");
@@ -245,7 +248,7 @@ fn serve_widened_policy_on_a_reserved_port() -> bool {
         .enable_all()
         .build()
         .expect("build the observing executor");
-    let stopped = observer.block_on(stop_the_observed_server(addr, &controller));
+    let stopped = observer.block_on(stop_the_observed_server(addr, &connections));
     assert_eq!(stopped, 200, "the stop route was not served");
 
     let outcome = reported
@@ -263,19 +266,19 @@ fn serve_widened_policy_on_a_reserved_port() -> bool {
 /// before anything connects would wait on a server with nothing to serve.
 async fn stop_the_observed_server(
     addr: std::net::SocketAddr,
-    controller: &LifecycleController,
+    connections: &ScopedConnectionOwner,
 ) -> u16 {
     let mut peer = connect_when_bound(addr).await;
     peer.write_all(b"GET /stop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .await
         .expect("write the stop request");
 
-    let observed = LifecycleCheckpoint::HeaderTimeoutConfigured(WIDENED_HEADER_TIMEOUT);
-    tokio::time::timeout(EVENT_TIMEOUT, controller.wait_until_paused(observed))
+    let observed = ConnectionOwnerEdge::HeaderTimeoutConfigured(WIDENED_HEADER_TIMEOUT);
+    tokio::time::timeout(EVENT_TIMEOUT, connections.wait_until_paused(observed))
         .await
         .expect("the blocking terminal never configured the policy it was built with")
         .expect("waiting for the widened header timeout failed");
-    controller
+    connections
         .release(observed)
         .expect("release the widened header timeout");
 
@@ -451,7 +454,7 @@ struct VariantProof {
     name: &'static str,
     expected_body: &'static str,
     addr: std::net::SocketAddr,
-    lifecycle: LifecycleController,
+    stop: ScopedServerStop,
     ownership: Weak<()>,
 }
 
@@ -467,15 +470,14 @@ struct StartedVariant {
 async fn variant_listener() -> (
     tokio::net::TcpListener,
     std::net::SocketAddr,
-    LifecycleController,
+    ScopedServerStop,
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let lifecycle = lifecycle(addr).unwrap();
-    lifecycle
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+    let stop = server_stop(addr).unwrap();
+    stop.pause_once(ServerStopEdge::SupervisorSelectedRuntime)
         .unwrap();
-    (listener, addr, lifecycle)
+    (listener, addr, stop)
 }
 
 async fn start_variant<S>(
@@ -487,14 +489,14 @@ async fn start_variant<S>(
 where
     S: FnOnce(tokio::net::TcpListener, Router) -> ServerHandle,
 {
-    let (listener, addr, lifecycle) = variant_listener().await;
+    let (listener, addr, stop) = variant_listener().await;
     let handle = serve(listener, route.router);
     StartedVariant {
         proof: VariantProof {
             name,
             expected_body,
             addr,
-            lifecycle,
+            stop,
             ownership: route.ownership,
         },
         handle,
@@ -598,13 +600,13 @@ impl BackgroundVariants {
     }
 }
 
-async fn wait_for_all(proofs: &VariantProofs, checkpoint: LifecycleCheckpoint) {
+async fn wait_for_all(proofs: &VariantProofs, edge: ServerStopEdge) {
     let [plain, tls, host, host_tls] = proofs;
     tokio::join!(
-        wait_for_checkpoint(&plain.lifecycle, checkpoint),
-        wait_for_checkpoint(&tls.lifecycle, checkpoint),
-        wait_for_checkpoint(&host.lifecycle, checkpoint),
-        wait_for_checkpoint(&host_tls.lifecycle, checkpoint),
+        wait_for_checkpoint(&plain.stop, edge),
+        wait_for_checkpoint(&tls.stop, edge),
+        wait_for_checkpoint(&host.stop, edge),
+        wait_for_checkpoint(&host_tls.stop, edge),
     );
 }
 
@@ -654,18 +656,18 @@ fn pin_joins(handles: [ServerHandle; 4]) -> [VariantJoin; 4] {
 }
 
 async fn stop_admission(proofs: &VariantProofs) {
-    wait_for_all(proofs, LifecycleCheckpoint::SupervisorSelectedRuntime).await;
+    wait_for_all(proofs, ServerStopEdge::SupervisorSelectedRuntime).await;
     for proof in proofs {
         proof
-            .lifecycle
-            .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
+            .stop
+            .pause_once(ServerStopEdge::BeforeSupervisorSelect)
             .unwrap();
         proof
-            .lifecycle
-            .release(LifecycleCheckpoint::SupervisorSelectedRuntime)
+            .stop
+            .release(ServerStopEdge::SupervisorSelectedRuntime)
             .unwrap();
     }
-    wait_for_all(proofs, LifecycleCheckpoint::BeforeSupervisorSelect).await;
+    wait_for_all(proofs, ServerStopEdge::BeforeSupervisorSelect).await;
     let [plain, tls, host, host_tls] = proofs;
     tokio::join!(
         common::assert_admission_closed(plain.addr, EVENT_TIMEOUT),
@@ -675,8 +677,8 @@ async fn stop_admission(proofs: &VariantProofs) {
     );
     for proof in proofs {
         proof
-            .lifecycle
-            .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+            .stop
+            .release(ServerStopEdge::BeforeSupervisorSelect)
             .unwrap();
     }
 }

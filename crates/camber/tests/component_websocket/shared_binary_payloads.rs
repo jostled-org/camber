@@ -15,7 +15,7 @@
 #![cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
 
 use crate::common::{
-    BEFORE_WRITE, FANOUTS, FRAME_BUILT, LARGE_PAYLOAD, PayloadWitness, SELECTED, SMALL_PAYLOAD,
+    AFTER_COMMIT, BEFORE_WRITE, FANOUTS, FRAME_BUILT, LARGE_PAYLOAD, PayloadWitness, SMALL_PAYLOAD,
     SharedPayloadFixture, assert_borrowed_copies_per_recipient, assert_no_further_payload,
     assert_payload_bytes, assert_payload_flat, closed_cause, fill_outbound_behind_the_writer,
     measure_borrowed_admission, measure_shared_admission, payload_bytes, read_ws_text_frame,
@@ -179,9 +179,9 @@ fn assert_live_full_immediate_send_refuses_and_releases() {
 fn assert_terminal_sends_refuse_and_release() {
     shared_payload_row(MEASURED_BUFFER, 1, |mut row| async move {
         let sender = row.sender(0).clone();
-        row.listener().arm(SELECTED);
+        row.listener().arm(AFTER_COMMIT);
         row.client(0).release_halves();
-        row.listener().wait_paused(SELECTED).await;
+        row.listener().wait_paused(AFTER_COMMIT).await;
         let expected = payload_bytes(SMALL_PAYLOAD, TERMINAL_TAG);
         let (payload, mut witness) = witnessed_payload(&expected, "the terminal shared payload");
         let sibling = payload.clone();
@@ -206,7 +206,7 @@ fn assert_terminal_sends_refuse_and_release() {
         )
         .await;
         drop(sender);
-        row.listener().release(SELECTED);
+        row.listener().release(AFTER_COMMIT);
         assert_no_further_payload(
             row.client(0).peer(),
             "a terminal refusal still reached the peer",

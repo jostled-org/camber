@@ -12,7 +12,7 @@
 //! caller cancelled enters forced termination immediately, under the fixed
 //! forced-join grace below rather than under a second copy of the aggregate's.
 
-use super::LifecycleParticipant;
+use super::ShutdownOwner;
 use crate::runtime_test_support::{ParticipantDisposition, RuntimeSchedule};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -57,10 +57,11 @@ impl AggregateShutdown {
     /// Mint the one expiry from `at`, unless a transition already did.
     ///
     /// The whole no-restart rule lives here: every graceful transition calls
-    /// this, and only the first one writes. It answers nothing, because a
-    /// transition's job is to start the clock and a participant reads it back
-    /// through [`Self::read`] under its own name.
-    pub(crate) fn mint_at(&self, at: Instant) {
+    /// this, and only the first one writes. It answers the one expiry that is
+    /// now fixed, which is the minted value for the first caller and the
+    /// standing one for every caller after it. A participant that wants the
+    /// reading recorded under its own name goes through [`Self::read`].
+    pub(crate) fn mint_at(&self, at: Instant) -> Instant {
         let mut minted = false;
         let expiry = *self.expiry.get_or_init(|| {
             minted = true;
@@ -69,58 +70,65 @@ impl AggregateShutdown {
         if minted && let Some(observer) = self.observer.as_ref() {
             observer.record_deadline_mint(at, expiry);
         }
+        expiry
     }
 
-    /// The shared expiry as `participant` reads it, minting nothing.
+    /// The shared expiry as `owner` reads it, minting nothing.
     ///
     /// An owner that reaches shutdown before any transition has been published
     /// reads `None` and keeps its own bound; it never mints one on the
     /// transition's behalf.
-    pub(crate) fn read(&self, participant: &LifecycleParticipant) -> Option<Instant> {
+    pub(crate) fn read(&self, owner: &ShutdownOwner) -> Option<Instant> {
         let expiry = *self.expiry.get()?;
         if let Some(observer) = self.observer.as_ref() {
-            observer.record_deadline_reading(participant, expiry);
+            observer.record_deadline_reading(owner, expiry);
         }
         Some(expiry)
     }
 
-    /// Mint from `at` if nothing has been minted yet, and answer as
-    /// `participant` reads it.
-    pub(crate) fn read_or_mint(&self, participant: &LifecycleParticipant, at: Instant) -> Instant {
-        self.mint_at(at);
+    /// Mint from `at` if nothing has been minted yet, and answer as `owner`
+    /// reads it.
+    pub(crate) fn read_or_mint(&self, owner: &ShutdownOwner, at: Instant) -> Instant {
+        let fixed = self.mint_at(at);
         // Filled by construction: the mint above leaves the cell written, so
-        // the fallback restates the same arithmetic rather than inventing a
+        // the fallback is the same instant this call just fixed rather than a
         // second deadline.
-        self.read(participant).unwrap_or(at + self.grace)
+        self.read(owner).unwrap_or(fixed)
     }
 
-    /// How long `participant` may still wait, bounded by its own `local` limit.
+    /// How long `owner` may still wait, bounded by its own `local` limit.
     ///
-    /// Reads the shared expiry under this participant's name and narrows
-    /// `local` by what is left, through [`narrowed`].
-    pub(crate) fn bounded(&self, participant: &LifecycleParticipant, local: Duration) -> Duration {
-        narrowed(local, self.remaining(participant))
+    /// Reads the shared expiry under this owner's name and narrows `local` by
+    /// what is left, through [`narrowed`].
+    pub(crate) fn bounded(&self, owner: &ShutdownOwner, local: Duration) -> Duration {
+        narrowed(local, self.remaining(owner))
     }
 
     /// The time left before the shared expiry, or `None` when no transition has
     /// minted one.
-    pub(crate) fn remaining(&self, participant: &LifecycleParticipant) -> Option<Duration> {
-        self.read(participant)
-            .map(|expiry| expiry.saturating_duration_since(Instant::now()))
+    pub(crate) fn remaining(&self, owner: &ShutdownOwner) -> Option<Duration> {
+        self.read(owner).map(left_until)
     }
 
-    /// Publish how one participant was disposed of.
+    /// The bound a safety action runs under, read by nobody.
+    ///
+    /// The same arithmetic [`Self::bounded`] performs, without a name attached.
+    /// A safety action is not an owner: it is a wait Camber places around work
+    /// no Camber owner is accountable for, so publishing a reading for it would
+    /// put a participant in the inventory that never existed, and a caller
+    /// counting owners would find one it could not settle.
+    pub(crate) fn safety_window(&self, local: Duration) -> Duration {
+        narrowed(local, self.expiry.get().copied().map(left_until))
+    }
+
+    /// Publish how one owner was disposed of.
     ///
     /// Production decides the disposition; the observation only records the
     /// decision so a case can read the whole inventory instead of inferring it
     /// from what the aggregate happened to name.
-    pub(crate) fn settle(
-        &self,
-        participant: &LifecycleParticipant,
-        disposition: ParticipantDisposition,
-    ) {
+    pub(crate) fn settle(&self, owner: &ShutdownOwner, disposition: ParticipantDisposition) {
         if let Some(observer) = self.observer.as_ref() {
-            observer.record_settlement(participant, disposition);
+            observer.record_settlement(owner, disposition);
         }
     }
 }
@@ -150,4 +158,13 @@ pub(crate) fn narrowed(local: Duration, remaining: Option<Duration>) -> Duration
         Some(remaining) => local.min(remaining.max(FORCED_JOIN_GRACE)),
         None => local,
     }
+}
+
+/// How long is left before one expiry, floored at zero.
+///
+/// The one definition of that subtraction, so the named read every owner goes
+/// through and the unnamed read a safety window takes cannot answer differently
+/// about the same instant.
+fn left_until(expiry: Instant) -> Duration {
+    expiry.saturating_duration_since(Instant::now())
 }

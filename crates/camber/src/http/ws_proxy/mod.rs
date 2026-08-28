@@ -3,13 +3,15 @@
 //! `handshake`, `origin` and `authority` decide whether a WebSocket may exist;
 //! `handoff` carries what a valid one earned; `ownership` decides who owns the
 //! connection that results and when its `101` becomes real; `framing` is the
-//! transport substrate both bridges write frames over. `direct` and `proxy`
+//! transport substrate both bridges write frames over; `callback` disposes of
+//! the blocking application child only a direct bridge has. `direct` and `proxy`
 //! then own two different lifecycles on top of that shared base and share
 //! nothing else: a direct connection has application queues, a receive owner,
 //! and one terminal cause an application reads, and a proxied one has a second
 //! WebSocket.
 
 mod authority;
+mod callback;
 mod direct;
 mod framing;
 mod handoff;

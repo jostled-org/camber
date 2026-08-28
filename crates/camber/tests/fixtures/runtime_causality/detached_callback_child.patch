@@ -1,0 +1,23 @@
+--- a/crates/camber/src/http/ws_proxy/direct.rs
++++ b/crates/camber/src/http/ws_proxy/direct.rs
+@@ -177,17 +177,9 @@
+         Some(mut stream) => shutdown_client_transport(&mut stream).await,
+         None => {}
+     }
+-    // Before the permit, and so before this task returns to the upgrade owner
+-    // that joins it: an upgrade cannot settle while the callback it started is
+-    // neither joined nor named.
+-    settle_callback(
+-        callback,
+-        &mut bridged.deadline,
+-        stop.as_deref(),
+-        &mut control,
+-        script.as_deref(),
+-    )
+-    .await;
++    // Detached: the handle is let go instead of joined, so no join bounds the
++    // callback and no disposition is ever published about it.
++    drop(callback);
+     release_permit(permit, script.as_deref());
+ }
+ 

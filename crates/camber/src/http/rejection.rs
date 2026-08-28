@@ -940,6 +940,20 @@ impl Rejected {
         )
     }
 
+    /// A streaming proxy route reached built-request dispatch without an
+    /// upgrade.
+    ///
+    /// Classification sends its ordinary request body through the dedicated
+    /// streaming path. Reaching buffered dispatch would otherwise revive a
+    /// second forward implementation with different admission and commitment
+    /// behavior, so the invariant fails closed as an internal service fault.
+    pub(super) fn streaming_proxy_misdispatched() -> Self {
+        Self::decided(
+            Rejection::redacted_fault(RejectionKind::InternalService),
+            "a streaming proxy route reached buffered dispatch",
+        )
+    }
+
     /// The peer framed its body under a coding Camber cannot undo.
     ///
     /// Hyper accepted the chain because it ends in `chunked` and decoded that
@@ -1219,21 +1233,21 @@ impl Rejected {
         )
     }
 
-    /// The supervisor declined to take ownership of this upgrade.
+    /// The connection declined to take this upgrade as a child.
     #[cfg(feature = "ws")]
     pub(super) fn upgrade_registration_refused() -> Self {
         Self::uncommitted_upgrade(
             Rejection::service_unavailable(RejectionKind::InternalService),
-            RefusalDetail::diagnostic("the supervisor refused to own this upgrade"),
+            RefusalDetail::diagnostic("the connection refused to own this upgrade"),
         )
     }
 
-    /// No supervisor was able to take ownership of this upgrade.
+    /// No connection was able to take this upgrade as a child.
     #[cfg(feature = "ws")]
     pub(super) fn upgrade_registration_unavailable() -> Self {
         Self::uncommitted_upgrade(
             Rejection::redacted_fault(RejectionKind::InternalService),
-            RefusalDetail::diagnostic("no supervisor could take ownership of this upgrade"),
+            RefusalDetail::diagnostic("no connection could take ownership of this upgrade"),
         )
     }
 
@@ -1436,23 +1450,50 @@ pub(super) struct RequestIdentity {
 }
 
 impl RequestIdentity {
-    /// Name a request from the head that has not been built into one yet.
-    pub(super) fn from_head(
-        origin: &super::request::RequestOrigin<'_>,
+    /// Name a request from the raw head Hyper accepted, before dispatch.
+    ///
+    /// The earliest point a request has a name at all: the identifier is minted
+    /// with the operation's clock, and no route, class, or representation has
+    /// been established yet. Every later stage refines this; a request whose
+    /// peer leaves before any exit answers is still recorded under it.
+    pub(super) fn admitted(
+        request_id: RequestId,
         method: &hyper::Method,
         uri: &hyper::Uri,
+        remote_addr: Option<IpAddr>,
+        version: hyper::Version,
     ) -> Self {
         Self {
-            request_id: origin.request_id,
+            request_id,
             method: RequestMethod::from_hyper(method),
             uri: uri.clone(),
-            remote_addr: origin.remote_addr,
-            version: origin.version,
+            remote_addr,
+            version,
             route: None,
             protocol: None,
             content_type: None,
             subprotocol: None,
         }
+    }
+
+    /// Name a request from the head that has not been built into one yet.
+    ///
+    /// The same name [`Self::admitted`] mints, read off the origin the head
+    /// arrived with rather than off loose arguments. Stated as a delegation
+    /// because it is the same stage: a request has one earliest name, and two
+    /// spellings of it could drift into two.
+    pub(super) fn from_head(
+        origin: &super::request::RequestOrigin<'_>,
+        method: &hyper::Method,
+        uri: &hyper::Uri,
+    ) -> Self {
+        Self::admitted(
+            origin.request_id,
+            method,
+            uri,
+            origin.remote_addr,
+            origin.version,
+        )
     }
 
     /// Name a request that has already been built.
@@ -1507,8 +1548,18 @@ impl RequestIdentity {
         }
     }
 
+    /// The identifier Camber minted for this request.
+    pub(super) const fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+
+    /// The accepted URI path this request is recorded under.
+    pub(super) fn path(&self) -> &str {
+        self.uri.path()
+    }
+
     /// The bounded label this request is recorded under.
-    fn method_label(&self) -> &'static str {
+    pub(super) fn method_label(&self) -> &'static str {
         self.method.label()
     }
 
@@ -1517,7 +1568,7 @@ impl RequestIdentity {
     /// A head answered before any owner established a class has none, and it is
     /// named rather than left empty: a completion counter whose class label is
     /// sometimes absent splits one time series into two.
-    fn protocol_label(&self) -> &'static str {
+    pub(super) fn protocol_label(&self) -> &'static str {
         match self.protocol {
             Some(protocol) => protocol.label(),
             None => UNCLASSIFIED_PROTOCOL,
@@ -1610,24 +1661,13 @@ impl RejectionScope {
         }
     }
 
-    /// The label this request is recorded under.
-    pub(super) fn method_label(&self) -> &'static str {
-        self.identity.method_label()
-    }
-
-    /// The bounded dispatch class this request is recorded under.
-    pub(super) fn protocol_label(&self) -> &'static str {
-        self.identity.protocol_label()
-    }
-
-    /// The accepted URI path this request is recorded under.
-    pub(super) fn path(&self) -> &str {
-        self.identity.uri.path()
-    }
-
-    /// The identifier Camber minted for this request.
-    pub(super) fn request_id(&self) -> RequestId {
-        self.identity.request_id
+    /// The name this request is recorded under, as this stage established it.
+    ///
+    /// Shared rather than copied: the completion account keeps whichever naming
+    /// stage answered, and an identity cloned per exit would be one allocation
+    /// per refusal for a value no owner mutates.
+    pub(super) fn identity(&self) -> Arc<RequestIdentity> {
+        Arc::clone(&self.identity)
     }
 
     /// Whether this request asked for a head and no body.

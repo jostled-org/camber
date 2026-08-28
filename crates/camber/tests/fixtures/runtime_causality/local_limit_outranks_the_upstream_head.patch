@@ -1,0 +1,53 @@
+diff --git a/crates/camber/src/http/async_proxy.rs b/crates/camber/src/http/async_proxy.rs
+index b506131..eced00e 100644
+--- a/crates/camber/src/http/async_proxy.rs
++++ b/crates/camber/src/http/async_proxy.rs
+@@ -1351,12 +1351,12 @@ async fn upload_refusal(refusal: &mut oneshot::Receiver<UploadRefusal>) -> Uploa
+ 
+ /// Settle one streaming request between its own bound and the upstream's answer.
+ ///
+-/// Unbiased, because there is no rank to apply. A crossing frame and an upstream
+-/// head are two producers of one answer, and whichever reaches this operation's
+-/// response commitment first owns it. A crossing committed before the head
+-/// entered its commit barrier maps `BodyLimit`; a head committed first stays
+-/// authoritative and this upload only stops. Released together with no edge
+-/// between them, either is a correct result, and both leave the same cleanup.
++/// Biased on the bound, which is the rank this seam applies. Both results can
++/// become ready in the same turn — a crossing frame and a response head — and
++/// the tie is decided for the refusal, because the alternative commits an answer
++/// to a request this route already refused to forward in full. The upstream head
++/// takes no commitment of its own: this table, not the operation's cell, says
++/// which producer answers.
+ async fn settle_upload(
+     mut coordinator: UploadCoordinator,
+     upstream: impl Future<Output = Result<StreamingProxyResponse, ProxyFailure>>,
+@@ -1364,6 +1364,7 @@ async fn settle_upload(
+ ) -> Result<StreamingProxyResponse, UploadFailure> {
+     tokio::pin!(upstream);
+     let answered = tokio::select! {
++        biased;
+         refusal = upload_refusal(&mut coordinator.refusal) => {
+             return Err(committed_refusal(refusal, commitment));
+         }
+@@ -1411,16 +1412,15 @@ fn resolve_upstream_result(
+ 
+ impl UploadCoordinator {
+     /// Stop this request's upload, then let the upstream's answer through.
++    ///
++    /// Nothing is committed here. The rank in [`settle_upload`] already decided
++    /// which producer answers, so the head this coordinator is carrying takes no
++    /// commitment on its way downstream.
+     async fn commit(
+         mut self,
+         answered: StreamingProxyResponse,
+-        commitment: &OperationCommitment,
++        _commitment: &OperationCommitment,
+     ) -> Result<StreamingProxyResponse, UploadFailure> {
+-        // Taken before the upload is asked to stop, in that order and not the
+-        // reverse: the head is authoritative from here, and quiescing first
+-        // would leave a window in which a crossing frame could still map over an
+-        // answer this proxy had already accepted.
+-        commitment.record_head(ResponseOrigin::Upstream);
+         let upload = self.quiesce().await;
+         LifecycleScript::pause_at_response_commit(
+             self.observer.as_deref(),

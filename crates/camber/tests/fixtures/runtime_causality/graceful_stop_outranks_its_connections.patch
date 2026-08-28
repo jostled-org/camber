@@ -1,0 +1,17 @@
+diff --git a/crates/camber/src/http/ws_proxy/direct.rs b/crates/camber/src/http/ws_proxy/direct.rs
+index 76577df..15fec54 100644
+--- a/crates/camber/src/http/ws_proxy/direct.rs
++++ b/crates/camber/src/http/ws_proxy/direct.rs
+@@ -577,7 +577,11 @@ async fn receive_owner_left(
+ fn stopped_or(phase: StopPhase, offered: WsCloseCause) -> WsCloseCause {
+     match phase {
+         StopPhase::Cancelled | StopPhase::TimedOut => WsCloseCause::ServerCancelled,
+-        StopPhase::Running | StopPhase::Graceful | StopPhase::Finished => offered,
++        // Ranked: a graceful stop outranks whatever an open connection had
++        // already noticed, so the stop speaks for a connection that ended for
++        // its own reason.
++        StopPhase::Graceful => WsCloseCause::ServerShutdown,
++        StopPhase::Running | StopPhase::Finished => offered,
+     }
+ }
+ 

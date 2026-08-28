@@ -2,19 +2,23 @@
 //! one immutable account returned after every join or abandonment has happened.
 //!
 //! 18.T1 owns the deadline: the first graceful transition anywhere mints the
-//! only expiry there is, and every nested owner — the server, an admitted
-//! request, a registered upgrade, the root scope, a registered resource, the
-//! executor — reads that same instant back rather than starting a fresh copy of
-//! the configured grace when it happens to notice.
+//! only expiry there is, and every owner that reads it — the server, an admitted
+//! connection, the root scope, a registered resource — reads that same instant
+//! back rather than starting a fresh copy of the configured grace when it
+//! happens to notice. The executor is not among them: Tokio's bounded shutdown
+//! is a safety action Camber places around work no owner is accountable for, so
+//! it takes the remaining time without reading it under a name.
 //!
-//! 18.T2 owns the inventory: every framework-owned participant completes, is
-//! cancelled and joined, or is named in the returned aggregate. There is no
-//! fourth disposition, and a participant that reached none of the three is a
-//! defect this row fails on.
+//! 11.T2 owns the inventory and the boundary between the two owner trees: every
+//! framework-owned participant completes, is cancelled and joined, or is named
+//! in the returned aggregate — and the server, its connections, and its upgrades
+//! settle flat inside the server tree without ever reappearing as runtime
+//! aggregate participants. There is no fourth disposition, and a participant
+//! that reached none of the three is a defect this row fails on.
 //!
 //! 18.T3 owns explicit cancellation: it mints nothing, it takes effect at once
-//! instead of under a fresh grace, its cause outranks every other cause that was
-//! ready, and the failures it displaced stay in the account.
+//! instead of under a fresh grace, and the failures it displaced stay in the
+//! account.
 
 use crate::common;
 use crate::lifecycle_kinds;
@@ -64,7 +68,14 @@ const ADMITTED_BODY_MAX: usize = 64 * 1024;
 /// reading and an owner nobody declared both fail 18.T1, where a containment
 /// check would only have caught the first. The registered resource is matched
 /// by prefix because it carries its own name.
-const REQUIRED_READERS: [&str; 4] = ["server", "connection", "root-scope", "executor"];
+const REQUIRED_READERS: [&str; 3] = ["server", "connection", "root-scope"];
+
+/// Every owner that settles inside the flat server tree.
+///
+/// Each of these is accounted for by the server that owns it, so it must appear
+/// in the settlement inventory and must never appear in the runtime aggregate a
+/// caller reads back.
+const SERVER_TREE_OWNERS: [&str; 3] = ["server", "connection", "upgrade"];
 
 /// What one row's router registers beyond the two held routes.
 ///
@@ -161,9 +172,9 @@ fn add_producer_route(router: &mut Router, producers: Option<SyncSender<StreamSe
 
 /// Serve a WebSocket route whose bridge ends when its peer closes.
 ///
-/// The bridge is what makes `LifecycleParticipant::Upgrade` reachable: a
-/// registered bridge outlives the response head that created it and settles its
-/// own connection, which is a different disposition from the connection's.
+/// The bridge is what makes an upgrade settlement reachable: a registered bridge
+/// outlives the response head that created it and settles as its own owner,
+/// which is a different disposition from the connection's.
 #[cfg(feature = "ws")]
 fn add_bridge_route(router: &mut Router, bridge: bool) {
     if !bridge {
@@ -453,6 +464,10 @@ fn staged_transitions_body(controller: &RuntimeController) -> tokio::time::Insta
     second_at
 }
 
+/// A build with no `ws` feature opened no bridge, so it closes none.
+#[cfg(not(feature = "ws"))]
+fn close_bridge_peer(_bridge: Option<TcpStream>) {}
+
 /// The bridge peer this row holds open across both transitions.
 #[cfg(feature = "ws")]
 fn open_bridge_peer(addr: SocketAddr) -> Option<TcpStream> {
@@ -470,6 +485,7 @@ fn open_bridge_peer(_addr: SocketAddr) -> Option<TcpStream> {
 /// Reading the echoed close is the production boundary that proves the bridge
 /// consumed the peer's frame. Dropping the socket before that point lets TCP
 /// EOF race the frame and can turn this natural completion into cancellation.
+#[cfg(feature = "ws")]
 fn close_bridge_peer(bridge: Option<TcpStream>) {
     let Some(mut bridge) = bridge else {
         return;
@@ -517,6 +533,21 @@ impl RowOutcome {
         }
     }
 
+    /// No owner that settles inside the flat server tree, and no executor, may
+    /// appear in the account the caller reads back.
+    fn assert_server_tree_absent_from_aggregate(&self, row: &str) {
+        let identities = lifecycle_kinds::aggregate_identities(self.failure(row));
+        for owner in SERVER_TREE_OWNERS.into_iter().chain(["executor"]) {
+            assert!(
+                !identities
+                    .iter()
+                    .any(|identity| identity.starts_with(owner)),
+                "{row}: {owner} settles inside its own tree but reached the runtime \
+                 aggregate: {identities:?}"
+            );
+        }
+    }
+
     /// A participant the inventory calls named must appear in the account the
     /// caller reads back.
     fn assert_named_in_aggregate(&self, row: &str, owner: &str) {
@@ -541,9 +572,10 @@ fn normalized_owner(owner: &str) -> String {
     }
 }
 
-/// 18.T2
+/// 11.T2: server, connection, and upgrade settlement stays flat inside the
+/// server owner tree, and the runtime aggregate names none of them.
 #[test]
-fn aggregate_shutdown_cancels_joins_or_names_every_framework_owner() {
+fn server_connection_upgrade_settlement_stays_flat_and_absent_from_runtime_aggregate() {
     graceful_completion_row();
     registered_upgrade_row();
     cancellable_work_row();
@@ -552,6 +584,99 @@ fn aggregate_shutdown_cancels_joins_or_names_every_framework_owner() {
     lost_resource_worker_row();
     non_preemptible_callback_row();
     exporter_row();
+    flat_server_tree_row();
+}
+
+/// A live server, a live connection, and a live bridge all settle inside the
+/// server tree while the same teardown returns an aggregate naming a resource.
+///
+/// The two halves are what this row is for. A settlement inventory holding
+/// `server`, `connection`, and `upgrade` proves those owners are accounted for;
+/// an aggregate naming none of them proves the account they are accounted for
+/// in is the server's, not the runtime's. Either half alone would pass on a
+/// build that had merely stopped settling them.
+///
+/// The positive half carries the invariant, and it is the falsifiable one:
+/// withholding the three production `settle` calls fails this row on the owner
+/// that never settled. The negative half cannot be falsified from production at
+/// all. `ShutdownOwner` nests the two vocabularies — only its `Runtime` arm
+/// holds a `LifecycleParticipant`, and a server-tree owner lives under
+/// `ServerTree` — so no server, connection, or upgrade can become an aggregate
+/// entry without a type change first. That absence is a compile-time fact, and
+/// this row asserts it as a guard against one, not as evidence of its own.
+fn flat_server_tree_row() {
+    let row = "flat server tree";
+    let controller = runtime_schedule();
+    let log = Arc::new(common::CallbackLog::default());
+    let refusing =
+        common::ScriptedResource::new("tree-witness", &log).shutdown(common::Behavior::FailFrom(1));
+
+    let result = runtime::builder()
+        .with_test_schedule(&controller)
+        .shutdown_timeout(AGGREGATE_GRACE)
+        .resource_budget(common::short_resource_budget())
+        .resource(refusing)
+        .run(|| serve_one_of_every_server_owner(&controller));
+
+    let outcome = RowOutcome {
+        settlements: controller.participant_settlements(),
+        result,
+    };
+    for owner in served_server_tree_owners() {
+        assert!(
+            settled_at_all(&outcome.settlements, owner),
+            "{row}: {owner} never settled inside its server's tree; settlements: {:?}",
+            settlement_rows(&outcome.settlements)
+        );
+    }
+    outcome.assert_settled(row, "resource tree-witness", ParticipantDisposition::Named);
+    outcome.assert_server_tree_absent_from_aggregate(row);
+}
+
+/// Serve one request and one registered bridge, then tear the server down
+/// through its own command so every owner in its tree settles.
+fn serve_one_of_every_server_owner(controller: &RuntimeController) {
+    let server = common::spawn_server_ready(
+        row_router(RouterParts {
+            bridge: true,
+            ..RouterParts::default()
+        }),
+        FIXTURE_BOUND,
+    )
+    .expect("the server-tree fixture served");
+    let addr = server.local_addr();
+    drop(common::send(addr, "GET", HELD_ROUTE, &[], b""));
+    close_bridge_peer(open_bridge_peer(addr));
+    // The children settle while their server is still serving; the server
+    // itself settles inside the command below, which is why it is not waited
+    // for here.
+    for owner in served_server_tree_children() {
+        wait_for_settlement(controller, owner);
+    }
+    server
+        .shutdown_bounded(FIXTURE_BOUND)
+        .expect("the server-tree fixture tore down");
+    runtime::request_shutdown();
+}
+
+/// The server-tree owners a `ws` build actually serves.
+#[cfg(feature = "ws")]
+fn served_server_tree_owners() -> &'static [&'static str] {
+    &SERVER_TREE_OWNERS
+}
+
+/// A build with no `ws` feature registers no bridge, so it reaches no upgrade.
+#[cfg(not(feature = "ws"))]
+fn served_server_tree_owners() -> &'static [&'static str] {
+    &SERVER_TREE_OWNERS[..2]
+}
+
+/// The served owners a running server settles before it is told to stop.
+///
+/// The server is the one owner that cannot be waited for while it serves: it
+/// settles as its own command tears it down.
+fn served_server_tree_children() -> &'static [&'static str] {
+    &served_server_tree_owners()[1..]
 }
 
 /// A server, its connection, a background child, and a resource that all finish
@@ -682,7 +807,8 @@ fn cancellable_work_row() {
     lifecycle_kinds::assert_scope_drain(outcome.failure(row), 1, row);
 }
 
-/// A Camber-owned child that unwinds: named, and its payload is the primary.
+/// A Camber-owned child that unwinds: named in the aggregate, carrying its
+/// panic payload.
 fn panicking_child_row() {
     let row = "panicking child";
     let panicked = Arc::new(AtomicBool::new(false));
@@ -761,8 +887,13 @@ fn lost_resource_worker_row() {
     controller.admit_resource_worker("lost");
 }
 
-/// A blocking child abort cannot preempt: the scope names it, and the executor
-/// that still owns it is named for the deadline it crossed.
+/// A blocking child abort cannot preempt: the scope names it, and nothing names
+/// an executor.
+///
+/// The executor is the owner Camber gets no acknowledgement from. Tokio's
+/// bounded shutdown still runs as a safety action, and the time it took is not
+/// a disposition — so the honest account here is the scope naming the child it
+/// could not stop, and nothing more.
 fn non_preemptible_callback_row() {
     let row = "non-preemptible callback";
     let (park_tx, park_rx) = std::sync::mpsc::channel::<()>();
@@ -772,7 +903,12 @@ fn non_preemptible_callback_row() {
         }));
     });
     outcome.assert_settled(row, "root-scope", ParticipantDisposition::Named);
-    outcome.assert_settled(row, "executor", ParticipantDisposition::Named);
+    assert!(
+        !settled_at_all(&outcome.settlements, "executor"),
+        "{row}: an expired safety window settled an executor; settlements: {:?}",
+        settlement_rows(&outcome.settlements)
+    );
+    outcome.assert_server_tree_absent_from_aggregate(row);
     drop(park_tx);
 }
 
@@ -836,7 +972,7 @@ fn run_row(body: impl FnOnce()) -> RowOutcome {
 
 /// 18.T3
 #[test]
-fn explicit_cancel_skips_new_grace_and_returns_cancel_primary() {
+fn explicit_cancel_skips_new_grace_and_retains_displaced_failures() {
     cancel_before_any_drain();
     cancel_during_a_drain();
 }
@@ -905,15 +1041,15 @@ fn cancel_during_a_drain() {
     permits.assert_settled(row);
 }
 
-/// The failure the cancellation displaced is still in the account, it is the
-/// entry the account names as primary, and no entry reports the cancellation
-/// itself.
+/// The failure the cancellation displaced is still in the account, the
+/// rendering carries it, and no entry reports the cancellation itself.
 ///
 /// Production keeps a cancelled owner's cause on that owner's own flat result:
 /// cancelling is a control action a caller asked for, not a lifecycle failure
 /// the runtime has to report, and the aggregate names the owners no caller holds
-/// a handle for. So the primary a caller reads back here is the resource failure
-/// the cancellation would have hidden had the account kept only one winner.
+/// a handle for. So what a caller reads back here is the resource failure the
+/// cancellation would have hidden had the account kept only one winner — and it
+/// is read as an entry of the whole collection, not as an elected one.
 fn assert_displaced_entry_retained(row: &str, outcome: &RuntimeError) {
     let displaced = "resource:displaced|resource:shutdown|resource";
     let identities = lifecycle_kinds::aggregate_identities(outcome);
@@ -921,10 +1057,11 @@ fn assert_displaced_entry_retained(row: &str, outcome: &RuntimeError) {
         identities.iter().any(|identity| identity == displaced),
         "{row}: the cancellation dropped the failure it displaced: {identities:?}"
     );
-    let primary = lifecycle_kinds::entry_identity(lifecycle_kinds::aggregate_primary(outcome));
-    assert_eq!(
-        primary, displaced,
-        "{row}: the account named {primary} as the entry to act on; entries: {identities:?}"
+    let rendered = lifecycle_kinds::aggregate_rendering(outcome);
+    assert!(
+        rendered.contains("resource displaced"),
+        "{row}: the rendered account dropped the failure the cancellation \
+         displaced: {rendered}"
     );
     assert!(
         !identities

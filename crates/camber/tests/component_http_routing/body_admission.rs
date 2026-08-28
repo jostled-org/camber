@@ -12,7 +12,7 @@ use crate::rejection_support::{
 };
 use crate::runtime_support as common;
 
-use camber::http::mock::LifecycleController;
+use camber::http::mock::{RequestBodyOwnerController, ScopedRequestBodyOwner};
 use camber::http::{
     BodyAdmission, BodyAdmissionContext, HostRouter, RejectionKind, Request, RequestBodyMode,
     Response, Router,
@@ -61,7 +61,7 @@ fn seen(journal: &Callbacks) -> Box<[Seen]> {
 /// run in.
 fn recording_policy(
     journal: &Callbacks,
-    observer: &Arc<LifecycleController>,
+    observer: &Arc<ScopedRequestBodyOwner>,
     limit: usize,
 ) -> impl Fn(&BodyAdmissionContext<'_>) -> Result<BodyAdmission, RuntimeError> + Send + Sync + 'static
 {
@@ -81,7 +81,7 @@ fn recording_policy(
                 tenant: context.header("X-Tenant").map(Box::from),
                 absent: context.header("x-not-sent").map(Box::from),
                 binary: context.header("x-binary").map(Box::from),
-                frames_at_entry: observer.body_frames_polled(),
+                frames_at_entry: observer.observed().frames_polled,
             });
         Ok(BodyAdmission::new(limit))
     }
@@ -209,8 +209,8 @@ struct Exchanges {
 }
 
 /// Drive the three admitted requests, reading the frame counter before each.
-fn drive_exchanges(addr: SocketAddr, controller: &LifecycleController) -> Exchanges {
-    let before_first = controller.body_frames_polled();
+fn drive_exchanges(addr: SocketAddr, controller: &RequestBodyOwnerController) -> Exchanges {
+    let before_first = controller.observed().frames_polled;
     let first = wire::send(
         addr,
         "POST",
@@ -220,7 +220,7 @@ fn drive_exchanges(addr: SocketAddr, controller: &LifecycleController) -> Exchan
     );
     assert_echoed(&first, b"first-body", "repeated header");
 
-    let before_second = controller.body_frames_polled();
+    let before_second = controller.observed().frames_polled;
     let second = wire::send(
         addr,
         "PUT",
@@ -230,7 +230,7 @@ fn drive_exchanges(addr: SocketAddr, controller: &LifecycleController) -> Exchan
     );
     assert_echoed(&second, b"second-body", "mixed-case header");
 
-    let before_third = controller.body_frames_polled();
+    let before_third = controller.observed().frames_polled;
     let third = send_with_binary_header(addr, "third-body");
     assert_echoed(&third, b"third-body", "header that is not UTF-8");
 
@@ -307,7 +307,7 @@ fn assert_exchange_contexts(recorded: &[Seen], sent: &Exchanges) {
 fn buffered_admission_context_precedes_first_body_poll() {
     common::test_runtime()
         .run(|| {
-            let port = wire::reserve_observed();
+            let port = wire::reserve_request_body_owner();
             let observer = port.controller();
             let journal = callbacks();
 
@@ -328,11 +328,11 @@ fn buffered_admission_context_precedes_first_body_poll() {
             assert_exchange_contexts(&recorded, &sent);
 
             assert!(
-                server.controller().body_frames_polled() > 0,
+                server.controller().observed().frames_polled > 0,
                 "the fixture's own counter moves once real bodies are collected"
             );
             assert_eq!(
-                server.controller().body_permit_owners_dropped(),
+                server.controller().observed().permit_owners_dropped,
                 0,
                 "a policy that supplies no permit creates no permit owner"
             );
@@ -544,7 +544,7 @@ fn terminal_rows(deep: &str) -> [Terminal<'_>; 7] {
 /// a real selection rather than the only answer available.
 fn terminal_hosts(
     journal: &Callbacks,
-    observer: &Arc<LifecycleController>,
+    observer: &Arc<ScopedRequestBodyOwner>,
     mapped: &Journal,
     handled: &Arc<AtomicUsize>,
 ) -> HostRouter {
@@ -567,20 +567,19 @@ fn terminal_hosts(
 }
 
 /// Assert no terminal path touched a request body in any observable way.
-fn assert_no_body_observations(controller: &LifecycleController) {
+///
+/// One snapshot for all three counters. Read separately they describe three
+/// different moments, and a failure could report a combination that never
+/// co-existed.
+fn assert_no_body_observations(controller: &RequestBodyOwnerController) {
+    let body = controller.observed();
+    assert_eq!(body.frames_polled, 0, "no terminal path polls a body frame");
     assert_eq!(
-        controller.body_frames_polled(),
-        0,
-        "no terminal path polls a body frame"
-    );
-    assert_eq!(
-        controller.body_peak_retained_bytes(),
-        0,
+        body.peak_retained_bytes, 0,
         "no terminal path retains payload bytes"
     );
     assert_eq!(
-        controller.body_permit_owners_dropped(),
-        0,
+        body.permit_owners_dropped, 0,
         "no terminal path takes ownership of a permit"
     );
 }
@@ -592,7 +591,7 @@ fn assert_no_body_observations(controller: &LifecycleController) {
 fn assert_buffered_control(
     addr: SocketAddr,
     journal: &Callbacks,
-    controller: &LifecycleController,
+    controller: &RequestBodyOwnerController,
 ) {
     let admitted = wire::request_to_host_with_body(
         addr,
@@ -611,7 +610,7 @@ fn assert_buffered_control(
         "the matched buffered control is the only policy call: {recorded:?}"
     );
     assert!(
-        controller.body_frames_polled() > 0,
+        controller.observed().frames_polled > 0,
         "the same counter moves once a matched buffered route reads a body"
     );
 }
@@ -621,7 +620,7 @@ fn internal_and_routing_terminal_paths_skip_buffered_admission() {
     common::test_runtime()
         .resource(AlwaysHealthy)
         .run(|| {
-            let port = wire::reserve_observed();
+            let port = wire::reserve_request_body_owner();
             let observer = port.controller();
             let journal = callbacks();
             let mapped: Journal = Arc::new(Mutex::new(Vec::new()));
@@ -832,7 +831,7 @@ fn assert_child_policy_calls(children: &[Box<str>]) {
 fn host_and_child_ceilings_resolve_one_minimum() {
     common::test_runtime()
         .run(|| {
-            let port = wire::reserve_observed();
+            let port = wire::reserve_request_body_owner();
             let seen_children = Arc::new(Mutex::new(Vec::new()));
             let pool = Arc::new(AtomicUsize::new(0));
             let server = port.serve_hosts(ceiling_hosts(&seen_children, &pool));
@@ -855,7 +854,7 @@ fn host_and_child_ceilings_resolve_one_minimum() {
                 "every permit the shared pool issued was released"
             );
             assert_eq!(
-                server.controller().body_permit_owners_dropped(),
+                server.controller().observed().permit_owners_dropped,
                 4,
                 "one owner is released for each admitted permit, refused afterwards or not"
             );

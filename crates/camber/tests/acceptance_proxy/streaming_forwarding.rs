@@ -455,7 +455,7 @@ fn proxy_stream_crossing_frame_is_not_forwarded_and_maps_body_limit_once() {
                 common::raw_upstream(200, "upstream-answered", common::UpstreamAnswers::OnBodyEnd);
             let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let mapped: common::Journal = Arc::new(Mutex::new(Vec::new()));
-            let port = common::reserve_observed();
+            let port = common::reserve_request_body_owner();
             let hosts = streaming_limit_hosts(&upstream.backend(), &drops, &mapped);
             let server = port.serve_hosts(hosts);
 
@@ -499,7 +499,7 @@ fn proxy_stream_crossing_frame_is_not_forwarded_and_maps_body_limit_once() {
                 drops.load(std::sync::atomic::Ordering::Acquire) == 1
             });
             assert!(released, "the admitted permit is released exactly once");
-            assert_eq!(server.controller().body_permit_owners_dropped(), 1);
+            assert_eq!(server.controller().observed().permit_owners_dropped, 1);
 
             let reused =
                 common::probe_connection_reuse(&mut peer, "POST", "/api/again", &[], b"probe");

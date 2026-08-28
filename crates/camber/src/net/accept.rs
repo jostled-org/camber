@@ -133,15 +133,19 @@ pub(crate) async fn acquire_connection_permit(
             },
         )
         .await;
-    match (immediate, script) {
-        (Some(result), _) => result,
-        (None, Some(script)) => {
-            script
-                .pause(crate::http::mock::LifecycleCheckpoint::ConnectionPermitWaitPending)
-                .await;
+    match immediate {
+        Some(result) => result,
+        // A permit that was not free is the one wait a case can hold open. The
+        // pause is inert without a script, so the unscripted path is the same
+        // await rather than a second arm that spells it again.
+        None => {
+            crate::http::mock::LifecycleScript::pause_at_connection(
+                script,
+                crate::http::mock::ConnectionOwnerEdge::PermitWaitPending,
+            )
+            .await;
             future.await
         }
-        (None, None) => future.await,
     }
 }
 

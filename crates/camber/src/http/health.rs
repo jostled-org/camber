@@ -226,7 +226,7 @@ pub async fn spawn_health_checker(
     record_probe(&url, &healthy, probe_url(client, &url).await);
 
     let loop_healthy = Arc::clone(&healthy);
-    crate::task::admit_signalled_on(&runtime, move |signals| {
+    crate::task::admit_signalled_subsystem_on(&runtime, "health checker", move |signals| {
         run_health_checker(client, url, interval, loop_healthy, signals)
     })?;
 

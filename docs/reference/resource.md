@@ -108,7 +108,7 @@ No resource failure is reduced to a log line:
   runtime returns, and never stops another resource's teardown from being
   attempted
 
-Read an aggregate through `primary()`, `iter()`, and `len()`.
+Read an aggregate through `iter()` and `len()`.
 
 ## Subprocess Lifecycle
 

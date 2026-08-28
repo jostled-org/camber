@@ -1,4 +1,4 @@
-use crate::common::{BOUND, PERPETUAL, SHORT_DRAIN, join_bounded, wait_registry_at_most};
+use crate::common::{BOUND, PERPETUAL, SHORT_DRAIN, join_bounded, wait_child_settled};
 use crate::lifecycle_kinds;
 use crate::scope_builders::{probed_runtime, scope_runtime};
 use camber::{RuntimeError, runtime, schedule};
@@ -110,26 +110,25 @@ fn internal_panic_displaces_runtime_result_without_inspecting_closure_value() {
     );
 }
 
-/// An outer scope drain is primary while the inner panic remains in the account.
+/// An outer scope drain and the inner panic are both retained in the account,
+/// with neither displacing the other.
 #[test]
-fn outer_scope_drain_is_primary_and_retains_inner_panic() {
+fn outer_scope_drain_and_inner_panic_are_both_retained() {
     let (controller, builder) = probed_runtime(SHORT_DRAIN);
 
     let outcome = builder.run(|| {
         // Never observes ScopeClosing, so the drain must escalate.
         camber::spawn_async(async { std::future::pending::<()>().await });
-        // Read once that child is registered and before the schedule is
-        // admitted. Neither it nor the runtime's own children can exit
-        // while the closure runs — only `ScopeClosing` ends them, and that
-        // has not fired — so the schedule child is the only one that can
-        // take the registry back to this length.
-        let before = controller.scope_registry_len().unwrap();
+        // Named before the schedule child is admitted, so what the wait
+        // below reads is that one child rather than whatever the runtime
+        // was holding.
+        let subject = controller.scope_settlement().name_next_admission();
         panic_from_a_schedule_child();
         // Ordering, not budget: without this the recorded panic would be
         // read against the drain window rather than against the child's
         // own exit, which is the wall-clock race this suite forbids.
         assert!(
-            wait_registry_at_most(&controller, before, BOUND),
+            wait_child_settled(&subject, BOUND),
             "the panicking schedule child never left the root scope, so the \
              drain timeout would have been read against an unrecorded panic"
         );
@@ -139,12 +138,13 @@ fn outer_scope_drain_is_primary_and_retains_inner_panic() {
         .as_ref()
         .expect_err("neither the panic nor the drain timeout was reported");
     lifecycle_kinds::assert_scope_drain(failure, 1, "the outer scope drain was not retained");
-    assert_eq!(
-        lifecycle_kinds::entry_identity(lifecycle_kinds::aggregate_primary(failure)),
-        "root-scope|graceful-drain|scope-drain",
+    assert!(
+        lifecycle_kinds::aggregate_identities(failure)
+            .iter()
+            .any(|identity| identity == "root-scope|graceful-drain|scope-drain"),
         "the inner panic displaced the outer failed owner"
     );
-    lifecycle_kinds::assert_retained_background_panic(
+    lifecycle_kinds::assert_background_panic(
         failure,
         INTERNAL_PANIC,
         "the outer scope drain discarded the inner panic",

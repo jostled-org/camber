@@ -14,7 +14,7 @@ use crate::streaming_multipart::{
 };
 
 use camber::RuntimeError;
-use camber::http::mock::LifecycleController;
+use camber::http::mock::{MultipartOwnerController, ScopedMultipartBody, ScopedMultipartOwner};
 use camber::http::{
     BodyAdmission, BodyAdmissionContext, HostRouter, Method, MultipartLimits, RejectionKind,
     Request, RequestBodyMode, Response, Router,
@@ -65,7 +65,7 @@ fn limits() -> MultipartLimits {
 /// happened to run in.
 fn recording_policy(
     journal: &Callbacks,
-    observer: &Arc<LifecycleController>,
+    observer: &Arc<ScopedMultipartOwner>,
     limit: usize,
 ) -> impl Fn(&BodyAdmissionContext<'_>) -> Result<BodyAdmission, RuntimeError> + Send + Sync + 'static
 {
@@ -80,7 +80,7 @@ fn recording_policy(
                 raw_path: context.raw_path().into(),
                 mode: context.mode(),
                 declared_length: context.declared_length(),
-                frames_at_entry: observer.multipart_observed().body_frames_polled(),
+                frames_at_entry: observer.observed().body_frames_polled(),
             });
         Ok(BodyAdmission::new(limit))
     }
@@ -104,7 +104,7 @@ const ROUTED_FIELDS: &str = "note/-/-/5/1,upload/a.bin/application/octet-stream/
 fn multipart_host_routing_selects_one_child_plan_and_identity() {
     common::test_runtime()
         .run(|| {
-            let port = wire::reserve_observed();
+            let port = wire::reserve_multipart_owner();
             let observer = port.controller();
             let alpha_seen = callbacks();
             let beta_seen = callbacks();
@@ -145,7 +145,7 @@ fn multipart_host_routing_selects_one_child_plan_and_identity() {
             // it, so beta's "before its own first payload frame" claim is stated
             // against what alpha's answered request left behind rather than
             // against zero.
-            let before_beta = observer.multipart_observed().body_frames_polled();
+            let before_beta = observer.observed().body_frames_polled();
             assert_child_answer(addr, "PUT", "/files/report", "beta.test", "beta|report");
             assert_wrong_method_refusal(addr, &mapped);
 
@@ -483,12 +483,12 @@ struct Answered {
     handled: usize,
     released: Arc<AtomicUsize>,
     mapped: Journal,
-    observer: Arc<LifecycleController>,
+    observer: Arc<ScopedMultipartBody>,
 }
 
 /// Serve one pre-body row and answer its request.
 fn drive_pre_body(row: &PreBody) -> Answered {
-    let port = wire::reserve_observed();
+    let port = wire::reserve_multipart_body();
     let observer = port.controller();
     let released = Arc::new(AtomicUsize::new(0));
     let handled = Arc::new(AtomicUsize::new(0));
@@ -552,12 +552,12 @@ fn multipart_admission_gate_and_boundary_validation_precede_first_poll() {
                     row.label
                 );
                 assert_mapping(row, &answered.mapped);
-                assert_pre_body_reads(row, &answered.observer);
+                assert_pre_body_reads(row, &answered.observer.sessions);
                 // Exactly one owner holds any admitted permit, and it releases
                 // once: the count is the production owner's own drop.
                 let owners = usize::from(row.admission == Admission::Admit);
                 wire::assert_released(&answered.released, owners, row.label);
-                wire::assert_owners_released(&answered.observer, owners, row.label);
+                wire::assert_owners_released(&answered.observer.bodies, owners, row.label);
             }
 
             runtime::request_shutdown();
@@ -595,8 +595,8 @@ fn assert_mapping(row: &PreBody, mapped: &Journal) {
 }
 
 /// Assert what this row's session read before its answer was selected.
-fn assert_pre_body_reads(row: &PreBody, observer: &LifecycleController) {
-    let observed = observer.multipart_observed();
+fn assert_pre_body_reads(row: &PreBody, observer: &MultipartOwnerController) {
+    let observed = observer.observed();
     match row.handled {
         0 => assert_eq!(
             (observed.body_frames_polled(), observed.commands_accepted()),

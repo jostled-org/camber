@@ -83,7 +83,7 @@ const TONIC_MESSAGE_CEILING: usize = 64;
 fn grpc_route_keeps_tonic_body_ownership_under_http_admission_policy() {
     grpc_runtime()
         .run(|| {
-            let port = crate::http::reserve_observed();
+            let port = crate::http::reserve_request_body_owner();
             let asked = Arc::new(AtomicUsize::new(0));
 
             let mut router = Router::new().max_request_body(0);
@@ -115,9 +115,10 @@ fn grpc_route_keeps_tonic_body_ownership_under_http_admission_policy() {
                 0,
                 "a gRPC request reaches no Camber body policy"
             );
-            assert_eq!(server.controller().body_frames_polled(), 0);
-            assert_eq!(server.controller().body_peak_retained_bytes(), 0);
-            assert_eq!(server.controller().body_permit_owners_dropped(), 0);
+            let body = server.controller().observed();
+            assert_eq!(body.frames_polled, 0);
+            assert_eq!(body.peak_retained_bytes, 0);
+            assert_eq!(body.permit_owners_dropped, 0);
 
             runtime::request_shutdown();
         })

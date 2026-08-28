@@ -10,7 +10,7 @@
 use super::http as wire;
 
 use camber::RuntimeError;
-use camber::http::mock::LifecycleController;
+use camber::http::mock::MultipartOwnerController;
 use camber::http::{MultipartField, MultipartStream, Request, Response};
 use std::future::Future;
 use std::net::SocketAddr;
@@ -323,7 +323,7 @@ pub async fn assert_escaped_inert(
     escapes: &Arc<Escapes>,
     escape: Escape,
     polled: usize,
-    controller: &LifecycleController,
+    controller: &MultipartOwnerController,
     path: &str,
     bound: Duration,
 ) {
@@ -332,7 +332,7 @@ pub async fn assert_escaped_inert(
         Escape::Task => assert_task_handle_inert(escapes, path, bound).await,
     }
     assert_eq!(
-        controller.multipart_observed().body_frames_polled(),
+        controller.observed().body_frames_polled(),
         polled,
         "{path}: an escaped handle polls no further payload"
     );

@@ -1,27 +1,13 @@
 use crate::common::{
-    BOUND, RUNTIME_OWNED_CHILDREN, join_bounded, observe_armed_sequence, observe_armed_window,
-    registry_len, wait_paused_bounded, wait_registry_at_most,
+    ArmedWatch, BOUND, NamedSubject, join_bounded, observe_armed_sequence, observe_armed_window,
+    reached, wait_paused_bounded, wait_scope_drained,
 };
 use crate::scope_builders::{probed_runtime, scope_runtime};
-use camber::runtime_test_support::{RuntimeCheckpoint, RuntimeController};
+use camber::runtime_test_support::{AdmittedScope, RuntimeCheckpoint};
 use camber::{RuntimeError, runtime};
 use std::future::IntoFuture;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-
-/// Poll the root scope's registry to empty within `bound`, reporting whether it
-/// got there.
-///
-/// `Closed` is admission-refused AND count zero, so a closure that only
-/// requested shutdown leaves the scope in `Closing`: the runtime's own children
-/// are still counted at the close transition. The scope reaches `Closed` when
-/// the last of them exits on `ScopeClosing` and the 1 -> 0 edge runs
-/// `on_drained`, which is exactly what an empty registry reports — the zero
-/// case of the shared registry wait.
-fn wait_scope_drained(controller: &RuntimeController, bound: Duration) -> bool {
-    wait_registry_at_most(controller, 0, bound)
-}
 
 /// A child admitted before the close transition is counted, so the drain
 /// awaits it to completion — even though the transition was already pending
@@ -66,7 +52,10 @@ fn admission_counted_before_close_is_awaited_by_the_drain() {
                 wait_paused_bounded(controller, close_transition, BOUND),
                 "the close transition never paused"
             );
-            let before = registry_len(controller);
+            // Named while the close is still pending, so what the two
+            // readings below describe is this subject and no other child.
+            let subject = controller.scope_settlement().name_next_admission();
+            let before = reached(&subject, AdmittedScope::admitted);
 
             camber::spawn_async(async move {
                 // Records the release it actually received: a child that
@@ -75,33 +64,35 @@ fn admission_counted_before_close_is_awaited_by_the_drain() {
                 closure_child.store(release_rx.await.is_ok(), Ordering::SeqCst);
             });
 
-            // Admission (RUNTIME_OWNED_CHILDREN -> +1) completed before the
-            // transition runs.
-            let after = registry_len(controller);
+            // Admission completed before the transition runs.
+            let after = reached(&subject, AdmittedScope::retained);
             controller.release(close_transition).unwrap();
-            (before, after)
+            (before, after, subject)
         },
-        // Releases the child only once the drain is provably running with that
-        // child still counted, and reads which child that is: the runtime's own
-        // children have exited by this window, so the one retained entry is the
-        // subject admitted at the close boundary.
-        |controller| (release_tx.send(()).is_ok(), registry_len(controller)),
+        // Releases the child the drain is holding. The runtime's own children
+        // have exited by this window, so what the drain is still waiting on is
+        // the subject admitted at the close boundary — and the assertion below
+        // reads that subject by name rather than by what was left over.
+        |_| release_tx.send(()).is_ok(),
     );
 
-    let (before, after) = result.expect("the admission runtime failed");
-    assert_eq!(
-        before, RUNTIME_OWNED_CHILDREN,
-        "a child was already counted before the subject's admission"
+    let (before, after, subject) = result.expect("the admission runtime failed");
+    assert!(
+        !before,
+        "the subject was already admitted before this case started it"
     );
-    assert_eq!(
+    assert!(
         after,
-        RUNTIME_OWNED_CHILDREN + 1,
-        "the subject was not counted before the close transition ran"
+        "the subject was not held by the scope owner before the close transition ran"
     );
     assert_eq!(
         drain_window,
-        Some((true, 1)),
-        "the drain never paused holding exactly the child admitted before the close"
+        Some(true),
+        "the drain never paused holding the child admitted before the close"
+    );
+    assert!(
+        reached(&subject, AdmittedScope::settled),
+        "the child admitted before the close never left the scope"
     );
     assert!(
         child_ran.load(Ordering::SeqCst),
@@ -119,6 +110,9 @@ fn admission_counts_the_child_before_its_body_runs() {
     let closure_body = Arc::clone(&body_ran);
     let observer_body = Arc::clone(&body_ran);
 
+    let named = NamedSubject::new();
+    let closure_named = named.clone();
+
     let (result, observed) = observe_armed_sequence(
         |builder| builder.shutdown_timeout(BOUND),
         move |gate| {
@@ -126,25 +120,27 @@ fn admission_counts_the_child_before_its_body_runs() {
             // the runtime admits its own children first, and one of those
             // would take the single pause this case needs to land on the child
             // below.
+            closure_named.name_next(gate.controller());
             gate.arm(counted);
             camber::spawn_async(async move {
                 closure_body.store(true, Ordering::SeqCst);
             });
         },
-        |watch| {
+        move |watch| {
             watch.wait_armed();
-            watch.probe(counted, |controller| {
+            watch.probe(counted, |_| {
+                let subject = named.get("the admission-counted probe");
                 (
                     observer_body.load(Ordering::SeqCst),
                     // Pins WHICH admission is paused. `AdmissionCounted` fires
                     // on every admission, so a probe that read only the body
                     // flag would report `false` for the runtime's own children
-                    // too. The registry reports children whose joinable handle
-                    // is filled, and the subject's is not yet — it is seeded at
-                    // this checkpoint and registered at the next — so its own
-                    // admission reads exactly the runtime-owned children. An
-                    // earlier admission reports fewer, a later one more.
-                    registry_len(controller),
+                    // too. The subject is counted at this checkpoint and its
+                    // joinable handle is filled at the next, so it is admitted
+                    // and not yet held — a pause on any other admission leaves
+                    // it unadmitted.
+                    reached(subject, AdmittedScope::admitted),
+                    reached(subject, AdmittedScope::retained),
                 )
             })
         },
@@ -153,7 +149,7 @@ fn admission_counts_the_child_before_its_body_runs() {
     result.expect("the admission runtime failed");
     assert_eq!(
         observed,
-        Some((false, RUNTIME_OWNED_CHILDREN)),
+        Some((false, true, false)),
         "the pause was not the subject's admission with its body still unrun"
     );
     assert!(
@@ -178,14 +174,19 @@ fn gated_admission_registers_before_run_and_removes_on_completion() {
     let observer_body = Arc::clone(&body_ran);
     let observer_hold = Arc::clone(&hold);
 
+    let named = NamedSubject::new();
+    let closure_named = named.clone();
+
     let (result, (registered_window, holder_window)) = observe_armed_sequence(
         |builder| builder.shutdown_timeout(BOUND),
         move |gate| {
             // The holder keeps exactly one child outstanding, so the drain
-            // reports a count of one once the subject is gone.
+            // pauses at a count of one once the subject is gone.
             camber::spawn_async(async move { closure_hold.notified().await });
 
             gate.arm(registered);
+            // Named before the admission the two windows below read.
+            closure_named.name_next(gate.controller());
             let subject = camber::spawn_async(async move {
                 closure_body.store(true, Ordering::SeqCst);
             });
@@ -198,46 +199,76 @@ fn gated_admission_registers_before_run_and_removes_on_completion() {
             // Bounds the drain at shutdown_timeout if any assertion wedges.
             runtime::request_shutdown();
         },
-        |watch| {
-            // The subject child is registered and still gated: its handle is
-            // already retained and its body has not run.
-            watch.wait_armed();
-            let registered_window = watch.probe(registered, |controller| {
-                (
-                    observer_body.load(Ordering::SeqCst),
-                    registry_len(controller),
-                )
-            });
-
-            // The drain observes one remaining child: the subject completed,
-            // so only the holder's entry may remain.
-            watch.wait_armed();
-            let holder_window = watch.probe(holder_only, |controller| {
-                let entries = registry_len(controller);
-                observer_hold.notify_one();
-                entries
-            });
-            (registered_window, holder_window)
+        move |watch| {
+            observe_gated_admission(
+                watch,
+                GatedAdmissionWindows {
+                    registered,
+                    holder_only,
+                },
+                &named,
+                &observer_body,
+                &observer_hold,
+            )
         },
     );
 
     result.expect("the gated admission runtime failed");
-    let (body_ran_while_gated, entries_when_registered) =
+    let (body_ran_while_gated, held_when_registered) =
         registered_window.expect("the admission never paused at its registration window");
     assert!(
         !body_ran_while_gated,
         "the child's body ran before its joinable handle was registered"
     );
-    assert_eq!(
-        entries_when_registered,
-        RUNTIME_OWNED_CHILDREN + 2,
-        "the registry did not retain the gated child's handle alongside the holder's"
+    assert!(
+        held_when_registered,
+        "the scope did not retain the gated child's handle"
     );
     assert_eq!(
         holder_window,
-        Some(1),
+        Some(true),
         "the completed child left its handle behind in the registry"
     );
+}
+
+/// The two windows [`gated_admission_registers_before_run_and_removes_on_completion`]
+/// reads its subject at.
+struct GatedAdmissionWindows {
+    /// The subject's handle is registered and its body has not run.
+    registered: RuntimeCheckpoint,
+    /// The drain is holding one child, which may only be the holder.
+    holder_only: RuntimeCheckpoint,
+}
+
+/// The observer half of
+/// [`gated_admission_registers_before_run_and_removes_on_completion`]: read the
+/// named subject at each of its two windows.
+///
+/// The holder is freed at the second window and not before: releasing it earlier
+/// would drain the scope while the first reading was still being taken.
+fn observe_gated_admission(
+    watch: &ArmedWatch<'_>,
+    windows: GatedAdmissionWindows,
+    named: &NamedSubject,
+    body_ran: &AtomicBool,
+    hold: &tokio::sync::Notify,
+) -> (Option<(bool, bool)>, Option<bool>) {
+    let subject = || named.get("the gated-admission probe");
+    watch.wait_armed();
+    let registered_window = watch.probe(windows.registered, |_| {
+        (
+            body_ran.load(Ordering::SeqCst),
+            reached(subject(), AdmittedScope::retained),
+        )
+    });
+
+    watch.wait_armed();
+    let holder_window = watch.probe(windows.holder_only, |_| {
+        let settled = reached(subject(), AdmittedScope::settled);
+        hold.notify_one();
+        settled
+    });
+    (registered_window, holder_window)
 }
 
 /// Row A: an admission attempted from the closure thread with the scope in
@@ -257,7 +288,7 @@ fn admission_after_close_from_the_closure_thread_is_refused() {
             // `Closed`, not `Closing`: waiting for the runtime's own children
             // to exit is what separates this row from Row B, which attempts its
             // admissions while one child is still live.
-            let drained = wait_scope_drained(&controller, BOUND);
+            let drained = wait_scope_drained(&controller.scope_settlement(), BOUND);
 
             let blocking = camber::spawn(move || closure_blocking.store(true, Ordering::SeqCst));
             let asynchronous = camber::spawn_async(async move {

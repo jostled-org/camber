@@ -19,7 +19,7 @@ use super::limits::MultipartLimits;
 use super::parser::{FieldMetadata, IncrementalParser, ParserEvent};
 use crate::RuntimeError;
 use crate::http::body_admission::{AdmittedBody, BodyBudget, BodyPermit};
-use crate::http::mock::{LifecycleCheckpoint, LifecycleScript};
+use crate::http::mock::{LifecycleScript, MultipartOwnerEdge};
 use crate::http::operation::InboundTerminal;
 use crate::http::transfer::{IncomingSource, Transfer, TransferFailure, TransferOwner};
 use bytes::Bytes;
@@ -72,8 +72,8 @@ pub(in crate::http) enum MultipartTerminal {
     /// The selected upload owner fixed one inbound or transfer terminal.
     ///
     /// Held apart from a parser failure because the answer is not this session's
-    /// to shape: the declared precedence already named the cause, and the route
-    /// answers it with the one disposition that cause carries.
+    /// to shape: the owner that committed the terminal already named the cause,
+    /// and the route answers it with the one disposition that cause carries.
     Ended(TransferFailure),
 }
 
@@ -106,8 +106,8 @@ pub(in crate::http) enum MultipartCompletion {
     /// failure keeps it; one that claimed success is answered with this.
     Incomplete(RuntimeError),
     /// The selected upload owner fixed one inbound or transfer terminal. It owes
-    /// the peer exactly what the declared precedence gives that cause, and
-    /// nothing the handler said can change it.
+    /// the peer exactly what the declared mapping gives that cause, and nothing
+    /// the handler said can change it.
     Ended(TransferFailure),
 }
 
@@ -913,8 +913,7 @@ where
     /// Service commands until admission closes, then report the terminal state.
     pub(in crate::http) async fn run(mut self) -> MultipartTerminal {
         while let Some(kind) = self.slot.accept().await {
-            self.pause_at(LifecycleCheckpoint::MultipartCommandAccepted)
-                .await;
+            self.pause_at(MultipartOwnerEdge::CommandAccepted).await;
             let Some(reply) = self.serviced(kind).await else {
                 break;
             };
@@ -968,15 +967,14 @@ where
         if !self.slot.publish(reply) {
             return false;
         }
-        self.pause_at(LifecycleCheckpoint::MultipartReplyPublished)
-            .await;
+        self.pause_at(MultipartOwnerEdge::ReplyPublished).await;
         self.slot.await_acknowledgment().await
     }
 
     /// Hold at one checkpoint when a controller armed it, and run straight
     /// through when none did.
-    async fn pause_at(&self, checkpoint: LifecycleCheckpoint) {
-        LifecycleScript::pause_at(self.observer.as_deref(), checkpoint).await;
+    async fn pause_at(&self, edge: MultipartOwnerEdge) {
+        LifecycleScript::pause_at_multipart(self.observer.as_deref(), edge).await;
     }
 
     /// Run ingress until this command has its one bounded reply.
@@ -1085,9 +1083,9 @@ where
     ///
     /// The frame arrives through the upload owner, so every deadline and
     /// cancellation this request runs under is weighed in the same turn the
-    /// frame is read in — and by the one declared precedence, not by a rule of
-    /// this session's own. Payload bytes are still admitted here, by the one
-    /// accountant this request has.
+    /// frame is read in — and by the read order every coordinator shares, not by
+    /// a rule of this session's own. Payload bytes are still admitted here, by
+    /// the one accountant this request has.
     async fn pull_frame(&mut self) -> Result<bool, RuntimeError> {
         let data = match self.upload.frame().await {
             Ok(None) => return Ok(false),
@@ -1097,8 +1095,7 @@ where
         self.count_frame();
         self.admit(data.len())?;
         self.source = Some(data);
-        self.pause_at(LifecycleCheckpoint::MultipartIngressAdvanced)
-            .await;
+        self.pause_at(MultipartOwnerEdge::IngressAdvanced).await;
         Ok(true)
     }
 

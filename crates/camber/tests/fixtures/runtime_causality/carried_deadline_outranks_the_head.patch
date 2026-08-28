@@ -1,0 +1,67 @@
+diff --git a/crates/camber/src/http/operation.rs b/crates/camber/src/http/operation.rs
+index 910e62a..6ee10b2 100644
+--- a/crates/camber/src/http/operation.rs
++++ b/crates/camber/src/http/operation.rs
+@@ -222,50 +222,30 @@ impl InboundReady {
+         }
+     }
+ 
+-    /// This owner's own read, in the order the edges inside it establish.
++    /// The declared global precedence, highest first.
+     ///
+-    /// Not a rank. The frame this turn took off its source, the maximum that
+-    /// frame crossed, the transport that failed under it, and the payload's end
+-    /// are all one read, and the causal edge inside it is the peer's own end: a
+-    /// source that failed in the same turn a peer's response lifetime ended did
+-    /// not fail beside that fact, it failed because of it. So the peer's end is
+-    /// the earlier of the two, and the read failure it caused is not a competing
+-    /// answer.
+-    const OWN_READ: [InboundTerminal; 5] = [
+-        InboundTerminal::RouteBodyLimit,
+-        InboundTerminal::TransferBytes,
+-        InboundTerminal::Disconnect,
+-        InboundTerminal::SourceFailure,
+-        InboundTerminal::ResponseHead,
+-    ];
+-
+-    /// The sources this owner carries but did not read for itself.
+-    ///
+-    /// Unordered, and named as a set rather than a table: no public action,
+-    /// owner commit, or protocol acknowledgement separates two of these that
+-    /// first became observable together, so either is a correct answer and this
+-    /// array only decides which one a rerun of the same turn produces. Nothing
+-    /// may state one of them as outranking another — a case whose two facts are
+-    /// both here owes its closed result set and identical cleanup for every
+-    /// member.
+-    const CARRIED: [InboundTerminal; 6] = [
++    /// Ranked: one table decides every turn, so which fact ends an admitted
++    /// request is read off this list rather than from which producer reached
++    /// the operation's commitment first. A carried deadline therefore outranks
++    /// the response head it was weighed against.
++    const ORDER: [InboundTerminal; 11] = [
+         InboundTerminal::ShutdownDeadline,
+         InboundTerminal::ForcedCancellation,
++        InboundTerminal::RouteBodyLimit,
++        InboundTerminal::TransferBytes,
+         InboundTerminal::BodyIdle,
+         InboundTerminal::TransferIdle,
+         InboundTerminal::TransferTotal,
+         InboundTerminal::RequestTotal,
++        InboundTerminal::Disconnect,
++        InboundTerminal::SourceFailure,
++        InboundTerminal::ResponseHead,
+     ];
+ 
+     /// The fact this turn commits, or `None` while the request runs on.
+-    ///
+-    /// The owner's own read is asked first because that read is what the turn
+-    /// started with, and so what this owner commits. A carried source decides
+-    /// only a turn its owner's own read decided nothing in.
+     pub(super) fn first_ready(self) -> Option<InboundTerminal> {
+-        Self::OWN_READ
++        Self::ORDER
+             .into_iter()
+-            .chain(Self::CARRIED)
+             .find(|terminal| self.holds(*terminal))
+     }
+ }

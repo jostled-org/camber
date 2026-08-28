@@ -1,0 +1,38 @@
+diff --git a/crates/camber/src/http/grpc_handoff.rs b/crates/camber/src/http/grpc_handoff.rs
+index 8f6dc1c..47e3eed 100644
+--- a/crates/camber/src/http/grpc_handoff.rs
++++ b/crates/camber/src/http/grpc_handoff.rs
+@@ -14,7 +14,6 @@
+ use super::body::BodyError;
+ use super::mock::{LifecycleScript, ResponseCommitmentEdge};
+ use super::operation::{OperationEnvelope, PreCommitCause};
+-use super::response_commitment::ResponseOrigin;
+ use super::transfer::{
+     IncomingSource, SourceStep, Transfer, TransferFailure, TransferOwner, TransferSource, step_of,
+ };
+@@ -331,21 +330,16 @@ pub(super) async fn produced_head<T>(
+     produced
+ }
+ 
+-/// Commit one tonic head and take its body under this operation's download
+-/// owner.
++/// Hand tonic's head on and take its body under this operation's download owner.
+ ///
+-/// The boundary itself: past this call no Camber cause reaches a mapper, and
+-/// each direction ends only its own body.
++/// Nothing is committed here. The declared rank is what decides which fact ends
++/// an admitted gRPC call, so a budget that expires after this head was produced
++/// still outranks it, and the handoff takes no commitment on its way to Hyper.
+ pub(super) async fn commit(
+     response: hyper::Response<tonic::body::Body>,
+     operation: &OperationEnvelope,
+     observer: Option<Arc<LifecycleScript>>,
+ ) -> hyper::Response<GrpcDownload> {
+-    // The handoff is the barrier, so the commitment is taken as it is crossed
+-    // and before anything can be held here. Past it no Camber cause reaches a
+-    // mapper: tonic owns the status, and a budget that expires afterwards is
+-    // its own owner's to end rather than a second answer to this request.
+-    operation.commit_response(ResponseOrigin::Grpc);
+     LifecycleScript::pause_at_response_commit(
+         observer.as_deref(),
+         ResponseCommitmentEdge::GrpcHandoffCommitted,

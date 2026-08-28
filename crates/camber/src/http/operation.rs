@@ -15,8 +15,9 @@ use super::disconnect::{ConnectionLiveness, DisconnectSignal};
 use super::mock::LifecycleScript;
 use super::rejection::Rejected;
 use super::request_budget::RequestBudget;
+use super::response_commitment::{OperationCommitment, ResponseOrigin};
 use super::route_budgets::RouteBudgets;
-use super::server_lifecycle::{ConnectionShutdown, ServerControl};
+use super::server_lifecycle::{ConnectionShutdownDeadline, ServerControl};
 use super::transfer::{TransferDirection, TransferOwner};
 use super::transfer_budget::TransferBudget;
 use std::future::Future;
@@ -45,15 +46,14 @@ pub enum OperationStage {
 
 /// The closed set of inbound terminals one admitted request can end on.
 ///
-/// Ordered by the one declared precedence every pre-commit coordinator shares.
-/// A terminal fixed in an earlier turn is immutable; for sources first observed
-/// in the same turn, the earliest row here wins.
+/// A set and not a ranking. Which of two facts ends a request is decided by
+/// which one commits into that operation's
+/// [`OperationCommitment`](super::response_commitment::OperationCommitment)
+/// first, so declaration order here carries no meaning and nothing reads it.
 ///
 /// The three transfer rows are read by the streaming owners in
-/// [`transfer`](super::transfer), which extend this one selector rather than
-/// keeping a precedence table of their own. A later step that adds a terminal
-/// adds a variant and an [`InboundTerminal::ORDER`] row; it does not redefine
-/// the order already declared.
+/// [`transfer`](super::transfer), which commit into their own transfer owner's
+/// set-once terminal on the same rule.
 ///
 /// A test seam, not API, on the same footing as [`OperationStage`].
 #[doc(hidden)]
@@ -84,33 +84,18 @@ pub enum InboundTerminal {
     ResponseHead,
 }
 
-impl InboundTerminal {
-    /// The declared precedence, highest first.
-    ///
-    /// Named exhaustively rather than derived from declaration order: the order
-    /// is the contract, and a variant reordered for readability must not
-    /// silently reorder the terminals a live service selects.
-    const ORDER: [Self; 11] = [
-        Self::ShutdownDeadline,
-        Self::ForcedCancellation,
-        Self::RouteBodyLimit,
-        Self::TransferBytes,
-        Self::BodyIdle,
-        Self::TransferIdle,
-        Self::TransferTotal,
-        Self::RequestTotal,
-        Self::Disconnect,
-        Self::SourceFailure,
-        Self::ResponseHead,
-    ];
-}
-
-/// The inbound sources one scheduling turn observed as ready.
+/// The inbound sources one turn observed as ready.
 ///
-/// A closed input to one selector. Every coordinator collects readiness for a
-/// whole turn before it decides, so two sources that became ready together are
-/// resolved by the declared order rather than by whichever future the executor
-/// happened to poll first.
+/// A closed input to one reading. Every coordinator reads its own source or
+/// producer first and the carried sources second, and
+/// [`InboundReady::first_ready`] answers in that same order — so the fact this
+/// owner read for itself is the fact it commits, and a carried source decides
+/// only a turn its owner's own read decided nothing in.
+///
+/// There is no rank over the whole set. [`InboundReady::OWN_READ`] is one read
+/// with one causal edge inside it; [`InboundReady::CARRIED`] is a set with none.
+/// Two carried sources that first became observable in the same turn may commit
+/// in either order, and both results are correct.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct InboundReady {
     shutdown_deadline: bool,
@@ -200,8 +185,9 @@ impl InboundReady {
     /// The gRPC pre-head coordinator is the owner this exists for: tonic holds
     /// the upload body, so the terminal that upload fixes is reported to the
     /// coordinator rather than observed by it. Folding the report into the turn
-    /// is what lets the one declared precedence resolve it against a tonic head
-    /// that became ready alongside it.
+    /// is what lets it be weighed against a tonic head that became ready
+    /// alongside it, under the read order every coordinator here shares rather
+    /// than by which of the two this handoff happened to poll first.
     ///
     /// Wildcard-free for the same reason [`Self::holds`] is: a terminal a later
     /// step adds fails to compile here until it names its source.
@@ -236,10 +222,50 @@ impl InboundReady {
         }
     }
 
-    /// The one terminal this turn selects, or `None` while the request runs on.
-    pub(super) fn select(self) -> Option<InboundTerminal> {
-        InboundTerminal::ORDER
+    /// This owner's own read, in the order the edges inside it establish.
+    ///
+    /// Not a rank. The frame this turn took off its source, the maximum that
+    /// frame crossed, the transport that failed under it, and the payload's end
+    /// are all one read, and the causal edge inside it is the peer's own end: a
+    /// source that failed in the same turn a peer's response lifetime ended did
+    /// not fail beside that fact, it failed because of it. So the peer's end is
+    /// the earlier of the two, and the read failure it caused is not a competing
+    /// answer.
+    const OWN_READ: [InboundTerminal; 5] = [
+        InboundTerminal::RouteBodyLimit,
+        InboundTerminal::TransferBytes,
+        InboundTerminal::Disconnect,
+        InboundTerminal::SourceFailure,
+        InboundTerminal::ResponseHead,
+    ];
+
+    /// The sources this owner carries but did not read for itself.
+    ///
+    /// Unordered, and named as a set rather than a table: no public action,
+    /// owner commit, or protocol acknowledgement separates two of these that
+    /// first became observable together, so either is a correct answer and this
+    /// array only decides which one a rerun of the same turn produces. Nothing
+    /// may state one of them as outranking another — a case whose two facts are
+    /// both here owes its closed result set and identical cleanup for every
+    /// member.
+    const CARRIED: [InboundTerminal; 6] = [
+        InboundTerminal::ShutdownDeadline,
+        InboundTerminal::ForcedCancellation,
+        InboundTerminal::BodyIdle,
+        InboundTerminal::TransferIdle,
+        InboundTerminal::TransferTotal,
+        InboundTerminal::RequestTotal,
+    ];
+
+    /// The fact this turn commits, or `None` while the request runs on.
+    ///
+    /// The owner's own read is asked first because that read is what the turn
+    /// started with, and so what this owner commits. A carried source decides
+    /// only a turn its owner's own read decided nothing in.
+    pub(super) fn first_ready(self) -> Option<InboundTerminal> {
+        Self::OWN_READ
             .into_iter()
+            .chain(Self::CARRIED)
             .find(|terminal| self.holds(*terminal))
     }
 }
@@ -289,9 +315,16 @@ pub(super) struct OperationEnvelope {
     /// transition answers to the instant the transition minted, narrowed by its
     /// own server's configured grace, not to a fresh copy of that grace started
     /// when this connection happened to notice.
-    shutdown: ConnectionShutdown,
+    shutdown: ConnectionShutdownDeadline,
     connection: Arc<ConnectionLiveness>,
     disconnect: DisconnectSignal,
+    /// The one response commitment every producer of this operation shares.
+    ///
+    /// Shared rather than owned, because the producers are concurrent: an
+    /// upload measuring its route's maximum, a coordinator holding an upstream
+    /// head, and this operation's own carried deadlines are three owners of one
+    /// answer, and the cell is what makes only the first of them the answer.
+    commitment: Arc<OperationCommitment>,
 }
 
 impl OperationEnvelope {
@@ -301,13 +334,20 @@ impl OperationEnvelope {
         control: Option<tokio::sync::watch::Receiver<ServerControl>>,
         connection: &Arc<ConnectionLiveness>,
         disconnect: &DisconnectSignal,
-        shutdown: ConnectionShutdown,
-        script: Option<&LifecycleScript>,
+        shutdown: ConnectionShutdownDeadline,
+        script: Option<&Arc<LifecycleScript>>,
+        account: &Arc<super::completion::CompletionAccount>,
     ) -> Self {
         let admitted_at = Instant::now();
         let request = budgets.request();
+        let id = OperationId::mint();
         let envelope = Self {
-            id: OperationId::mint(),
+            id,
+            commitment: OperationCommitment::minted(
+                id,
+                script.map(Arc::clone),
+                Arc::clone(account),
+            ),
             budgets,
             total: request.total().map(|total| admitted_at + total),
             control,
@@ -315,13 +355,31 @@ impl OperationEnvelope {
             connection: Arc::clone(connection),
             disconnect: disconnect.clone(),
         };
-        LifecycleScript::observe_operation_admitted(script, envelope.id, request.total());
+        LifecycleScript::observe_operation_admitted(
+            script.map(Arc::as_ref),
+            envelope.id,
+            request.total(),
+        );
         envelope
     }
 
     /// Publish this operation's identity from the owner that reached `stage`.
     pub(super) fn observe(&self, script: Option<&LifecycleScript>, stage: OperationStage) {
         LifecycleScript::observe_operation(script, self.id, stage);
+    }
+
+    /// The one response commitment every producer of this operation shares.
+    pub(super) const fn commitment(&self) -> &Arc<OperationCommitment> {
+        &self.commitment
+    }
+
+    /// Record one produced response head against this operation's commitment.
+    ///
+    /// A producer arriving after the answer was decided is counted and keeps
+    /// its own answer: the peer it would tell is either gone or already served,
+    /// and the cell is what keeps a later cause from mapping a second status.
+    pub(super) fn commit_response(&self, origin: ResponseOrigin) {
+        self.commitment.record_head(origin);
     }
 
     /// The effective request policy this operation runs under.
@@ -403,22 +461,23 @@ impl OperationEnvelope {
     ///
     /// For an owner whose answer is a whole future rather than a stream of
     /// frames — the streaming proxy's upstream head is the one this exists for.
-    /// The producer's answer is weighed as one source among the carried ones, so
-    /// a shutdown deadline, a forced cancellation, a peer whose lifetime ended,
-    /// or an expired request total that became observable in the same scheduling
-    /// turn is selected by the declared precedence before an upstream head this
-    /// service has not committed.
+    /// The producer's answer is this coordinator's own read, so a turn it
+    /// answered in is a turn it settles: an upstream head this service accepted
+    /// at its own commit barrier is the answer even when a shutdown deadline, a
+    /// forced cancellation, a peer whose lifetime ended, or an expired request
+    /// total became observable in the same scheduling turn. Those carried
+    /// sources decide only a turn the producer has not answered in.
     ///
     /// The quiet interval is deliberately absent: the payload owner accounts for
     /// data frames, and a second guard that never sees one would report a
     /// healthy upload as an idle body.
     ///
-    /// The selected local cause is published to `observer` before the caller is
-    /// answered with it, at the one owner that chose it. It is the same
-    /// checkpoint the buffered coordinator publishes, so a case reads which
-    /// local source beat an uncommitted upstream head instead of inferring it
-    /// from a status — and the rows whose peer is gone, or whose server is,
-    /// have an observable at all.
+    /// The producer takes the commitment itself, at its own commit barrier —
+    /// the upstream head this proxy accepted, or the head tonic handed over —
+    /// because that barrier is where the answer stops being revocable. What this
+    /// coordinator owns is the other side: a carried cause may take the cell
+    /// while it is still free, and once anything holds it, no carried cause maps
+    /// and the producer's answer is the one this request gives.
     pub(super) async fn pre_commit<T>(
         &self,
         producing: impl Future<Output = T>,
@@ -445,20 +504,22 @@ impl OperationEnvelope {
         observer: Option<&LifecycleScript>,
     ) -> Result<T, PreCommitCause> {
         let selected = self.select_pre_commit(producing, local).await;
-        match &selected {
-            Ok(_) => {}
-            Err(cause) => {
-                LifecycleScript::pause_at(
-                    observer,
-                    super::mock::LifecycleCheckpoint::InboundTerminalSelected(cause.terminal),
-                )
-                .await;
-            }
-        }
+        let committed = match &selected {
+            Ok(_) => None,
+            Err(cause) => Some(cause.terminal),
+        };
+        LifecycleScript::pause_at_settled_commit(observer, committed).await;
         selected
     }
 
-    /// Weigh this operation's carried sources against one pre-commit producer.
+    /// Run one pre-commit producer until this operation's answer is settled.
+    ///
+    /// One turn reads the producer, then the local report, then the carried
+    /// sources. A producer that answered owns the answer, because whatever it
+    /// answered with was decided at its own commit barrier. Otherwise the first
+    /// fact this turn read attempts the shared cell: taking it ends the request
+    /// on that cause, and finding it taken means the producer already owns the
+    /// answer and this turn only waits for it.
     async fn select_pre_commit<T>(
         &self,
         producing: impl Future<Output = T>,
@@ -467,33 +528,42 @@ impl OperationEnvelope {
         let mut watch = InboundWatch::over(self.guard(None, self.total));
         let mut producing = std::pin::pin!(producing);
         let mut local = std::pin::pin!(local);
-        let mut produced = None;
         let mut reported: Option<PreCommitCause> = None;
+        // Whether the shared cell was found taken by some other owner. Once it
+        // is, this turn stops reading carried sources at all: they can no longer
+        // change the answer, and re-reading an expired deadline every turn would
+        // spin this coordinator against its own wake.
+        let mut settled = false;
         std::future::poll_fn(|cx| {
-            // Read first, weigh second — the one order every coordinator here
-            // shares. A producer that answered in this turn is what makes the
-            // turn a tie at all, and reading it after the carried sources would
-            // decide the tie by poll order instead of by the declared one.
-            produced = produced.take().or_else(|| answered(producing.as_mut(), cx));
+            // Read first, commit second — the one order every coordinator here
+            // shares. The producer's answer is this owner's own read, so a turn
+            // it answered in is a turn it settles in. It is deliberately absent
+            // from the carried set below: a producer that answered has already
+            // settled this turn, and folding it in would make the answer one more
+            // source to be weighed against rather than the fact it is.
+            if let Some(value) = answered(producing.as_mut(), cx) {
+                return std::task::Poll::Ready(Ok(value));
+            }
+            if settled {
+                return std::task::Poll::Pending;
+            }
             reported = reported.take().or_else(|| answered(local.as_mut(), cx));
-            let carried = weighed(&mut watch, cx, produced.is_some());
+            let carried = watch.observed(cx, None);
             let ready = reported
                 .as_ref()
                 .map_or(carried, |cause| carried.with_local(cause.terminal));
-            match (ready.select(), produced.take()) {
-                (Some(InboundTerminal::ResponseHead), Some(value)) => {
-                    std::task::Poll::Ready(Ok(value))
-                }
-                (Some(InboundTerminal::ResponseHead) | None, held) => {
-                    produced = held;
+            let Some(terminal) = ready.first_ready() else {
+                return std::task::Poll::Pending;
+            };
+            let cause = selected_cause(terminal, reported.take());
+            match self.commitment.commit_cause(cause.terminal) {
+                Ok(()) => std::task::Poll::Ready(Err(cause)),
+                // Already committed, so this cause maps nothing. The owner that
+                // took the cell answers this request, and the only thing left
+                // for this turn is the wait for it.
+                Err(_committed) => {
+                    settled = true;
                     std::task::Poll::Pending
-                }
-                // The head in hand is released rather than delivered: a local
-                // cause selected in the same turn ends this request, and
-                // committing the answer first would commit one to a request
-                // this service has already ended.
-                (Some(terminal), _) => {
-                    std::task::Poll::Ready(Err(selected_cause(terminal, reported.take())))
                 }
             }
         })
@@ -528,14 +598,14 @@ impl OperationEnvelope {
 ///
 /// It answers two questions and nothing else: which sources are ready in this
 /// turn, and how long the turn may wait before one of them becomes ready. The
-/// terminal itself is selected by [`InboundReady::select`], which every
+/// terminal itself is selected by [`InboundReady::first_ready`], which every
 /// coordinator shares.
 pub(super) struct InboundGuard {
     idle: Option<Duration>,
     total: Option<Instant>,
     control: Option<tokio::sync::watch::Receiver<ServerControl>>,
     /// The shared aggregate this owner's shutdown answer comes from.
-    shutdown: ConnectionShutdown,
+    shutdown: ConnectionShutdownDeadline,
     /// The instant the graceful shutdown this owner observed expires at, read
     /// once from the shared aggregate and never re-read.
     shutdown_deadline: Option<Instant>,
@@ -560,9 +630,12 @@ impl InboundGuard {
 
     /// Every source this turn can decide without touching the wire.
     ///
-    /// Collected as a whole turn before anything is selected, so a shutdown
-    /// that expires in the same turn as a body-idle deadline is answered by the
-    /// declared order rather than by poll order.
+    /// Read as a whole turn so the answer is reproducible, not so it is ranked.
+    /// A shutdown that expires in the same turn as a body-idle deadline has no
+    /// edge to either side of it: whichever of them reaches this operation's
+    /// response commitment first owns the answer, and both are correct results
+    /// of the same race. Reading them together only keeps a rerun of the same
+    /// turn from answering differently.
     pub(super) fn observed(&mut self) -> InboundReady {
         let now = Instant::now();
         let control = self.control_state();
@@ -701,8 +774,9 @@ impl PreCommitCause {
 /// The cause one selected terminal is answered with.
 ///
 /// A local owner's report is used only for the terminal it actually named: a
-/// carried source that outranked it is this operation's own cause, and the
-/// refusal the upload minted for a different bound has nothing to say about it.
+/// different terminal this turn selected is this operation's own cause, and the
+/// refusal the upload minted for a bound nothing selected has nothing to say
+/// about it.
 fn selected_cause(terminal: InboundTerminal, reported: Option<PreCommitCause>) -> PreCommitCause {
     match reported {
         Some(cause) if cause.terminal == terminal => cause,
@@ -718,19 +792,6 @@ fn answered<T>(
     match producing.poll(cx) {
         std::task::Poll::Ready(value) => Some(value),
         std::task::Poll::Pending => None,
-    }
-}
-
-/// Every source one pre-commit turn can decide, the producer's included.
-fn weighed(
-    watch: &mut InboundWatch,
-    cx: &mut std::task::Context<'_>,
-    answered: bool,
-) -> InboundReady {
-    let carried = watch.observed(cx, None);
-    match answered {
-        true => carried.with_response_head(),
-        false => carried,
     }
 }
 
@@ -875,7 +936,7 @@ fn transition_wake(
 
 /// How one admitted request's inbound work ended when it did not complete.
 ///
-/// The two arms are the precedence table's two dispositions, not a success and
+/// The two arms are the declared mapping's two dispositions, not a success and
 /// a failure: a mapped cause still owes the peer the one response its route's
 /// mapper produces, while a silent cause has no response to give at all.
 pub(super) enum InboundFailure {
@@ -903,11 +964,20 @@ impl InboundFailure {
             None => Self::Silent(terminal),
         }
     }
+
+    /// The failure one cause produces when it did not take the commitment.
+    ///
+    /// A late owner maps nothing, whatever the shared table would have given
+    /// it: the response this operation gives is already another producer's, and
+    /// a second mapped answer would be a second status for one request.
+    pub(super) const fn silent(terminal: InboundTerminal) -> Self {
+        Self::Silent(terminal)
+    }
 }
 
 /// The refusal one mapped terminal answers with.
 ///
-/// `None` is a silent row: the precedence table gives it no mapper, so the
+/// `None` is a silent row: the declared mapping gives it no mapper, so the
 /// transport ends and ownership releases without a mapped response. A row whose
 /// producer is missing its own refusal falls here too, which closes the
 /// transport rather than inventing a category for a bound nothing named.

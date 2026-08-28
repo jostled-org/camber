@@ -167,11 +167,16 @@ impl ChildGuard {
         &self.stderr
     }
 
-    pub fn wait_for_line(&self, expected: &str, timeout: Duration) -> Result<(), ProcessError> {
+    /// Wait for the line carrying `expected`, and hand it back.
+    ///
+    /// The form for a marker that carries a payload — an address the child
+    /// bound, say — so a caller that needs what the line said reads it here
+    /// instead of racing a second read against the same stream.
+    pub fn await_line(&self, expected: &str, timeout: Duration) -> Result<Box<str>, ProcessError> {
         let deadline = Instant::now() + timeout;
         loop {
             match self.lines.recv_timeout(super::http::remaining(deadline)) {
-                Ok(line) if line.contains(expected) => return Ok(()),
+                Ok(line) if line.contains(expected) => return Ok(line.into()),
                 Ok(_) => {}
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     return Err(ProcessError::ReadinessTimeout { timeout });
@@ -181,6 +186,12 @@ impl ChildGuard {
                 }
             }
         }
+    }
+
+    /// Wait for the line carrying `expected`, for a caller the marker alone
+    /// answers.
+    pub fn wait_for_line(&self, expected: &str, timeout: Duration) -> Result<(), ProcessError> {
+        self.await_line(expected, timeout).map(drop)
     }
 
     pub fn wait_for_readiness(
@@ -465,6 +476,77 @@ pub fn run_in_child(
     }
     assert_child_succeeded(test_name, mode, marker, bound);
     false
+}
+
+/// Run `body` in a private child that is meant to outlive its own assertions.
+///
+/// The containment counterpart of [`run_in_child`], for a subject the child
+/// cannot take back: a blocking application callback Camber has deliberately
+/// stopped waiting for. Such a child cannot exit on its own — exiting would be
+/// indistinguishable from the callback having cooperated — so it says its
+/// assertions passed and then parks.
+///
+/// In the child it runs `body`, prints `marker`, flushes it, and parks forever.
+/// In the parent it waits `bound` for that marker, quotes the child's stderr if
+/// it never came, and otherwise ends the child through the public
+/// [`ChildGuard::shutdown`] and requires the reap to complete inside `bound`.
+///
+/// The kill is cleanup and never evidence. It happens only after the marker has
+/// arrived, so nothing the parent asserts depends on how the child ended; a
+/// child that had exited by itself would have closed its stdout, and the marker
+/// wait would report that instead.
+pub fn contain_in_child(
+    test_name: &str,
+    mode: &str,
+    marker: &str,
+    bound: Duration,
+    body: impl FnOnce(),
+) {
+    if is_private_child(mode) {
+        body();
+        println!("{marker}");
+        io::Write::flush(&mut std::io::stdout()).expect("the child could not flush its marker");
+        park_until_reaped();
+    }
+    assert_child_contained(test_name, mode, marker, bound);
+}
+
+/// Hold this process open for the parent that is about to reap it.
+///
+/// Parking rather than sleeping a fixed span: the parent owns when this ends,
+/// and a span that expired first would let the child exit on its own and turn a
+/// containment protocol into a race.
+fn park_until_reaped() -> ! {
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Drive the contained child from the parent side, then reap it boundedly.
+fn assert_child_contained(test_name: &str, mode: &str, marker: &str, bound: Duration) {
+    let mut child = ChildGuard::spawn_exact_current(test_name, mode, bound)
+        .expect("the contained child could not be started");
+    let child_id = child.id();
+    let probe = child
+        .take_reap_probe()
+        .expect("a freshly spawned guard owns its reap probe");
+    if let Err(error) = child.wait_for_readiness(marker, bound) {
+        panic!(
+            "the contained child never reported: {error}\n{}",
+            String::from_utf8_lossy(child.stderr())
+        );
+    }
+    child
+        .shutdown()
+        .expect("the contained child could not be reaped");
+    let reaped = probe
+        .wait(bound)
+        .expect("the contained child's reap did not complete");
+    assert_eq!(
+        reaped.child_id(),
+        child_id,
+        "the reap probe reported a different child"
+    );
 }
 
 /// Run the private child from the parent side, failing with what it said.

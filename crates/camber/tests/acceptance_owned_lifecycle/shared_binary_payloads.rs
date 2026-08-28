@@ -15,10 +15,11 @@
 #![cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
 
 use crate::common::{
-    BEFORE_WRITE, CLOSE, DirectionTestFixture, FANOUTS, FRAME_BUILT, LARGE_PAYLOAD, PayloadWitness,
-    SELECTED, SMALL_PAYLOAD, SharedPayloadFixture, abortive_direction_row, assert_payload_flat,
-    fill_outbound_behind_the_writer, measure_shared_admission, offer_shared_clones, payload_bytes,
-    read_ws_frame_raw, shared_payload_row, witnessed_payload, write_ws_close_frame,
+    AFTER_COMMIT, BEFORE_COMMIT, BEFORE_WRITE, BEFORE_WRITE_EDGE, CLOSE, DirectionTestFixture,
+    FANOUTS, FRAME_BUILT, LARGE_PAYLOAD, PayloadWitness, SMALL_PAYLOAD, SharedPayloadFixture,
+    abortive_direction_row, assert_payload_flat, fill_outbound_behind_the_writer,
+    measure_shared_admission, offer_shared_clones, payload_bytes, read_ws_frame_raw,
+    shared_payload_row, witnessed_payload, write_ws_close_frame,
 };
 use allocation_counter::AllocationInfo;
 use camber::RuntimeError;
@@ -61,6 +62,7 @@ const DISCONNECT_TAG: u8 = 0x35;
 const RECEIVER_TAG: u8 = 0x36;
 const SHUTDOWN_TAG: u8 = 0x37;
 const CANCELLED_TAG: u8 = 0x38;
+const BACKPRESSURE_TAG: u8 = 0x39;
 
 // 1.T3
 #[camber::test]
@@ -161,13 +163,60 @@ fn admit_and_take(
     (measured, witness)
 }
 
-// 1.T5
+// 1.T5, revised by 4.T4
+//
+// Every row states its cause through a public or protocol barrier rather than
+// through whichever event a coordinator turn reached first, and every row still
+// owes the same account of what its cause released.
 #[camber::test]
-async fn shared_binary_terminal_paths_release_every_payload_handle() {
+async fn websocket_backpressure_payload_and_close_contracts_survive_causal_cutover() {
+    saturated_admission_refusal_row().await;
     peer_disconnect_release_row().await;
     receiver_drop_release_row();
     graceful_shutdown_release_row();
     forced_cancellation_release_row();
+}
+
+/// A bounded queue answers backpressure, the frames it did take still reach the
+/// peer, and the close that follows is the peer's own.
+///
+/// The queue is filled behind a held writer, so the refusal is the production
+/// bound rather than a slow reader: every admission this row is owed has been
+/// taken, and the next one has nowhere to go. The cause is then stated through
+/// the peer's close and the echo that answers it, so the row's cleanup claim
+/// rests on a protocol acknowledgement rather than on a teardown race.
+async fn saturated_admission_refusal_row() {
+    shared_payload_row(TERMINAL_BUFFER, 1, |mut row| async move {
+        let expected = payload_bytes(SMALL_PAYLOAD, BACKPRESSURE_TAG);
+        let (payload, mut witness) = witnessed_payload(&expected, "the saturating payload");
+        row.listener().arm(BEFORE_WRITE);
+        for _ in 0..=TERMINAL_BUFFER {
+            row.sender(0)
+                .send_shared_binary(payload.clone())
+                .expect("admit one clone into the bounded queue");
+        }
+        let refused = row.sender(0).try_send_shared_binary(payload.clone());
+        assert!(
+            matches!(refused, Err(RuntimeError::ChannelFull)),
+            "a saturated outbound queue answered {refused:?} rather than backpressure"
+        );
+        drop(payload);
+        row.listener().wait_paused(BEFORE_WRITE).await;
+        row.listener().release(BEFORE_WRITE);
+        for _ in 0..=TERMINAL_BUFFER {
+            row.take_peer_frames_from(0, &expected, "an admitted clone");
+        }
+        row.listener().arm(AFTER_COMMIT);
+        write_ws_close_frame(row.client(0).peer());
+        row.listener().wait_paused(AFTER_COMMIT).await;
+        row.listener().release(AFTER_COMMIT);
+        expect_peer_close(row.client(0).peer(), "the peer close was never echoed");
+        row.release_every_half();
+        row.end_every_connection();
+        row.stop_and_join().await;
+        assert_bridge_released(&row.listener().observed(), WsCloseCause::PeerClosed, 0);
+        witness.assert_released("the saturated bridge").await;
+    });
 }
 
 /// A peer whose transport is reset: the converted frame and the queued clone
@@ -184,13 +233,14 @@ async fn peer_disconnect_release_row() {
         let mut witness =
             stage_converted_and_queued(&fixture, &sender, &expected, "the peer-disconnect payload")
                 .await;
-        // The cause is fixed before the server is asked to stop, because a stop
-        // requested in the same coordinator turn outranks a peer that went away
-        // and the row would then be reading another cause's disposition.
-        fixture.arm(SELECTED);
+        // The cause is committed before the server is asked to stop, so the
+        // stop is the later fact and this row reads the peer's disposition. A
+        // stop asked for first would be the earlier one, and the row would then
+        // be reading a cause it did not stage.
+        fixture.arm(AFTER_COMMIT);
         drop(peer);
-        fixture.wait_paused(SELECTED).await;
-        fixture.release(SELECTED);
+        fixture.wait_paused(AFTER_COMMIT).await;
+        fixture.release(AFTER_COMMIT);
         fixture.shutdown_server();
         fixture
             .join_server()
@@ -204,7 +254,16 @@ async fn peer_disconnect_release_row() {
 }
 
 /// The unique receive owner going away cancels the converted frame and the
-/// queued clone alike.
+/// queued clone alike, and a graceful stop that lands afterwards does not turn
+/// that into a drain.
+///
+/// The bridge is held short of its commit with the receive owner's departure in
+/// hand, and the public `shutdown` then returns — so the graceful phase is
+/// committed in the shared stop state before the commit this bridge takes
+/// inside it. A graceful stop closes admission and lets open connections
+/// finish, so this connection reports why it ended, and the disposition that
+/// follows is the cancelling one its own cause owes. A bridge that let the stop
+/// speak for an open connection would drain both handles to the peer instead.
 fn receiver_drop_release_row() {
     shared_payload_row(TERMINAL_BUFFER, 1, |mut row| async move {
         let expected = payload_bytes(SMALL_PAYLOAD, RECEIVER_TAG);
@@ -215,15 +274,24 @@ fn receiver_drop_release_row() {
             "the receiver-drop payload",
         )
         .await;
-        // The cause is fixed before the peer goes, because a peer dropped in
-        // the same coordinator turn outranks a receive owner that left and the
-        // row would then be reading another cause's disposition.
-        row.listener().arm(SELECTED);
+        row.listener().arm(BEFORE_COMMIT);
         drop(row.client(0).take_receiver());
-        row.listener().wait_paused(SELECTED).await;
+        row.listener().wait_paused(BEFORE_COMMIT).await;
+        row.listener().shutdown_server();
+        row.listener().arm(AFTER_COMMIT);
+        row.listener().release(BEFORE_COMMIT);
+        row.listener().wait_paused(AFTER_COMMIT).await;
+        assert_eq!(
+            row.listener().observed().terminal,
+            Some(WsCloseCause::ReceiverDropped),
+            "the receiver-drop row fixed another cause"
+        );
         row.end_every_connection();
-        row.listener().release(SELECTED);
-        row.stop_and_join().await;
+        row.listener().release(AFTER_COMMIT);
+        row.listener()
+            .join_server()
+            .await
+            .expect("the owned server completed");
         assert_bridge_released(&row.listener().observed(), WsCloseCause::ReceiverDropped, 1);
         witness.assert_released("the receiver-drop bridge").await;
     });
@@ -232,11 +300,20 @@ fn receiver_drop_release_row() {
 /// A graceful stop keeps the promise a successful shared send was given: the
 /// converted frame and the queued clone both reach the peer, then the close.
 ///
-/// The checkpoint's release is staged before the server is asked to stop, so
-/// the coordinator's own turn advances the already-released outbound future
-/// into the sink. Asking for the stop first can cancel that future while it
-/// alone owns the converted frame, which would drop a frame a successful send
-/// was promised.
+/// The hold is advanced off the conversion before the stop is asked for. A pump
+/// held at [`FRAME_BUILT`] owns that frame on its running future's own stack,
+/// and the coordinator drops that future the moment it answers — so a stop
+/// published while the bridge's turn is still in flight takes the frame with
+/// it. That turn is in flight for as long as it takes to poll the sources after
+/// the write side, and a wait that ends at the held future's first look ends
+/// inside it, so no order the row asks for closes the window. Production never
+/// stands there at all: `hand_over` builds the frame and gives it to the sink
+/// within one turn, and only this checkpoint holds the two apart.
+///
+/// Held at [`BEFORE_WRITE`] the frame is the pump's own, which is where every
+/// admitted frame waits. The release is then staged rather than woken, so the
+/// stop lands in the same turn: whichever of the write side and the graceful
+/// drain reaches the frame first, the peer is owed it and gets it.
 fn graceful_shutdown_release_row() {
     shared_payload_row(TERMINAL_BUFFER, 1, |mut row| async move {
         let expected = payload_bytes(SMALL_PAYLOAD, SHUTDOWN_TAG);
@@ -247,15 +324,13 @@ fn graceful_shutdown_release_row() {
             "the shutdown payload",
         )
         .await;
-        let turns = row.checkpoint_polls(FRAME_BUILT);
-        row.listener().stage_release(FRAME_BUILT);
+        row.listener().arm(BEFORE_WRITE);
+        row.listener().release(FRAME_BUILT);
+        row.listener().wait_paused(BEFORE_WRITE).await;
+        row.listener().release_without_waking(BEFORE_WRITE_EDGE);
         row.listener().shutdown_server();
         row.take_peer_frames_from(0, &expected, "the converted frame");
         row.take_peer_frames_from(0, &expected, "the queued clone");
-        assert!(
-            row.checkpoint_polls(FRAME_BUILT) > turns,
-            "the staged release never reached the held outbound future"
-        );
         expect_peer_close(row.client(0).peer(), "a graceful stop sent no close frame");
         write_ws_close_frame(row.client(0).peer());
         row.release_every_half();
@@ -284,7 +359,7 @@ fn forced_cancellation_release_row() {
         )
         .await;
         row.listener().select_server_cancellation().await;
-        row.listener().release(SELECTED);
+        row.listener().release(AFTER_COMMIT);
         let completed = row.listener().join_server().await;
         assert!(
             matches!(completed, Err(RuntimeError::Cancelled)),

@@ -1,0 +1,12 @@
+diff --git a/crates/camber/src/http/server_lifecycle/control.rs b/crates/camber/src/http/server_lifecycle/control.rs
+index 765aca3..3629d9c 100644
+--- a/crates/camber/src/http/server_lifecycle/control.rs
++++ b/crates/camber/src/http/server_lifecycle/control.rs
+@@ -75,7 +75,6 @@ impl StopAuthority {
+ 
+     /// Ask for forced cancellation, which mints nothing at all.
+     pub(in crate::http) fn request_cancel(&self) {
+-        self.stop.apply(StopEvent::Cancel);
+         ServerControl::send_abort(&self.control);
+     }
+ 

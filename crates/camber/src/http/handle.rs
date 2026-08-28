@@ -1,10 +1,11 @@
 use super::body::HyperResponseBody;
 use super::body_admission::{BodyBudget, BodyPermit, ResolvedBodyPlan};
 use super::boundary::CrossedBound;
-use super::completion::RequestAccount;
+use super::completion::CompletionAccount;
 use super::disconnect::{ConnectionLiveness, ResponseLifetime};
 use super::dispatch::{
     AsyncDispatch, Classified, FrozenRouter, HeadUpgrade, PreBodyScope, RouteClass, Routed,
+    TerminalProducer,
 };
 use super::head_projection::{self, Gated, HeadProjection};
 #[cfg(feature = "profiling")]
@@ -12,19 +13,17 @@ use super::internal_routes::match_profiling_route;
 use super::internal_routes::{
     build_internal_handler, invoke_internal_route, match_internal_route_from_path,
 };
+use super::middleware::TerminalEntry;
 use super::operation::{
     InboundFailure, InboundGuard, InboundReady, InboundTerminal, OperationEnvelope, OperationStage,
 };
 use super::record::count_rejection;
-use super::rejection::{
-    HANDLER, Rejected, RejectionProtocol, RejectionScope, RequestId, RequestIdentity,
-};
+use super::rejection::{HANDLER, Rejected, RejectionProtocol, RejectionScope, RequestIdentity};
 use super::request::{RequestHead, RequestOrigin};
+use super::response_commitment::ResponseOrigin;
 use super::router::{DispatchResult, GateCheck, ServerDispatch};
 use super::server_lifecycle::ConnectionLifecycle;
-use super::streaming::{
-    dispatch_streaming_proxy, handle_proxy_stream_response, handle_sse, handle_stream_response,
-};
+use super::streaming::{dispatch_streaming_proxy, handle_sse, handle_stream_response};
 #[cfg(feature = "ws")]
 use super::ws_proxy::{self, WsUpgrade};
 use super::{BufferConfig, Request, Response};
@@ -134,13 +133,15 @@ async fn collect_body_limited(
 /// Retain one admitted body's data frames under every bound its operation
 /// carries.
 ///
-/// One turn of this loop weighs every inbound source together — the shutdown
+/// One turn of this loop reads every inbound source together — the shutdown
 /// and cancellation authority the envelope carries, the two request deadlines,
-/// the peer's own response lifetime, and whatever the wire produced — and the
-/// declared precedence then names the single terminal. Two sources that became
-/// ready in the same turn are resolved by that contract rather than by which
-/// future the executor happened to poll first, and nothing is polled after a
-/// terminal is selected.
+/// the peer's own response lifetime, and whatever the wire produced. What this
+/// reader read for itself is what it commits: the frame the wire produced, the
+/// maximum that frame crossed, the peer's own end, and the payload's end are
+/// one read, and the carried sources decide only a turn that read decided
+/// nothing in. Two carried sources that first became observable in the same
+/// turn may commit in either order, and nothing is polled after a terminal is
+/// selected.
 ///
 /// Every frame is accounted through the shared bound first and appended second,
 /// so a frame that would carry this request past its limit is dropped while it
@@ -168,23 +169,35 @@ async fn retain_within_budget(
         script,
     };
     loop {
-        super::mock::LifecycleScript::pause_at(
+        super::mock::LifecycleScript::pause_at_response_commit(
             script,
-            super::mock::LifecycleCheckpoint::BeforeInboundTerminalSelection,
+            super::mock::ResponseCommitmentEdge::BeforeResponseCommit,
         )
         .await;
         let (ready, wire) = advance(&mut body, &mut read).await;
-        let Some(terminal) = ready.select() else {
+        let Some(terminal) = ready.first_ready() else {
             continue;
         };
-        super::mock::LifecycleScript::pause_at(
+        // The payload's end commits nothing: it releases the owner that will
+        // produce this operation's head, and that owner takes the commitment
+        // where it produces it. Every other terminal is a cause, and the cause
+        // only maps if this reader is the first owner to reach the cell.
+        let committed = match terminal {
+            InboundTerminal::ResponseHead => None,
+            ended => Some(operation.commitment().commit_cause(ended)),
+        };
+        super::mock::LifecycleScript::pause_at_settled_commit(
             script,
-            super::mock::LifecycleCheckpoint::InboundTerminalSelected(terminal),
+            committed.and_then(|attempt| attempt.ok().map(|()| terminal)),
         )
         .await;
-        return match terminal {
-            InboundTerminal::ResponseHead => Ok(std::mem::take(read.retained).freeze()),
-            ended => Err(InboundFailure::of(ended, operation.budget(), wire)),
+        return match (terminal, committed) {
+            (InboundTerminal::ResponseHead, _) => Ok(std::mem::take(read.retained).freeze()),
+            (ended, Some(Ok(()))) => Err(InboundFailure::of(ended, operation.budget(), wire)),
+            // Another producer holds this operation's answer, so this reader
+            // maps nothing. The payload it retained is not an answer either:
+            // what it owes is to stop reading, which is what a silent ending is.
+            (ended, Some(Err(_)) | None) => Err(InboundFailure::silent(ended)),
         };
     }
 }
@@ -206,8 +219,8 @@ struct InboundRead<'a> {
 ///
 /// The carried sources are read again after the wait rather than before it: a
 /// deadline that expired while a frame was in flight belongs to the same turn
-/// as the frame, and weighing it against a stale reading would let poll order
-/// decide what the precedence table already decides.
+/// as the frame, and weighing it against a stale reading would answer this turn
+/// with an observation the turn never made.
 async fn advance(
     body: &mut hyper::body::Incoming,
     read: &mut InboundRead<'_>,
@@ -216,7 +229,8 @@ async fn advance(
     // The wire is offered first, so a frame already waiting is read into the
     // same turn as the deadlines beside it. Deciding on the deadlines alone
     // would let a body that already crossed its route's byte maximum be
-    // reported as an idle expiry, which the declared precedence ranks below it.
+    // reported as an idle expiry — a carried source answering a turn this
+    // reader's own read of the wire had already decided.
     let frame = tokio::select! {
         biased;
         frame = body.frame() => Some(frame),
@@ -441,24 +455,23 @@ fn pending_middleware_gate(
     result: &DispatchResult,
     router: Option<&FrozenRouter>,
     scope: &RejectionScope,
-) -> Option<GateCheck> {
+) -> Result<Option<GateCheck>, Rejected> {
     match (result.needs_middleware_gate(), router) {
-        (false, _) => None,
-        (true, Some(router)) => router.middleware_gate(result.request_ref(), scope),
+        (false, _) => Ok(None),
+        (true, Some(router)) => Ok(router.middleware_gate(result.request_ref(), scope)),
         // Named rather than folded into the pass above. Only a resolved router
         // has handlers to select a gated class from, so nothing reaches here
         // today — but the pass arm forwards, and a stream, an SSE, or a proxied
         // upgrade forwarded on a gate that never ran is an unauthenticated
         // request. Refused instead, which is the answer that stays safe if the
         // shape ever changes.
-        (true, None) => Some(unrunnable_gate(scope)),
+        //
+        // Carried as a refusal rather than as a chain that answers with one: no
+        // frame runs, so the head belongs to the framework mapper, and a
+        // synthesized chain would have the caller record it as a middleware
+        // short-circuit.
+        (true, None) => Err(Rejected::gate_unrunnable()),
     }
-}
-
-/// Answer a gate that was owed but had no chain to run it.
-fn unrunnable_gate(scope: &RejectionScope) -> GateCheck {
-    let scope = scope.clone();
-    Box::pin(async move { scope.map(Rejected::gate_unrunnable()) })
 }
 
 /// Put a buffered response on the wire and record the status the peer is given.
@@ -480,7 +493,7 @@ fn unrunnable_gate(scope: &RejectionScope) -> GateCheck {
 pub(super) fn answer(
     ctx: &ConnCtx,
     resp: Response,
-    account: &RequestAccount,
+    account: &CompletionAccount,
     scope: &RejectionScope,
 ) -> hyper::Response<HyperResponseBody> {
     answer_over(ctx, resp, account, scope, CrossedBound::None)
@@ -499,7 +512,7 @@ pub(super) fn answer_rejected(
     ctx: &ConnCtx,
     scope: &RejectionScope,
     rejected: Rejected,
-    account: &RequestAccount,
+    account: &CompletionAccount,
 ) -> hyper::Response<HyperResponseBody> {
     let crossed = rejected.crossed();
     let response = scope.map(rejected);
@@ -513,7 +526,7 @@ pub(super) fn answer_rejected(
 fn answer_over(
     ctx: &ConnCtx,
     resp: Response,
-    account: &RequestAccount,
+    account: &CompletionAccount,
     scope: &RejectionScope,
     crossed: CrossedBound,
 ) -> hyper::Response<HyperResponseBody> {
@@ -521,6 +534,10 @@ fn answer_over(
     let status = finalized.response.status().as_u16();
     if let Some(kind) = finalized.refused {
         count_rejection(ctx, kind, status);
+        // The typed category this request's mapper answered under. Recorded
+        // beside the counter rather than derived later, because this is the one
+        // stage that both applies the mapper and knows what it mapped.
+        account.record_rejection(kind);
     }
     account.commit_refused(scope, status, crossed);
     let (parts, body) = finalized.response.into_parts();
@@ -539,7 +556,7 @@ pub(super) struct ConnDispatch<'a> {
     origin: RequestOrigin<'a>,
     lifecycle: &'a ConnectionLifecycle,
     connection: &'a Arc<ConnectionLiveness>,
-    account: &'a RequestAccount,
+    account: &'a Arc<CompletionAccount>,
 }
 
 impl<'a> ConnDispatch<'a> {
@@ -554,7 +571,7 @@ impl<'a> ConnDispatch<'a> {
     fn admit(
         &self,
         budgets: super::route_budgets::RouteBudgets,
-        script: Option<&super::mock::LifecycleScript>,
+        script: Option<&Arc<super::mock::LifecycleScript>>,
     ) -> OperationEnvelope {
         let operation = OperationEnvelope::admit(
             budgets,
@@ -563,8 +580,9 @@ impl<'a> ConnDispatch<'a> {
             self.origin.disconnect,
             self.lifecycle.shutdown_deadline(),
             script,
+            self.account,
         );
-        operation.observe(script, OperationStage::Dispatch);
+        operation.observe(script.map(Arc::as_ref), OperationStage::Dispatch);
         operation
     }
 
@@ -587,7 +605,7 @@ pub(super) struct RequestDispatch<'a> {
     pub(super) ctx: &'a ConnCtx,
     pub(super) origin: RequestOrigin<'a>,
     pub(super) lifecycle: &'a ConnectionLifecycle,
-    pub(super) account: &'a RequestAccount,
+    pub(super) account: &'a Arc<CompletionAccount>,
     /// The one envelope this admitted head minted.
     ///
     /// Borrowed rather than owned, because the envelope is not cloneable and
@@ -674,9 +692,9 @@ async fn dispatch_classified_route<'a>(
     // limit is: the number an operator or a test reads is the one the routing
     // owner decided, not one a later consumer re-derived.
     let script = lifecycle.script();
-    super::mock::LifecycleScript::pause_at(
+    super::mock::LifecycleScript::pause_at_response_commit(
         script.as_deref(),
-        super::mock::LifecycleCheckpoint::RouteBudgetsResolved {
+        super::mock::ResponseCommitmentEdge::RouteBudgetsResolved {
             request: budgets.request(),
             upload: budgets.upload(),
             download: budgets.download(),
@@ -685,6 +703,10 @@ async fn dispatch_classified_route<'a>(
     .await;
     let class = match class {
         RouteClass::Refused(rejected) => {
+            super::response_commitment::record_prehead_origin(
+                account,
+                prehead_refusal_origin(router),
+            );
             return Ok(refuse_from_head(
                 ctx, origin, &scope, &hyper_req, rejected, account,
             ));
@@ -697,7 +719,7 @@ async fn dispatch_classified_route<'a>(
     };
     // One envelope per admitted head, minted from the policy the classifier
     // just resolved and carried from here to the response-head boundary.
-    let operation = conn.admit(budgets, script.as_deref());
+    let operation = conn.admit(budgets, script.as_ref());
     let request_dispatch = conn.admitted(&operation);
     dispatch_admitted_route(hyper_req, class, router, &scope, &request_dispatch).await
 }
@@ -744,15 +766,20 @@ async fn dispatch_admitted_route<'a>(
         // wildcarded so a class that gains a refusal cannot fall through into
         // body collection.
         RouteClass::Refused(rejected) => {
+            operation.commit_response(ResponseOrigin::Framework);
             return Ok(refuse_from_head(
                 ctx, origin, scope, &hyper_req, rejected, account,
             ));
         }
     };
 
+    // The admission decision that precedes the first body frame is answered by
+    // the framework mapper, and the operation it answers for is already minted:
+    // its head belongs to this producer like any other.
     let read = match wire_read(class, origin, &hyper_req, lifecycle).await {
         Ok(read) => read,
         Err(rejected) => {
+            operation.commit_response(ResponseOrigin::Framework);
             return Ok(refuse_from_head(
                 ctx, origin, scope, &hyper_req, rejected, account,
             ));
@@ -761,10 +788,30 @@ async fn dispatch_admitted_route<'a>(
     let input = match build_dispatch_input(hyper_req, origin, lifecycle, operation, read).await {
         Ok(input) => input,
         Err(refused) => {
-            return Ok(refuse_body(ctx, origin, scope, *refused, account));
+            return Ok(refuse_body(
+                ctx, origin, scope, *refused, account, operation,
+            ));
         }
     };
     dispatch_built_request(input, router, request_dispatch).await
+}
+
+/// The producer of a head refused before any operation was minted.
+///
+/// A resolved router says a route and a policy were reached, so its refusal is
+/// the framework mapper's own answer, like every other refusal a route earns.
+///
+/// An unresolved router says the authority the request named is not one, and
+/// that is a routing decision. [`ServerDispatch::refuse`](super::dispatch) names
+/// the identical refusal `Router` when an internal route answers the same
+/// malformed `Host`, and `host_terminal` names an unclaimed authority the same
+/// way. Answering it from the head is an optimisation over building an owned
+/// request first; it is not a second producer.
+const fn prehead_refusal_origin(router: Option<&FrozenRouter>) -> ResponseOrigin {
+    match router {
+        Some(_) => ResponseOrigin::Framework,
+        None => ResponseOrigin::Router,
+    }
 }
 
 /// Answer a refusal decided from the request head alone.
@@ -778,7 +825,7 @@ fn refuse_from_head(
     pre_body: &PreBodyScope,
     hyper_req: &hyper::Request<hyper::body::Incoming>,
     rejected: Rejected,
-    account: &RequestAccount,
+    account: &CompletionAccount,
 ) -> hyper::Response<HyperResponseBody> {
     let scope = pre_body.scope(RequestIdentity::from_head(
         &origin,
@@ -798,7 +845,8 @@ fn refuse_body(
     origin: RequestOrigin<'_>,
     pre_body: &PreBodyScope,
     refused: Refused,
-    account: &RequestAccount,
+    account: &CompletionAccount,
+    operation: &OperationEnvelope,
 ) -> hyper::Response<HyperResponseBody> {
     let Refused {
         failure,
@@ -806,7 +854,7 @@ fn refuse_body(
         uri,
     } = refused;
     let scope = pre_body.scope(RequestIdentity::from_head(&origin, &method, &uri));
-    answer_inbound_failure(ctx, &scope, failure, account)
+    answer_inbound_failure(ctx, &scope, failure, account, operation)
 }
 
 /// Answer one selected inbound terminal with the disposition it declares.
@@ -819,15 +867,21 @@ pub(super) fn answer_inbound_failure(
     ctx: &ConnCtx,
     scope: &RejectionScope,
     failure: InboundFailure,
-    account: &RequestAccount,
+    account: &CompletionAccount,
+    operation: &OperationEnvelope,
 ) -> hyper::Response<HyperResponseBody> {
     match failure {
-        InboundFailure::Mapped(rejected) => answer_rejected(ctx, scope, rejected, account),
+        // The cause took the commitment where it was read; the mapper this
+        // reaches is the framework producing the head that cause is owed, so
+        // the origin is recorded here and the cell already names the cause.
+        InboundFailure::Mapped(rejected) => {
+            answer_framework(ctx, scope, rejected, account, operation)
+        }
         InboundFailure::Silent(terminal) => end_without_mapping(scope, terminal, account),
     }
 }
 
-/// End one admitted request that the declared precedence gives no mapper.
+/// End one admitted request that the declared mapping gives no mapper.
 ///
 /// The shutdown deadline, an explicit cancellation, and a peer whose response
 /// lifetime already ended stop the work rather than refusing it. There is no
@@ -838,7 +892,7 @@ pub(super) fn answer_inbound_failure(
 pub(super) fn end_without_mapping(
     scope: &RejectionScope,
     terminal: InboundTerminal,
-    account: &RequestAccount,
+    account: &CompletionAccount,
 ) -> hyper::Response<HyperResponseBody> {
     let status = match terminal {
         InboundTerminal::Disconnect => hyper::StatusCode::REQUEST_TIMEOUT,
@@ -904,7 +958,14 @@ async fn dispatch_built_request<'a>(
     };
     // Built in its own statement: `DispatchResult` is not `Sync`, so the borrow
     // this takes must end before the check is awaited.
-    let gate = pending_middleware_gate(&result, router, &scope);
+    let gate = match pending_middleware_gate(&result, router, &scope) {
+        Ok(gate) => gate,
+        Err(unrunnable) => {
+            return Ok(answer_framework(
+                ctx, &scope, unrunnable, account, operation,
+            ));
+        }
+    };
     operation.observe(script.as_deref(), OperationStage::Middleware);
     // Refused as it stands: this class declared no payload it leaves unread.
     let answering = gate_within_total(
@@ -913,11 +974,45 @@ async fn dispatch_built_request<'a>(
         &scope,
         identity,
     );
+    // The gate took the commitment for whichever owner answered — the chain or
+    // the total that outlived it — so nothing is recorded here.
     let projection = match answering.await {
         Gated::Answered(answered) => return Ok(answered),
         Gated::Admitted(projection) => projection,
     };
 
+    operation.observe(script.as_deref(), OperationStage::ResponseHead);
+    // One merge for every class this dispatch answers, whichever owner produced
+    // the head: the chain ran once, so its metadata reaches the real answer once
+    // — including a refusal raised after the chain admitted the request.
+    let answered = answer_admitted_dispatch(
+        result,
+        #[cfg(feature = "ws")]
+        ws_upgrade,
+        &scope,
+        request_dispatch,
+    )
+    .await?;
+    Ok(projection.merged_into(answered))
+}
+
+/// Answer one admitted class, or the handshake refusal raised after its gate.
+///
+/// Held apart from the gate above so each half states one thing: the chain
+/// decides whether this request proceeds, and this decides which producer
+/// answers it once the chain has.
+async fn answer_admitted_dispatch<'a>(
+    result: DispatchResult,
+    #[cfg(feature = "ws")] ws_upgrade: WsUpgrade,
+    scope: &RejectionScope,
+    request_dispatch: &RequestDispatch<'a>,
+) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    let &RequestDispatch {
+        ctx,
+        account,
+        operation,
+        ..
+    } = request_dispatch;
     #[cfg(feature = "ws")]
     let refused_origin = result
         .is_websocket()
@@ -926,24 +1021,23 @@ async fn dispatch_built_request<'a>(
     #[cfg(not(feature = "ws"))]
     let refused_origin: Option<Rejected> = None;
 
-    operation.observe(script.as_deref(), OperationStage::ResponseHead);
-    // One merge for every class this dispatch answers, whichever owner produced
-    // the head: the chain ran once, so its metadata reaches the real answer once
-    // — including a refusal raised after the chain admitted the request.
-    let answered = match refused_origin {
-        Some(rejected) => answer_rejected(ctx, &scope, rejected, account),
+    match refused_origin {
+        // A handshake refused on its declared origin is answered by the mapper,
+        // so the framework is the producer of this operation's head. It reaches
+        // the commitment for the same reason every other producer does: the
+        // request is answered here and by nothing after it.
+        Some(rejected) => Ok(answer_framework(ctx, scope, rejected, account, operation)),
         None => {
             finish_dispatched(
                 result,
                 #[cfg(feature = "ws")]
                 ws_upgrade,
-                &scope,
+                scope,
                 request_dispatch,
             )
-            .await?
+            .await
         }
-    };
-    Ok(projection.merged_into(answered))
+    }
 }
 
 /// Answer one dispatched result under the scope and operation it resolved to.
@@ -965,15 +1059,26 @@ async fn finish_dispatched<'a>(
         operation,
         ..
     } = request_dispatch;
-    let script = lifecycle.script();
+    // Each arm takes this operation's one commitment under the owner that is
+    // about to produce its head. A commitment already taken means a cause ended
+    // this request first, and the arm below then answers a request that has no
+    // peer left to tell — which is exactly what the cause's own answer already
+    // did. Nothing here re-maps it.
+    //
+    // The buffered arm reads the producer off the dispatch that built it rather
+    // than naming one here: a routing terminal, a served file, an internal
+    // route, and a buffered forward are all one boxed future by the time they
+    // reach this match, and only the registration that mounted them knows which
+    // producer is answering.
     match result {
-        DispatchResult::Async(fut, held_request) => {
-            finish_buffered(fut, held_request, ctx, scope, account, operation).await
+        DispatchResult::Async(buffered) => {
+            finish_buffered(buffered, ctx, scope, account, operation).await
         }
         DispatchResult::Stream(fut, req) => {
             finish_stream(fut, req, ctx, scope, account, operation, lifecycle).await
         }
         DispatchResult::Sse(handler, req) => {
+            operation.commit_response(ResponseOrigin::ServerSentEvents);
             account.commit(scope, 200);
             handle_sse(handler, req, ctx.sse_buffer_size, lifecycle, operation).await
         }
@@ -991,15 +1096,52 @@ async fn finish_dispatched<'a>(
             })
             .await
         }
-        DispatchResult::ProxyStream(req, backend, prefix, upstream) => {
-            let download = operation.download(upstream.download(), script);
-            let target = super::async_proxy::ProxyTarget {
-                backend: &backend,
-                prefix: &prefix,
-                upstream: &upstream,
-            };
-            handle_proxy_stream_response(req, &target, ctx, scope, account, download).await
-        }
+    }
+}
+
+/// Answer one refusal the framework mapper produces, under the operation it
+/// produces it for.
+///
+/// The commitment and the answer are one step. The framework is the producer of
+/// this head, so a site that mapped the refusal without naming itself on the
+/// cell left a status the record could not attribute to any owner — and the pair
+/// was written at every stage of this file, which is one place per stage for the
+/// same rule to be forgotten in.
+///
+/// The commitment's answer is deliberately dropped. A producer that arrives
+/// after the cell was taken owes no different work here: its own answer goes to
+/// a peer that is either gone or already served, and the cell's job is to keep a
+/// later cause from mapping a second status over it.
+pub(super) fn answer_framework(
+    ctx: &ConnCtx,
+    scope: &RejectionScope,
+    rejected: Rejected,
+    account: &CompletionAccount,
+    operation: &OperationEnvelope,
+) -> hyper::Response<HyperResponseBody> {
+    operation.commit_response(ResponseOrigin::Framework);
+    answer_rejected(ctx, scope, rejected, account)
+}
+
+/// Which owner produced a buffered chain's answer.
+///
+/// The registration names the producer behind the chain — a handler, a served
+/// file, an internal route, a routing terminal, or a buffered forward — and that
+/// producer answers only if the chain let it run. A frame that returned without
+/// calling `next.call` built the head itself, and no later stage can tell: the
+/// response it hands back has the shape the terminal's would have had.
+///
+/// A chain that did reach its terminal is answered by
+/// [`TerminalProducer::origin`], because for a forward the registration alone
+/// still cannot say who produced the head.
+fn chain_origin(
+    entry: &TerminalEntry,
+    producer: &TerminalProducer,
+    answered: &Response,
+) -> ResponseOrigin {
+    match entry.was_reached() {
+        true => producer.origin(answered),
+        false => ResponseOrigin::Middleware,
     }
 }
 
@@ -1085,6 +1227,11 @@ fn inbound_failure<T>(
 /// caller's to say through `refuse` — a class that declared a payload it never
 /// read has to close the connection the next request would otherwise be framed
 /// out of, and a class that declared none does not.
+///
+/// Either answer is a committed response head, so the commitment is taken here
+/// rather than by each of the four classes that gate. The two answers have two
+/// different producers: a chain that replaced the answer is the middleware's own
+/// head, and a chain the request total outlived is the framework mapper's.
 pub(super) async fn gate_within_total(
     gate: impl std::future::Future<Output = Gated<Response>>,
     request_dispatch: &RequestDispatch<'_>,
@@ -1100,9 +1247,12 @@ pub(super) async fn gate_within_total(
     match within_total(gate, operation).await {
         Ok(Gated::Admitted(projection)) => Gated::Admitted(projection),
         Ok(Gated::Answered(blocked)) => {
+            operation.commit_response(ResponseOrigin::Middleware);
             Gated::Answered(answer(ctx, refuse(blocked), account, scope))
         }
-        Err(rejected) => Gated::Answered(answer_rejected(ctx, scope, rejected, account)),
+        Err(rejected) => {
+            Gated::Answered(answer_framework(ctx, scope, rejected, account, operation))
+        }
     }
 }
 
@@ -1119,17 +1269,17 @@ pub(super) async fn handle_request(
     remote_addr: Option<std::net::IpAddr>,
     lifecycle: &ConnectionLifecycle,
     lifetime: ResponseLifetime,
-    account: &RequestAccount,
+    account: &Arc<CompletionAccount>,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     // Built once and copied down every dispatch path, so no path can pair this
-    // peer with another request's lifetime signal. The identity is minted here,
-    // after Hyper accepted the head and before method, host, route, body,
-    // middleware, or protocol classification has run, so every answer this
-    // request can get names the same value.
+    // peer with another request's lifetime signal. The identifier is read back
+    // off the account rather than minted here, because the owner that started
+    // this operation's clock already named it: every answer this request can get
+    // — including one no exit produced — then names the same value.
     let origin = RequestOrigin {
         remote_addr,
         is_tls: ctx.is_tls,
-        request_id: RequestId::generate(),
+        request_id: account.request_id(),
         version: hyper_req.version(),
         disconnect: lifetime.signal(),
     };
@@ -1159,8 +1309,7 @@ pub(super) async fn handle_request(
         // Internal routes (/health, /metrics, /debug/pprof/cpu) bypass body
         // collection.
         PreBodyRoute::Internal(route) => {
-            return dispatch_internal_head_only(&hyper_req, route, dispatch, ctx, origin, account)
-                .await;
+            return dispatch_internal_head_only(&hyper_req, route, &conn, account).await;
         }
         PreBodyRoute::Class(classified) => classified,
     };
@@ -1172,17 +1321,31 @@ pub(super) async fn handle_request(
 /// The total covers handler execution and response production and ends at the
 /// committed head, so a handler that never returns holds this operation no
 /// longer than the policy its route resolved to allows.
+///
+/// The commitment is taken on the answer rather than on the dispatch that chose
+/// the producer. Which of the two answers below happens is not known until the
+/// total has been weighed against the producer, and a cell taken beforehand
+/// named the producer that was going to answer instead of the one that did — and
+/// would name it even for a chain that never let that producer run.
 async fn finish_buffered(
-    producing: super::middleware::ResponseFuture,
-    held_request: Request,
+    buffered: AsyncDispatch,
     ctx: &ConnCtx,
     scope: &RejectionScope,
-    account: &RequestAccount,
+    account: &CompletionAccount,
     operation: &OperationEnvelope,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    let AsyncDispatch {
+        fut: producing,
+        req: held_request,
+        producer,
+        entry,
+    } = buffered;
     let answered = match within_total(producing, operation).await {
-        Ok(response) => finish_async(ctx, response, account, scope),
-        Err(rejected) => Ok(answer_rejected(ctx, scope, rejected, account)),
+        Ok(response) => {
+            operation.commit_response(chain_origin(&entry, &producer, &response));
+            finish_async(ctx, response, account, scope)
+        }
+        Err(rejected) => Ok(answer_framework(ctx, scope, rejected, account, operation)),
     };
     // Released here, not at the start of this arm: the request owns this
     // response's lifetime signal, and the buffered future is `'static`, so
@@ -1204,7 +1367,7 @@ async fn finish_stream(
     held_request: Request,
     ctx: &ConnCtx,
     scope: &RejectionScope,
-    account: &RequestAccount,
+    account: &CompletionAccount,
     operation: &OperationEnvelope,
     lifecycle: &ConnectionLifecycle,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
@@ -1213,12 +1376,21 @@ async fn finish_stream(
             // The response the handler produced names its own policy, and the
             // route's contains it: resolved here, at the one head this arm
             // commits, rather than inside the body that then has no policy to
-            // read.
+            // read. The commitment itself is taken off the BUILT response, by
+            // the exit that builds it.
             let download = operation.download(stream_resp.budget(), lifecycle.script());
-            handle_stream_response(stream_resp, held_request, ctx, scope, account, download)
+            handle_stream_response(
+                stream_resp,
+                held_request,
+                ctx,
+                scope,
+                account,
+                download,
+                operation,
+            )
         }
         Err(rejected) => {
-            let answered = Ok(answer_rejected(ctx, scope, rejected, account));
+            let answered = Ok(answer_framework(ctx, scope, rejected, account, operation));
             // Released here for the same reason the buffered arm releases it
             // last: the request owns this response's lifetime signal, and a
             // handler dropped by the expiring total must not be told the
@@ -1236,7 +1408,7 @@ async fn finish_stream(
 fn finish_async(
     ctx: &ConnCtx,
     resp: Response,
-    account: &RequestAccount,
+    account: &CompletionAccount,
     scope: &RejectionScope,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     Ok(answer(ctx, resp, account, scope))
@@ -1268,7 +1440,7 @@ fn finish_async(
 async fn record_upgrade<F, Fut>(
     ctx: &ConnCtx,
     req: Request,
-    account: &RequestAccount,
+    account: &CompletionAccount,
     scope: &RejectionScope,
     operation: &OperationEnvelope,
     upgrade: F,
@@ -1281,18 +1453,22 @@ where
 {
     let handed_off = match within_total(upgrade(req), operation).await {
         Ok(handed_off) => handed_off,
-        Err(rejected) => return Ok(answer_rejected(ctx, scope, rejected, account)),
+        Err(rejected) => {
+            return Ok(answer_framework(ctx, scope, rejected, account, operation));
+        }
     };
     match handed_off {
         Ok(resp) => {
+            operation.commit_response(ResponseOrigin::WebSocket);
             account.commit(scope, resp.status().as_u16());
             Ok(resp)
         }
-        Err(refusal) => Ok(answer_rejected(
+        Err(refusal) => Ok(answer_framework(
             ctx,
             &refused_upgrade_scope(scope, refusal.subprotocol.as_deref()),
             *refusal.rejected,
             account,
+            operation,
         )),
     }
 }
@@ -1312,21 +1488,39 @@ fn refused_upgrade_scope(scope: &RejectionScope, subprotocol: Option<&str>) -> R
 /// request body. This function builds a lightweight Request from head
 /// metadata when middleware requires it, or invokes directly when middleware
 /// is bypassed.
+///
+/// The envelope is minted here for the same reason every other admitted class
+/// mints one: an internal route is a Camber producer, so the head it answers
+/// with is a response commitment with an origin of its own. The budgets are the
+/// server's, because an internal route registers none — it is served by this
+/// process, not by a route table an application narrowed.
 async fn dispatch_internal_head_only(
     hyper_req: &hyper::Request<hyper::body::Incoming>,
     route: super::internal_routes::InternalRoute,
-    dispatch: &ServerDispatch,
-    ctx: &ConnCtx,
-    origin: RequestOrigin<'_>,
-    account: &RequestAccount,
+    conn: &ConnDispatch<'_>,
+    account: &CompletionAccount,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    let &ConnDispatch {
+        dispatch,
+        ctx,
+        origin,
+        lifecycle,
+        ..
+    } = conn;
+    let operation = conn.admit(
+        super::route_budgets::RouteBudgets::from_policy(ctx.policy),
+        lifecycle.script().as_ref(),
+    );
     match dispatch.skip_middleware_for_internal() {
-        true => {
-            Ok(answer_internal_directly(hyper_req, &route, dispatch, ctx, origin, account).await)
-        }
+        true => Ok(answer_internal_directly(
+            hyper_req, &route, dispatch, ctx, origin, account, &operation,
+        )
+        .await),
         false => {
-            dispatch_internal_through_middleware(hyper_req, route, dispatch, ctx, origin, account)
-                .await
+            dispatch_internal_through_middleware(
+                hyper_req, route, dispatch, ctx, origin, account, &operation,
+            )
+            .await
         }
     }
 }
@@ -1345,11 +1539,13 @@ async fn answer_internal_directly(
     dispatch: &ServerDispatch,
     ctx: &ConnCtx,
     origin: RequestOrigin<'_>,
-    account: &RequestAccount,
+    account: &CompletionAccount,
+    operation: &OperationEnvelope,
 ) -> hyper::Response<HyperResponseBody> {
     let head = RequestHead::from_hyper_request(hyper_req, origin);
     let identity = RequestIdentity::from_head(&origin, hyper_req.method(), hyper_req.uri());
     let scope = internal_scope(dispatch.head_scope(&head, identity), route);
+    operation.commit_response(ResponseOrigin::Internal);
     let response = scope.resolve(invoke_internal_route(route).await, HANDLER);
     answer(ctx, response, account, &scope)
 }
@@ -1375,7 +1571,8 @@ async fn dispatch_internal_through_middleware(
     dispatch: &ServerDispatch,
     ctx: &ConnCtx,
     origin: RequestOrigin<'_>,
-    account: &RequestAccount,
+    account: &CompletionAccount,
+    operation: &OperationEnvelope,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let req = RequestHead::from_hyper_request(hyper_req, origin).to_request(None);
     let resolved = dispatch.resolve(&req);
@@ -1384,8 +1581,21 @@ async fn dispatch_internal_through_middleware(
     let AsyncDispatch {
         fut,
         req: held_request,
-    } = ServerDispatch::dispatch_with_handler(resolved, &handler, req, scope.clone());
-    let answered = finish_async(ctx, fut.await, account, &scope);
+        producer,
+        entry,
+    } = ServerDispatch::dispatch_with_handler(
+        resolved,
+        &handler,
+        req,
+        scope.clone(),
+        ResponseOrigin::Internal,
+    );
+    // Recorded after the chain answered, not before it ran: a frame that refused
+    // `/health` or `/metrics` without calling `next.call` is the producer of that
+    // refusal, and the registration cannot say so.
+    let response = fut.await;
+    operation.commit_response(chain_origin(&entry, &producer, &response));
+    let answered = finish_async(ctx, response, account, &scope);
     // Released here, not before the await: the request owns this response's
     // lifetime signal, and the buffered future does not borrow from it.
     drop(held_request);
@@ -1457,11 +1667,7 @@ async fn dispatch_grpc_inner(
     conn: &ConnDispatch<'_>,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
     let &ConnDispatch {
-        ctx,
-        origin,
-        lifecycle,
-        account,
-        ..
+        origin, lifecycle, ..
     } = conn;
     let class = match classify_grpc_head(&hyper_req, conn) {
         GrpcHead::Classified(class) => class,
@@ -1477,21 +1683,20 @@ async fn dispatch_grpc_inner(
     // reads it: the gate, the payload tonic is handed, and the handoff that
     // commits tonic's answer.
     let script = lifecycle.script();
-    let operation = conn.admit(budgets, script.as_deref());
+    let operation = conn.admit(budgets, script.as_ref());
+    let request_dispatch = conn.admitted(&operation);
     let head = RequestHead::from_hyper_request(&hyper_req, origin);
     let gate = run_head_gate(&head, router, None, &scope);
     operation.observe(script.as_deref(), OperationStage::Middleware);
-    // The chain is admitted work before the committed head, so it spends the
-    // one total this operation carries — the same rule every other gated class
-    // follows.
-    let projection = match within_total(gate, &operation).await {
-        // Answered under the scope this class established, not a rebuilt
-        // built-in one: a middleware response the wire cannot carry recovers
-        // through the router's own mapper, the same one every other refusal on
-        // this path reaches.
-        Ok(Gated::Answered(refusal)) => return Ok(answer(ctx, refusal, account, &scope)),
-        Err(rejected) => return Ok(answer_rejected(ctx, &scope, rejected, account)),
-        Ok(Gated::Admitted(projection)) => projection,
+    // The chain is admitted work before the committed head, so it runs through
+    // the same gate every other gated class runs through: it spends this
+    // operation's one total, its answer is mapped under the scope this class
+    // established rather than a rebuilt built-in one, and whichever owner
+    // answered — the chain or the total that outlived it — takes the commitment
+    // there. Nothing is left unread behind a gRPC refusal, so it does not close.
+    let projection = match gate_within_total(gate, &request_dispatch, &scope, identity).await {
+        Gated::Answered(answered) => return Ok(answered),
+        Gated::Admitted(projection) => projection,
     };
     drop(head);
     // Merged after tonic has committed, so what a chain stated reaches the head
@@ -1548,12 +1753,14 @@ fn classify_grpc_head<'a>(
 
 /// Hand this payload to tonic, and commit only a head no local cause beat.
 ///
-/// The coordinator weighs four sources under the one declared precedence: the
+/// The coordinator reads four sources in one turn: tonic's own head, the
 /// terminal the upload tonic now holds fixed, this operation's carried request
-/// total, its shutdown and cancellation authority, and tonic's own head. A
-/// local winner cancels tonic — by dropping the future that owns it — and maps
-/// once through this class's mapper. Tonic's head winning alone commits, and
-/// from there the RPC's status and trailers are tonic's.
+/// total, and its shutdown and cancellation authority. Tonic's head is the
+/// coordinator's own read, so a turn it answered in is a turn it settles; the
+/// reported upload terminal and the carried sources decide only a turn it left
+/// open. A local winner cancels tonic — by dropping the future that owns it —
+/// and maps once through this class's mapper. Tonic's head winning alone
+/// commits, and from there the RPC's status and trailers are tonic's.
 #[cfg(feature = "grpc")]
 async fn handoff_grpc(
     hyper_req: hyper::Request<hyper::body::Incoming>,
@@ -1588,7 +1795,7 @@ async fn handoff_grpc(
     .await;
     let response = match answered {
         Ok(response) => response,
-        Err(failure) => return answer_inbound_failure(ctx, scope, failure, account),
+        Err(failure) => return answer_inbound_failure(ctx, scope, failure, account, operation),
     };
     operation.observe(script.as_deref(), OperationStage::ResponseHead);
     let committed = super::grpc_handoff::commit(response, operation, script).await;

@@ -1,0 +1,14 @@
+--- a/crates/camber/src/http/ws_proxy/direct.rs
++++ b/crates/camber/src/http/ws_proxy/direct.rs
+@@ -145,7 +145,10 @@
+     // retained callback's join deadline.
+     let authority = attachment.callback_runtime();
+     let stop = attachment.callback_stop();
+-    let owner = attachment.callback_owner();
++    let owner = super::super::server_lifecycle::UpgradeIdentity {
++        connection: LifecycleScript::mint_owner_identity(script.as_deref()),
++        upgrade: LifecycleScript::mint_owner_identity(script.as_deref()),
++    };
+     let opened = open_bridge(on_upgrade, attachment, "WebSocket client upgrade failed").await;
+     let (mut control, stream) = match opened {
+         Some(opened) => opened,

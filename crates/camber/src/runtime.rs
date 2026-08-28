@@ -8,7 +8,7 @@ use crate::runtime_state::{
     RuntimeConfig, RuntimeContextGuard, RuntimeInner, drain_root_scope, install_runtime,
     stop_cancel_watcher, teardown_runtime,
 };
-use crate::runtime_test_support::{ParticipantDisposition, RuntimeController, RuntimeSchedule};
+use crate::runtime_test_support::{RuntimeController, RuntimeSchedule};
 use crate::tls::CertStore;
 use std::sync::Arc;
 use std::time::Duration;
@@ -612,8 +612,8 @@ fn close_and_drain(
 ///
 /// No user holds a handle for such a child, so this slot is the only place its
 /// fault survives. It enters the aggregate as the background task it belongs
-/// to, and owner order alone decides whether it becomes the primary, instead of
-/// a hand-written ordering doing it here.
+/// to, and the freeze alone decides where it renders, instead of a hand-written
+/// ordering doing it here.
 fn record_internal_panic(inner: &RuntimeInner, log: &mut LifecycleFailureLog) {
     if let Some(panicked) = inner.take_internal_panic() {
         log.record(
@@ -786,8 +786,8 @@ fn shutdown_runtime_services(
 fn shutdown_exporter_participant(inner: &RuntimeInner) {
     crate::http::otel::shutdown_exporter();
     inner.shutdown_deadline_ref().settle(
-        &LifecycleParticipant::Exporter,
-        ParticipantDisposition::Completed,
+        &crate::lifecycle::ShutdownOwner::EXPORTER,
+        crate::runtime_test_support::ParticipantDisposition::Completed,
     );
 }
 
@@ -941,13 +941,13 @@ fn finish_runtime<T>(
     inner: &RuntimeInner,
     tokio_rt: tokio::runtime::Runtime,
     runtime_guard: RuntimeContextGuard,
-    mut teardown: LifecycleFailureLog,
+    teardown: LifecycleFailureLog,
     scoped: ScopedOutcome<Result<T, crate::RuntimeError>>,
 ) -> Result<T, crate::RuntimeError> {
     teardown_runtime(inner);
     drop(runtime_guard);
 
-    stop_executor(inner, tokio_rt, &mut teardown);
+    stop_executor(inner, tokio_rt);
 
     // Frozen only now, after every join or abandonment decision above has been
     // taken. Read BEFORE the unwind resumes: `resume_unwind` diverges.
@@ -959,48 +959,30 @@ fn finish_runtime<T>(
     }
 }
 
-/// Give whatever Tokio still carries past the scope drain its shutdown window,
-/// and record whether the executor settled inside it.
+/// Give whatever Tokio still carries past the scope drain a bounded window to
+/// stop in.
 ///
-/// This is the window for a server handle the caller dropped without joining
-/// and the connection tasks its supervisor was still ending. Not a second scope
-/// drain: the scope already drained above, so the bound is whatever the one
-/// aggregate expiry has left rather than a fresh copy of the configured grace.
+/// A safety action, and only that. Every Camber-owned registry has already
+/// settled or named its outstanding owners by the time this runs — the root
+/// scope and its background children in the drain above, each resource and the
+/// exporter in `teardown_runtime`, and every server inside its own tree — so
+/// what this call reaches is work no Camber owner is accountable for: a server
+/// handle the caller dropped without joining, the connection tasks its
+/// supervisor was still ending, and raw tasks the application spawned itself.
 ///
-/// `shutdown_timeout` returns as soon as everything has stopped, so an elapsed
-/// span that reached the bound is the executor telling this runtime it still
-/// owns work — the one participant no join handle can speak for.
-fn stop_executor(
-    inner: &RuntimeInner,
-    tokio_rt: tokio::runtime::Runtime,
-    log: &mut LifecycleFailureLog,
-) {
-    let shutdown = inner.shutdown_deadline();
-    let window = shutdown.bounded(
-        &LifecycleParticipant::Executor,
-        inner.config.server_policy.shutdown_timeout_value(),
-    );
-    let started = std::time::Instant::now();
+/// Not a second scope drain either: the scope already drained above, so the
+/// bound is whatever the one aggregate expiry has left rather than a fresh copy
+/// of the configured grace.
+///
+/// Nothing is recorded or settled here. Tokio hands back no acknowledgement,
+/// and elapsed time is not one: a window that ran out says the wait was bounded,
+/// not that an owner failed inside it. Reading the clock for a fact would
+/// manufacture a participant Camber cannot speak for.
+fn stop_executor(inner: &RuntimeInner, tokio_rt: tokio::runtime::Runtime) {
+    let window = inner
+        .shutdown_deadline()
+        .safety_window(inner.config.server_policy.shutdown_timeout_value());
     tokio_rt.shutdown_timeout(window);
-    match started.elapsed() < window {
-        true => shutdown.settle(
-            &LifecycleParticipant::Executor,
-            ParticipantDisposition::Completed,
-        ),
-        false => {
-            log.record(
-                LifecycleParticipant::Executor,
-                LifecyclePhase::ForcedJoin,
-                LifecycleFailureKind::DeadlineExceeded(
-                    crate::http::DeadlineBoundary::AggregateShutdown,
-                ),
-            );
-            shutdown.settle(
-                &LifecycleParticipant::Executor,
-                ParticipantDisposition::Named,
-            );
-        }
-    }
 }
 
 /// Report the startup refusal that kept the closure from running, logging the
@@ -1047,11 +1029,12 @@ fn resume_past_failure(
 }
 
 /// Emit the one operator event a displaced lifecycle aggregate leaves behind.
+///
+/// The whole account, not a chosen entry: the rendering names every recorded
+/// failure, and the count says how many to expect. Naming one participant in a
+/// field of its own would reintroduce the primacy the aggregate no longer has.
 fn report_displaced_lifecycle(failures: &crate::LifecycleFailures) {
-    let primary = failures.primary();
     tracing::error!(
-        participant = %primary.participant(),
-        phase = %primary.phase(),
         recorded = failures.len(),
         displaced = %failures,
         "lifecycle failures displaced by an unwinding closure"

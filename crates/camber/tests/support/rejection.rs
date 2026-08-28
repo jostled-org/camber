@@ -241,13 +241,25 @@ pub fn drain(journal: &Journal) -> Box<[Observed]> {
 /// so the failure carries both observations rather than only their count: two
 /// refusals from one request are told apart by what each was handed.
 pub fn only(journal: &Journal, label: &str) -> Observed {
-    let seen = drain(journal);
-    assert_eq!(
-        seen.len(),
-        1,
-        "{label}: one refusal invokes one mapper once, not {seen:?}"
-    );
-    seen.into_vec().remove(0)
+    let mut seen = drain(journal).into_vec();
+    only_of(&seen, label);
+    seen.remove(0)
+}
+
+/// The one observation a row expects, borrowed out of what it already took.
+///
+/// [`only`] for a row that read its refusals off an answer rather than out of a
+/// journal it can drain. The claim and the sentence it fails with are the same
+/// either way, so they live here and `only` states which record it is asking
+/// about.
+///
+/// The answer is taken by reference rather than cloned: every caller reads
+/// fields off it, and an [`Observed`] carries `Debug` alone by design.
+pub fn only_of<'a>(seen: &'a [Observed], label: &str) -> &'a Observed {
+    match seen {
+        [single] => single,
+        other => panic!("{label}: one refusal invokes one mapper once, not {other:?}"),
+    }
 }
 
 /// A handler that reports it ran and answers with the same body either way.

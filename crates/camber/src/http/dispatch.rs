@@ -1,13 +1,13 @@
-use super::Request;
 use super::body_admission::{BodyPolicy, ConfiguredCeiling, RequestBodyMode, ResolvedBodyPlan};
 use super::host_router::FrozenHostRouter;
 use super::method::Method;
-use super::middleware::{MiddlewareFn, Next, ResponseFuture, Terminal};
+use super::middleware::{MiddlewareFn, Next, ResponseFuture, Terminal, TerminalEntry};
 use super::proxy_upstream::ProxyUpstream;
 use super::rejection::{
     Rejected, RejectionMapper, RejectionProtocol, RejectionScope, RequestIdentity,
 };
 use super::request::{Params as RequestParams, RequestHead};
+use super::response_commitment::ResponseOrigin;
 use super::route_budgets::RouteBudgets;
 use super::stream::StreamResponse;
 pub(super) use super::trie::Handler;
@@ -18,6 +18,7 @@ use super::trie::{
     FrozenNode, MultipartRegistration, PATH_SEGMENT_LIMIT, RouteHandler, RouteLookup, Selected,
     split_path_segments,
 };
+use super::{Request, Response};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -228,7 +229,7 @@ fn protocol_of(handler: &RouteHandler) -> RejectionProtocol {
     match handler {
         // Ordinary HTTP, not a streaming class: the payload streams in, and the
         // answer is one buffered response the route's own mapper can shape.
-        RouteHandler::Async(_) | RouteHandler::Multipart(_) => RejectionProtocol::OrdinaryHttp,
+        RouteHandler::Async(..) | RouteHandler::Multipart(_) => RejectionProtocol::OrdinaryHttp,
         RouteHandler::Stream(_) => RejectionProtocol::StreamingHttp,
         RouteHandler::Sse(_) => RejectionProtocol::ServerSentEvents,
         #[cfg(feature = "ws")]
@@ -275,7 +276,8 @@ pub(super) struct FrozenRouter {
 
 /// Result of routing a request through the frozen router.
 pub(super) enum DispatchResult {
-    Async(ResponseFuture, Request),
+    /// A buffered answer, and the producer whose head it is.
+    Async(AsyncDispatch),
     Stream(
         Pin<Box<dyn Future<Output = StreamResponse> + Send>>,
         Request,
@@ -285,8 +287,6 @@ pub(super) enum DispatchResult {
     WebSocket(WsHandler, Request),
     #[cfg(feature = "ws")]
     ProxyWebSocket(Request, Arc<str>, Arc<str>, Arc<ProxyUpstream>),
-    /// Streaming proxy: middleware gates the request, body streams with backpressure.
-    ProxyStream(Request, Arc<str>, Arc<str>, Arc<ProxyUpstream>),
 }
 
 /// A dispatch that can only end in a buffered handler future.
@@ -299,11 +299,73 @@ pub(super) enum DispatchResult {
 pub(super) struct AsyncDispatch {
     pub(super) fut: ResponseFuture,
     pub(super) req: Request,
+    /// The producer this dispatch answers as, when its own terminal answers.
+    pub(super) producer: TerminalProducer,
+    /// Whether that terminal was reached at all.
+    ///
+    /// Carried beside the producer because a chain that short-circuited produced
+    /// the head itself, and the registration this producer came from cannot know
+    /// that: the answer a frame returns has the same shape the terminal's would.
+    pub(super) entry: TerminalEntry,
+}
+
+impl AsyncDispatch {
+    /// A buffered answer with no chain in front of it.
+    ///
+    /// The mapped routing refusals and the pre-dispatch fallbacks: no frame ran,
+    /// so the producer named here is the one that answered.
+    fn direct(fut: ResponseFuture, req: Request, origin: ResponseOrigin) -> Self {
+        Self {
+            fut,
+            req,
+            producer: TerminalProducer::Registered(origin),
+            entry: TerminalEntry::Direct,
+        }
+    }
+}
+
+/// Which owner a buffered dispatch's terminal answers as.
+///
+/// Two kinds, because the registration answers the question for only one of
+/// them. A mounted handler, the router's own refusal, a served file, and a
+/// Camber-internal route each decide their own answer, so naming the
+/// registration names the producer. A forwarded route names an upstream that
+/// may never have answered at all, and only the response coming back can say
+/// whether it did.
+pub(super) enum TerminalProducer {
+    /// A terminal whose registration names its producer, whatever it answered.
+    ///
+    /// A refusal is still this owner's: a router terminal that maps a `404`
+    /// decided that answer, and the mapper only rendered it.
+    Registered(ResponseOrigin),
+    /// A forward, whose producer is its upstream only while an upstream head is
+    /// what came back.
+    Forwarded,
+}
+
+impl TerminalProducer {
+    /// The owner that produced `answered`.
+    ///
+    /// A forward's own answer is the upstream head it collected, and a forward
+    /// carries nothing else: a dial that failed, an admission or phase deadline
+    /// that expired, and a frame outside this route's maximum all leave
+    /// rejection policy to build the head instead. So a mapped answer out of a
+    /// forward is the framework's, and it is the framework the commitment must
+    /// name — the alternative credits an upstream for a gateway refusal it never
+    /// sent, and does it under the one origin that is supposed to mean the
+    /// upstream answered.
+    pub(super) fn origin(&self, answered: &Response) -> ResponseOrigin {
+        match (self, answered.provenance().is_mapped()) {
+            (Self::Registered(origin), _) => *origin,
+            (Self::Forwarded, true) => ResponseOrigin::Framework,
+            (Self::Forwarded, false) => ResponseOrigin::Upstream,
+        }
+    }
 }
 
 impl From<AsyncDispatch> for DispatchResult {
     fn from(dispatch: AsyncDispatch) -> Self {
-        Self::Async(dispatch.fut, dispatch.req)
+        Self::Async(dispatch)
     }
 }
 
@@ -312,7 +374,7 @@ impl DispatchResult {
     /// Async already runs middleware inside dispatch.
     pub(super) fn needs_middleware_gate(&self) -> bool {
         match self {
-            Self::Stream(..) | Self::Sse(..) | Self::ProxyStream(..) => true,
+            Self::Stream(..) | Self::Sse(..) => true,
             #[cfg(feature = "ws")]
             Self::WebSocket(..) | Self::ProxyWebSocket(..) => true,
             Self::Async(..) => false,
@@ -328,10 +390,9 @@ impl DispatchResult {
     /// Borrow the request from any variant.
     pub(super) fn request_ref(&self) -> &Request {
         match self {
-            Self::Async(_, req)
-            | Self::Stream(_, req)
-            | Self::Sse(_, req)
-            | Self::ProxyStream(req, _, _, _) => req,
+            Self::Async(AsyncDispatch { req, .. }) | Self::Stream(_, req) | Self::Sse(_, req) => {
+                req
+            }
             #[cfg(feature = "ws")]
             Self::WebSocket(_, req) | Self::ProxyWebSocket(req, _, _, _) => req,
         }
@@ -458,7 +519,7 @@ impl FrozenRouter {
                     .body_plan(route, RequestBodyMode::Buffered, outer)
                     .narrowed_to(upstream.upload().max_bytes()),
             },
-            RouteHandler::Async(_) | RouteHandler::Stream(_) => RouteClass::Buffered {
+            RouteHandler::Async(..) | RouteHandler::Stream(_) => RouteClass::Buffered {
                 method,
                 plan: self.body_plan(route, RequestBodyMode::Buffered, outer),
             },
@@ -565,7 +626,9 @@ impl FrozenRouter {
         scope: &RejectionScope,
     ) -> DispatchResult {
         match handler {
-            RouteHandler::Async(handler) => self.dispatch_async(handler, req, scope.clone()).into(),
+            RouteHandler::Async(handler, origin) => self
+                .dispatch_async(handler, req, scope.clone(), *origin)
+                .into(),
             RouteHandler::Stream(handler) => {
                 let fut = handler(&req);
                 DispatchResult::Stream(fut, req)
@@ -618,10 +681,12 @@ impl FrozenRouter {
     /// no session at all — and a `_` arm here would do exactly that silently.
     fn misdispatched(req: Request, scope: &RejectionScope) -> DispatchResult {
         let refusal = scope.clone();
-        DispatchResult::Async(
+        AsyncDispatch::direct(
             Box::pin(async move { refusal.map(Rejected::multipart_misdispatched()) }),
             req,
+            ResponseOrigin::Framework,
         )
+        .into()
     }
 
     /// Dispatch a proxied route, or refuse it while its upstream is unhealthy.
@@ -636,10 +701,12 @@ impl FrozenRouter {
         match upstream_unhealthy(healthy) {
             true => {
                 let refusal = scope.clone();
-                DispatchResult::Async(
+                AsyncDispatch::direct(
                     Box::pin(async move { refusal.map(Rejected::no_admissible_backend()) }),
                     req,
+                    ResponseOrigin::Framework,
                 )
+                .into()
             }
             false => self.dispatch_proxy(kind, req, route, scope),
         }
@@ -663,8 +730,17 @@ impl FrozenRouter {
             Terminal::Rejected(rejected),
             scope.clone(),
         );
+        let entry = next.entry();
         let fut = next.call(&req);
-        (DispatchResult::Async(fut, req), scope)
+        (
+            DispatchResult::Async(AsyncDispatch {
+                fut,
+                req,
+                producer: TerminalProducer::Registered(ResponseOrigin::Router),
+                entry,
+            }),
+            scope,
+        )
     }
 
     /// Dispatch a proxied route of either kind.
@@ -708,13 +784,25 @@ impl FrozenRouter {
             }
             // The gate mechanism, not a wrapped response: middleware gates the
             // request and the body streams with backpressure.
-            ProxyKind::Streaming => DispatchResult::ProxyStream(
-                req,
-                Arc::clone(route.backend),
-                Arc::clone(route.prefix),
-                Arc::clone(route.upstream),
-            ),
+            ProxyKind::Streaming => Self::misdispatched_streaming_proxy(req, scope),
         }
+    }
+
+    /// Refuse a streaming proxy that reached built-request dispatch without an
+    /// upgrade.
+    ///
+    /// Classification answers ordinary streaming proxies from their incoming
+    /// body and sends only upgrades through this path. A non-upgrade here is a
+    /// Camber dispatch fault, so it fails closed instead of reviving the old
+    /// second streaming-forward implementation.
+    fn misdispatched_streaming_proxy(req: Request, scope: &RejectionScope) -> DispatchResult {
+        let refusal = scope.clone();
+        AsyncDispatch::direct(
+            Box::pin(async move { refusal.map(Rejected::streaming_proxy_misdispatched()) }),
+            req,
+            ResponseOrigin::Framework,
+        )
+        .into()
     }
 
     pub(super) fn dispatch_async(
@@ -722,10 +810,17 @@ impl FrozenRouter {
         handler: &Handler,
         req: Request,
         scope: RejectionScope,
+        origin: ResponseOrigin,
     ) -> AsyncDispatch {
         let next = Next::new(&self.middleware, Terminal::Handler(handler), scope);
+        let entry = next.entry();
         let fut = next.call(&req);
-        AsyncDispatch { fut, req }
+        AsyncDispatch {
+            fut,
+            req,
+            producer: TerminalProducer::Registered(origin),
+            entry,
+        }
     }
 
     /// Build a middleware gate check for non-standard dispatch types (WS, SSE, Stream).
@@ -770,8 +865,12 @@ impl FrozenRouter {
     /// One place decides what a gate terminal is, so the two entry points above
     /// cannot drift apart in what they run. Called only from their populated
     /// arms, so the emptiness test each already made is not repeated here.
+    ///
+    /// Untracked, because the answer this hands back is all its caller reads: a
+    /// gate is told apart from a short-circuit by the mark the gate terminal
+    /// leaves on its own provisional head, never by the entry cell.
     fn gate_chain(&self, req: &Request, scope: &RejectionScope) -> GateCheck {
-        let next = Next::new(&self.middleware, Terminal::Gate, scope.clone());
+        let next = Next::untracked(&self.middleware, Terminal::Gate, scope.clone());
         next.call(req)
     }
 }
@@ -814,8 +913,14 @@ fn dispatch_proxy_through_middleware(
         upstream: Arc::clone(route.upstream),
     };
     let next = Next::new(&router.middleware, terminal, scope.clone());
+    let entry = next.entry();
     let fut = next.call(&req);
-    AsyncDispatch { fut, req }
+    AsyncDispatch {
+        fut,
+        req,
+        producer: TerminalProducer::Forwarded,
+        entry,
+    }
 }
 
 /// A routed request, and the router that answered it.
@@ -1074,7 +1179,7 @@ impl ServerDispatch {
         let mapping = scope.clone();
         let fut: ResponseFuture = Box::pin(async move { mapping.map(rejected) });
         Routed {
-            result: DispatchResult::Async(fut, req),
+            result: AsyncDispatch::direct(fut, req, ResponseOrigin::Router).into(),
             router: None,
             scope,
         }
@@ -1095,18 +1200,23 @@ impl ServerDispatch {
         handler: &Handler,
         req: Request,
         scope: RejectionScope,
+        origin: ResponseOrigin,
     ) -> AsyncDispatch {
         match resolved {
-            Ok(Some(router)) => router.dispatch_async(handler, req, scope),
+            Ok(Some(router)) => router.dispatch_async(handler, req, scope, origin),
             Ok(None) => Self::refuse(req, scope, Rejected::no_route()),
             Err(rejected) => Self::refuse(req, scope, rejected),
         }
     }
 
     /// Answer a refusal with no middleware chain to unwind through.
+    ///
+    /// The router itself is the producer: nothing this request named was
+    /// entered, so the terminal is the routing decision and not the framework
+    /// mapper that gives it a body.
     fn refuse(req: Request, scope: RejectionScope, rejected: Rejected) -> AsyncDispatch {
         let fut: ResponseFuture = Box::pin(async move { scope.map(rejected) });
-        AsyncDispatch { fut, req }
+        AsyncDispatch::direct(fut, req, ResponseOrigin::Router)
     }
 
     /// Whether internal routes should bypass middleware.

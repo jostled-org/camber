@@ -12,11 +12,11 @@
 //! One turn of [`Transfer::poll_transfer`] reads the source first and weighs
 //! every carried source second, which is what keeps a frame that was already
 //! waiting from being pre-empted by the quiet interval that frame restarts. The
-//! terminal itself is selected by the one shared
-//! [`InboundReady::select`](super::operation::InboundReady) every pre-commit
-//! coordinator uses, so a transfer bound and a request bound that become ready
-//! in the same turn are resolved by the declared precedence rather than by which
-//! source this file happened to read first.
+//! terminal itself is read by the one shared
+//! [`InboundReady::first_ready`](super::operation::InboundReady) every
+//! pre-commit coordinator uses, so this owner commits the fact its own read
+//! produced and a carried source decides only a turn that read decided nothing
+//! in. There is no rank between the two.
 //!
 //! Nothing is polled after a terminal is fixed, and the frame in hand when one
 //! is fixed is dropped rather than delivered.
@@ -24,7 +24,7 @@
 use super::body::BodyError;
 use super::body_admission::checked_body_frame_total;
 use super::boundary::{ByteBoundary, DeadlineBoundary};
-use super::mock::{CheckpointHold, LifecycleCheckpoint, LifecycleScript, TransferEvent};
+use super::mock::{CheckpointHold, LifecycleScript, TransferEvent, TransferOwnerEdge};
 use super::operation::{InboundReady, InboundTerminal, InboundWatch};
 use super::rejection::Rejected;
 use super::transfer_budget::TransferBudget;
@@ -318,8 +318,11 @@ impl<S: TransferSource> Transfer<S> {
     /// Read the next frame this transfer delivers, or the terminal it ended on.
     ///
     /// One turn reads the source, weighs every carried source against this
-    /// transfer's own two deadlines, and lets the declared precedence name the
-    /// single terminal. `Ok(None)` is the source's normal end.
+    /// transfer's own two deadlines, and names the single terminal under the
+    /// read order every coordinator here shares: what this transfer read from
+    /// its own source decides the turn it read it in, and the carried sources
+    /// decide only a turn that read left open. `Ok(None)` is the source's
+    /// normal end.
     pub(super) fn poll_transfer(
         &mut self,
         cx: &mut Context<'_>,
@@ -343,13 +346,13 @@ impl<S: TransferSource> Transfer<S> {
                 Turn::Held => return Poll::Pending,
             };
             if self
-                .holding(cx, LifecycleCheckpoint::BeforeTransferTerminalSelection)
+                .holding(cx, TransferOwnerEdge::BeforeTerminalCommit)
                 .is_pending()
             {
                 self.selecting = Some(ready);
                 return Poll::Pending;
             }
-            let Some(terminal) = ready.select() else {
+            let Some(terminal) = ready.first_ready() else {
                 return match self.pending.take() {
                     Some(frame) => Poll::Ready(Ok(Some(frame))),
                     None => Poll::Pending,
@@ -367,7 +370,7 @@ impl<S: TransferSource> Transfer<S> {
         // it later would move a production deadline.
         self.arm();
         if self
-            .holding(cx, LifecycleCheckpoint::BeforeTransferSourcePoll)
+            .holding(cx, TransferOwnerEdge::BeforeSourcePoll)
             .is_pending()
         {
             return Turn::Held;
@@ -476,7 +479,8 @@ impl<S: TransferSource> Transfer<S> {
     /// The operation's authority is read through the same guard the inbound
     /// coordinator uses, so a shutdown deadline, a forced cancellation, or a
     /// peer whose lifetime ended reaches a transfer terminal through the one
-    /// declared order rather than through a rule of this file's own.
+    /// read order every coordinator shares rather than through a rule of this
+    /// file's own.
     fn weighed(&mut self, read: SourceRead, cx: &mut Context<'_>) -> InboundReady {
         let wanted = self.next_deadline();
         let carried = match self.authority.as_mut() {
@@ -559,11 +563,11 @@ impl<S: TransferSource> Transfer<S> {
     /// The gate is taken synchronously and polled here, so the one turn this
     /// file runs can be held open by a case without this file owning an async
     /// wait a body poll cannot take.
-    fn holding(&mut self, cx: &mut Context<'_>, checkpoint: LifecycleCheckpoint) -> Poll<()> {
+    fn holding(&mut self, cx: &mut Context<'_>, edge: TransferOwnerEdge) -> Poll<()> {
         let Some(held) = self
             .held
             .take()
-            .or_else(|| LifecycleScript::hold_at(self.observer.as_deref(), checkpoint))
+            .or_else(|| LifecycleScript::hold_at_transfer(self.observer.as_deref(), edge))
         else {
             return Poll::Ready(());
         };
@@ -632,9 +636,11 @@ enum SourceRead {
 
 /// How one transfer direction ended when it did not complete.
 ///
-/// It carries the direction, the terminal the shared precedence selected, and
-/// the policy that terminal was measured against, so every consumer reports the
-/// same typed provenance without re-deriving which bound was crossed.
+/// It carries the direction, the terminal this owner committed, and the policy
+/// that terminal was measured against, so every consumer reports the same typed
+/// provenance without re-deriving which bound was crossed. The owner's own read
+/// decides its turn; a carried source decides only when that read left the turn
+/// open.
 #[derive(Debug)]
 pub(super) struct TransferFailure {
     direction: TransferDirection,
@@ -645,7 +651,7 @@ pub(super) struct TransferFailure {
 }
 
 impl TransferFailure {
-    /// The terminal the shared precedence selected.
+    /// The terminal this transfer owner committed.
     pub(super) const fn terminal(&self) -> InboundTerminal {
         self.terminal
     }

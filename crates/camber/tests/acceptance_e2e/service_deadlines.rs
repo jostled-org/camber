@@ -10,14 +10,19 @@ use crate::common;
 use crate::http as http_support;
 use crate::stream::{Streamed, open_streaming, read_cut, read_streamed, read_streaming_head};
 
-use camber::http::mock::{InboundTerminal, LifecycleCheckpoint};
+#[cfg(feature = "ws")]
+use camber::http::mock::UpgradeOwnerEdge;
+use camber::http::mock::{InboundTerminal, ResponseCommitmentEdge, ServerStopEdge};
+/// The refused-handoff row's own vocabulary, which only the upgrade rows name.
+#[cfg(feature = "ws")]
+use camber::http::mock::{ResponseCommit, ResponseCommitmentController, ResponseOrigin};
 use camber::http::{
     BodyAdmission, BodyAdmissionContext, Method, MultipartLimits, MultipartStream, Rejection,
     RejectionContext, RejectionKind, Request, RequestBudget, Response, Router, ServerPolicy,
     StreamResponse, TransferBudget,
 };
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -168,7 +173,7 @@ fn header_timeout_is_prehead_and_independent_of_operation_and_shutdown_budgets()
 
 /// The header boundary over a plain listener, and the same listener afterwards.
 async fn assert_partial_head_closes_plain() {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_response_commitment();
     let controller = port.controller();
     let (router, log) = counted_mapper(deadline_routes());
     let server = port.serve_with_policy(router, prehead_policy());
@@ -327,7 +332,7 @@ fn body_idle_and_request_total_map_once_and_apply_protocol_transport_disposition
 /// A body that stops arriving is a body-idle expiry, mapped exactly once, and
 /// the connection that owes unread payload cannot frame another request.
 async fn assert_http1_body_idle_closes_and_maps_once() {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_response_commitment();
     let controller = port.controller();
     let (router, log) = counted_mapper(deadline_routes());
     let server = port.serve_with_policy(router, deadline_policy());
@@ -374,7 +379,7 @@ async fn assert_http1_body_idle_closes_and_maps_once() {
 /// restarts per delivered frame, and a total short enough to end the request
 /// would prove that instead.
 async fn assert_http1_paced_body_renews_its_quiet_interval() {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_unwatched();
     let (router, log) = counted_mapper(deadline_routes());
     let policy = deadline_policy().request_budget(
         RequestBudget::bounded(BODY_IDLE, UNREACHED).expect("the paced row's request budget"),
@@ -416,7 +421,7 @@ async fn assert_http1_paced_body_renews_its_quiet_interval() {
 /// A request with no body at all still spends the request total, which covers
 /// handler execution and response production.
 async fn assert_bodyless_handler_spends_the_request_total() {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_unwatched();
     let (router, log) = counted_mapper(deadline_routes());
     let server = port.serve_with_policy(router, deadline_policy());
     let addr = server.addr();
@@ -456,7 +461,7 @@ async fn assert_bodyless_handler_spends_the_request_total() {
 /// body at all and stalls after dispatch has chosen the streaming arm, so only a
 /// total applied to head production can end it.
 async fn assert_http1_stalled_response_head_closes_and_maps_once() {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_response_commitment();
     let controller = port.controller();
     let (router, log) = counted_mapper(deadline_routes());
     let server = port.serve_with_policy(router, deadline_policy());
@@ -513,7 +518,7 @@ async fn assert_http1_stalled_response_head_closes_and_maps_once() {
 /// The same stalled head over HTTP/2 is ended on its own stream, and the
 /// connection under it still carries another request.
 async fn assert_http2_stalled_response_head_is_stream_local() {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_unwatched();
     let (router, log) = counted_mapper(deadline_routes());
     let server = port.serve_with_policy(router, deadline_policy());
     let addr = server.addr();
@@ -566,14 +571,15 @@ async fn assert_http2_stalled_response_head_is_stream_local() {
 /// alone would leave the other unbounded.
 #[cfg(feature = "ws")]
 async fn assert_websocket_handoff_spends_the_request_total(path: &str, upgrade: &str) {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_handoff_commitment();
     let controller = port.controller();
     let (router, log) = counted_mapper(upgrade_routes());
     let server = port.serve_with_policy(router, upgrade_policy());
     let addr = server.addr();
 
     controller
-        .pause_once(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
+        .upgrades
+        .pause_once(UpgradeOwnerEdge::AfterHandoffSubmitted)
         .expect("the upgrade handoff was armed");
     let requested = path.to_owned();
     // Both rows read through the same helper, so the row is named in what a
@@ -591,12 +597,36 @@ async fn assert_websocket_handoff_spends_the_request_total(path: &str, upgrade: 
     // ticket reached the registrar, so negotiation had already succeeded.
     http_support::wait_until_paused_bounded(
         &controller,
-        LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
+        UpgradeOwnerEdge::AfterHandoffSubmitted,
         upgrade,
     )
     .await;
     let answered = answered.await.expect("the upgrading peer settled");
 
+    assert_handoff_refusal_is_the_frameworks(&controller.commitment, &log, &answered, upgrade);
+    controller
+        .upgrades
+        .release(UpgradeOwnerEdge::AfterHandoffSubmitted)
+        .expect("the held handoff was released");
+    assert_refused_handoff_returns_its_permit(addr, &log, upgrade).await;
+
+    server
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the upgrade-handoff fixture tore down");
+}
+
+/// The refusal an expired total wrote, read off the wire and off the cell.
+///
+/// The status alone leaves the producer open: a `408` a bridge mapped for itself
+/// reads the same on this socket. What tells them apart is that the framework
+/// took this operation's one commitment, and took it before a `101` could exist.
+#[cfg(feature = "ws")]
+fn assert_handoff_refusal_is_the_frameworks(
+    controller: &ResponseCommitmentController,
+    log: &MapperLog,
+    answered: &http_support::HttpResponse,
+    upgrade: &str,
+) {
     assert_eq!(answered.status, 408, "{upgrade}: {}", answered.text());
     assert_eq!(
         log.request_timeouts.load(Ordering::SeqCst),
@@ -604,21 +634,38 @@ async fn assert_websocket_handoff_spends_the_request_total(path: &str, upgrade: 
         "{upgrade} outlived its total, so the total is what must answer it",
     );
     assert_eq!(log.calls(), 1, "{upgrade} was mapped exactly once");
+    let commitment = controller.observed();
+    assert_eq!(
+        commitment.committed,
+        Some(ResponseCommit::Head(ResponseOrigin::Framework)),
+        "{upgrade} was answered by the framework before a 101 existed: {commitment:?}",
+    );
+    assert_eq!(
+        (commitment.attempts, commitment.commits, commitment.late),
+        (1, 1, 0),
+        "{upgrade} reached the commitment once at its real producer: {commitment:?}",
+    );
     assert_eq!(
         controller.operations_observed().admitted,
         1,
         "{upgrade} minted one envelope",
     );
-    controller
-        .release(LifecycleCheckpoint::AfterUpgradeTicketSubmitted)
-        .expect("the held handoff was released");
+}
 
-    // The refusal drops the registrar's future while the supervisor already
-    // holds the ticket, so the bridge that owns this connection's permit is
-    // reaped by the cancellation the supervisor answers with — a terminal no
-    // other row reaches. Under `connection_limit(1)` a permit that outlived the
-    // refusal leaves nothing here that can be accepted, and the probe runs
-    // against a live listener, where teardown cannot mask it.
+/// Serve a second peer through the slot the refused handoff held.
+///
+/// The refusal drops the registrar's future while the supervisor already holds
+/// the ticket, so the bridge that owns this connection's permit is reaped by the
+/// cancellation the supervisor answers with — a terminal no other row reaches.
+/// Under `connection_limit(1)` a permit that outlived the refusal leaves nothing
+/// here that can be accepted, and the probe runs against a live listener, where
+/// teardown cannot mask it.
+#[cfg(feature = "ws")]
+async fn assert_refused_handoff_returns_its_permit(
+    addr: SocketAddr,
+    log: &MapperLog,
+    upgrade: &str,
+) {
     let served = tokio::task::spawn_blocking(move || {
         http_support::wait_for_http_response(addr, CLOSE_BOUND)
             .expect("no connection was accepted after the refused upgrade closed");
@@ -638,10 +685,6 @@ async fn assert_websocket_handoff_spends_the_request_total(path: &str, upgrade: 
         1,
         "{upgrade}: the permit probe is refused by nothing",
     );
-
-    server
-        .shutdown_bounded(SHUTDOWN_BOUND)
-        .expect("the upgrade-handoff fixture tore down");
 }
 
 /// The policy the upgrade-handoff rows serve under.
@@ -759,9 +802,9 @@ async fn assert_middleware_gate_spends_the_request_total() {
 /// is the only thing left holding the request.
 async fn assert_gated_class_spends_the_total(
     class: &str,
-    drive: impl FnOnce(std::net::SocketAddr) -> http_support::HttpResponse + Send + 'static,
+    drive: impl FnOnce(SocketAddr) -> http_support::HttpResponse + Send + 'static,
 ) {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_response_commitment();
     let controller = port.controller();
     let (router, log) = counted_mapper(stalled_gate_routes());
     let server = port.serve_with_policy(router, gate_policy());
@@ -854,7 +897,7 @@ fn gate_policy() -> ServerPolicy {
 /// exactly the same way; only a body produced past the total can tell a total
 /// that ended at commitment from one that outlived it.
 async fn assert_response_body_outlives_the_request_total() {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_unwatched();
     let (router, log) = counted_mapper(deadline_routes());
     let server = port.serve_with_policy(router, deadline_policy());
     let addr = server.addr();
@@ -886,7 +929,7 @@ async fn assert_response_body_outlives_the_request_total() {
 /// An HTTP/2 stream whose body stalls is ended on its own stream, and the
 /// connection under it still carries another request.
 async fn assert_http2_stalled_body_is_stream_local() {
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_unwatched();
     let (router, log) = counted_mapper(deadline_routes());
     let server = port.serve_with_policy(router, deadline_policy());
     let addr = server.addr();
@@ -945,7 +988,7 @@ fn request_deadlines_retain_route_body_byte_and_permit_authority() {
 /// releases exactly one application permit.
 async fn assert_byte_terminal_keeps_route_authority() {
     let released = Arc::new(AtomicUsize::new(0));
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_request_body_owner();
     let controller = port.controller();
     let (router, log) = counted_mapper(admitting_routes(&released));
     let server = port.serve_with_policy(router, deadline_policy());
@@ -966,10 +1009,10 @@ async fn assert_byte_terminal_keeps_route_authority() {
         "the route's own byte ceiling stays the category a deadline owner \
          cannot re-classify",
     );
+    let peak = controller.observed().peak_retained_bytes;
     assert!(
-        controller.body_peak_retained_bytes() <= ADMITTED_CEILING,
-        "the crossing frame must never be retained: peak {} exceeded {ADMITTED_CEILING}",
-        controller.body_peak_retained_bytes(),
+        peak <= ADMITTED_CEILING,
+        "the crossing frame must never be retained: peak {peak} exceeded {ADMITTED_CEILING}",
     );
     http_support::assert_released(&released, 1, "an oversized body");
     http_support::assert_owners_released(&controller, 1, "an oversized body");
@@ -983,7 +1026,7 @@ async fn assert_byte_terminal_keeps_route_authority() {
 /// answers under the deadline's own category rather than the ceiling's.
 async fn assert_idle_terminal_releases_one_permit() {
     let released = Arc::new(AtomicUsize::new(0));
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_request_body_owner();
     let controller = port.controller();
     let (router, log) = counted_mapper(admitting_routes(&released));
     let server = port.serve_with_policy(router, deadline_policy());
@@ -1022,7 +1065,7 @@ async fn assert_idle_terminal_releases_one_permit() {
 /// session's own admission still owns the permit, and it is released once.
 async fn assert_multipart_terminal_releases_one_permit() {
     let released = Arc::new(AtomicUsize::new(0));
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_unwatched();
     let (router, log) = counted_mapper(multipart_routes(&released));
     let server = port.serve_with_policy(router, deadline_policy());
     let addr = server.addr();
@@ -1062,13 +1105,14 @@ async fn assert_multipart_terminal_releases_one_permit() {
 async fn assert_peer_disconnect_releases_one_permit_without_mapping() {
     let row = "a disconnected admitted body";
     let released = Arc::new(AtomicUsize::new(0));
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_admitted_commitment();
     let controller = port.controller();
     let (router, log) = counted_mapper(admitting_routes(&released));
     let server = port.serve_with_policy(router, deadline_policy());
     let addr = server.addr();
-    let selected = LifecycleCheckpoint::InboundTerminalSelected(InboundTerminal::Disconnect);
+    let selected = ResponseCommitmentEdge::CauseCommitted(InboundTerminal::Disconnect);
     controller
+        .commitment
         .pause_once(selected)
         .expect("arm the disconnect-terminal observation");
 
@@ -1081,6 +1125,7 @@ async fn assert_peer_disconnect_releases_one_permit_without_mapping() {
     peer.await.expect("the disconnecting peer settled");
     http_support::wait_until_paused_bounded(&controller, selected, row).await;
     controller
+        .commitment
         .release(selected)
         .expect("release the disconnect-terminal observation");
 
@@ -1090,7 +1135,7 @@ async fn assert_peer_disconnect_releases_one_permit_without_mapping() {
         "a peer that cannot receive a response must not invoke the mapper",
     );
     http_support::assert_released(&released, 1, row);
-    http_support::assert_owners_released(&controller, 1, row);
+    http_support::assert_owners_released(&controller.bodies, 1, row);
 
     server
         .shutdown_bounded(SHUTDOWN_BOUND)
@@ -1110,7 +1155,7 @@ async fn assert_peer_disconnect_releases_one_permit_without_mapping() {
 async fn assert_shutdown_terminal_releases_one_permit() {
     let row = "a shutdown deadline";
     let released = Arc::new(AtomicUsize::new(0));
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_staged_commitment();
     let (listener, addr, controller) = port.into_owned_parts();
     let (router, log) = counted_mapper(admitting_routes(&released));
     let handle = camber::http::server(router)
@@ -1118,16 +1163,19 @@ async fn assert_shutdown_terminal_releases_one_permit() {
         .serve_background(listener)
         .expect("owned serving requires a Tokio runtime");
 
-    let supervisor = LifecycleCheckpoint::SupervisorSelectedControl;
-    let held = LifecycleCheckpoint::BeforeInboundTerminalSelection;
-    let selected = LifecycleCheckpoint::InboundTerminalSelected(InboundTerminal::ShutdownDeadline);
+    let supervisor = ServerStopEdge::SupervisorSelectedControl;
+    let held = ResponseCommitmentEdge::BeforeResponseCommit;
+    let selected = ResponseCommitmentEdge::CauseCommitted(InboundTerminal::ShutdownDeadline);
     controller
+        .stop
         .pause_once(supervisor)
         .expect("arm the supervisor's control observation");
     controller
+        .commitment
         .pause_once(held)
         .expect("arm the pre-selection checkpoint");
     controller
+        .commitment
         .pause_once(selected)
         .expect("arm the selected-terminal observation");
 
@@ -1145,10 +1193,12 @@ async fn assert_shutdown_terminal_releases_one_permit() {
     handle.shutdown();
     http_support::wait_until_paused_bounded(&controller, supervisor, row).await;
     controller
+        .commitment
         .release(held)
         .expect("release the pre-selection checkpoint");
     http_support::wait_until_paused_bounded(&controller, selected, row).await;
     controller
+        .commitment
         .release(selected)
         .expect("release the selected-terminal observation");
 
@@ -1165,9 +1215,10 @@ async fn assert_shutdown_terminal_releases_one_permit() {
         "a shutdown deadline is not an oversized body",
     );
     http_support::assert_released(&released, 1, row);
-    http_support::assert_owners_released(&controller, 1, row);
+    http_support::assert_owners_released(&controller.bodies, 1, row);
 
     controller
+        .stop
         .release(supervisor)
         .expect("release the supervisor's control observation");
     http_support::ReadyServer::adopt(addr, handle)
@@ -1209,7 +1260,7 @@ async fn assert_streaming_proxy_terminal_keeps_route_authority() {
     let upstream = recording_upstream(&forwarded);
     let backend = format!("http://{}", upstream.local_addr());
     let released = Arc::new(AtomicUsize::new(0));
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_request_body_owner();
     let controller = port.controller();
     let (router, log) = counted_mapper(proxying_routes(&released, &backend));
     let server = port.serve_with_policy(router, deadline_policy());
@@ -1239,10 +1290,10 @@ async fn assert_streaming_proxy_terminal_keeps_route_authority() {
         ADMITTED_PAYLOAD.len(),
         "the crossing frame must reach no upstream",
     );
+    let peak = controller.observed().peak_retained_bytes;
     assert!(
-        controller.body_peak_retained_bytes() <= ADMITTED_CEILING,
-        "a forwarded upload retains nothing past the ceiling: peak {}",
-        controller.body_peak_retained_bytes(),
+        peak <= ADMITTED_CEILING,
+        "a forwarded upload retains nothing past the ceiling: peak {peak}",
     );
     http_support::assert_released(&released, 2, row);
 
@@ -1258,7 +1309,7 @@ async fn assert_streaming_proxy_terminal_keeps_route_authority() {
 const ADMITTED_PAYLOAD: &[u8] = b"forwarded";
 
 /// Forward one chunked upload through the proxy route and report its status.
-async fn proxied_upload(addr: std::net::SocketAddr, payload: &[u8], leg: &str) -> u16 {
+async fn proxied_upload(addr: SocketAddr, payload: &[u8], leg: &str) -> u16 {
     let payload: Box<[u8]> = payload.into();
     let leg: Box<str> = leg.into();
     tokio::task::spawn_blocking(move || {
@@ -1443,10 +1494,12 @@ impl PostCommit {
     }
 }
 
-/// 11.T4
+/// Invariant 10
 ///
-/// A committed response head is never replaced. Every post-commit download
-/// terminal — the payload maximum, the quiet interval, the lifetime, a failed
+/// Only a pre-commit producer can map its cause into a response. A committed
+/// response head is never replaced: the status crossed to the peer before the
+/// transfer failed, so what a post-commit failure changes is the transport, not
+/// the answer. Every post-commit download terminal — the payload maximum, the quiet interval, the lifetime, a failed
 /// source, a departed peer, and the aggregate shutdown deadline — ends its body
 /// and nothing else: the peer keeps the `200` it was already given, the route's
 /// mapper is never called, HTTP/1 closes the connection whose framing cannot
@@ -1455,7 +1508,7 @@ impl PostCommit {
 /// both transports share: the server itself is going, so it cuts the connection
 /// rather than one stream on it, and there is no neighbour left to ask.
 #[test]
-fn postcommit_transfer_failure_preserves_the_wire_status() {
+fn postcommit_failure_preserves_wire_status_and_ends_transport() {
     camber::runtime::builder()
         .run(|| {
             camber::runtime::block_on(async {
@@ -1479,7 +1532,7 @@ fn postcommit_transfer_failure_preserves_the_wire_status() {
 async fn assert_postcommit_http1(row: PostCommit) {
     let label = format!("{row:?} over HTTP/1");
     let upstream = truncating_upstream(row);
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let controller = port.controller();
     let (router, log) = counted_mapper(postcommit_routes(upstream.as_ref()));
     let (listener, addr, _) = port.into_owned_parts();
@@ -1535,7 +1588,7 @@ async fn assert_postcommit_http1(row: PostCommit) {
 async fn assert_postcommit_http2(row: PostCommit) {
     let label = format!("{row:?} over HTTP/2");
     let upstream = truncating_upstream(row);
-    let port = http_support::reserve_observed();
+    let port = http_support::reserve_transfer_owner();
     let controller = port.controller();
     let (router, log) = counted_mapper(postcommit_routes(upstream.as_ref()));
     let (listener, addr, _) = port.into_owned_parts();
@@ -1651,7 +1704,7 @@ fn assert_postcommit_wire(row: PostCommit, label: &str, delivered: Option<&Strea
 
 /// Assert the production owner fixed this row's terminal and released once.
 async fn assert_postcommit_owner(
-    controller: &camber::http::mock::LifecycleController,
+    controller: &camber::http::mock::TransferOwnerController,
     row: PostCommit,
     label: &str,
 ) {
@@ -1661,11 +1714,11 @@ async fn assert_postcommit_owner(
     // such excuse, so each must fix its own terminal.
     let transport_caused = matches!(row, PostCommit::Disconnect | PostCommit::Shutdown);
     let settled = http_support::poll_until(CLOSE_BOUND, || {
-        let observed = controller.transfers_observed();
+        let observed = controller.observed();
         observed.download.releases >= 1
             && (transport_caused || observed.download.terminal.is_some())
     });
-    let observed = controller.transfers_observed();
+    let observed = controller.observed();
     assert!(settled, "{label}: the download never settled: {observed:?}");
     assert_eq!(
         observed.download.releases, 1,

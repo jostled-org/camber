@@ -1,5 +1,7 @@
 pub mod common;
 
+#[path = "component_observability/completion_facts.rs"]
+mod completion_facts;
 #[cfg(feature = "profiling")]
 #[path = "component_observability/cpu_profiling.rs"]
 mod cpu_profiling;

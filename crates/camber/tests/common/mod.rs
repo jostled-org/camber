@@ -39,6 +39,9 @@ mod ws;
 #[path = "../support/ws_async.rs"]
 mod ws_async;
 #[cfg(feature = "ws")]
+#[path = "../support/ws_callbacks.rs"]
+mod ws_callbacks;
+#[cfg(feature = "ws")]
 #[path = "../support/ws_directions.rs"]
 mod ws_directions;
 #[cfg(feature = "ws")]
@@ -64,6 +67,8 @@ pub use tls::*;
 pub use trace_capture::*;
 pub use ws::*;
 pub use ws_async::*;
+#[cfg(feature = "ws")]
+pub use ws_callbacks::*;
 #[cfg(feature = "ws")]
 pub use ws_directions::*;
 #[cfg(feature = "ws")]

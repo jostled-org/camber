@@ -4,7 +4,7 @@
 use camber::RuntimeError;
 #[cfg(feature = "grpc")]
 use camber::http::GrpcRouter;
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController, lifecycle};
+use camber::http::mock::{ConnectionOwnerEdge, ScopedConnectionOwner, connection_owner};
 use camber::http::{Request, Response, Router, ServerPolicy, SseWriter};
 use std::sync::Arc;
 use std::time::Duration;
@@ -199,9 +199,9 @@ async fn assert_moved_future_keeps_its_captured_policy() {
         .await
         .expect("bind the moved-future listener");
     let addr = listener.local_addr().expect("moved-future address");
-    let controller = lifecycle(addr).expect("register the moved-future observer");
-    let configured = LifecycleCheckpoint::HeaderTimeoutConfigured(RUNTIME_HEADER_TIMEOUT);
-    controller
+    let connections = connection_owner(addr).expect("register the moved-future observer");
+    let configured = ConnectionOwnerEdge::HeaderTimeoutConfigured(RUNTIME_HEADER_TIMEOUT);
+    connections
         .pause_once(configured)
         .expect("arm the captured header timeout");
 
@@ -233,12 +233,12 @@ async fn assert_moved_future_keeps_its_captured_policy() {
     let mut peer = connect(addr).await;
     send_get(&mut peer, "/moved").await;
     crate::common::wait_until_paused_bounded(
-        &controller,
+        &connections,
         configured,
         &format!("moved future: {configured:?}"),
     )
     .await;
-    controller
+    connections
         .release(configured)
         .expect("release the captured header timeout");
     assert_answered(&mut peer, "moved future").await;
@@ -409,7 +409,7 @@ async fn assert_omitted_limit_admits_concurrent_transports() {
 struct LimitedServer {
     handle: camber::http::ServerHandle,
     addr: std::net::SocketAddr,
-    controller: LifecycleController,
+    controller: ScopedConnectionOwner,
 }
 
 /// Serve `router` in the background under a one-transport connection limit.
@@ -434,7 +434,8 @@ async fn serve_under_limit(router: Router, limit: usize, label: &str) -> Limited
     let addr = listener
         .local_addr()
         .unwrap_or_else(|_| panic!("{label} address"));
-    let controller = lifecycle(addr).unwrap_or_else(|_| panic!("register the {label} observer"));
+    let controller =
+        connection_owner(addr).unwrap_or_else(|_| panic!("register the {label} observer"));
     let handle = camber::http::server(router)
         .policy(
             ServerPolicy::default()
@@ -451,9 +452,9 @@ async fn serve_under_limit(router: Router, limit: usize, label: &str) -> Limited
 }
 
 /// Arm the one production checkpoint every permit row waits on.
-fn arm_permit_wait(controller: &LifecycleController, label: &str) {
-    controller
-        .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+fn arm_permit_wait(connections: &ScopedConnectionOwner, label: &str) {
+    connections
+        .pause_once(ConnectionOwnerEdge::PermitWaitPending)
         .unwrap_or_else(|_| panic!("arm the {label} permit wait"));
 }
 
@@ -463,15 +464,19 @@ fn arm_permit_wait(controller: &LifecycleController, label: &str) {
 /// reached the permit wait, so the silence that follows the release is the limit
 /// holding, not a race the test happened to win.
 async fn assert_blocked_on_permit(
-    controller: &LifecycleController,
+    connections: &ScopedConnectionOwner,
     blocked: &mut tokio::net::TcpStream,
     label: &str,
 ) {
-    let pending = LifecycleCheckpoint::ConnectionPermitWaitPending;
-    crate::common::wait_until_paused_bounded(controller, pending, &format!("{label}: {pending:?}"))
-        .await;
-    controller
-        .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+    let pending = ConnectionOwnerEdge::PermitWaitPending;
+    crate::common::wait_until_paused_bounded(
+        connections,
+        pending,
+        &format!("{label}: {pending:?}"),
+    )
+    .await;
+    connections
+        .release(ConnectionOwnerEdge::PermitWaitPending)
         .unwrap_or_else(|_| panic!("release the {label} permit wait"));
     assert_unanswered(blocked, label).await;
 }

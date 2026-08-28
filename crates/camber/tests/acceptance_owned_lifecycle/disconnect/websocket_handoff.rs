@@ -22,7 +22,7 @@ use super::probes::{CauseProbe, relay};
 use super::routes::{Hold, gate_probe, probe_router};
 use super::servers::{SyncServer, await_lifecycle_pause, with_scripted_server};
 use camber::RuntimeError;
-use camber::http::mock::LifecycleCheckpoint;
+use camber::http::mock::UpgradeOwnerEdge;
 use camber::http::{DisconnectCause, DisconnectSignal, Request, Router, WsConn};
 use camber::runtime;
 use std::future::IntoFuture;
@@ -206,14 +206,16 @@ fn websocket_upgrade_resolves_at_handoff_or_actual_cause() {
         // A successful upgrade, held short of the acknowledgement that commits
         // it. Nothing has been handed off yet, so nothing may have resolved.
         controller
-            .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+            .upgrades
+            .pause_once(UpgradeOwnerEdge::BeforeTransferAcknowledge)
             .expect("the upgrade acknowledgement could not be armed");
         let peer = crate::common::start_upgrade(addr, WS_PATH);
-        await_lifecycle_pause(controller, LifecycleCheckpoint::BeforeUpgradeAcknowledge);
+        await_lifecycle_pause(controller, UpgradeOwnerEdge::BeforeTransferAcknowledge);
         accepted.await_entry();
         let unresolved_before_handoff = accepted.still_unresolved();
         controller
-            .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+            .upgrades
+            .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
             .expect("the held upgrade could not be released");
 
         // Released: the transport is handed to the WebSocket subsystem and the
@@ -302,17 +304,17 @@ struct RejectionOutcome {
     closed: PeerClose,
 }
 
-/// An upgrade the supervisor rejects before acknowledgement never commits a
+/// An upgrade its connection refuses before acknowledgement never commits a
 /// `101`, and its `503` is an ordinary produced response.
 ///
-/// The bridge is already registered with `OwnedHttpTasks` when the supervisor
-/// decides, so rejection means abort-and-join — and the connection permit rides
-/// inside that bridge future. The owner joining within the bound is therefore
-/// the permit probe for this boundary: a bridge that was never joined leaves
-/// `OwnedHttpTasks` non-empty and the owner never returns. The live-listener
-/// permit probe cannot be used here, because the same shutdown that produces
-/// the rejection closes the accept path before any second connection could be
-/// served.
+/// The bridge already exists when the connection decides, so a refusal means
+/// ending it where it stands — and the connection permit is held by the
+/// connection itself until it settles. The owner joining within the bound is
+/// therefore the permit probe for this boundary: a child that was never ended
+/// leaves its connection unsettled and the owner never returns. The
+/// live-listener permit probe cannot be used here, because the same shutdown
+/// that produces the refusal closes the accept path before any second
+/// connection could be served.
 #[test]
 fn supervisor_rejection_before_websocket_handoff_completes_http_error() {
     let mut router = probe_router();
@@ -321,17 +323,26 @@ fn supervisor_rejection_before_websocket_handoff_completes_http_error() {
 
     let observed = with_scripted_server(router, |addr, handle, controller| {
         controller
-            .pause_once(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+            .upgrades
+            .pause_once(UpgradeOwnerEdge::BeforeTransferAcknowledge)
             .expect("the upgrade acknowledgement could not be armed");
         let mut peer = crate::common::start_upgrade(addr, REFUSED_PATH);
-        await_lifecycle_pause(controller, LifecycleCheckpoint::BeforeUpgradeAcknowledge);
+        await_lifecycle_pause(controller, UpgradeOwnerEdge::BeforeTransferAcknowledge);
         refused.await_entry();
-        // The supervisor reads admission when it resumes, so requesting
-        // shutdown while it is held is what makes the rejection deterministic
-        // rather than a race against the drain.
+        // The connection reads admission when it resumes, so the release waits
+        // for this server's own stop state to commit the shutdown. That is what
+        // makes the refusal deterministic rather than a race against the drain.
         runtime::request_shutdown();
+        // The shared wait is async, and this case drives production from a
+        // blocking frame, so it is entered the same way every other blocking
+        // step in this module is.
+        runtime::block_on(crate::common::await_committed_stop(
+            controller,
+            "the refused handshake",
+        ));
         controller
-            .release(LifecycleCheckpoint::BeforeUpgradeAcknowledge)
+            .upgrades
+            .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
             .expect("the held upgrade could not be released into shutdown");
 
         let head = crate::common::read_until_double_crlf(&mut peer);

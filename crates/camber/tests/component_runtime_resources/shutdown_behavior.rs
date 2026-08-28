@@ -5,14 +5,48 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use camber::http::mock::{LifecycleCheckpoint, lifecycle};
+use camber::http::mock::{ServerStopController, ServerStopEdge, server_stop};
 use camber::http::{Request, Response, Router};
 use futures_util::FutureExt;
 
-use crate::common::{ChildGuard, assert_admission_closed, is_private_child};
+use crate::common::{
+    ChildGuard, assert_admission_closed, is_private_child, wait_until_paused_within,
+};
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 const IMMEDIATE_BOUNDARY: Duration = Duration::from_millis(100);
+
+/// How long runtime shutdown took to reach the checkpoint that closes
+/// admission.
+///
+/// Both supervisor edges are walked, in order: the first says the runtime
+/// signal was selected, and the second — armed before the first is released —
+/// says the supervisor came back around with admission already closed. Reading
+/// only the first would time the signal arriving rather than the admission stop
+/// the row asserts.
+async fn elapsed_to_admission_stop(stop: &ServerStopController, context: &str) -> Duration {
+    let started = Instant::now();
+    camber::runtime::request_shutdown();
+    wait_until_paused_within(
+        stop,
+        ServerStopEdge::SupervisorSelectedRuntime,
+        EVENT_TIMEOUT,
+        context,
+    )
+    .await;
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
+        .unwrap();
+    stop.release(ServerStopEdge::SupervisorSelectedRuntime)
+        .unwrap();
+    wait_until_paused_within(
+        stop,
+        ServerStopEdge::BeforeSupervisorSelect,
+        EVENT_TIMEOUT,
+        context,
+    )
+    .await;
+    started.elapsed()
+}
 
 #[camber::test]
 async fn shutdown_stops_accepting_immediately() {
@@ -42,9 +76,8 @@ async fn shutdown_stops_accepting_immediately() {
     });
     let listener = crate::common::BoundListener::bind_tcp("127.0.0.1:0").unwrap();
     let addr = listener.local_addr();
-    let controller = lifecycle(addr).unwrap();
-    controller
-        .pause_once(LifecycleCheckpoint::SupervisorSelectedRuntime)
+    let stop = server_stop(addr).unwrap();
+    stop.pause_once(ServerStopEdge::SupervisorSelectedRuntime)
         .unwrap();
     let server = crate::common::ReadyServer::start(listener, router, EVENT_TIMEOUT).unwrap();
     let response = reqwest::get(format!("http://{addr}/hello")).await.unwrap();
@@ -55,20 +88,9 @@ async fn shutdown_stops_accepting_immediately() {
         .unwrap()
         .unwrap();
 
-    let started = Instant::now();
-    camber::runtime::request_shutdown();
-    wait_for_checkpoint(&controller, LifecycleCheckpoint::SupervisorSelectedRuntime).await;
-    controller
-        .pause_once(LifecycleCheckpoint::BeforeSupervisorSelect)
-        .unwrap();
-    controller
-        .release(LifecycleCheckpoint::SupervisorSelectedRuntime)
-        .unwrap();
-    wait_for_checkpoint(&controller, LifecycleCheckpoint::BeforeSupervisorSelect).await;
-    let checkpoint_elapsed = started.elapsed();
+    let checkpoint_elapsed = elapsed_to_admission_stop(&stop, "shutdown stops accepting").await;
     assert_admission_closed(addr, EVENT_TIMEOUT).await;
-    controller
-        .release(LifecycleCheckpoint::BeforeSupervisorSelect)
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
         .unwrap();
     release.add_permits(1);
     let held_response = tokio::time::timeout(EVENT_TIMEOUT, held_client)
@@ -87,16 +109,6 @@ async fn shutdown_stops_accepting_immediately() {
         server_result.is_ok(),
         "owned server returned {server_result:?}"
     );
-}
-
-async fn wait_for_checkpoint(
-    controller: &camber::http::mock::LifecycleController,
-    checkpoint: LifecycleCheckpoint,
-) {
-    tokio::time::timeout(EVENT_TIMEOUT, controller.wait_until_paused(checkpoint))
-        .await
-        .unwrap()
-        .unwrap();
 }
 
 #[camber::test]

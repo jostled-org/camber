@@ -5,7 +5,35 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use camber::RuntimeError;
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController, lifecycle};
+/// The broad hub, named only by the lender block Step 15 removes.
+///
+/// Imported apart from the owner-local vocabulary above so the one remaining
+/// use is visible at the top of the file rather than buried in a list.
+use camber::http::mock::{
+    AdmittedCommitment, AdmittedOperation, ArmedFaults, BlockingWorkerController,
+    BlockingWorkerEdge, CommittedAnswer, CommittedTransfer, ConnectionOwnerController,
+    ConnectionOwnerEdge, ConnectionOwnershipEvent, ConnectionOwnershipObservation,
+    FaultedSelection, MultipartBody, MultipartOwnerController, MultipartOwnerEdge,
+    RequestBodyObservation, RequestBodyOwnerController, ResponseCommitmentController,
+    ResponseCommitmentEdge, ScopedAdmittedCommitment, ScopedAdmittedOperation,
+    ScopedCommittedAnswer, ScopedCommittedTransfer, ScopedMultipartBody, ScopedMultipartOwner,
+    ScopedOwner, ScopedRequestBodyOwner, ScopedResponseCommitment, ScopedStagedCommitment,
+    ScopedStagedTransfer, ScopedStoppedCommitment, ScopedStoppedMultipart, ScopedStoppedTransfer,
+    ScopedSupervisorSelection, ScopedTransferOwner, ScopedUnwatched, ServerStopController,
+    ServerStopEdge, ServerTaskController, ServerTaskFault, StagedCommitment, StagedTransfer,
+    StoppedCommitment, StoppedMultipart, StoppedTransfer, SupervisorSelection,
+    TransferOwnerController, TransferOwnerEdge, admitted_commitment, admitted_operation,
+    committed_answer, committed_transfer, multipart_body, multipart_owner, request_body_owner,
+    response_commitment, staged_commitment, staged_transfer, stopped_commitment, stopped_multipart,
+    stopped_transfer, supervisor_selection, transfer_owner, unwatched,
+};
+#[cfg(feature = "ws")]
+use camber::http::mock::{
+    FaultedRegistration, HandoffCommitment, OwnerTree, RegistrationSelection, RetainedBridge,
+    RetainedCallback, ScopedHandoffCommitment, SupervisedRegistration, UpgradeOwnerController,
+    UpgradeOwnerEdge, WebSocketDirectionController, WebSocketDirectionEdge,
+    WebSocketTerminalController, WebSocketTerminalEdge, handoff_commitment,
+};
 use camber::http::{
     self, BodyAdmission, BodyAdmissionContext, HostRouter, Request, Response, Router, ServerHandle,
     ServerPolicy,
@@ -100,6 +128,20 @@ pub fn poll_value<T>(bound: Duration, mut attempt: impl FnMut() -> Option<T>) ->
 /// value it carries.
 pub fn poll_until(bound: Duration, mut ready: impl FnMut() -> bool) -> bool {
     poll_value(bound, || ready().then_some(())).is_some()
+}
+
+/// Wait for `ready` off this runtime, and report whether it arrived in `bound`.
+///
+/// [`poll_until`] sleeps the thread it polls on, so an `async fn` calling it
+/// directly holds a runtime worker for the whole bound — including a worker the
+/// server, the connection driver, or the handler being waited on needs in order
+/// to reach the arrival. On a machine with few workers that turns a bounded wait
+/// into a bound-length stall and then a failure. So the poll is taken on the
+/// blocking pool instead, and what the caller gets back is the same arrival.
+pub async fn arrived(bound: Duration, ready: impl FnMut() -> bool + Send + 'static) -> bool {
+    tokio::task::spawn_blocking(move || poll_until(bound, ready))
+        .await
+        .expect("the bounded arrival was waited for")
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -504,6 +546,20 @@ pub async fn rebind_within(
     }
 }
 
+/// Assert the address a completed server served on is bindable again.
+///
+/// The last claim a row makes about a server it has already joined, and the
+/// only one an out-of-process observer could make. The listener is given up
+/// again immediately: what is being asserted is that the address was free, not
+/// that this row now holds it, and a row that kept it would refuse the bind the
+/// next row takes over the same port.
+pub async fn assert_address_reused(addr: SocketAddr, context: &str) {
+    let listener = rebind_within(addr, SETTLE_BOUND)
+        .await
+        .unwrap_or_else(|error| panic!("{context}: the served address was not released: {error}"));
+    drop(listener);
+}
+
 /// A body-admission permit whose release is the only thing it records.
 ///
 /// The permit a policy hands over is dropped by the owner the runtime gave it
@@ -575,15 +631,68 @@ pub fn assert_released(released: &Arc<AtomicUsize>, expected: usize, label: &str
 /// the one the application permit does, and polled for the same reason: the
 /// owner is released when the request future finishes, which can happen after
 /// the peer already has its answer.
-pub fn assert_owners_released(controller: &LifecycleController, expected: usize, label: &str) {
+pub fn assert_owners_released(
+    controller: &RequestBodyOwnerController,
+    expected: usize,
+    label: &str,
+) {
     let settled = poll_until(SETTLE_BOUND, || {
-        controller.body_permit_owners_dropped() == expected
+        controller.observed().permit_owners_dropped == expected
     });
     assert!(
         settled,
         "{label}: expected {expected} permit owners released, saw {}",
-        controller.body_permit_owners_dropped()
+        controller.observed().permit_owners_dropped
     );
+}
+
+/// What one lender's request-body owners have polled, retained, and released.
+///
+/// The whole of a request-body owner's published surface is this one reading,
+/// so a case that wants any part of it takes the reading and names the field.
+/// Written here rather than per root, because reaching it means naming the
+/// family the lender answers for, and that is what [`Owns`] already states.
+pub fn body_owners<O: Owns<RequestBodyOwnerController>>(owners: &O) -> RequestBodyObservation {
+    owners.owner().observed()
+}
+
+/// Every connection identity one observation registered at server scope.
+///
+/// The registry's own membership, which is what a row nesting children under a
+/// parent, or counting the owners a stop reaped, has to name first. Three roots
+/// wrote the same filter, so the event this reads is named once.
+pub fn registered_connections(observed: &ConnectionOwnershipObservation) -> Box<[u64]> {
+    observed
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ConnectionOwnershipEvent::ServerConnectionRegistered { connection } => {
+                Some(*connection)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every upgrade this observation's connections took as a child, with its
+/// parent.
+///
+/// The pair rather than either half: an upgrade is only nested by the
+/// connection that transferred it, so a row asserting the tree, and a row
+/// waiting for both halves of one transfer, need the same two identities
+/// together.
+pub fn transferred_upgrades(observed: &ConnectionOwnershipObservation) -> Box<[(u64, u64)]> {
+    observed
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ConnectionOwnershipEvent::ConnectionUpgradeTransferred {
+                connection,
+                upgrade,
+            } => Some((*connection, *upgrade)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// How long an observed fixture has to answer its first probe.
@@ -599,28 +708,210 @@ const OBSERVED_READINESS: Duration = Duration::from_secs(5);
 ///
 /// The owned server path is the one served, because that is where the lifecycle
 /// seam is wired; the synchronous path reads no script.
-pub struct ObservedPort {
+///
+/// `Owner` is what the reservation registered and hands back. There is no
+/// default: every reservation below names the families its cases read, so a
+/// fixture cannot reach the rest of the scope on the way past, and one that
+/// reads nothing states that by reserving unwatched.
+pub struct ObservedPort<Owner> {
     listener: BoundListener,
-    controller: Arc<LifecycleController>,
+    controller: Arc<Owner>,
 }
 
-/// Reserve an ephemeral port and register its lifecycle observer.
-pub fn reserve_observed() -> ObservedPort {
+/// Reserve an ephemeral port whose scope is registered and read by nobody.
+///
+/// [`reserve_response_commitment`] for a fixture that has to bind before it
+/// serves — because its router, its peers, or its own teardown are built against
+/// its address — and that then reads none of that scope's owners. The scope is
+/// still registered, so production publishes to it exactly as it does for a
+/// watched reservation, and the view it hands back names no family at all.
+pub fn reserve_unwatched() -> ObservedPort<ScopedUnwatched> {
+    reserve_registered(unwatched)
+}
+
+/// Reserve an ephemeral port watched through its transfer owners and its stop.
+///
+/// [`reserve_transfer_owner`] for a case whose stream is ended by the server
+/// under it: the aggregate deadline belongs to the stop owner, and only the
+/// transfer owner can say which terminal that deadline fixed.
+pub fn reserve_stopped_transfer() -> ObservedPort<ScopedStoppedTransfer> {
+    reserve_registered(stopped_transfer)
+}
+
+/// Reserve an ephemeral port watched through its commitment, transfer, and stop
+/// owners.
+///
+/// [`reserve_stopped_transfer`] for a staged proxy case that also holds the
+/// upstream at its head: what the upload polled behind that hold and what the
+/// operation committed are two different owners' facts.
+pub fn reserve_staged_transfer() -> ObservedPort<ScopedStagedTransfer> {
+    reserve_registered(staged_transfer)
+}
+
+/// Reserve an ephemeral port watched through its commitments and request bodies.
+///
+/// [`reserve_response_commitment`] for a case that also reads the payload behind
+/// the answer: how much was polled, retained, and released is the request-body
+/// owner's fact, not the producer's.
+pub fn reserve_admitted_commitment() -> ObservedPort<ScopedAdmittedCommitment> {
+    reserve_registered(admitted_commitment)
+}
+
+/// Reserve an ephemeral port watched through its commitment, request-body, and
+/// stop owners.
+///
+/// [`reserve_admitted_commitment`] for a staged precedence case: the transition
+/// its cause is weighed against is the stop owner's, and holding the supervisor
+/// where it selected that transition is what keeps the abort behind it from
+/// taking the operation away mid-decision.
+pub fn reserve_staged_commitment() -> ObservedPort<ScopedStagedCommitment> {
+    reserve_registered(staged_commitment)
+}
+
+/// Reserve an ephemeral port watched only through its response commitments.
+///
+/// [`reserve_unwatched`] for a case whose whole claim is which producer took an
+/// operation's head: the registration is the same one, and what it hands back
+/// reaches no server stop, connection permit, or transfer owner.
+pub fn reserve_response_commitment() -> ObservedPort<ScopedResponseCommitment> {
+    reserve_registered(response_commitment)
+}
+
+/// Reserve an ephemeral port watched through its commitments and the
+/// connections that carry the answers those commitments name.
+///
+/// [`reserve_response_commitment`] for a case whose rows outlive the head the
+/// peer read: the connection owner is what says the answer under that head is
+/// over.
+pub fn reserve_committed_answer() -> ObservedPort<ScopedCommittedAnswer> {
+    reserve_registered(committed_answer)
+}
+
+/// Reserve an ephemeral port watched through its commitments and the stop that
+/// can end an operation before any producer commits one.
+///
+/// [`reserve_response_commitment`] for a case that cancels the server its
+/// operation is running under: the stop half is what holds the supervisor where
+/// it selected the transition, so the forced abort behind a cancellation cannot
+/// take the operation away before it has read the phase the command committed.
+pub fn reserve_stopped_commitment() -> ObservedPort<ScopedStoppedCommitment> {
+    reserve_registered(stopped_commitment)
+}
+
+/// Reserve an ephemeral port watched only through its multipart sessions.
+///
+/// [`reserve_multipart_body`] for a case whose whole claim is what one
+/// streaming multipart session read, published, and released: the admission in
+/// front of that session is a different owner's fact.
+pub fn reserve_multipart_owner() -> ObservedPort<ScopedMultipartOwner> {
+    reserve_registered(multipart_owner)
+}
+
+/// Reserve an ephemeral port watched through its multipart sessions and the
+/// payload admission in front of them.
+///
+/// [`reserve_multipart_owner`] for a case whose claim crosses that boundary:
+/// what admission polled before a session existed is the request-body owner's
+/// fact, not the session's.
+pub fn reserve_multipart_body() -> ObservedPort<ScopedMultipartBody> {
+    reserve_registered(multipart_body)
+}
+
+/// Reserve an ephemeral port watched through its multipart sessions, their
+/// admission, and the stop that can revoke both.
+///
+/// [`reserve_multipart_body`] for a case whose session is ended by its server
+/// rather than by its peer: the aggregate deadline belongs to the stop owner.
+pub fn reserve_stopped_multipart() -> ObservedPort<ScopedStoppedMultipart> {
+    reserve_registered(stopped_multipart)
+}
+
+/// Reserve an ephemeral port watched through its upgrade children and the
+/// commitments that refuse them.
+///
+/// [`reserve_response_commitment`] for a case whose claim is which owner
+/// answered a handoff: the ticket is held by the upgrade owner, and the cell is
+/// what says the framework took the answer before a `101` could exist.
+#[cfg(feature = "ws")]
+pub fn reserve_handoff_commitment() -> ObservedPort<ScopedHandoffCommitment> {
+    reserve_registered(handoff_commitment)
+}
+
+/// Reserve an ephemeral port watched through its commitment and transfer
+/// owners.
+///
+/// [`reserve_response_commitment`] for a case whose rows span the head: which
+/// producer took it is the cell's fact, and how the payload under it ended is
+/// the direction's.
+pub fn reserve_committed_transfer() -> ObservedPort<ScopedCommittedTransfer> {
+    reserve_registered(committed_transfer)
+}
+
+/// Reserve an ephemeral port watched through every owner an admitted operation
+/// crosses.
+///
+/// [`reserve_committed_transfer`] for a matrix case that reads one operation end
+/// to end: the permit that admitted it, the envelope its head minted, the
+/// payload behind that head, and the direction that carried the answer out are
+/// four owners' facts about the same operation.
+pub fn reserve_admitted_operation() -> ObservedPort<ScopedAdmittedOperation> {
+    reserve_registered(admitted_operation)
+}
+
+/// Reserve an ephemeral port watched only through its request-body owners.
+///
+/// [`reserve_admitted_commitment`] for a case whose whole claim is what an
+/// admitted payload polled, retained, and released: which producer then answered
+/// over it is a different owner's fact.
+pub fn reserve_request_body_owner() -> ObservedPort<ScopedRequestBodyOwner> {
+    reserve_registered(request_body_owner)
+}
+
+/// Reserve an ephemeral port watched only through its transfer owners.
+///
+/// [`reserve_stopped_transfer`] for a case whose whole claim is what one
+/// direction polled, charged, and ended: the registration is the same one, and
+/// what it hands back reaches no server stop, connection permit, or request
+/// body.
+pub fn reserve_transfer_owner() -> ObservedPort<ScopedTransferOwner> {
+    reserve_registered(transfer_owner)
+}
+
+/// Reserve an ephemeral port and register `observe` against it before serving.
+///
+/// Public because the reservation and the view it hands back are separate
+/// choices: every named reservation above supplies its own `observe`, and a
+/// fixture whose owner set no named reservation covers supplies one of its own
+/// rather than reaching for a broader reservation that happens to include it.
+pub fn reserve_registered<Owner>(
+    observe: impl FnOnce(SocketAddr) -> Result<Owner, RuntimeError>,
+) -> ObservedPort<Owner> {
     let listener = BoundListener::bind_tcp("127.0.0.1:0").expect("reserve an observed port");
     let controller =
-        lifecycle(listener.local_addr()).expect("register the reservation's lifecycle observer");
+        observe(listener.local_addr()).expect("register the reservation's lifecycle observer");
     ObservedPort {
         listener,
         controller: Arc::new(controller),
     }
 }
 
-impl ObservedPort {
-    pub fn controller(&self) -> Arc<LifecycleController> {
+impl<Owner> ObservedPort<Owner> {
+    pub fn controller(&self) -> Arc<Owner> {
         Arc::clone(&self.controller)
     }
 
-    pub fn serve(self, router: Router) -> ObservedServer {
+    /// The address this reservation holds, before anything serves on it.
+    ///
+    /// [`ObservedServer::addr`] answers the same question for a reservation that
+    /// has already been served, which a fixture assembling its peers around the
+    /// reservation cannot use: the address is what its counters, its router, and
+    /// its own teardown are built against, and all three exist before the server
+    /// does.
+    pub fn addr(&self) -> SocketAddr {
+        self.listener.local_addr()
+    }
+
+    pub fn serve(self, router: Router) -> ObservedServer<Owner> {
         self.serve_with(move |listener| {
             http::serve_background(listener, router).expect("owned server requires a Tokio runtime")
         })
@@ -632,7 +923,7 @@ impl ObservedPort {
     /// deadline row can use: the bound it drives is the one it configured, and
     /// a fixture that could not name it would have to reach for a whole runtime
     /// to say so.
-    pub fn serve_with_policy(self, router: Router, policy: ServerPolicy) -> ObservedServer {
+    pub fn serve_with_policy(self, router: Router, policy: ServerPolicy) -> ObservedServer<Owner> {
         self.serve_with(move |listener| {
             http::server(router)
                 .policy(policy)
@@ -650,7 +941,7 @@ impl ObservedPort {
         self,
         hosts: HostRouter,
         policy: ServerPolicy,
-    ) -> ObservedServer {
+    ) -> ObservedServer<Owner> {
         self.serve_with(move |listener| {
             http::server_hosts(hosts)
                 .policy(policy)
@@ -659,7 +950,7 @@ impl ObservedPort {
         })
     }
 
-    pub fn serve_hosts(self, hosts: HostRouter) -> ObservedServer {
+    pub fn serve_hosts(self, hosts: HostRouter) -> ObservedServer<Owner> {
         self.serve_with(move |listener| {
             http::serve_background_hosts(listener, hosts)
                 .expect("owned server requires a Tokio runtime")
@@ -680,13 +971,7 @@ impl ObservedPort {
     /// type exists to keep: registration happens before anything serves on the
     /// port, and the caller that takes it is the one that decides when to give
     /// it back.
-    pub fn into_owned_parts(
-        self,
-    ) -> (
-        tokio::net::TcpListener,
-        SocketAddr,
-        Arc<LifecycleController>,
-    ) {
+    pub fn into_owned_parts(self) -> (tokio::net::TcpListener, SocketAddr, Arc<Owner>) {
         let local_addr = self.listener.local_addr();
         let listener = self
             .listener
@@ -698,7 +983,7 @@ impl ObservedPort {
     fn serve_with(
         self,
         serve: impl FnOnce(tokio::net::TcpListener) -> ServerHandle,
-    ) -> ObservedServer {
+    ) -> ObservedServer<Owner> {
         let controller = self.controller;
         let server = ReadyServer::started_by(self.listener, OBSERVED_READINESS, serve)
             .expect("the observed fixture server answered");
@@ -715,17 +1000,17 @@ impl ObservedPort {
 /// an `Arc` so a body-admission closure captured into the served router can read
 /// the same counters the case does, and the registration is released when the
 /// last of those handles drops — which is the served router's, not this one's.
-pub struct ObservedServer {
+pub struct ObservedServer<Owner> {
     server: ReadyServer,
-    controller: Arc<LifecycleController>,
+    controller: Arc<Owner>,
 }
 
-impl ObservedServer {
+impl<Owner> ObservedServer<Owner> {
     pub fn addr(&self) -> SocketAddr {
         self.server.local_addr()
     }
 
-    pub fn controller(&self) -> &LifecycleController {
+    pub fn controller(&self) -> &Owner {
         &self.controller
     }
 
@@ -1810,27 +2095,823 @@ pub async fn bounded<F: std::future::Future>(
         .unwrap_or_else(|_| panic!("{operation} timed out after {bound:?}"))
 }
 
-/// Wait until production pauses at `checkpoint`, under a bound.
+/// One place production can be held, named against the owner that holds it.
 ///
-/// `LifecycleController::wait_until_paused` has no deadline of its own, so
-/// production that never reaches the checkpoint parks the observer on it and the
-/// case hangs instead of failing. Two roots wrote a bounded form; `context`
-/// names the step, so an expired bound says which pause never arrived.
+/// The controllers stay separate authorities: an edge belongs to exactly one
+/// owner-local vocabulary, and arming, waiting, and releasing it are that
+/// vocabulary's own calls. What is shared is only the three moves a case makes
+/// to step production from one hold to the next — arm it, wait for it, let it
+/// go — which are identical whichever owner was named and are written once here
+/// rather than once per owner. No implementation submits a fact, chooses a
+/// phase, or fixes a result.
+///
+/// The `_on` half is the same three moves taken through a value that lends the
+/// owner rather than through the owner itself, so a case holding a composite
+/// scoped view spells them the same way a case holding one controller does. It
+/// widens nothing: a view that lends no such owner has no implementation to
+/// reach, so naming this point through it does not compile.
+pub trait OwnerPoint: Copy + std::fmt::Debug {
+    /// The owner-local controller whose vocabulary this point belongs to.
+    type Owner;
+
+    /// Arm this point on the owner that holds it.
+    fn arm_at(self, owner: &Self::Owner) -> Result<(), RuntimeError>;
+
+    /// Wait until production is held here.
+    fn paused_at(
+        self,
+        owner: &Self::Owner,
+    ) -> impl std::future::Future<Output = Result<(), RuntimeError>>;
+
+    /// Let go of whatever is held here.
+    fn release_at(self, owner: &Self::Owner) -> Result<(), RuntimeError>;
+
+    /// Arm this point on the owner `owners` lends.
+    fn arm_on(self, owners: &impl Owns<Self::Owner>) -> Result<(), RuntimeError> {
+        self.arm_at(&owners.owner())
+    }
+
+    /// Wait until production is held here, on the owner `owners` lends.
+    ///
+    /// The controller is taken before the future is built, so it is carried
+    /// into that future rather than borrowed from a value the caller may drop.
+    fn paused_on(
+        self,
+        owners: &impl Owns<Self::Owner>,
+    ) -> impl std::future::Future<Output = Result<(), RuntimeError>> {
+        let owner = owners.owner();
+        async move { self.paused_at(&owner).await }
+    }
+
+    /// Let go of whatever is held here, on the owner `owners` lends.
+    fn release_on(self, owners: &impl Owns<Self::Owner>) -> Result<(), RuntimeError> {
+        self.release_at(&owners.owner())
+    }
+}
+
+/// A value that can name one of its scope's owner-local controllers.
+///
+/// What a stepping helper needs from a case is the owner the step belongs to,
+/// and both a scoped view and the hub can answer that: the view lends the
+/// controller it was built with, and the hub mints one. Neither answer widens
+/// what the caller holds — a view that names no upgrade owner cannot be asked
+/// for one, because the implementation it would need does not exist.
+pub trait Owns<Owner> {
+    /// This scope's controller over `Owner`'s family.
+    fn owner(&self) -> Owner;
+}
+
+/// A scoped view lends whatever its own view lends.
+impl<View, Owner> Owns<Owner> for ScopedOwner<View>
+where
+    View: Owns<Owner>,
+{
+    fn owner(&self) -> Owner {
+        (**self).owner()
+    }
+}
+
+/// A shared reservation lends whatever the observer it holds lends.
+///
+/// [`ObservedPort::controller`] hands its observer out behind an `Arc` so a
+/// body-admission closure captured into the served router reads the same
+/// counters the case does. That handle names the same one owner set, so a
+/// stepping helper takes it directly rather than making every caller reach
+/// through it first.
+impl<Lender, Owner> Owns<Owner> for Arc<Lender>
+where
+    Lender: Owns<Owner>,
+{
+    fn owner(&self) -> Owner {
+        (**self).owner()
+    }
+}
+
+/// Give one owner-local family its own lender.
+///
+/// A controller lends itself, which is mechanical and identical for every
+/// family, so it is written once per family here. What a composite view lends
+/// depends on the field it was built with, which is [`view_lender`]'s job.
+macro_rules! owner_lender {
+    ($owner:ty $(, $feature:literal)?) => {
+        $(#[cfg(feature = $feature)])?
+        impl Owns<$owner> for $owner {
+            fn owner(&self) -> $owner {
+                self.clone()
+            }
+        }
+    };
+}
+
+owner_lender!(ServerStopController);
+owner_lender!(BlockingWorkerController);
+owner_lender!(ConnectionOwnerController);
+owner_lender!(ServerTaskController);
+owner_lender!(ResponseCommitmentController);
+owner_lender!(TransferOwnerController);
+owner_lender!(MultipartOwnerController);
+owner_lender!(RequestBodyOwnerController);
+owner_lender!(UpgradeOwnerController, "ws");
+owner_lender!(WebSocketDirectionController, "ws");
+owner_lender!(WebSocketTerminalController, "ws");
+
+/// Lend each named family of one composite scoped view.
+///
+/// A view is a record of the owners its cases read, so lending them is one line
+/// per field. Written here rather than in each root, so two roots taking the
+/// same view cannot disagree about which field answers for which family.
+macro_rules! view_lender {
+    ($view:ty $(, $owner:ty, $field:ident)+ $(,)?) => {
+        $(
+            impl Owns<$owner> for $view {
+                fn owner(&self) -> $owner {
+                    self.$field.clone()
+                }
+            }
+        )+
+    };
+}
+
+view_lender!(
+    SupervisorSelection,
+    ServerStopController,
+    stop,
+    ConnectionOwnerController,
+    connections,
+);
+view_lender!(
+    FaultedSelection,
+    ServerStopController,
+    stop,
+    ConnectionOwnerController,
+    connections,
+    ServerTaskController,
+    tasks,
+);
+view_lender!(
+    ArmedFaults,
+    ConnectionOwnerController,
+    connections,
+    ServerTaskController,
+    tasks,
+);
+view_lender!(
+    StoppedTransfer,
+    TransferOwnerController,
+    transfers,
+    ServerStopController,
+    stop,
+);
+view_lender!(
+    StagedTransfer,
+    ResponseCommitmentController,
+    commitment,
+    TransferOwnerController,
+    transfers,
+    ServerStopController,
+    stop,
+);
+view_lender!(
+    AdmittedCommitment,
+    ResponseCommitmentController,
+    commitment,
+    RequestBodyOwnerController,
+    bodies,
+);
+view_lender!(
+    CommittedAnswer,
+    ResponseCommitmentController,
+    commitment,
+    ConnectionOwnerController,
+    connections,
+);
+view_lender!(
+    StoppedCommitment,
+    ResponseCommitmentController,
+    commitment,
+    ServerStopController,
+    stop,
+);
+view_lender!(
+    MultipartBody,
+    MultipartOwnerController,
+    sessions,
+    RequestBodyOwnerController,
+    bodies,
+);
+#[cfg(feature = "ws")]
+view_lender!(
+    HandoffCommitment,
+    UpgradeOwnerController,
+    upgrades,
+    ResponseCommitmentController,
+    commitment,
+);
+view_lender!(
+    CommittedTransfer,
+    ResponseCommitmentController,
+    commitment,
+    TransferOwnerController,
+    transfers,
+);
+view_lender!(
+    AdmittedOperation,
+    ConnectionOwnerController,
+    connections,
+    ResponseCommitmentController,
+    commitment,
+    RequestBodyOwnerController,
+    bodies,
+    TransferOwnerController,
+    transfers,
+);
+view_lender!(
+    StoppedMultipart,
+    MultipartOwnerController,
+    sessions,
+    RequestBodyOwnerController,
+    bodies,
+    TransferOwnerController,
+    transfers,
+    ServerStopController,
+    stop,
+);
+view_lender!(
+    StagedCommitment,
+    ResponseCommitmentController,
+    commitment,
+    RequestBodyOwnerController,
+    bodies,
+    ServerStopController,
+    stop,
+);
+#[cfg(feature = "ws")]
+view_lender!(
+    RegistrationSelection,
+    ServerStopController,
+    stop,
+    UpgradeOwnerController,
+    upgrades,
+);
+#[cfg(feature = "ws")]
+view_lender!(
+    SupervisedRegistration,
+    ServerStopController,
+    stop,
+    ConnectionOwnerController,
+    connections,
+    UpgradeOwnerController,
+    upgrades,
+);
+#[cfg(feature = "ws")]
+view_lender!(
+    FaultedRegistration,
+    ServerStopController,
+    stop,
+    UpgradeOwnerController,
+    upgrades,
+    ServerTaskController,
+    tasks,
+);
+#[cfg(feature = "ws")]
+view_lender!(
+    OwnerTree,
+    ConnectionOwnerController,
+    connections,
+    UpgradeOwnerController,
+    upgrades,
+);
+#[cfg(feature = "ws")]
+view_lender!(
+    RetainedCallback,
+    ServerStopController,
+    stop,
+    ConnectionOwnerController,
+    connections,
+    UpgradeOwnerController,
+    upgrades,
+    WebSocketTerminalController,
+    terminals,
+);
+#[cfg(feature = "ws")]
+view_lender!(
+    RetainedBridge,
+    ConnectionOwnerController,
+    connections,
+    UpgradeOwnerController,
+    upgrades,
+    WebSocketDirectionController,
+    directions,
+    WebSocketTerminalController,
+    terminals,
+);
+
+/// Give one narrow owner-local edge its pause protocol.
+///
+/// The three calls differ only in which controller the edge belongs to, so they
+/// are written once here rather than eight times over.
+macro_rules! narrow_pause_point {
+    ($edge:ty, $owner:ty $(, $feature:literal)?) => {
+        $(#[cfg(feature = $feature)])?
+        impl OwnerPoint for $edge {
+            type Owner = $owner;
+
+            fn arm_at(self, owner: &$owner) -> Result<(), RuntimeError> {
+                owner.pause_once(self)
+            }
+
+            fn paused_at(
+                self,
+                owner: &$owner,
+            ) -> impl std::future::Future<Output = Result<(), RuntimeError>> {
+                owner.wait_until_paused(self)
+            }
+
+            fn release_at(self, owner: &$owner) -> Result<(), RuntimeError> {
+                owner.release(self)
+            }
+        }
+    };
+}
+
+narrow_pause_point!(ServerStopEdge, ServerStopController);
+narrow_pause_point!(BlockingWorkerEdge, BlockingWorkerController);
+narrow_pause_point!(ConnectionOwnerEdge, ConnectionOwnerController);
+narrow_pause_point!(ResponseCommitmentEdge, ResponseCommitmentController);
+narrow_pause_point!(TransferOwnerEdge, TransferOwnerController);
+narrow_pause_point!(MultipartOwnerEdge, MultipartOwnerController);
+narrow_pause_point!(UpgradeOwnerEdge, UpgradeOwnerController, "ws");
+narrow_pause_point!(WebSocketDirectionEdge, WebSocketDirectionController, "ws");
+narrow_pause_point!(WebSocketTerminalEdge, WebSocketTerminalController, "ws");
+
+/// A live owned server whose handler enters, reports, and then waits to be let
+/// go.
+///
+/// The entry signal is the causal barrier a stop case starts from: once it has
+/// arrived, the connection is admitted, its permit is held, and the handler is
+/// live, so a command issued afterwards is genuinely racing owned work. Two
+/// roots stop a server that has work outstanding — one to read what the commit
+/// left, one to read what the public journey did — so the fixture is written
+/// once and each root keeps its own peers and its own claims.
+pub struct HeldServer {
+    /// The observer registered on this server's address.
+    ///
+    /// Two families and no others: the stop owner, whose passes every case here
+    /// steps the supervisor through, and the connection owners, whose registered
+    /// and settled events say whether the permits those passes drained ever came
+    /// back.
+    pub controller: ScopedSupervisorSelection,
+    pub addr: SocketAddr,
+    pub handle: ServerHandle,
+    /// One added permit releases exactly one held handler.
+    pub release: Arc<tokio::sync::Semaphore>,
+    /// One available permit per handler that has entered.
+    ///
+    /// A rendezvous rather than a counter poll: the case takes a permit and is
+    /// woken by the entry itself, so no wait here is a sleep standing in for an
+    /// ordering barrier.
+    entered: Arc<tokio::sync::Semaphore>,
+    /// How many held handlers ran to completion.
+    ///
+    /// A field rather than a reader, so a case that has already given the handle
+    /// up to its own join can still read it.
+    pub served: Arc<AtomicUsize>,
+}
+
+impl HeldServer {
+    /// The narrow controller over this server's stop owner.
+    ///
+    /// Taken through the lender rather than off the field, so which field of a
+    /// [`SupervisorSelection`] answers for the stop family is stated in the one
+    /// `view_lender!` that already states it.
+    pub fn stop(&self) -> ServerStopController {
+        Owns::<ServerStopController>::owner(&self.controller)
+    }
+
+    /// Wait until one more handler has entered and is holding its request.
+    pub async fn await_entry(&self, context: &str) {
+        let entered = tokio::time::timeout(SETTLE_BOUND, self.entered.acquire())
+            .await
+            .unwrap_or_else(|_| panic!("{context}: no handler entered"))
+            .unwrap_or_else(|error| panic!("{context}: the entry rendezvous closed: {error}"));
+        entered.forget();
+    }
+}
+
+/// The route every [`HeldServer`] answers a held request on.
+pub const HELD_ROUTE: &str = "/held";
+
+/// Serve [`HELD_ROUTE`] under `limit` concurrent connections and `drain`, and
+/// hand back the live server without any peer of its own.
+pub fn held_server(limit: usize, drain: Duration) -> HeldServer {
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let served = Arc::new(AtomicUsize::new(0));
+
+    let mut router = Router::new();
+    let handler_entered = Arc::clone(&entered);
+    let handler_release = Arc::clone(&release);
+    let handler_served = Arc::clone(&served);
+    router.get(HELD_ROUTE, move |_request: &Request| {
+        let entered = Arc::clone(&handler_entered);
+        let release = Arc::clone(&handler_release);
+        let served = Arc::clone(&handler_served);
+        async move {
+            entered.add_permits(1);
+            if let Ok(permit) = release.acquire().await {
+                permit.forget();
+            }
+            served.fetch_add(1, Ordering::SeqCst);
+            Response::text(200, "released")
+        }
+    });
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the held fixture");
+    listener
+        .set_nonblocking(true)
+        .expect("the held fixture's listener takes a Tokio reactor");
+    let listener =
+        tokio::net::TcpListener::from_std(listener).expect("adopt the held fixture's listener");
+    let addr = listener.local_addr().expect("read the fixture's address");
+    let controller = supervisor_selection(addr).expect("register the fixture's observer");
+    let policy = ServerPolicy::default()
+        .connection_limit(limit)
+        .expect("a positive connection limit")
+        .shutdown_timeout(drain)
+        .expect("a positive drain bound");
+    let handle = http::server(router)
+        .policy(policy)
+        .serve_background(listener)
+        .expect("the owned server requires a Tokio runtime");
+
+    HeldServer {
+        controller,
+        addr,
+        handle,
+        release,
+        entered,
+        served,
+    }
+}
+
+/// Open a peer and send one request on it.
+pub async fn request_on_new_peer(
+    addr: SocketAddr,
+    path: &str,
+    connection: &str,
+) -> tokio::net::TcpStream {
+    let mut peer = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect a live peer");
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: {connection}\r\n\r\n");
+    tokio::io::AsyncWriteExt::write_all(&mut peer, request.as_bytes())
+        .await
+        .expect("write the peer's request");
+    peer
+}
+
+/// Read one peer's whole answer, up to and including its EOF.
+pub async fn read_peer_to_eof(peer: &mut tokio::net::TcpStream, context: &str) -> Box<str> {
+    let mut answer = Vec::new();
+    tokio::time::timeout(
+        SETTLE_BOUND,
+        tokio::io::AsyncReadExt::read_to_end(peer, &mut answer),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{context}: the peer's answer never ended"))
+    .unwrap_or_else(|error| panic!("{context}: reading the peer's answer failed: {error}"));
+    String::from_utf8_lossy(&answer).into()
+}
+
+/// One hold in a sequence a supervisor's own admission walks.
+///
+/// The three families a connection crosses on its way in, and no others: the
+/// supervisor's pass, the connection that pass admitted, and the upgrade child
+/// that connection submits. Their vocabularies are deliberately different types,
+/// so an ordered list across them cannot be spelled in any one of them alone.
+/// This carries the name and nothing else — each arm arms, waits, and releases
+/// through exactly the controller that owns it, so naming a hold here grants no
+/// authority the owner did not already have, and no bridge that upgrade retains
+/// can be named through it at all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdmissionHold {
+    /// A server-stop owner's edge.
+    Stop(ServerStopEdge),
+    /// A connection owner's edge.
+    Connection(ConnectionOwnerEdge),
+    /// An upgrade child's edge.
+    #[cfg(feature = "ws")]
+    Upgrade(UpgradeOwnerEdge),
+}
+
+/// The owners one [`AdmissionHold`] can name, stated as the loan a caller must
+/// be able to make.
+///
+/// A name spanning a family set needs every family it can spell, so this is the
+/// one bound a value must satisfy to be stepped through an `AdmissionHold` —
+/// written once here rather than repeated across the three moves and every
+/// caller of them.
+#[cfg(feature = "ws")]
+pub trait AdmissionOwners:
+    Owns<ServerStopController> + Owns<ConnectionOwnerController> + Owns<UpgradeOwnerController>
+{
+}
+
+#[cfg(feature = "ws")]
+impl<Lender> AdmissionOwners for Lender where
+    Lender:
+        Owns<ServerStopController> + Owns<ConnectionOwnerController> + Owns<UpgradeOwnerController>
+{
+}
+
+#[cfg(not(feature = "ws"))]
+pub trait AdmissionOwners: Owns<ServerStopController> + Owns<ConnectionOwnerController> {}
+
+#[cfg(not(feature = "ws"))]
+impl<Lender> AdmissionOwners for Lender where
+    Lender: Owns<ServerStopController> + Owns<ConnectionOwnerController>
+{
+}
+
+impl AdmissionHold {
+    /// Arm this hold on whichever of `owners`' families holds it.
+    pub fn arm_on(self, owners: &impl AdmissionOwners) -> Result<(), RuntimeError> {
+        match self {
+            Self::Stop(edge) => edge.arm_on(owners),
+            Self::Connection(edge) => edge.arm_on(owners),
+            #[cfg(feature = "ws")]
+            Self::Upgrade(edge) => edge.arm_on(owners),
+        }
+    }
+
+    /// Wait until production is held here, on whichever family holds it.
+    pub async fn paused_on(self, owners: &impl AdmissionOwners) -> Result<(), RuntimeError> {
+        match self {
+            Self::Stop(edge) => edge.paused_on(owners).await,
+            Self::Connection(edge) => edge.paused_on(owners).await,
+            #[cfg(feature = "ws")]
+            Self::Upgrade(edge) => edge.paused_on(owners).await,
+        }
+    }
+
+    /// Let go of whatever is held here, on whichever family holds it.
+    pub fn release_on(self, owners: &impl AdmissionOwners) -> Result<(), RuntimeError> {
+        match self {
+            Self::Stop(edge) => edge.release_on(owners),
+            Self::Connection(edge) => edge.release_on(owners),
+            #[cfg(feature = "ws")]
+            Self::Upgrade(edge) => edge.release_on(owners),
+        }
+    }
+}
+
+/// One hold in a sequence a retained bridge walks.
+///
+/// The two families one upgrade child retains, and no others: the direction
+/// owner holding a transport half, and the terminal owner that commits the one
+/// cause both halves end on. Nothing above the upgrade can be named through it,
+/// so a row stepping a bridge cannot reach the supervisor pass or the permit
+/// that admitted the connection under it.
+#[cfg(feature = "ws")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BridgeHold {
+    /// One WebSocket direction owner's read or write edge.
+    Direction(WebSocketDirectionEdge),
+    /// One WebSocket terminal owner's commit or close edge.
+    Terminal(WebSocketTerminalEdge),
+}
+
+/// The owners one [`BridgeHold`] can name, stated as the loan a caller must be
+/// able to make.
+#[cfg(feature = "ws")]
+pub trait BridgeOwners:
+    Owns<WebSocketDirectionController> + Owns<WebSocketTerminalController>
+{
+}
+
+#[cfg(feature = "ws")]
+impl<Lender> BridgeOwners for Lender where
+    Lender: Owns<WebSocketDirectionController> + Owns<WebSocketTerminalController>
+{
+}
+
+#[cfg(feature = "ws")]
+impl BridgeHold {
+    /// Arm this hold on whichever of `owners`' families holds it.
+    pub fn arm_on(self, owners: &impl BridgeOwners) -> Result<(), RuntimeError> {
+        match self {
+            Self::Direction(edge) => edge.arm_on(owners),
+            Self::Terminal(edge) => edge.arm_on(owners),
+        }
+    }
+
+    /// Wait until production is held here, on whichever family holds it.
+    pub async fn paused_on(self, owners: &impl BridgeOwners) -> Result<(), RuntimeError> {
+        match self {
+            Self::Direction(edge) => edge.paused_on(owners).await,
+            Self::Terminal(edge) => edge.paused_on(owners).await,
+        }
+    }
+
+    /// Let go of whatever is held here, on whichever family holds it.
+    pub fn release_on(self, owners: &impl BridgeOwners) -> Result<(), RuntimeError> {
+        match self {
+            Self::Direction(edge) => edge.release_on(owners),
+            Self::Terminal(edge) => edge.release_on(owners),
+        }
+    }
+}
+
+/// Wait until production pauses at `point`, under a bound.
+///
+/// `wait_until_paused` has no deadline of its own, so production that never
+/// reaches the pause point parks the observer on it and the case hangs instead
+/// of failing. Two roots wrote a bounded form; `context` names the step, so an
+/// expired bound says which pause never arrived.
+///
+/// `owners` is asked for the one owner the point belongs to and nothing else,
+/// so a case that registered one owner family lends exactly that family here.
 ///
 /// The bound comes off the runtime's timer, so a case driving a paused clock
 /// needs a real-clock bound of its own rather than this.
-pub async fn wait_until_paused_bounded(
-    controller: &LifecycleController,
-    checkpoint: LifecycleCheckpoint,
+pub async fn wait_until_paused_bounded<P: OwnerPoint>(
+    owners: &impl Owns<P::Owner>,
+    point: P,
     context: &str,
 ) {
-    bounded(
-        controller.wait_until_paused(checkpoint),
-        SETTLE_BOUND,
-        context,
+    wait_until_paused_within(owners, point, SETTLE_BOUND, context).await;
+}
+
+/// Wait until production pauses at `point`, under the bound the caller names.
+///
+/// [`wait_until_paused_bounded`] for a case whose budget is not the settling
+/// one: a row staging a live server gives it a live budget, while a row waiting
+/// on an owner that is already running takes the settling default above. The
+/// wait itself, and the sentence an unarmed point fails with, are the same
+/// either way, so only the number moves.
+pub async fn wait_until_paused_within<P: OwnerPoint>(
+    owners: &impl Owns<P::Owner>,
+    point: P,
+    bound: Duration,
+    context: &str,
+) {
+    pause_within(point.paused_on(owners), bound, context).await;
+}
+
+/// Arm `point` on the owner `owners` lends for it, or fail the case.
+///
+/// Arming is refused for exactly two reasons — the point is already armed, or
+/// the registration behind it is gone — and neither is something a case can
+/// recover from. Stated once so every row reports which point it could not arm
+/// rather than unwrapping a bare `Result`.
+pub fn arm_point<P: OwnerPoint>(owners: &impl Owns<P::Owner>, point: P, label: &str) {
+    point
+        .arm_on(owners)
+        .unwrap_or_else(|error| panic!("{label}: arming {point:?} failed: {error}"));
+}
+
+/// Let go of whatever `owners` is holding at `point`, or fail the case.
+///
+/// [`arm_point`]'s mirror, and the failure matters more: a release that was
+/// refused leaves production parked, so a row that swallowed it would hang its
+/// binary instead of reporting the point it never let go of.
+pub fn release_point<P: OwnerPoint>(owners: &impl Owns<P::Owner>, point: P, label: &str) {
+    point
+        .release_on(owners)
+        .unwrap_or_else(|error| panic!("{label}: releasing {point:?} failed: {error}"));
+}
+
+/// Wait until production pauses at `point`, from a blocking frame.
+///
+/// The waits a synchronous row takes are the same waits an async one takes, and
+/// the only thing between them is the sandwich that enters the runtime. Written
+/// here so a blocking row names the point it is waiting on and nothing else.
+///
+/// `block_in_place` rather than a nested runtime: the caller is already on a
+/// multi-thread runtime's worker, and the pause it is waiting for is reached by
+/// production running on that same runtime.
+pub fn wait_paused_blocking<P: OwnerPoint>(owners: &impl Owns<P::Owner>, point: P, label: &str) {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(async { wait_until_paused_bounded(owners, point, label).await })
+    });
+}
+
+/// Await one already-built pause under the settling bound, or fail the case.
+///
+/// Every bounded wait differs only in how it named the owner it is waiting on,
+/// so what they share — the bound, and the sentence an unarmed point fails with
+/// — is written once here. A hold that spans a family set cannot be one
+/// [`OwnerPoint`], so it builds its own pause and brings it here rather than
+/// carrying a second copy of the bound.
+pub async fn bounded_pause(
+    paused: impl std::future::Future<Output = Result<(), RuntimeError>>,
+    context: &str,
+) {
+    pause_within(paused, SETTLE_BOUND, context).await;
+}
+
+/// Await one already-built pause under `bound`, or fail the case.
+///
+/// The one home for the sentence an unarmed point fails with. Private, because
+/// a caller either names a point — and takes [`wait_until_paused_within`] — or
+/// has already built a pause that spans a family set, and takes
+/// [`bounded_pause`] at the settling bound.
+async fn pause_within(
+    paused: impl std::future::Future<Output = Result<(), RuntimeError>>,
+    bound: Duration,
+    context: &str,
+) {
+    bounded(paused, bound, context)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("{context}: the lifecycle pause point was not armed: {error}")
+        });
+}
+
+/// How long a commanded stop has to commit a phase before a row fails.
+///
+/// Twice the settling bound, because what it waits on is not one owner
+/// settling: the command has to reach the supervisor, be selected against
+/// whatever that supervisor is already carrying, and be committed before the
+/// phase changes at all.
+pub const COMMITTED_STOP_BOUND: Duration = Duration::from_secs(10);
+
+/// Wait until `answered` reads true, under `bound`.
+///
+/// The general form of every read-only wait on a live observation. Nothing here
+/// makes the fact happen: the record is written by the production mutation it
+/// names, so the bound is what turns a fact that never arrives into a named
+/// failure instead of a parked test.
+///
+/// A yield loop rather than a sleep, for the two reasons every such wait has:
+/// the observation is published by production's own write, so the wait can end
+/// on it; and a row driving a paused clock must not have that clock advanced
+/// underneath it here.
+pub async fn await_live<F: Fn() -> bool>(answered: F, bound: Duration, context: &str) {
+    let observed = async {
+        while !answered() {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(bound, observed)
+        .await
+        .unwrap_or_else(|_| panic!("{context}"));
+}
+
+/// Wait until this server's stop state has left `running`.
+///
+/// Read-only, and the causal barrier every row that races a stop needs: the
+/// committed phase is what a connection answers a pending child against, so
+/// releasing that answer before the phase had committed would be racing the
+/// stop rather than following it.
+///
+/// A yield loop rather than a sleep. The phase is published by the supervisor's
+/// own commit, so the wait ends on production's write; keeping a task runnable
+/// is also what stops a row with a paused clock from advancing it here.
+pub async fn await_committed_stop(owners: &impl Owns<ServerStopController>, context: &str) {
+    let stop = owners.owner();
+    let committed = async {
+        while stop.observed().phase == "running" {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(COMMITTED_STOP_BOUND, committed)
+        .await
+        .unwrap_or_else(|_| panic!("{context}: no stop phase ever committed"));
+}
+
+/// Panic one server's supervisor core, and return once the unwind has committed
+/// a phase.
+///
+/// The fault is armed while the supervisor is held at its own select boundary,
+/// which is what makes the unwind land on a pass rather than on whichever
+/// branch the scheduler happened to reach: the children this row holds are
+/// answered by a supervisor that is already gone.
+///
+/// Two owners, both named: the stop owner brings the parked supervisor round to
+/// the fault and reports the phase it committed on the way out, and only the
+/// task vocabulary can end that core badly.
+pub async fn unwind_the_supervisor(
+    owners: &(impl Owns<ServerStopController> + Owns<ServerTaskController>),
+    context: &str,
+) {
+    let stop = Owns::<ServerStopController>::owner(owners);
+    stop.pause_once(ServerStopEdge::BeforeSupervisorSelect)
+        .expect("arm the supervisor's select boundary");
+    wait_until_paused_bounded(
+        &stop,
+        ServerStopEdge::BeforeSupervisorSelect,
+        "the supervisor reaches its select boundary",
     )
-    .await
-    .unwrap_or_else(|error| panic!("{context}: the lifecycle checkpoint was not armed: {error}"));
+    .await;
+    Owns::<ServerTaskController>::owner(owners)
+        .inject_once(ServerTaskFault::PanicSupervisorCore)
+        .expect("inject the supervisor unwind");
+    stop.release(ServerStopEdge::BeforeSupervisorSelect)
+        .expect("release the supervisor into its unwind");
+    await_committed_stop(owners, context).await;
 }
 
 /// [`bounded`], for a caller whose runtime clock is paused.

@@ -19,6 +19,7 @@
 //! to the WebSocket subsystem. Both still carry a guard — it resolves nothing,
 //! because the terminal cause is already set by the time it drops.
 
+use super::completion::{ConnectionEnd, OperationFinalizer};
 use super::server_lifecycle::ServerControl;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -187,6 +188,14 @@ impl DisconnectSignal {
 /// invariant is structural, and no caller has to remember to wrap.
 pub(super) struct ConnectionLiveness {
     terminating: AtomicBool,
+    /// Whether a concrete read or write on this transport returned an error.
+    ///
+    /// Held beside `terminating` rather than folded into it, because the two
+    /// answer different questions. Both mark a connection over, and only this
+    /// one tells a peer that closed cleanly from a transport that broke — which
+    /// is the difference between [`ConnectionEnd::PeerDisconnected`] and
+    /// [`ConnectionEnd::TransportFailed`].
+    failed: AtomicBool,
     /// The server's control watch — row 3 of the cause table. Read
     /// synchronously, so a shutdown request is visible to every guard that
     /// drops after it. Every connection now has one: one supervisor owns every
@@ -206,6 +215,7 @@ impl ConnectionLiveness {
     pub(super) fn controlled(control: tokio::sync::watch::Receiver<ServerControl>) -> Arc<Self> {
         Arc::new(Self {
             terminating: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
             shutdown: control,
         })
     }
@@ -233,17 +243,27 @@ impl ConnectionLiveness {
         self.terminating.load(Ordering::Acquire)
     }
 
+    /// Whether this connection's transport reported a concrete failure.
+    fn has_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
     /// Create one request's signal and its armed guard.
     ///
     /// It consumes the per-request handle the service closure already cloned.
     /// One additional connection refcount lets the request operation observe
     /// transport death while the response guard retains the same cause table;
     /// the response signal itself still costs one shared-state allocation.
-    pub(super) fn begin_response(self: Arc<Self>) -> (ResponseLifetime, ResponseGuard) {
+    pub(super) fn begin_response(
+        self: Arc<Self>,
+        finalizer: OperationFinalizer,
+    ) -> (ResponseLifetime, ResponseGuard) {
         let state = DisconnectState::new();
         let guard = ResponseGuard {
             state: Arc::clone(&state),
             connection: Arc::clone(&self),
+            account: Arc::clone(finalizer.account()),
+            finalizer: Some(finalizer),
         };
         let lifetime = ResponseLifetime {
             signal: DisconnectSignal { state },
@@ -274,18 +294,35 @@ impl ResponseLifetime {
     }
 }
 
-/// The single armed guard for one response.
+/// The single armed guard for one response, and its uniquely owned finalizer.
 ///
 /// Ownership moves from the per-request service future into the response body;
 /// a Rust move leaves no second holder, so exactly one drop can resolve. On
-/// drop it applies the first-wins cause table over preconditions Camber owns.
+/// drop it applies the first-wins cause table over preconditions Camber owns,
+/// names the connection end that cause implies, and lets its finalizer write
+/// the operation's one record.
 ///
-/// It reads those preconditions through the connection's own handle. The
-/// service future held one for this request already, so the guard borrows the
-/// whole cause table for what per-field clones cost for one field of it.
+/// The finalizer lives here and nowhere else because this is the response
+/// lifetime: whichever way that lifetime ends — a body produced in full, a peer
+/// that left mid-stream, or a per-request future Hyper dropped before any exit
+/// answered — this drop is the moment it ended, and there is no second one.
+///
+/// It reads its preconditions through the connection's own handle. The service
+/// future held one for this request already, so the guard borrows the whole
+/// cause table for what per-field clones cost for one field of it.
 pub(super) struct ResponseGuard {
     state: Arc<DisconnectState>,
     connection: Arc<ConnectionLiveness>,
+    /// The account every owner of this operation writes its facts into.
+    ///
+    /// Held beside the finalizer rather than reached for through it. The
+    /// finalizer is taken by the drop that records, so an accessor reading the
+    /// account off it could only answer "absent" — and a body that met a
+    /// download boundary would have had that fact silently dropped instead of
+    /// written.
+    account: Arc<super::completion::CompletionAccount>,
+    /// Taken by the drop that records, so a second record is unrepresentable.
+    finalizer: Option<OperationFinalizer>,
 }
 
 impl ResponseGuard {
@@ -294,14 +331,16 @@ impl ResponseGuard {
         self.state.resolve(DisconnectCause::Completed);
     }
 
+    /// The account every owner of this operation writes its facts into.
+    pub(super) const fn account(&self) -> &Arc<super::completion::CompletionAccount> {
+        &self.account
+    }
+
     /// Resolve this response's lifetime now, and answer with what it resolved to.
     ///
-    /// The body that owns this guard has to name the terminal it ended on while
-    /// it still holds the guard, and the cause table is what names it. Calling
-    /// this early rather than reading the table twice keeps one owner of that
-    /// decision: the drop below then finds the lifetime already resolved and
-    /// leaves it alone, exactly as it does for a completed response.
-    pub(super) fn settle(&self) -> DisconnectCause {
+    /// The cause table is read once per response and its answer is immutable, so
+    /// an owner asking early and the drop below asking later get the same value.
+    fn settle(&self) -> DisconnectCause {
         match self.state.cause.get() {
             Some(cause) => *cause,
             None => {
@@ -332,14 +371,20 @@ impl ResponseGuard {
 }
 
 impl Drop for ResponseGuard {
+    /// End this response lifetime, name what ended it, and record it once.
+    ///
+    /// Three steps in one place because they are one moment. The cause table
+    /// settles the lifetime, the connection end it implies is this guard's own
+    /// fact to write, and only then may the finalizer read a complete account.
     fn drop(&mut self) {
-        // Row 1 of the cause table, spelled out: an already-resolved lifetime
-        // has nothing left to decide, and it is the common case — every
-        // completed response passes here. Reading the table first would take a
-        // watch borrow and an atomic load per response only to throw both away.
-        match self.state.cause.get() {
-            Some(_) => {}
-            None => self.state.resolve(self.cause()),
+        let settled = self.settle();
+        let ended = ConnectionEnd::of(settled, self.connection.has_failed());
+        match self.finalizer.take() {
+            Some(finalizer) => {
+                self.account.record_connection_end(ended);
+                finalizer.finalize(settled);
+            }
+            None => {}
         }
     }
 }
@@ -357,6 +402,12 @@ pub(super) struct LivenessStream<S> {
 impl<S> LivenessStream<S> {
     fn mark_terminating(&self) {
         self.connection.terminating.store(true, Ordering::Release);
+    }
+
+    /// Record a concrete transport failure, which is also a connection ending.
+    fn mark_failed(&self) {
+        self.connection.failed.store(true, Ordering::Release);
+        self.mark_terminating();
     }
 
     /// Record the flag for any read outcome that ends this connection.
@@ -380,9 +431,8 @@ impl<S> LivenessStream<S> {
     /// values are derived at the one call site from the same buffer.
     fn observe_read(&self, outcome: &std::task::Poll<std::io::Result<()>>, reached_eof: bool) {
         match (outcome, reached_eof) {
-            (std::task::Poll::Ready(Err(_)), _) | (std::task::Poll::Ready(Ok(())), true) => {
-                self.mark_terminating();
-            }
+            (std::task::Poll::Ready(Err(_)), _) => self.mark_failed(),
+            (std::task::Poll::Ready(Ok(())), true) => self.mark_terminating(),
             _ => {}
         }
     }
@@ -390,7 +440,7 @@ impl<S> LivenessStream<S> {
     /// Record the flag for any write outcome that ends this connection.
     fn observe_write<T>(&self, outcome: &std::task::Poll<std::io::Result<T>>) {
         match outcome {
-            std::task::Poll::Ready(Err(_)) => self.mark_terminating(),
+            std::task::Poll::Ready(Err(_)) => self.mark_failed(),
             _ => {}
         }
     }

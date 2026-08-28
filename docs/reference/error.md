@@ -9,7 +9,7 @@ propagation without converting between framework-specific error types.
 
 The variants cluster into a few stable buckets:
 
-- runtime and coordination: `Io`, `Timeout`, `Cancelled`, `TaskPanicked`, channel errors
+- runtime and coordination: `Io`, `Timeout`, `Cancelled`, `TaskPanicked`, `ChannelClosed`, `ChannelFull`
 - configured service deadlines: `DeadlineExceeded(DeadlineBoundary)`
 - configured byte maximums: `LimitExceeded(ByteBoundary)`
 - runtime context and task lifecycle: `NoRuntime`, `ScopeClosed`, `ScopeDrainTimeout`
@@ -35,17 +35,16 @@ The exact enum is documented in rustdoc. The useful public rule is that Camber k
 
 ## Lifecycle Aggregates
 
-`Lifecycle` is what a runtime entry point returns when teardown could not finish cleanly: `runtime::run`, `RuntimeBuilder::run`, `runtime::test`, or `#[camber::test]`. It carries every framework-owned participant that failed during one startup or one teardown, frozen after every join or abandonment decision has been taken — never a single flattened winner.
+`Lifecycle` is what a runtime entry point returns when teardown could not finish cleanly: `runtime::run`, `RuntimeBuilder::run`, `runtime::test`, or `#[camber::test]`. It carries every direct runtime-owned participant that failed during one startup or one teardown, frozen after every join or abandonment decision has been taken — never a single flattened winner, and never a chosen one.
 
 ```rust
-use camber::{LifecycleFailureKind, LifecycleParticipant, RuntimeError};
+use camber::{LifecycleFailureKind, RuntimeError};
 
 fn report(error: &RuntimeError) {
     let RuntimeError::Lifecycle(failures) = error else { return };
-    // The one to act on. The rest stay available through `iter`.
-    let primary = failures.primary();
-    println!("{} failed in {}", primary.participant(), primary.phase());
+    // Every direct owner that failed. None of them is the one to act on.
     for failure in failures.iter() {
+        println!("{} failed in {}", failure.participant(), failure.phase());
         if let LifecycleFailureKind::Resource(resource) = failure.kind() {
             println!("resource {} : {}", resource.name(), resource.kind());
         }
@@ -53,15 +52,23 @@ fn report(error: &RuntimeError) {
 }
 ```
 
-- `primary()` is total — an aggregate exists only because something failed — and is the first entry in owner order: the outermost owner that failed, whatever it failed with. A root-scope entry is read before a resource's, and a resource's before the executor's. Nothing ranks the failure kinds against each other.
-- `iter()` lists every entry in owner order: root scope, servers, their connections and upgrades, background children, resources, the exporter, then the executor.
+- `iter()` lists every entry in rendering order: root scope, background children, resources, then the exporter. There is no accessor for a chosen entry. The runtime reports what failed and leaves the decision of what to act on with you.
+- Rendering order is reproducible output and nothing else. It is not causal precedence: the first entry is no more responsible than the last, and nothing ranks the failure kinds against each other.
+- `len()` counts the entries. There is no `is_empty` — an aggregate exists only because at least one owner failed.
+- `Display` renders the count followed by every entry, so an operator line elects no owner either.
 - `LifecycleParticipant`, `LifecyclePhase`, and `LifecycleFailureKind` are closed, so a `match` over any of them is exhaustive and a new variant is a deliberate API change.
 
 A server's own result stays flat. `ServerHandle` and `ServerHandleFuture` answer `Result<(), RuntimeError>` — `Cancelled`, `Timeout`, or the fatal error that ended the server — because that value has an owner already holding it. The aggregate names the owners no caller holds a handle for.
 
+Which of those a server answers with is decided by commit order, not by rank. Every stop command commits its phase before it publishes anything, so `RuntimeError::Cancelled` is what a join reports whenever an accepted `.cancel()` committed before the server's terminal result did. A deadline or a settlement that committed first keeps its own result — `RuntimeError::Timeout` for a graceful drain that ran out of its one aggregate deadline — and the later command is then a no-op rather than an override. Two facts with no order between them are not weighed against each other.
+
+`LifecycleParticipant::Exporter` is settlement-only vocabulary. Teardown settles the trace provider completed through `ShutdownOwner::EXPORTER`, whose shutdown is unbounded and hands nothing back, so no aggregate entry is ever recorded against it.
+
+A blocked upgrade callback is the one child a flat server result does not speak for. The upgrade owner records a callback disposition for it: a callback still running at the fixed join deadline raises one WARN event, `camber.websocket.callback.outstanding`, carrying `disposition="outstanding-after-forced-grace"`, and Camber stops claiming it returned. That event and that field are the whole observable form — the record behind them is private to the bridge. The server result still follows the accepted server command, so the callback disposition is an operator event rather than a second result.
+
 What the aggregate cannot claim: Camber's deadlines bound Camber's own waiting and escalation. Cooperative cancellation cannot preempt an async task that never yields, cannot stop application code running on a blocking or OS thread, and cannot prove that an abandoned synchronous callback has returned. A participant Camber could not prove finished is named rather than reported as stopped.
 
-If the user closure panics, the panic is the answer and nothing replaces it. Teardown still runs in full, the aggregate it produced is emitted as one `lifecycle failures displaced by an unwinding closure` event carrying the primary's participant, phase, and the recorded count, and the original payload then resumes.
+If the user closure panics, the panic is the answer and nothing replaces it. Teardown still runs in full, the aggregate it produced is emitted as one `lifecycle failures displaced by an unwinding closure` event carrying the recorded count and the rendering of every entry, and the original payload then resumes.
 
 ## Application-Supplied Variants
 
@@ -124,6 +131,10 @@ application acts on, and a channel result flattens six answers into one:
 - `ChannelFull` means backpressure. `WsSender::try_send` and
   `try_send_binary` return it only while the connection is live and its bounded
   outbound queue is full, so retrying is meaningful.
+- `ChannelClosed` means a send or receive found the other side gone, and carries
+  no cause. It is what `camber::channel`, `select!`, and a join whose sender was
+  dropped answer. A direct WebSocket half answers `WebSocketClosed` instead,
+  which is the same event carrying the reason for it.
 - `WebSocketClosed` means the connection is over. Every send after that reports
   it, including one that found the queue full.
 - `BlockingInAsyncContext` means the caller asked a current-thread Tokio runtime

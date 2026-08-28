@@ -1,4 +1,4 @@
-use camber::http::mock::{LifecycleCheckpoint, lifecycle};
+use camber::http::mock::{ResponseCommitmentEdge, response_commitment};
 use camber::http::{Request, Response, Router};
 use std::time::Duration;
 
@@ -62,8 +62,8 @@ async fn configured_body_limit_clamps_at_hard_max() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let controller = lifecycle(addr).unwrap();
-    let checkpoint = LifecycleCheckpoint::RequestBodyLimitConfigured(HARD_MAX);
+    let controller = response_commitment(addr).unwrap();
+    let checkpoint = ResponseCommitmentEdge::RequestBodyLimitConfigured(HARD_MAX);
     controller.pause_once(checkpoint).unwrap();
 
     let server = camber::http::serve_background(listener, router)

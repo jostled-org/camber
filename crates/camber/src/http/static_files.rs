@@ -20,7 +20,7 @@
 use super::Response;
 use super::boundary::ByteBoundary;
 use super::checked_collect::CheckedCollector;
-use super::mock::{BlockingWorkerObserver, LifecycleCheckpoint, StaticFileEvent, StaticFileStep};
+use super::mock::{BlockingWorkerEdge, BlockingWorkerObserver, StaticFileEvent, StaticFileStep};
 use crate::RuntimeError;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -181,7 +181,7 @@ impl StaticFileWorker {
         self.observer.spanning(
             StaticFileEvent::WorkerEntered,
             StaticFileEvent::WorkerReturned,
-            LifecycleCheckpoint::StaticFileWorkerEntered,
+            BlockingWorkerEdge::StaticFileWorkerEntered,
             || self.read(),
         )
     }
@@ -215,7 +215,7 @@ impl StaticFileWorker {
             .publish(StaticFileEvent::CeilingFrozen(collected.ceiling()));
         collected.admit_declared(Some(declared))?;
         self.observer
-            .hold_at(LifecycleCheckpoint::StaticFileMetadataObserved);
+            .hold_at(BlockingWorkerEdge::StaticFileMetadataObserved);
 
         let opened = match self.open(&canonical) {
             Some(opened) => opened,

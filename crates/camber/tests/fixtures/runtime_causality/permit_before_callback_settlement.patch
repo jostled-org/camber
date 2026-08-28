@@ -1,0 +1,18 @@
+--- a/crates/camber/src/http/ws_proxy/direct.rs
++++ b/crates/camber/src/http/ws_proxy/direct.rs
+@@ -180,6 +180,7 @@
+     // Before the permit, and so before this task returns to the upgrade owner
+     // that joins it: an upgrade cannot settle while the callback it started is
+     // neither joined nor named.
++    release_permit(permit, script.as_deref());
+     settle_callback(
+         callback,
+         &mut bridged.deadline,
+@@ -188,7 +189,6 @@
+         script.as_deref(),
+     )
+     .await;
+-    release_permit(permit, script.as_deref());
+ }
+ 
+ /// Give this connection's slot back, then say that it is back.

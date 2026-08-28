@@ -172,9 +172,18 @@ pub(super) async fn until_abort<F>(
 {
     tokio::select! {
         biased;
-        _ = awaited_control(control, |mode| mode == ServerControl::Abort) => {}
+        () = awaited_abort(control) => {}
         () = step => {}
     }
+}
+
+/// Wait for the one escalation that overrides whatever a bridge is waiting on.
+///
+/// Spelled once, because the teardown step and the retained callback's join
+/// both stop for it: two predicates over one watch are two definitions of what
+/// counts as an abort, and the two owners would eventually disagree.
+pub(super) async fn awaited_abort(control: &mut tokio::sync::watch::Receiver<ServerControl>) {
+    awaited_control(control, |mode| mode == ServerControl::Abort).await;
 }
 
 /// Wait for a control mode that answers `reached`.

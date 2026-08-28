@@ -11,7 +11,10 @@ use crate::common;
 use crate::http as wire;
 
 use camber::RuntimeError;
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController};
+use camber::http::mock::{
+    InboundTerminal, RequestBodyOwnerController, ResponseCommit, ResponseCommitmentEdge,
+    ResponseOrigin, ScopedAdmittedCommitment,
+};
 use camber::http::{
     BodyAdmission, BodyAdmissionContext, HostRouter, Next, RejectionKind, Request, RequestBodyMode,
     Response, Router,
@@ -105,8 +108,12 @@ fn permitting_policy(
 }
 
 /// Serve one streaming proxy on an observed listener, under one admission policy.
-fn streaming_proxy(backend: &str, selected: usize, probes: &Probes) -> wire::ObservedServer {
-    let port = wire::reserve_observed();
+fn streaming_proxy(
+    backend: &str,
+    selected: usize,
+    probes: &Probes,
+) -> wire::ObservedServer<ScopedAdmittedCommitment> {
+    let port = wire::reserve_admitted_commitment();
     let mut router = Router::new();
     router.proxy_stream(PREFIX, backend);
     port.serve(
@@ -141,7 +148,8 @@ fn upstream_head_winner_quiesces_upload_before_downstream_commit() {
             let server = streaming_proxy(&upstream.backend(), CEILING, &probes);
             let controller = server.controller();
             controller
-                .pause_once(LifecycleCheckpoint::BeforeStreamingResponseCommit)
+                .commitment
+                .pause_once(ResponseCommitmentEdge::BeforeDownstreamCommit)
                 .expect("arm the streaming commitment checkpoint");
 
             let mut peer = wire::connect(server.addr()).expect("the paced peer connected");
@@ -149,16 +157,13 @@ fn upstream_head_winner_quiesces_upload_before_downstream_commit() {
             wire::tolerate_dead_socket(wire::write_chunk(&mut peer, UNDER))
                 .expect("the first frame reached the proxy");
 
-            common::block_on(async {
-                wire::wait_until_paused_bounded(
-                    &controller,
-                    LifecycleCheckpoint::BeforeStreamingResponseCommit,
-                    "the answer reached its commitment checkpoint",
-                )
-                .await;
-            });
+            wire::wait_paused_blocking(
+                controller,
+                ResponseCommitmentEdge::BeforeDownstreamCommit,
+                "the answer reached its commitment checkpoint",
+            );
 
-            let quiesced = controller.body_frames_polled();
+            let quiesced = wire::body_owners(server.controller()).frames_polled;
             assert!(
                 quiesced >= 1,
                 "the frames sent before the answer were polled and counted"
@@ -169,7 +174,7 @@ fn upstream_head_winner_quiesces_upload_before_downstream_commit() {
                 "the upload released its permit before the answer was committed"
             );
             assert_eq!(
-                controller.body_permit_owners_dropped(),
+                wire::body_owners(server.controller()).permit_owners_dropped,
                 1,
                 "the listener counted the same single release"
             );
@@ -187,7 +192,8 @@ fn upstream_head_winner_quiesces_upload_before_downstream_commit() {
             wire::tolerate_dead_socket(wire::write_chunk(&mut peer, b"after-quiescence"))
                 .expect("the frame sent after quiescence reached the proxy");
             controller
-                .release(LifecycleCheckpoint::BeforeStreamingResponseCommit)
+                .commitment
+                .release(ResponseCommitmentEdge::BeforeDownstreamCommit)
                 .expect("release the answer onto the wire");
 
             let answered = wire::read_http_response_bounded(&mut peer)
@@ -200,7 +206,7 @@ fn upstream_head_winner_quiesces_upload_before_downstream_commit() {
                 "an answer over unread payload ends the connection"
             );
             assert_eq!(
-                controller.body_frames_polled(),
+                wire::body_owners(server.controller()).frames_polled,
                 quiesced,
                 "no frame is polled after the upload has quiesced"
             );
@@ -211,233 +217,272 @@ fn upstream_head_winner_quiesces_upload_before_downstream_commit() {
         .unwrap();
 }
 
-// ── The bound wins a tie against an upstream head ────────────────────
+// ── Committed barriers, not a rank, decide the bound against the head ─
 
-/// How many turns must be settled with both results ready.
+/// How many unordered iterations the race row runs.
 ///
-/// What is under test is a precedence rule, and a coordinator without one would
-/// decide each staged turn by coin flip rather than always the wrong way. One
-/// turn would clear such a coordinator half the time; this many leaves it under
-/// one run in two hundred.
-const TIE_TURNS: usize = 8;
+/// Each is a complete exchange against a live proxy and a live upstream, so what
+/// the count buys is sensitivity to a result outside the documented closed set
+/// rather than a winner. The listener is served once and every iteration is
+/// measured as a step above its own baseline, so the count costs one exchange
+/// each rather than a bind, a serve, and a joined teardown.
+const RACE_ITERATIONS: usize = 32;
 
-/// How many attempts those turns may take.
-///
-/// An attempt is spent rather than settled when something else wakes the
-/// coordinator while only the head is ready, which nothing in a test can
-/// forbid — the request is served over a real connection, and the server's own
-/// transport is entitled to poll it. Spent attempts are recognised and repeated
-/// rather than asserted on, so the headroom here is for them.
-const TIE_ATTEMPTS: usize = TIE_TURNS * 4;
-
-/// How long a spent turn has to show itself before the crossing is released.
-const SPENT_WINDOW: Duration = Duration::from_millis(200);
-
-/// What one staged attempt produced.
-enum Staged {
-    /// The coordinator was still parked when the crossing reached it, so this
-    /// answer is the one it gave a turn both results were ready in.
-    Settled(wire::HttpResponse),
-    /// Something else woke the coordinator first, so the turn was decided while
-    /// only the head was ready. The answer says nothing about precedence.
-    Spent,
+/// What one row's peer read, and what its refusal journal held.
+struct Answered {
+    status: u16,
+    mapped: Box<[common::Observed]>,
 }
 
-/// Stage one turn with both of this request's results ready, and read its answer.
+/// Open one upload, send a frame that fits, and hand back the paced peer.
 ///
-/// The staging is the whole fixture. The crossing frame is held where the upload
-/// observes it and before it is reported, and the upstream's head is held where
-/// it became ready — so neither has reached the coordinator yet. Releasing the
-/// head outright would wake the coordinator, which then settles the request
-/// before a crossing exists at all; so the head's release is recorded quietly
-/// and the crossing's release does the waking. The coordinator's next poll then
-/// has both results ready, which is the only turn a precedence rule decides
-/// anything in.
-///
-/// "Next poll" is what has to be earned. The server's own connection task polls
-/// this request for its own reasons, and one of those polls landing on a staged
-/// head settles the turn with nothing to weigh it against. So the held head is
-/// watched: the coordinator has to look at it and stop looking before the head
-/// is staged, and any look between staging and the crossing's release marks the
-/// attempt spent.
-fn stage_ready_tie(server: &wire::ObservedServer, controller: &LifecycleController) -> Staged {
-    let held = LifecycleCheckpoint::StreamingUpstreamHeadReady;
-    let crossing = LifecycleCheckpoint::RequestBodyLimitObserved;
-    controller
-        .pause_once(held)
-        .expect("arm the upstream-head checkpoint");
-    controller
-        .pause_once(crossing)
-        .expect("arm the crossing checkpoint");
-
+/// The frame tolerates a peer that has already been answered. A row holding one
+/// producer at its own edge cannot reach that state, so it loses nothing; the
+/// unordered row can, because an upstream head committed over an undrained
+/// upload ends the connection and the frame then meets a socket the proxy has
+/// closed. That is the answer arriving early, and the closed result set is what
+/// reads it.
+fn opened_upload<Owner>(server: &wire::ObservedServer<Owner>) -> std::net::TcpStream {
     let mut peer = wire::connect(server.addr()).expect("the racing peer connected");
     open_upload(&mut peer, wire::DEFAULT_HOST);
-    wire::tolerate_dead_socket(wire::write_chunk(&mut peer, UNDER))
-        .expect("the first frame reached the proxy");
-    common::block_on(async {
-        wire::wait_until_paused_bounded(
-            controller,
-            held,
-            "the upstream answered and its head is held ready",
-        )
-        .await;
-    });
+    wire::tolerate_answered_peer(wire::write_chunk(&mut peer, UNDER))
+        .expect("the first frame reached the proxy, or the proxy had already answered");
+    peer
+}
 
-    wire::tolerate_dead_socket(wire::write_chunk(&mut peer, &CROSSING))
-        .expect("the crossing frame reached the proxy");
-    common::block_on(async {
-        wire::wait_until_paused_bounded(
-            controller,
-            crossing,
-            "the crossing was observed and is held unreported",
-        )
-        .await;
-    });
-
-    wait_until_parked(controller, held);
-    let looked = polls_at(controller, held);
-    controller
-        .stage_release(held)
-        .expect("record the upstream head ready without waking the coordinator");
-    let staged = polls_before_release(controller, held, looked);
-    controller
-        .release(crossing)
-        .expect("let the crossing reach the coordinator that is holding both");
-
-    let answered =
-        wire::read_http_response_bounded(&mut peer).expect("the staged turn was answered");
-    wire::assert_connection_closed(&mut peer, "equal-ready tie");
-    match staged > looked {
-        true => Staged::Spent,
-        false => assert_settled_without_looking(controller, held, staged, answered),
+/// Read one row's answer and the refusals its route's mapper was handed.
+fn answered(peer: &mut std::net::TcpStream, probes: &Probes) -> Answered {
+    let answered = wire::read_http_response_bounded(peer).expect("the row was answered");
+    Answered {
+        status: answered.status,
+        mapped: common::drain(&probes.mapped),
     }
 }
 
-/// How many turns the future held at `checkpoint` has taken.
+/// What the release counters one row is measured against already stood at.
 ///
-/// A checkpoint this controller never armed is refused rather than counted, and
-/// that refusal is a case naming the wrong checkpoint rather than an observation
-/// about the coordinator. Every read below reports it as the fixture fault it is.
-fn polls_at(controller: &LifecycleController, checkpoint: LifecycleCheckpoint) -> usize {
-    controller
-        .checkpoint_polls(checkpoint)
-        .expect("the checkpoint this attempt armed is the one it reads")
+/// Both counters are cumulative per listener, and the race row drives every one
+/// of its iterations against a single served listener. Taken before that row's
+/// peer opens, this baseline turns each cumulative counter back into the one
+/// release the iteration itself owed. A row that serves its own listener takes
+/// the same reading and finds it at zero.
+struct Cleanup {
+    drops: usize,
+    owners: usize,
 }
 
-/// The poll count the released crossing is measured against.
-///
-/// A wake already in flight when the head was staged has to land before the
-/// crossing is released, or the turn it spends cannot be told apart from the
-/// turn the precedence rule decides. Nothing in a test can forbid such a wake —
-/// the request is served over a real connection, and the server's own transport
-/// is entitled to poll it — and the seam reports polls that have happened, never
-/// wakes that are pending, so an elapsed window is the only observation of one's
-/// absence there is.
-///
-/// The count is read again after the window rather than taken from the poll's
-/// own answer. A wake landing between the two would otherwise be asserted on as
-/// a settled turn that weighed the head, which is the one failure this fixture
-/// must never report: a spent attempt is repeated, not failed.
-fn polls_before_release(
-    controller: &LifecycleController,
-    held: LifecycleCheckpoint,
-    looked: usize,
-) -> usize {
-    wire::poll_value(SPENT_WINDOW, || {
-        let polls = polls_at(controller, held);
-        (polls > looked).then_some(polls)
-    })
-    .unwrap_or_else(|| polls_at(controller, held))
+impl Cleanup {
+    /// Read what this row's two release counters stand at right now.
+    fn take<Owner: wire::Owns<RequestBodyOwnerController>>(
+        server: &wire::ObservedServer<Owner>,
+        probes: &Probes,
+    ) -> Self {
+        Self {
+            drops: probes.drops(),
+            owners: wire::body_owners(server.controller()).permit_owners_dropped,
+        }
+    }
 }
 
-/// Wait until the coordinator has looked at the held head and stopped looking.
+/// Assert one row left the cleanup every result here owes, whichever it was.
 ///
-/// A look still owed is a poll that would land on a head staged before it, so
-/// the head is staged only once the count has gone one interval without moving.
-fn wait_until_parked(controller: &LifecycleController, held: LifecycleCheckpoint) {
-    // Seeded past any real count, so the first comparison cannot succeed and
-    // the count must survive a whole poll interval to count as still.
-    let mut previous = usize::MAX;
-    let parked = wire::poll_until(SETTLE_BOUND, || {
-        let now = polls_at(controller, held);
-        let still = now == previous;
-        previous = now;
-        still
+/// Identical for both allowed results, which is the point: a race whose two
+/// members owed different cleanup would be two behaviours rather than one
+/// contract with two valid answers.
+///
+/// Both counts are read as one more than `before` rather than as one outright.
+/// The claim is the same either way — this row released exactly what it took —
+/// and stating it as a step lets a row that shares its listener with the
+/// iterations around it make the claim its own.
+fn assert_row_cleanup<Owner: wire::Owns<RequestBodyOwnerController>>(
+    peer: &mut std::net::TcpStream,
+    server: &wire::ObservedServer<Owner>,
+    probes: &Probes,
+    upstream: &RawUpstream,
+    before: &Cleanup,
+    row: &str,
+) {
+    wire::assert_connection_closed(peer, row);
+    assert!(
+        !upstream.forwarded(&CROSSING),
+        "{row}: no crossing frame reaches an upstream"
+    );
+    wire::assert_released(&probes.drops, before.drops + 1, row);
+    let counted = wire::poll_until(SETTLE_BOUND, || {
+        wire::body_owners(server.controller()).permit_owners_dropped == before.owners + 1
     });
-    assert!(parked, "the coordinator parked on the head it is holding");
+    assert!(
+        counted,
+        "{row}: the listener counted the same single release"
+    );
 }
 
-/// Assert the settled turn never weighed the head it could have taken.
+/// Row A: the upstream head reaches its commit barrier before the crossing is
+/// released, so the upstream status is what the peer reads.
 ///
-/// A coordinator that reached its answer without polling the ready head is one
-/// that decided the turn on the bound alone, which is the precedence rule
-/// itself: an unbiased turn polls the arms in an order it chooses, and taking
-/// the head is what that choice makes possible.
-fn assert_settled_without_looking(
-    controller: &LifecycleController,
-    held: LifecycleCheckpoint,
-    staged: usize,
-    answered: wire::HttpResponse,
-) -> Staged {
+/// The barrier is production's own: the coordinator has taken this operation's
+/// commitment for the upstream head and quiesced the upload by the time it is
+/// held here. Only then does this row put the crossing frame on the wire, so the
+/// crossing meets a commitment another producer already holds and maps nothing.
+fn assert_head_committed_first(upstream: &RawUpstream, probes: &Probes) {
+    let row = "upstream head committed first";
+    let server = streaming_proxy(&upstream.backend(), CEILING, probes);
+    let controller = server.controller();
+    let committed = ResponseCommitmentEdge::BeforeDownstreamCommit;
+    controller
+        .commitment
+        .pause_once(committed)
+        .expect("arm the downstream commit edge");
+
+    let before = Cleanup::take(&server, probes);
+    let mut peer = opened_upload(&server);
+    wire::wait_paused_blocking(controller, committed, row);
+
+    let observed = controller.commitment.observed();
     assert_eq!(
-        polls_at(controller, held),
-        staged,
-        "the settled turn took the bound without weighing the head that was ready for it"
+        observed.commits, 1,
+        "{row}: the upstream head took the one commitment"
     );
-    Staged::Settled(answered)
+    wire::tolerate_dead_socket(wire::write_chunk(&mut peer, &CROSSING))
+        .expect("the crossing frame reached the proxy");
+    controller
+        .commitment
+        .release(committed)
+        .expect("let the committed head go downstream");
+
+    let read = answered(&mut peer, probes);
+    assert_eq!(
+        read.status, 200,
+        "{row}: a head committed before the crossing was released stays authoritative"
+    );
+    assert!(
+        read.mapped.is_empty(),
+        "{row}: a crossing that reached a taken commitment maps nothing"
+    );
+    assert_row_cleanup(&mut peer, &server, probes, upstream, &before, row);
 }
 
-/// Assert what one settled turn owes: the bound's answer, mapped once, naming
-/// the request its own classification selected.
-fn assert_settled_turn(answered: &wire::HttpResponse, probes: &Probes, attempt: usize) {
+/// Row B: the crossing commits before the upstream head is allowed through, so
+/// the peer reads this route's mapped refusal.
+fn assert_crossing_committed_first(upstream: &RawUpstream, probes: &Probes) {
+    let row = "crossing committed first";
+    let server = streaming_proxy(&upstream.backend(), CEILING, probes);
+    let controller = server.controller();
+    let head = ResponseCommitmentEdge::UpstreamHeadReady;
+    controller
+        .commitment
+        .pause_once(head)
+        .expect("arm the upstream-head edge");
+
+    let before = Cleanup::take(&server, probes);
+    let mut peer = opened_upload(&server);
+    wire::wait_paused_blocking(controller, head, row);
+    wire::tolerate_dead_socket(wire::write_chunk(&mut peer, &CROSSING))
+        .expect("the crossing frame reached the proxy");
+
+    let read = answered(&mut peer, probes);
     assert_eq!(
-        answered.status, 413,
-        "attempt {attempt}: the bound wins the turn its upstream head became ready in"
+        read.status, 413,
+        "{row}: a crossing committed before the head was released owns the answer"
     );
-    let seen = only(&probes.mapped, "equal-ready tie");
+    let seen = common::only_of(&read.mapped, row);
     assert_eq!(seen.kind, RejectionKind::BodyLimit);
     assert_eq!(seen.route.as_deref(), Some(PREFIX_ROUTE));
-    common::assert_request_id_shape(Some(&seen.request_id), "equal-ready tie");
     assert_eq!(
         seen.raw_path.as_ref(),
         TARGET,
-        "the refusal names the request its own classification selected"
+        "{row}: the refusal names the request its own classification selected"
     );
+    common::assert_request_id_shape(Some(&seen.request_id), row);
+
+    controller
+        .commitment
+        .release(head)
+        .expect("let the losing head go");
+    assert_row_cleanup(&mut peer, &server, probes, upstream, &before, row);
 }
 
+/// Row C: both producers are released with no edge between them.
+///
+/// Either result is correct, and the closed set is the whole claim: this route's
+/// mapped `BodyLimit` or the status the upstream committed. Every iteration owes
+/// the same cleanup whichever it got, which is what makes the two members one
+/// contract rather than two behaviours.
+fn assert_unordered_race(upstream: &RawUpstream) {
+    // One listener and one set of probes for every iteration. What each row owed
+    // is read as a step above the baseline it took first, so a later iteration
+    // cannot inherit an earlier one's single release and pass on it — which is
+    // the whole reason the counters were once served fresh.
+    let probes = &Probes::new();
+    let server = streaming_proxy(&upstream.backend(), CEILING, probes);
+    for iteration in 0..RACE_ITERATIONS {
+        let row = format!("unordered race {iteration}");
+        let before = Cleanup::take(&server, probes);
+        let commits_before = server.controller().commitment.observed().commits;
+        let mut peer = opened_upload(&server);
+        // No barrier holds this row's producers apart, so the upstream head can
+        // already have been committed, written, and its connection ended. The
+        // crossing frame then reaches a closed socket, which is that member of
+        // the closed set winning rather than the fixture's transport breaking.
+        wire::tolerate_answered_peer(wire::write_chunk(&mut peer, &CROSSING))
+            .expect("the crossing frame reached the proxy, or the proxy had already answered");
+
+        let read = answered(&mut peer, probes);
+        // Each member is read off the production cell as well as off the wire.
+        // A status alone leaves the set open: a `200` some other producer
+        // committed reads the same on this socket, and the closed set would
+        // have silently gained a third member.
+        let committed = server.controller().commitment.observed();
+        match read.status {
+            413 => {
+                let seen = common::only_of(&read.mapped, &row);
+                assert_eq!(seen.kind, RejectionKind::BodyLimit);
+                assert_eq!(seen.route.as_deref(), Some(PREFIX_ROUTE));
+                assert_eq!(
+                    committed.committed,
+                    Some(ResponseCommit::Cause(InboundTerminal::RouteBodyLimit)),
+                    "{row}: the mapped refusal is the fact this operation committed: {committed:?}"
+                );
+            }
+            200 => {
+                assert!(
+                    read.mapped.is_empty(),
+                    "{row}: a committed upstream status maps no refusal"
+                );
+                assert_eq!(
+                    committed.committed,
+                    Some(ResponseCommit::Head(ResponseOrigin::Upstream)),
+                    "{row}: the upstream head is the fact this operation committed: {committed:?}"
+                );
+            }
+            other => panic!("{row}: {other} is outside the documented closed result set"),
+        }
+        assert_eq!(
+            committed.commits,
+            commits_before + 1,
+            "{row}: whichever member won, one producer took the commitment: {committed:?}"
+        );
+        assert_row_cleanup(&mut peer, &server, probes, upstream, &before, &row);
+    }
+}
+
+/// Invariant 11
+///
+/// A streaming upload's own bound and its upstream's head are two producers of
+/// one answer. Neither outranks the other: whichever reaches this operation's
+/// response commitment first owns the response, and the two rows with a real
+/// barrier between them prove both directions of that. The third row releases
+/// them with no ordering edge at all and accepts only the documented closed set,
+/// requiring the identical cleanup for both members.
 #[test]
-fn equal_ready_limit_beats_upstream_head_before_commit() {
+fn streaming_body_limit_and_upstream_head_follow_committed_barriers() {
     common::test_runtime()
         .shutdown_timeout(Duration::from_secs(5))
         .run(|| {
             let upstream = raw_upstream(200, UPSTREAM_BODY, UpstreamAnswers::OnHead);
-            let probes = Probes::new();
-            let server = streaming_proxy(&upstream.backend(), CEILING, &probes);
-            let controller = server.controller();
-
-            let mut settled = 0;
-            let mut attempts = 0;
-            while settled < TIE_TURNS && attempts < TIE_ATTEMPTS {
-                attempts += 1;
-                match stage_ready_tie(&server, controller) {
-                    Staged::Spent => drop(common::drain(&probes.mapped)),
-                    Staged::Settled(answered) => {
-                        settled += 1;
-                        assert_settled_turn(&answered, &probes, attempts);
-                    }
-                }
-            }
-            assert_eq!(
-                settled, TIE_TURNS,
-                "only {settled} of {attempts} attempts reached the coordinator as a staged turn"
-            );
-            assert!(
-                !upstream.forwarded(&CROSSING),
-                "no crossing frame reaches an upstream, in any turn"
-            );
-            // Settled or spent, every attempt admitted one permit and owed one
-            // release: a turn nothing could claim still owns what it took.
-            wire::assert_released(&probes.drops, attempts, "equal-ready tie");
+            assert_head_committed_first(&upstream, &Probes::new());
+            assert_crossing_committed_first(&upstream, &Probes::new());
+            assert_unordered_race(&upstream);
 
             runtime::request_shutdown();
         })
@@ -479,7 +524,10 @@ fn assert_completion_releases_once_and_keeps_the_connection() {
         "every admitted frame reached the upstream"
     );
     wire::assert_released(&probes.drops, 1, "streaming completion");
-    assert_eq!(server.controller().body_permit_owners_dropped(), 1);
+    assert_eq!(
+        wire::body_owners(server.controller()).permit_owners_dropped,
+        1
+    );
 
     let framed = wire::probe_connection_reuse(&mut peer, "POST", TARGET, &[], UNDER)
         .expect("the reuse probe reached the same connection")
@@ -536,7 +584,10 @@ fn assert_disconnect_releases_once() {
         .expect("the frame reached the proxy");
     drop(peer);
     wire::assert_released(&probes.drops, 1, "disconnect during upload");
-    assert_eq!(server.controller().body_permit_owners_dropped(), 1);
+    assert_eq!(
+        wire::body_owners(server.controller()).permit_owners_dropped,
+        1
+    );
 }
 
 /// Cancel the request future while it waits on an upstream that never answers.
@@ -687,7 +738,7 @@ type ContextJournal = Arc<Mutex<Vec<SeenContext>>>;
 fn journalling_policy(
     seen: &ContextJournal,
     probes: &Probes,
-    controller: &Arc<LifecycleController>,
+    controller: &Arc<ScopedAdmittedCommitment>,
     admit: bool,
 ) -> impl Fn(&BodyAdmissionContext<'_>) -> Result<BodyAdmission, RuntimeError> + Send + Sync + 'static
 {
@@ -706,7 +757,7 @@ fn journalling_policy(
             streaming: context.mode() == RequestBodyMode::Streaming,
             declared: context.declared_length(),
             header: context.header("X-CaSe").map(Into::into),
-            polled: controller.body_frames_polled(),
+            polled: controller.bodies.observed().frames_polled,
         });
         match admit {
             true => Ok(BodyAdmission::with_permit(
@@ -763,8 +814,8 @@ fn gated_proxy(
     probes: &Probes,
     admit: bool,
     gate: &Arc<AtomicUsize>,
-) -> wire::ObservedServer {
-    let port = wire::reserve_observed();
+) -> wire::ObservedServer<ScopedAdmittedCommitment> {
+    let port = wire::reserve_admitted_commitment();
     let controller = port.controller();
     let mut router = Router::new();
     router.proxy_stream(PREFIX, backend);
@@ -829,7 +880,7 @@ fn assert_declined_policy_stops_first(upstream: &RawUpstream) {
         0,
         "a declined policy reaches no upstream"
     );
-    assert_eq!(server.controller().body_frames_polled(), 0);
+    assert_eq!(wire::body_owners(server.controller()).frames_polled, 0);
     assert_eq!(probes.drops(), 0, "a declined policy hands over no permit");
 }
 
@@ -861,7 +912,7 @@ fn assert_gate_refuses_after_admission(upstream: &RawUpstream) {
         "the gate ran once, after the permit was granted"
     );
     assert_eq!(
-        server.controller().body_frames_polled(),
+        wire::body_owners(server.controller()).frames_polled,
         0,
         "a refused gate polls no payload frame"
     );
@@ -1035,7 +1086,7 @@ fn assert_narrowing_child(addr: std::net::SocketAddr, upstream: &RawUpstream, na
 /// asks for every byte, so the cap is the only thing left that can refuse.
 fn assert_hard_cap_narrows(upstream: &RawUpstream) {
     let probes = Probes::new();
-    let port = wire::reserve_observed();
+    let port = wire::reserve_request_body_owner();
     let mut router = Router::new();
     router.proxy_stream(PREFIX, &upstream.backend());
     let server = port.serve(
@@ -1066,7 +1117,7 @@ fn assert_hard_cap_narrows(upstream: &RawUpstream) {
         "a declaration above the hard cap reaches no upstream"
     );
     assert_eq!(
-        server.controller().body_frames_polled(),
+        wire::body_owners(server.controller()).frames_polled,
         0,
         "a declaration refused before arrival polls no frame"
     );
@@ -1091,7 +1142,7 @@ fn host_routed_streaming_policy_and_ceiling_select_child() {
             let pool = Arc::new(AtomicUsize::new(0));
             let inheriting = Probes::sharing(&pool);
             let narrowing = Probes::sharing(&pool);
-            let port = wire::reserve_observed();
+            let port = wire::reserve_request_body_owner();
             let mut hosts = HostRouter::new();
             hosts.add(
                 INHERITING_HOST,

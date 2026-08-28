@@ -2,7 +2,7 @@
 //! one stored response policy.
 
 use camber::RuntimeError;
-use camber::http::mock::{self, LifecycleController};
+use camber::http::mock::{self, ScopedTransferOwner};
 use camber::http::{self, ByteBoundary, Request, Response, Router, TransferBudget};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -166,8 +166,8 @@ async fn write_all(stream: &mut TcpStream, bytes: &[u8]) -> Result<(), Box<str>>
 
 /// Watch one upstream's address, so a row reads what the production collector
 /// published while it read that upstream's answer.
-fn watch(addr: SocketAddr) -> LifecycleController {
-    mock::lifecycle(addr).expect("one controller for this upstream")
+fn watch(addr: SocketAddr) -> ScopedTransferOwner {
+    mock::transfer_owner(addr).expect("one transfer-owner controller for this upstream")
 }
 
 /// Run one client call under the row bound, so a poll after a terminal fails

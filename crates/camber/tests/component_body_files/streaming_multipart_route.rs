@@ -16,7 +16,7 @@ use crate::streaming_multipart::{
 };
 
 use camber::RuntimeError;
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController};
+use camber::http::mock::{MultipartOwnerEdge, ScopedMultipartOwner};
 use camber::http::{
     BodyAdmission, BodyAdmissionContext, HostRouter, Method, MultipartField, MultipartLimits,
     MultipartStream, RejectionKind, Request, Response, Router,
@@ -180,7 +180,7 @@ fn assert_host_ceiling_narrows(body: &[u8]) {
         reading_router(&handled).max_request_body(64 * 1024),
     );
     let hosts = hosts.max_request_body(body.len() - 1);
-    let port = wire::reserve_observed();
+    let port = wire::reserve_unwatched();
     let server = port.serve_hosts(hosts);
 
     let declared = declared();
@@ -744,7 +744,7 @@ const FINALIZERS: &[Finalizer] = &[
 #[tokio::test(flavor = "multi_thread")]
 async fn multipart_finalizer_revokes_escaped_handles_before_response_selection() {
     let wiring = Wiring::new();
-    let port = wire::reserve_observed();
+    let port = wire::reserve_multipart_owner();
     let controller = port.controller();
     let server = port.serve(finalizer_router(&wiring));
     let addr = server.addr();
@@ -781,11 +781,11 @@ async fn assert_finalizer_row(
     row: &Finalizer,
     addr: std::net::SocketAddr,
     wiring: &Wiring,
-    controller: &Arc<LifecycleController>,
+    controller: &ScopedMultipartOwner,
 ) {
-    let checkpoint = LifecycleCheckpoint::BeforeMultipartResponseSelection;
+    let checkpoint = MultipartOwnerEdge::BeforeResponseSelection;
     let label = row.label;
-    let before = controller.multipart_observed();
+    let before = controller.observed();
     let permits_before = wiring.released.load(Ordering::SeqCst);
     controller
         .pause_once(checkpoint)
@@ -797,7 +797,7 @@ async fn assert_finalizer_row(
         .unwrap_or_else(|_| panic!("{label}: the response-selection checkpoint was reached"))
         .expect("the checkpoint is armed");
 
-    let observed = controller.multipart_observed();
+    let observed = controller.observed();
     assert_eq!(
         (
             observed.revocations(),
@@ -865,13 +865,13 @@ struct Escaping {
 
 /// Drive one escaped-handle row and assert what was true before its response
 /// was selected.
-async fn assert_escape_row(row: &Escaping, controller: &Arc<LifecycleController>) {
-    let checkpoint = LifecycleCheckpoint::BeforeMultipartResponseSelection;
+async fn assert_escape_row(row: &Escaping, controller: &ScopedMultipartOwner) {
+    let checkpoint = MultipartOwnerEdge::BeforeResponseSelection;
     let path = row.path;
     // The counters belong to the listener and both rows run against it, so each
     // row states its claim against what it found rather than against a number it
     // assumed the row before had left behind.
-    let before = controller.multipart_observed();
+    let before = controller.observed();
     let permits_before = row.released.load(Ordering::SeqCst);
     controller
         .pause_once(checkpoint)
@@ -891,7 +891,7 @@ async fn assert_escape_row(row: &Escaping, controller: &Arc<LifecycleController>
 
     // Held before the response is selected: revocation has run, the driver has
     // returned, and the permit owner is already gone.
-    let observed = controller.multipart_observed();
+    let observed = controller.observed();
     assert_eq!(
         (observed.revocations(), observed.drivers_terminated()),
         (before.revocations() + 1, before.drivers_terminated() + 1),

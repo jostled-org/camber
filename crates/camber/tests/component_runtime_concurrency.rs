@@ -22,6 +22,8 @@ pub mod scope_builders;
 mod async_channels;
 #[path = "component_runtime_concurrency/async_tasks.rs"]
 mod async_tasks;
+#[path = "component_runtime_concurrency/lifecycle_test_support.rs"]
+mod lifecycle_test_support;
 #[path = "component_runtime_concurrency/no_runtime.rs"]
 mod no_runtime;
 #[path = "component_runtime_concurrency/owned_subsystems.rs"]
@@ -38,6 +40,8 @@ mod schedule_probes;
 mod scope_admission;
 #[path = "component_runtime_concurrency/scope_signals.rs"]
 mod scope_signals;
+#[path = "component_runtime_concurrency/server_stop_causality.rs"]
+mod server_stop_causality;
 #[path = "component_runtime_concurrency/shutdown_observation.rs"]
 mod shutdown_observation;
 #[path = "component_runtime_concurrency/sync_channels.rs"]

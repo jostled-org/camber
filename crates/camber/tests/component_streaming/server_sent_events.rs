@@ -42,7 +42,7 @@ fn sse_streams_multiple_events() {
             let inherited = TransferBudget::unbounded()
                 .with_max_bytes(FEED_MAX_BYTES)
                 .expect("the router's download maximum is accepted");
-            let port = crate::http::reserve_observed();
+            let port = crate::http::reserve_transfer_owner();
             let server = port.serve(router.download_budget(inherited));
             let addr = server.addr();
 
@@ -89,7 +89,7 @@ fn sse_route_ignores_request_body_limit() {
     common::test_runtime()
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
-            let port = crate::http::reserve_observed();
+            let port = crate::http::reserve_request_body_owner();
             let asked = Arc::new(AtomicUsize::new(0));
             let mut router = Router::new().max_request_body(10);
             router.get_sse(
@@ -125,9 +125,10 @@ fn sse_route_ignores_request_body_limit() {
                 0,
                 "an SSE route is bodyless, so no body policy is asked about it"
             );
-            assert_eq!(server.controller().body_frames_polled(), 0);
-            assert_eq!(server.controller().body_peak_retained_bytes(), 0);
-            assert_eq!(server.controller().body_permit_owners_dropped(), 0);
+            let body = server.controller().observed();
+            assert_eq!(body.frames_polled, 0);
+            assert_eq!(body.peak_retained_bytes, 0);
+            assert_eq!(body.permit_owners_dropped, 0);
 
             runtime::request_shutdown();
         })
@@ -157,7 +158,7 @@ fn sse_client_disconnect_stops_handler() {
                 },
             );
 
-            let port = crate::http::reserve_observed();
+            let port = crate::http::reserve_transfer_owner();
             let server = port.serve(router);
             let addr = server.addr();
 

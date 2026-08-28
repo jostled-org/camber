@@ -9,4 +9,5 @@ docs/**
 !docs/reference/**
 !docs/vision.md
 crates/camber-bench/examples/*/Cargo.lock
+crates/camber-macros/tests/fixtures/*/Cargo.lock
 logs/

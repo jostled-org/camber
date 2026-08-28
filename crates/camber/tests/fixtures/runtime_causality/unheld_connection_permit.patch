@@ -1,0 +1,12 @@
+--- a/crates/camber/src/http/server_lifecycle/connections.rs
++++ b/crates/camber/src/http/server_lifecycle/connections.rs
+@@ -36,7 +36,8 @@
+ 
+ impl ConnectionPermit {
+     pub(super) fn new(permit: Option<tokio::sync::OwnedSemaphorePermit>) -> Arc<Self> {
+-        Arc::new(Self { permit })
++        drop(permit);
++        Arc::new(Self { permit: None })
+     }
+ }
+ 

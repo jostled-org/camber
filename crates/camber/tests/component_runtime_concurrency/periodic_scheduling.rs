@@ -1,4 +1,4 @@
-use crate::common::{BOUND, wait_registry_at_most};
+use crate::common::{BOUND, reached, wait_child_settled};
 use crate::schedule_probes::{
     AsyncProbe, CALLBACK_INTERVAL, SyncCallback, SyncProbe, async_deadline, sync_deadline,
 };
@@ -258,26 +258,27 @@ fn cron_that_runs_out_mid_loop_stops_itself_and_leaves_the_scope() {
 
     let handle = builder
         .run(move || {
-            let before = scope_entries(&controller);
+            let subject = name_next_child(&controller);
             let handle = camber::schedule::cron(&expr, move || {
                 let _ = fired_tx.send(());
             })
             .unwrap();
-            assert_eq!(
-                scope_entries(&controller),
-                before + 1,
+            assert!(
+                reached(
+                    &subject,
+                    camber::runtime_test_support::AdmittedScope::retained
+                ),
                 "the cron loop was not admitted as a root-scope child"
             );
 
             fired_rx
                 .recv_timeout(BOUND)
                 .expect("the pinned cron occurrence never fired");
-            // Ordering, not budget: nothing else in the scope can exit while
-            // this closure runs — only `ScopeClosing` ends the runtime's own
-            // children, and that has not fired — so the registry falling back
-            // to its pre-admission length IS the exhaustion break.
+            // Ordering, not budget: this names the cron loop itself, so its
+            // settlement IS the exhaustion break rather than a length the rest
+            // of the scope could also have produced.
             assert!(
-                wait_registry_at_most(&controller, before, BOUND),
+                wait_child_settled(&subject, BOUND),
                 "the exhausted cron loop stayed in the root scope after its last occurrence"
             );
             handle
@@ -303,28 +304,30 @@ fn cancelled_cron_wakes_instead_of_sleeping_to_its_next_occurrence() {
 
     builder
         .run(move || {
-            let before = scope_entries(&controller);
+            let subject = name_next_child(&controller);
             let handle = camber::schedule::cron(DISTANT_CRON, || {}).unwrap();
-            assert_eq!(
-                scope_entries(&controller),
-                before + 1,
+            assert!(
+                reached(
+                    &subject,
+                    camber::runtime_test_support::AdmittedScope::retained
+                ),
                 "the cron loop was not admitted as a root-scope child"
             );
 
             handle.cancel();
             assert!(
-                wait_registry_at_most(&controller, before, BOUND),
+                wait_child_settled(&subject, BOUND),
                 "the cancelled cron loop slept on toward its next occurrence"
             );
         })
         .unwrap();
 }
 
-/// How many children the root scope retains right now.
-fn scope_entries(controller: &camber::runtime_test_support::RuntimeController) -> usize {
-    controller
-        .scope_registry_len()
-        .expect("the runtime schedule could not read the root scope registry")
+/// Name the child the root scope admits next.
+fn name_next_child(
+    controller: &camber::runtime_test_support::RuntimeController,
+) -> camber::runtime_test_support::AdmittedScope {
+    controller.scope_settlement().name_next_admission()
 }
 
 /// A 7-field cron expression naming exactly one occurrence, `lead` from now.

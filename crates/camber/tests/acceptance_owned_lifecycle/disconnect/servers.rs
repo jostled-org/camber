@@ -107,13 +107,13 @@ where
 #[cfg(feature = "ws")]
 pub(super) fn with_scripted_server<T, F>(router: Router, body: F) -> T
 where
-    F: FnOnce(SocketAddr, ServerHandle, &camber::http::mock::LifecycleController) -> T,
+    F: FnOnce(SocketAddr, ServerHandle, &camber::http::mock::ScopedRegistrationSelection) -> T,
 {
     owned_builder()
         .run(move || {
             let listener = bind_owned();
             let addr = listener.local_addr();
-            let controller = camber::http::mock::lifecycle(addr)
+            let controller = camber::http::mock::registration_selection(addr)
                 .expect("failed to install the fixture lifecycle controller");
             let handle = serve_ready(listener, router);
             body(addr, handle, &controller)
@@ -128,14 +128,14 @@ where
 /// park the thread driving it.
 #[cfg(feature = "ws")]
 pub(super) fn await_lifecycle_pause(
-    controller: &camber::http::mock::LifecycleController,
-    checkpoint: camber::http::mock::LifecycleCheckpoint,
+    controller: &camber::http::mock::ScopedRegistrationSelection,
+    edge: camber::http::mock::UpgradeOwnerEdge,
 ) {
     super::fixture::bounded(
-        "production to reach the lifecycle checkpoint",
-        controller.wait_until_paused(checkpoint),
+        "production to reach the upgrade owner's edge",
+        controller.upgrades.wait_until_paused(edge),
     )
-    .expect("the lifecycle checkpoint was not armed");
+    .expect("the upgrade owner's edge was not armed");
 }
 
 /// What stopping a [`SyncServer`] observed.

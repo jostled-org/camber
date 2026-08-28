@@ -1,17 +1,17 @@
 //! Who owns one upgraded connection, and when its `101` becomes real.
 //!
 //! The direct and proxied bridges differ in everything they do with a
-//! transport and agree on everything about how they get one: an owned server
-//! registers the bridge before the response reaches the wire, an unavailable
-//! registrar refuses the upgrade, and neither bridge frames against a peer that
-//! never saw the response. That sequence lives here, once. What the handshake
-//! handed over lives beside it.
+//! transport and agree on everything about how they get one: the connection
+//! takes the bridge as its own child before the response reaches the wire, a
+//! connection with no upgrade transport refuses the upgrade, and neither bridge
+//! frames against a peer that never saw the response. That sequence lives here,
+//! once. What the handshake handed over lives beside it.
 
 use super::super::body::HyperResponseBody;
 use super::super::disconnect::DisconnectSignal;
 use super::super::rejection::Rejected;
 use super::super::server_lifecycle::{
-    ConnectionLifecycle, ServerControl, UpgradeRegistrar, UpgradeRegistration,
+    ConnectionLifecycle, ServerControl, UpgradeAdmission, UpgradeRegistration,
 };
 use super::framing::shutdown_client_transport;
 use std::ops::ControlFlow;
@@ -37,6 +37,21 @@ pub(super) struct BridgeAttachment {
     /// authority — the same `Arc` task admission reads — not a second one
     /// minted here.
     callback_runtime: Option<Arc<crate::runtime_state::RuntimeInner>>,
+    /// The causal stop state this connection's server commits its control facts
+    /// into.
+    ///
+    /// Carried for the same reason as the runtime authority above: the bridge
+    /// runs past a bare `tokio::spawn`, and the phase a retained callback's
+    /// join deadline is fixed from has to be the one the server committed, not
+    /// the one a watch notification happened to have delivered.
+    callback_stop: Option<Arc<super::super::server_stop::ServerStopState>>,
+    /// The place in the owner tree this bridge will be taken as.
+    ///
+    /// Handed down rather than looked up, for the same reason as the two above:
+    /// the connection minted it before it offered the bridge a place, so a
+    /// bridge names the child its parent recorded rather than one it invented
+    /// for itself after the fact.
+    callback_owner: super::super::server_lifecycle::UpgradeIdentity,
 }
 
 impl BridgeAttachment {
@@ -49,6 +64,20 @@ impl BridgeAttachment {
     /// pick up a blocking worker's leftover context by accident.
     pub(super) fn callback_runtime(&self) -> Option<Arc<crate::runtime_state::RuntimeInner>> {
         self.callback_runtime.clone()
+    }
+
+    /// The committed stop phase a retained callback's join deadline reads.
+    ///
+    /// Read from the attachment for the same reason the authority above is:
+    /// this is the connection's own server, taken where the connection still
+    /// owns the context, rather than whatever a bridge could look up later.
+    pub(super) fn callback_stop(&self) -> Option<Arc<super::super::server_stop::ServerStopState>> {
+        self.callback_stop.clone()
+    }
+
+    /// The connection and upgrade a callback started here belongs to.
+    pub(super) fn callback_owner(&self) -> super::super::server_lifecycle::UpgradeIdentity {
+        self.callback_owner
     }
 
     /// Spread an attachment over the parts a bridge holds separately.
@@ -69,17 +98,20 @@ impl BridgeAttachment {
             control,
             dispatch,
             callback_runtime: _,
+            callback_stop: _,
+            callback_owner: _,
         } = attachment;
         (control, dispatch)
     }
 }
 
-/// Choose who owns the bridge, then resolve the response lifetime to match.
+/// Give the bridge to its connection, then resolve the response lifetime to
+/// match.
 ///
-/// The server registers the bridge and commits the `101` only once its registrar
-/// has admitted it. An unavailable registrar refuses the upgrade instead of
-/// launching work no supervisor owns. Every upgrade kind routes through here,
-/// so a new one inherits the rule instead of restating it.
+/// The connection takes the bridge as its own child and the `101` is committed
+/// only once it has. A connection that cannot take one refuses the upgrade
+/// instead of launching work no owner holds. Every upgrade kind routes through
+/// here, so a new one inherits the rule instead of restating it.
 pub(super) async fn own_upgrade_bridge<F, Fut>(
     lifecycle: &ConnectionLifecycle,
     response: hyper::Response<HyperResponseBody>,
@@ -90,21 +122,23 @@ where
     F: FnOnce(BridgeAttachment) -> Fut,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    let registrar = match lifecycle.upgrade_registrar() {
-        Some(registrar) => registrar,
+    let admission = match lifecycle.upgrade_admission() {
+        Some(admission) => admission,
         None => return Err(Rejected::upgrade_registration_unavailable()),
     };
     // Captured HERE, on the connection task, because that task is the last
     // owner of this runtime's context: the launch below is a bare
     // `tokio::spawn`, and no task-local crosses it.
     let attachment = BridgeAttachment {
-        control: registrar.control(),
-        dispatch: registrar.dispatch_gate(),
+        control: admission.control(),
+        dispatch: admission.dispatch_gate(),
         callback_runtime: crate::runtime_state::try_current_runtime(),
+        callback_stop: lifecycle.stop(),
+        callback_owner: admission.owner(),
     };
     let (gate, start) = tokio::sync::oneshot::channel();
     let handle = spawn_gated_bridge(start, build_bridge(attachment));
-    complete_upgrade_registration(registrar, handle, gate, response, handoff).await
+    complete_upgrade_transfer(admission, handle, gate, response, handoff).await
 }
 
 /// Resolve the response lifetime at a successful `101` handoff.
@@ -136,19 +170,19 @@ where
     })
 }
 
-/// Hand the bridge to the owned server's registrar, committing the `101` only
-/// once the bridge is registered and owned.
+/// Offer the bridge to the connection that serves this request, committing the
+/// `101` only once that connection has taken it as a child.
 ///
-/// A registrar-produced `503` or `500` is an ordinary HTTP response whose body
+/// A refusal-produced `503` or `500` is an ordinary HTTP response whose body
 /// owns its own completion, so only the admitted arm resolves the handoff.
-async fn complete_upgrade_registration(
-    registrar: UpgradeRegistrar,
+async fn complete_upgrade_transfer(
+    admission: UpgradeAdmission,
     handle: tokio::task::JoinHandle<()>,
     gate: tokio::sync::oneshot::Sender<()>,
     response: hyper::Response<HyperResponseBody>,
     handoff: &DisconnectSignal,
 ) -> Result<hyper::Response<HyperResponseBody>, Rejected> {
-    match registrar.submit(handle).await {
+    match admission.submit(handle).await {
         UpgradeRegistration::Admitted => release_admitted_bridge(gate, response, handoff),
         UpgradeRegistration::Rejected => Err(Rejected::upgrade_registration_refused()),
         UpgradeRegistration::Unavailable => Err(Rejected::upgrade_registration_unavailable()),
@@ -157,12 +191,12 @@ async fn complete_upgrade_registration(
 
 /// Release the admitted bridge from its gate, then commit its `101`.
 ///
-/// The gate's receiver lives inside the registered task, so a send failure has
-/// one meaning: the supervisor aborted that task between admitting it and this
+/// The gate's receiver lives inside the transferred task, so a send failure has
+/// one meaning: the connection ended that task between taking it and this
 /// release. The bridge will never run, and a `101` committed for it would hand
 /// the peer a transport nothing serves and resolve the response lifetime as
 /// `Completed`. That race reports what it is — the upgrade could not be taken
-/// up — through the same response the registrar's own unavailability produces.
+/// up — through the same response an unavailable owner produces.
 fn release_admitted_bridge(
     gate: tokio::sync::oneshot::Sender<()>,
     response: hyper::Response<HyperResponseBody>,

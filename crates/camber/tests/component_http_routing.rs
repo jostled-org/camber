@@ -8,6 +8,11 @@ pub mod rejection_support;
 pub mod runtime_support;
 #[path = "support/streaming_multipart.rs"]
 pub mod streaming_multipart;
+#[path = "support/temp.rs"]
+pub mod temp;
+#[cfg(feature = "ws")]
+#[path = "support/ws.rs"]
+pub mod ws_support;
 
 #[path = "component_http_routing/async_client.rs"]
 mod async_client;
@@ -31,6 +36,8 @@ mod host_dispatch;
 mod http_test_api;
 #[path = "component_http_routing/hyper_transport.rs"]
 mod hyper_transport;
+#[path = "component_http_routing/operation_commitment.rs"]
+mod operation_commitment;
 #[path = "component_http_routing/path_parameters.rs"]
 mod path_parameters;
 #[path = "component_http_routing/query_parameters.rs"]

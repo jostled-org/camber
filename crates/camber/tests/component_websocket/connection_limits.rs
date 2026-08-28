@@ -5,7 +5,13 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use camber::RuntimeError;
-use camber::http::mock::{LifecycleCheckpoint, LifecycleController, lifecycle};
+use camber::http::mock::{
+    ConnectionOwnerEdge, ScopedConnectionOwner, ServerStopEdge, connection_owner,
+};
+#[cfg(feature = "ws")]
+use camber::http::mock::{ScopedSupervisedRegistration, UpgradeOwnerEdge, supervised_registration};
+#[cfg(not(feature = "ws"))]
+use camber::http::mock::{ScopedSupervisorSelection, supervisor_selection};
 #[cfg(feature = "ws")]
 use camber::http::{HostRouter, WsConn};
 use camber::http::{Request, Response, Router};
@@ -269,9 +275,9 @@ where
     completion_rx
 }
 
-fn arm_pending_permit_checkpoint(controller: &LifecycleController) {
-    controller
-        .pause_once(LifecycleCheckpoint::ConnectionPermitWaitPending)
+fn arm_pending_permit_checkpoint(connections: &ScopedConnectionOwner) {
+    connections
+        .pause_once(ConnectionOwnerEdge::PermitWaitPending)
         .expect("arm pending connection-permit checkpoint");
 }
 
@@ -281,11 +287,11 @@ fn arm_pending_permit_checkpoint(controller: &LifecycleController) {
 /// admits that peer straight away, so the checkpoint is never reached — and an
 /// unbounded wait would report that as a hang instead of as the limit failing
 /// to hold.
-fn wait_for_pending_permit(controller: &LifecycleController) {
+fn wait_for_pending_permit(connections: &ScopedConnectionOwner) {
     common::block_on(async {
         tokio::time::timeout(
             EVENT_TIMEOUT,
-            controller.wait_until_paused(LifecycleCheckpoint::ConnectionPermitWaitPending),
+            connections.wait_until_paused(ConnectionOwnerEdge::PermitWaitPending),
         )
         .await
         .expect("ConnectionPermitWaitPending was never reached")
@@ -293,9 +299,9 @@ fn wait_for_pending_permit(controller: &LifecycleController) {
     .expect("production connection-permit acquisition returned Pending");
 }
 
-fn release_pending_permit(controller: &LifecycleController) {
-    controller
-        .release(LifecycleCheckpoint::ConnectionPermitWaitPending)
+fn release_pending_permit(connections: &ScopedConnectionOwner) {
+    connections
+        .release(ConnectionOwnerEdge::PermitWaitPending)
         .expect("release pending connection-permit checkpoint");
 }
 
@@ -322,9 +328,35 @@ fn assert_dispatched(dispatched: &Receiver<()>) {
         .expect("second client dispatches after WebSocket close");
 }
 
+/// The owners every synchronous-serving row here steps its connection through.
+///
+/// One name for the view those rows take, because what they can name differs by
+/// build and what they do with it does not: an [`common::AdmissionHold`] spans
+/// the supervisor's pass, the connection that pass admitted, and the upgrade
+/// child that connection submits, so the value stepping one has to lend exactly
+/// that set. Without `ws` there is no upgrade family to lend or to name, and
+/// the same rows read the two owners that remain.
+#[cfg(feature = "ws")]
+type SupervisedOwners = ScopedSupervisedRegistration;
+
+#[cfg(not(feature = "ws"))]
+type SupervisedOwners = ScopedSupervisorSelection;
+
+/// Watch the owners one synchronously served connection is admitted through.
+fn supervised_owners(addr: SocketAddr) -> Result<SupervisedOwners, RuntimeError> {
+    #[cfg(feature = "ws")]
+    {
+        supervised_registration(addr)
+    }
+    #[cfg(not(feature = "ws"))]
+    {
+        supervisor_selection(addr)
+    }
+}
+
 /// The per-connection checkpoint every supervised server configures Hyper at.
-fn synchronous_connection_checkpoint() -> LifecycleCheckpoint {
-    LifecycleCheckpoint::HeaderTimeoutConfigured(Duration::from_secs(5))
+fn synchronous_connection_checkpoint() -> ConnectionOwnerEdge {
+    ConnectionOwnerEdge::HeaderTimeoutConfigured(Duration::from_secs(5))
 }
 
 /// Prove synchronous serving reaches the supervisor checkpoint every owned
@@ -335,20 +367,16 @@ fn synchronous_connection_checkpoint() -> LifecycleCheckpoint {
 /// supervisor owns both families, so a checkpoint the owned path pauses at is
 /// one this path pauses at too. The client runs on its own thread, because the
 /// pause holds its connection until this thread releases it.
-fn assert_supervisor_checkpoint_reached(
-    controller: &LifecycleController,
-    checkpoint: LifecycleCheckpoint,
-) {
+fn assert_supervisor_checkpoint_reached(owners: &SupervisedOwners, hold: common::AdmissionHold) {
     common::block_on(async {
-        tokio::time::timeout(EVENT_TIMEOUT, controller.wait_until_paused(checkpoint))
+        tokio::time::timeout(EVENT_TIMEOUT, hold.paused_on(owners))
             .await
             .unwrap_or_else(|_| {
-                panic!("synchronous serving never reached {checkpoint:?} within {EVENT_TIMEOUT:?}")
+                panic!("synchronous serving never reached {hold:?} within {EVENT_TIMEOUT:?}")
             })
     })
     .expect("synchronous serving never reached the supervisor checkpoint");
-    controller
-        .release(checkpoint)
+    hold.release_on(owners)
         .expect("release the supervisor checkpoint");
 }
 
@@ -368,22 +396,21 @@ fn assert_supervisor_checkpoint_reached(
 /// `SupervisorSelectedRuntime` belong to shutdown, `SupervisorSelectedTask` to
 /// a connection that has already ended, and `SupervisorSelectedRegistration` to
 /// an upgrade this plain GET never submits. Each of those has its own row.
-fn synchronous_supervisor_checkpoints() -> [LifecycleCheckpoint; 6] {
+fn synchronous_supervisor_checkpoints() -> [common::AdmissionHold; 6] {
     [
-        LifecycleCheckpoint::BeforeSupervisorSelect,
-        LifecycleCheckpoint::SupervisorSelectedAccept,
-        LifecycleCheckpoint::AfterAccept,
-        LifecycleCheckpoint::SupervisorSelectedPermit,
-        LifecycleCheckpoint::AfterPermit,
-        synchronous_connection_checkpoint(),
+        common::AdmissionHold::Stop(ServerStopEdge::BeforeSupervisorSelect),
+        common::AdmissionHold::Stop(ServerStopEdge::SupervisorSelectedAccept),
+        common::AdmissionHold::Connection(ConnectionOwnerEdge::AfterAccept),
+        common::AdmissionHold::Stop(ServerStopEdge::SupervisorSelectedPermit),
+        common::AdmissionHold::Connection(ConnectionOwnerEdge::AfterPermit),
+        common::AdmissionHold::Connection(synchronous_connection_checkpoint()),
     ]
 }
 
 /// Arm every checkpoint the synchronous path under test must reach.
-fn arm_checkpoints(controller: &LifecycleController, checkpoints: &[LifecycleCheckpoint]) {
-    for checkpoint in checkpoints {
-        controller
-            .pause_once(*checkpoint)
+fn arm_checkpoints(owners: &SupervisedOwners, holds: &[common::AdmissionHold]) {
+    for hold in holds {
+        hold.arm_on(owners)
             .expect("arm the shared supervisor checkpoint");
     }
 }
@@ -395,11 +422,11 @@ fn arm_checkpoints(controller: &LifecycleController, checkpoints: &[LifecycleChe
 /// taken while an earlier one still holds the connection would report the
 /// earlier hold as a failure to reach the later one.
 fn assert_supervisor_checkpoints_reached(
-    controller: &LifecycleController,
-    checkpoints: &[LifecycleCheckpoint],
+    owners: &SupervisedOwners,
+    holds: &[common::AdmissionHold],
 ) {
-    for checkpoint in checkpoints {
-        assert_supervisor_checkpoint_reached(controller, *checkpoint);
+    for hold in holds {
+        assert_supervisor_checkpoint_reached(owners, *hold);
     }
 }
 
@@ -414,11 +441,13 @@ fn assert_supervisor_checkpoints_reached(
 /// capacity the router resolved, so a case naming a capacity the router never
 /// configured would wait at a checkpoint production never reaches.
 #[cfg(feature = "ws")]
-fn synchronous_sse_checkpoints() -> [LifecycleCheckpoint; 3] {
+fn synchronous_sse_checkpoints() -> [common::AdmissionHold; 3] {
     [
-        LifecycleCheckpoint::BeforeRuntimeWait,
-        LifecycleCheckpoint::AfterPermit,
-        LifecycleCheckpoint::SseBufferConfigured(SUPERVISED_BUFFER),
+        common::AdmissionHold::Stop(ServerStopEdge::BeforeRuntimeWait),
+        common::AdmissionHold::Connection(ConnectionOwnerEdge::AfterPermit),
+        common::AdmissionHold::Connection(ConnectionOwnerEdge::SseBufferConfigured(
+            SUPERVISED_BUFFER,
+        )),
     ]
 }
 
@@ -428,13 +457,17 @@ fn synchronous_sse_checkpoints() -> [LifecycleCheckpoint; 3] {
 /// ticket, the supervisor acknowledges it — and the buffer pair belongs to the
 /// direct bridge the admitted registration releases.
 #[cfg(feature = "ws")]
-fn synchronous_direct_websocket_checkpoints() -> [LifecycleCheckpoint; 5] {
+fn synchronous_direct_websocket_checkpoints() -> [common::AdmissionHold; 5] {
     [
-        LifecycleCheckpoint::AfterPermit,
-        LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
-        LifecycleCheckpoint::BeforeUpgradeAcknowledge,
-        LifecycleCheckpoint::WebSocketOutgoingBufferConfigured(SUPERVISED_BUFFER),
-        LifecycleCheckpoint::WebSocketIncomingBufferConfigured(SUPERVISED_BUFFER),
+        common::AdmissionHold::Connection(ConnectionOwnerEdge::AfterPermit),
+        common::AdmissionHold::Upgrade(UpgradeOwnerEdge::AfterHandoffSubmitted),
+        common::AdmissionHold::Upgrade(UpgradeOwnerEdge::BeforeTransferAcknowledge),
+        common::AdmissionHold::Connection(ConnectionOwnerEdge::WebSocketOutgoingBufferConfigured(
+            SUPERVISED_BUFFER,
+        )),
+        common::AdmissionHold::Connection(ConnectionOwnerEdge::WebSocketIncomingBufferConfigured(
+            SUPERVISED_BUFFER,
+        )),
     ]
 }
 
@@ -446,11 +479,11 @@ fn synchronous_direct_websocket_checkpoints() -> [LifecycleCheckpoint; 5] {
 /// application queue on this listener, so naming those checkpoints here would
 /// claim reachability the proxy path does not have.
 #[cfg(feature = "ws")]
-fn synchronous_proxy_websocket_checkpoints() -> [LifecycleCheckpoint; 3] {
+fn synchronous_proxy_websocket_checkpoints() -> [common::AdmissionHold; 3] {
     [
-        LifecycleCheckpoint::AfterPermit,
-        LifecycleCheckpoint::AfterUpgradeTicketSubmitted,
-        LifecycleCheckpoint::BeforeUpgradeAcknowledge,
+        common::AdmissionHold::Connection(ConnectionOwnerEdge::AfterPermit),
+        common::AdmissionHold::Upgrade(UpgradeOwnerEdge::AfterHandoffSubmitted),
+        common::AdmissionHold::Upgrade(UpgradeOwnerEdge::BeforeTransferAcknowledge),
     ]
 }
 
@@ -637,8 +670,9 @@ fn synchronous_serve_shutdown_cancels_pending_connection_permit() {
                         .expect("pending-permit listener address")
                         .tcp()
                         .expect("TCP listener address");
-                    let controller = lifecycle(addr).expect("register pending-permit listener");
-                    arm_pending_permit_checkpoint(&controller);
+                    let connections =
+                        connection_owner(addr).expect("register pending-permit listener");
+                    arm_pending_permit_checkpoint(&connections);
 
                     let mut router = Router::new();
                     router.get("/sync", |_req: &Request| async {
@@ -655,7 +689,7 @@ fn synchronous_serve_shutdown_cancels_pending_connection_permit() {
 
                     let mut second = plain_stream(addr);
                     send_request(&mut second, "/sync");
-                    wait_for_pending_permit(&controller);
+                    wait_for_pending_permit(&connections);
 
                     camber::runtime::request_shutdown();
                     assert!(
@@ -665,7 +699,7 @@ fn synchronous_serve_shutdown_cancels_pending_connection_permit() {
                             .is_ok(),
                         "synchronous server exits while permit acquisition is pending"
                     );
-                    release_pending_permit(&controller);
+                    release_pending_permit(&connections);
                 })
                 .expect("run pending-permit shutdown runtime");
             println!("{PENDING_PERMIT_SHUTDOWN_MARKER}");
@@ -685,69 +719,6 @@ fn synchronous_serve_shutdown_cancels_pending_connection_permit() {
         run.success(),
         "isolated pending-permit shutdown contract failed: {}",
         String::from_utf8_lossy(run.stderr())
-    );
-}
-
-/// Prove a checkpoint wait ends on the held future's first look, not on the
-/// phase flip that reached the checkpoint.
-///
-/// Every row above waits through `wait_until_paused`, so what that wait ends on
-/// decides whether the release a case records next lands on a turn production
-/// has already spent. A served checkpoint reaches and looks inside one poll —
-/// nothing can stand between them — which is why the two moments are driven
-/// apart here through the probe's own script rather than through a listener.
-/// The gate, the counter, the wait, and the recorded release are all the
-/// production ones.
-#[test]
-fn checkpoint_wait_ends_on_the_first_look_not_the_phase_flip() {
-    use std::future::Future;
-    use std::task::{Context, Poll, Waker};
-
-    let checkpoint = synchronous_connection_checkpoint();
-    let mut probe =
-        camber::http::mock::checkpoint_wait_probe(checkpoint).expect("arm the probed checkpoint");
-    probe.reach().expect("reach the probed checkpoint");
-    assert_eq!(
-        probe.polls().expect("count turns before the first look"),
-        0,
-        "reaching a checkpoint is not a turn the held future took"
-    );
-
-    let wait = probe.wait_until_paused();
-    let mut wait = std::pin::pin!(wait);
-    let mut context = Context::from_waker(Waker::noop());
-    assert!(
-        wait.as_mut().poll(&mut context).is_pending(),
-        "the wait ended on the phase flip, before the held future looked for its release"
-    );
-
-    assert!(
-        !probe.look().expect("take the held future's first turn"),
-        "the first look found a release nothing had recorded"
-    );
-    assert_eq!(
-        probe.polls().expect("count turns after the first look"),
-        1,
-        "the first look is the held future's first turn"
-    );
-    assert!(
-        matches!(wait.as_mut().poll(&mut context), Poll::Ready(Ok(()))),
-        "the wait did not end on the first look"
-    );
-
-    // What the case does next: the release it records has to land on a turn
-    // that has not started, which is the whole reason the wait ends here.
-    probe
-        .stage_release()
-        .expect("record the release the case takes next");
-    assert_eq!(
-        probe.polls().expect("count turns after the staged release"),
-        1,
-        "the staged release landed on a turn the held future had already spent"
-    );
-    assert!(
-        probe.look().expect("take the held future's next turn"),
-        "the turn after the staged release did not observe it"
     );
 }
 
@@ -787,10 +758,10 @@ fn synchronous_serve_reaches_the_shared_supervisor_checkpoints() {
                 .expect("synchronous isolation listener address")
                 .tcp()
                 .expect("TCP listener address");
-            let controller =
-                lifecycle(addr).expect("register synchronous isolation listener address");
+            let owners =
+                supervised_owners(addr).expect("register synchronous isolation listener address");
             let checkpoints = synchronous_supervisor_checkpoints();
-            arm_checkpoints(&controller, &checkpoints);
+            arm_checkpoints(&owners, &checkpoints);
 
             let mut router = Router::new();
             router.get("/sync", |_req: &Request| async {
@@ -803,12 +774,12 @@ fn synchronous_serve_reaches_the_shared_supervisor_checkpoints() {
                 send_request(&mut client, "/sync");
                 read_status(&mut client)
             });
-            assert_supervisor_checkpoints_reached(&controller, &checkpoints);
+            assert_supervisor_checkpoints_reached(&owners, &checkpoints);
             assert_eq!(
                 client.join().expect("the synchronous client thread joined"),
                 200
             );
-            drop(controller);
+            drop(owners);
 
             camber::runtime::request_shutdown();
             assert!(
@@ -838,9 +809,10 @@ fn synchronous_sse_serves_under_the_shared_supervisor() {
                 .expect("synchronous SSE listener address")
                 .tcp()
                 .expect("TCP listener address");
-            let controller = lifecycle(addr).expect("register synchronous SSE listener address");
+            let owners =
+                supervised_owners(addr).expect("register synchronous SSE listener address");
             let checkpoints = synchronous_sse_checkpoints();
-            arm_checkpoints(&controller, &checkpoints);
+            arm_checkpoints(&owners, &checkpoints);
 
             let mut router = Router::new();
             router.get_sse("/events", |_req: &Request, writer| {
@@ -859,14 +831,14 @@ fn synchronous_sse_serves_under_the_shared_supervisor() {
                     .expect("read synchronous SSE response");
                 response
             });
-            assert_supervisor_checkpoints_reached(&controller, &checkpoints);
+            assert_supervisor_checkpoints_reached(&owners, &checkpoints);
             let response = client
                 .join()
                 .expect("the synchronous SSE client thread joined");
             assert!(response.starts_with("HTTP/1.1 200"), "{response}");
             assert!(response.contains("text/event-stream"), "{response}");
             assert!(response.contains("data: synchronous"), "{response}");
-            drop(controller);
+            drop(owners);
 
             camber::runtime::request_shutdown();
             assert!(
@@ -892,10 +864,10 @@ fn synchronous_direct_websocket_serves_under_the_shared_supervisor() {
                 .expect("synchronous direct WebSocket listener address")
                 .tcp()
                 .expect("TCP listener address");
-            let controller =
-                lifecycle(addr).expect("register synchronous direct WebSocket listener address");
+            let owners = supervised_owners(addr)
+                .expect("register synchronous direct WebSocket listener address");
             let checkpoints = synchronous_direct_websocket_checkpoints();
-            arm_checkpoints(&controller, &checkpoints);
+            arm_checkpoints(&owners, &checkpoints);
             let (dispatched, _) = dispatch_channel();
             let server = camber::spawn(move || {
                 camber::http::serve_listener(listener, direct_ws_router(dispatched))
@@ -909,11 +881,11 @@ fn synchronous_direct_websocket_serves_under_the_shared_supervisor() {
                 assert_ws_echo(&mut websocket);
                 complete_client_initiated_close(&mut websocket);
             });
-            assert_supervisor_checkpoints_reached(&controller, &checkpoints);
+            assert_supervisor_checkpoints_reached(&owners, &checkpoints);
             client
                 .join()
                 .expect("the synchronous direct WebSocket client thread joined");
-            drop(controller);
+            drop(owners);
 
             camber::runtime::request_shutdown();
             assert!(
@@ -943,10 +915,10 @@ fn synchronous_proxy_websocket_serves_under_the_shared_supervisor() {
                 .expect("synchronous proxy WebSocket listener address")
                 .tcp()
                 .expect("TCP listener address");
-            let controller =
-                lifecycle(addr).expect("register synchronous proxy WebSocket listener address");
+            let owners = supervised_owners(addr)
+                .expect("register synchronous proxy WebSocket listener address");
             let checkpoints = synchronous_proxy_websocket_checkpoints();
-            arm_checkpoints(&controller, &checkpoints);
+            arm_checkpoints(&owners, &checkpoints);
             let (dispatched, _) = dispatch_channel();
             let server = camber::spawn(move || {
                 camber::http::serve_listener(listener, proxy_ws_router(backend_addr, dispatched))
@@ -960,11 +932,11 @@ fn synchronous_proxy_websocket_serves_under_the_shared_supervisor() {
                 assert_ws_echo(&mut websocket);
                 complete_client_initiated_close(&mut websocket);
             });
-            assert_supervisor_checkpoints_reached(&controller, &checkpoints);
+            assert_supervisor_checkpoints_reached(&owners, &checkpoints);
             client
                 .join()
                 .expect("the synchronous proxy WebSocket client thread joined");
-            drop(controller);
+            drop(owners);
 
             camber::runtime::request_shutdown();
             assert!(
@@ -991,7 +963,7 @@ fn serve_async_direct_websocket_holds_permit_until_owned_bridge_finishes() {
             let listener = common::block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
                 .expect("bind owned listener");
             let addr = listener.local_addr().expect("owned listener address");
-            let controller = lifecycle(addr).expect("install owned listener controller");
+            let connections = connection_owner(addr).expect("install owned listener controller");
             let completion = observe_owner(
                 camber::http::serve_async(listener, router)
                     .expect("owned server requires a Tokio runtime"),
@@ -1000,14 +972,14 @@ fn serve_async_direct_websocket_holds_permit_until_owned_bridge_finishes() {
             let mut websocket = upgrade_websocket(plain_stream(addr), "/ws", "localhost");
             assert_ws_echo(&mut websocket);
 
-            arm_pending_permit_checkpoint(&controller);
+            arm_pending_permit_checkpoint(&connections);
             let mut second = plain_stream(addr);
             send_request(&mut second, "/second");
-            wait_for_pending_permit(&controller);
+            wait_for_pending_permit(&connections);
             assert_not_dispatched(&dispatched_rx);
 
             camber::runtime::request_shutdown();
-            release_pending_permit(&controller);
+            release_pending_permit(&connections);
             receive_server_initiated_close(&mut websocket);
             acknowledge_server_close(&mut websocket);
             assert_owner_completed(&completion);
@@ -1039,7 +1011,8 @@ fn serve_async_hosts_tls_proxy_websocket_holds_permit_until_owned_bridge_finishe
             let listener = common::block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
                 .expect("bind owned TLS listener");
             let addr = listener.local_addr().expect("owned TLS listener address");
-            let controller = lifecycle(addr).expect("install owned TLS listener controller");
+            let connections =
+                connection_owner(addr).expect("install owned TLS listener controller");
             let completion = observe_owner(
                 camber::http::serve_async_hosts_tls(listener, hosts, server_config)
                     .expect("owned server requires a Tokio runtime"),
@@ -1052,7 +1025,7 @@ fn serve_async_hosts_tls_proxy_websocket_holds_permit_until_owned_bridge_finishe
             );
             assert_ws_echo(&mut websocket);
 
-            arm_pending_permit_checkpoint(&controller);
+            arm_pending_permit_checkpoint(&connections);
             let (attempted_tx, attempted_rx) = std::sync::mpsc::sync_channel(1);
             let second_config = Arc::clone(&client_config);
             let second = std::thread::spawn(move || {
@@ -1069,11 +1042,11 @@ fn serve_async_hosts_tls_proxy_websocket_holds_permit_until_owned_bridge_finishe
             attempted_rx
                 .recv_timeout(EVENT_TIMEOUT)
                 .expect("second TLS client connects");
-            wait_for_pending_permit(&controller);
+            wait_for_pending_permit(&connections);
             assert_not_dispatched(&dispatched_rx);
 
             camber::runtime::request_shutdown();
-            release_pending_permit(&controller);
+            release_pending_permit(&connections);
             receive_server_initiated_close(&mut websocket);
             acknowledge_server_close(&mut websocket);
             assert_owner_completed(&completion);
@@ -1100,7 +1073,8 @@ fn serve_background_hosts_direct_websocket_holds_permit_until_owned_bridge_finis
             let listener = common::block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
                 .expect("bind owned host listener");
             let addr = listener.local_addr().expect("owned host listener address");
-            let controller = lifecycle(addr).expect("install owned host listener controller");
+            let connections =
+                connection_owner(addr).expect("install owned host listener controller");
             let handle = camber::http::serve_background_hosts(listener, hosts)
                 .expect("owned server requires a Tokio runtime");
             let completion = observe_owner(handle.into_future());
@@ -1108,14 +1082,14 @@ fn serve_background_hosts_direct_websocket_holds_permit_until_owned_bridge_finis
             let mut websocket = upgrade_websocket(plain_stream(addr), "/ws", "matrix.test");
             assert_ws_echo(&mut websocket);
 
-            arm_pending_permit_checkpoint(&controller);
+            arm_pending_permit_checkpoint(&connections);
             let mut second = plain_stream(addr);
             send_request_with_host(&mut second, "/second", "matrix.test");
-            wait_for_pending_permit(&controller);
+            wait_for_pending_permit(&connections);
             assert_not_dispatched(&dispatched_rx);
 
             camber::runtime::request_shutdown();
-            release_pending_permit(&controller);
+            release_pending_permit(&connections);
             receive_server_initiated_close(&mut websocket);
             acknowledge_server_close(&mut websocket);
             assert_owner_completed(&completion);
@@ -1147,7 +1121,7 @@ fn serve_background_tls_proxy_websocket_holds_permit_until_owned_bridge_finishes
             let addr = listener
                 .local_addr()
                 .expect("background TLS listener address");
-            let controller = lifecycle(addr).expect("install background TLS controller");
+            let connections = connection_owner(addr).expect("install background TLS controller");
             let handle = camber::http::serve_background_tls(listener, proxy, server_config)
                 .expect("owned server requires a Tokio runtime");
             let completion = observe_owner(handle.into_future());
@@ -1159,7 +1133,7 @@ fn serve_background_tls_proxy_websocket_holds_permit_until_owned_bridge_finishes
             );
             assert_ws_echo(&mut websocket);
 
-            arm_pending_permit_checkpoint(&controller);
+            arm_pending_permit_checkpoint(&connections);
             let (attempted_tx, attempted_rx) = std::sync::mpsc::sync_channel(1);
             let second_config = Arc::clone(&client_config);
             let second = std::thread::spawn(move || {
@@ -1176,11 +1150,11 @@ fn serve_background_tls_proxy_websocket_holds_permit_until_owned_bridge_finishes
             attempted_rx
                 .recv_timeout(EVENT_TIMEOUT)
                 .expect("second TLS client connects");
-            wait_for_pending_permit(&controller);
+            wait_for_pending_permit(&connections);
             assert_not_dispatched(&dispatched_rx);
 
             camber::runtime::request_shutdown();
-            release_pending_permit(&controller);
+            release_pending_permit(&connections);
             receive_server_initiated_close(&mut websocket);
             acknowledge_server_close(&mut websocket);
             assert_owner_completed(&completion);
@@ -1208,7 +1182,7 @@ fn serve_listener_direct_websocket_releases_permit_after_bridge_transport() {
                 .expect("sync listener address")
                 .tcp()
                 .expect("TCP listener address");
-            let controller = lifecycle(addr).expect("register sync listener address");
+            let connections = connection_owner(addr).expect("register sync listener address");
             let server = camber::spawn(move || {
                 camber::http::serve_listener(listener, direct_ws_router(dispatched_tx))
             });
@@ -1216,14 +1190,14 @@ fn serve_listener_direct_websocket_releases_permit_after_bridge_transport() {
             let mut websocket = upgrade_websocket(plain_stream(addr), "/ws", "localhost");
             assert_ws_echo(&mut websocket);
 
-            arm_pending_permit_checkpoint(&controller);
+            arm_pending_permit_checkpoint(&connections);
             let mut second = plain_stream(addr);
             send_request(&mut second, "/second");
-            wait_for_pending_permit(&controller);
+            wait_for_pending_permit(&connections);
             assert_not_dispatched(&dispatched_rx);
 
             complete_client_initiated_close(&mut websocket);
-            release_pending_permit(&controller);
+            release_pending_permit(&connections);
             assert_dispatched(&dispatched_rx);
             assert_eq!(read_status(&mut second), 200);
 
@@ -1252,7 +1226,8 @@ fn serve_listener_proxy_websocket_releases_permit_after_bridge_transport() {
                 .expect("sync proxy listener address")
                 .tcp()
                 .expect("TCP listener address");
-            let controller = lifecycle(proxy_addr).expect("register sync proxy listener address");
+            let connections =
+                connection_owner(proxy_addr).expect("register sync proxy listener address");
             let server = camber::spawn(move || {
                 camber::http::serve_listener(listener, proxy_ws_router(backend_addr, dispatched_tx))
             });
@@ -1261,14 +1236,14 @@ fn serve_listener_proxy_websocket_releases_permit_after_bridge_transport() {
                 upgrade_websocket(plain_stream(proxy_addr), "/ws/echo", "localhost");
             assert_ws_echo(&mut websocket);
 
-            arm_pending_permit_checkpoint(&controller);
+            arm_pending_permit_checkpoint(&connections);
             let mut second = plain_stream(proxy_addr);
             send_request(&mut second, "/second");
-            wait_for_pending_permit(&controller);
+            wait_for_pending_permit(&connections);
             assert_not_dispatched(&dispatched_rx);
 
             complete_client_initiated_close(&mut websocket);
-            release_pending_permit(&controller);
+            release_pending_permit(&connections);
             assert_dispatched(&dispatched_rx);
             assert_eq!(read_status(&mut second), 200);
 

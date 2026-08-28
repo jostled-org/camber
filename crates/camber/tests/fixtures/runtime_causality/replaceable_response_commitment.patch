@@ -1,0 +1,30 @@
+diff --git a/crates/camber/src/http/response_commitment.rs b/crates/camber/src/http/response_commitment.rs
+index b5f4595..51ba344 100644
+--- a/crates/camber/src/http/response_commitment.rs
++++ b/crates/camber/src/http/response_commitment.rs
+@@ -234,19 +234,13 @@ impl OperationCommitment {
+-    /// Take the cell, or answer with what is already in it.
++    /// Write the cell, whoever wrote it last.
+     ///
+-    /// The whole set-once rule, stated once. A post-commit mapping is not a
+-    /// second commitment and not an error to report upward: it is an owner
+-    /// arriving late, which is told what won so it can clean up against the
+-    /// right answer.
++    /// Replaceable: an owner that arrives after the answer was decided takes the
++    /// cell from the owner that decided it, so the fact a request ends on is the
++    /// last one written rather than the first one committed.
+     fn commit(&self, attempt: ResponseCommit) -> Result<(), ResponseCommit> {
+         let settled = {
+             let mut held = self.held();
+-            match *held {
+-                Some(committed) => Err(committed),
+-                None => {
+-                    *held = Some(attempt);
+-                    Ok(())
+-                }
+-            }
++            *held = Some(attempt);
++            Ok(())
+         };
+         LifecycleScript::observe_commitment(self.observer.as_deref(), self.id, attempt, &settled);
+         settled

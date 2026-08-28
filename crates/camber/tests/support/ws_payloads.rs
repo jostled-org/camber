@@ -27,7 +27,6 @@ use std::time::Duration;
 use allocation_counter::AllocationInfo;
 #[cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
 use camber::RuntimeError;
-use camber::http::mock::LifecycleCheckpoint;
 use camber::http::{Bytes, WsReceiver, WsSender};
 
 use super::http::is_closed_connection_error;
@@ -36,13 +35,6 @@ use super::ws_async::lifecycle_event;
 use super::ws_directions::{
     CLOSE, DIRECTION_PATH, DirectionHandoff, DirectionTestFixture, direction_router,
 };
-
-/// The checkpoint that holds the outbound pump with its converted frame in
-/// hand, after production built it and before the sink takes it.
-pub const FRAME_BUILT: LifecycleCheckpoint = LifecycleCheckpoint::WebSocketOutboundFrameBuilt;
-
-/// The checkpoint that holds the coordinator once its cause is fixed.
-pub const SELECTED: LifecycleCheckpoint = LifecycleCheckpoint::WebSocketTerminalSelected;
 
 /// The small payload every calibrated row measures against.
 pub const SMALL_PAYLOAD: usize = 64;
@@ -301,18 +293,6 @@ impl SharedPayloadFixture {
         offer_shared_clones(self.sender(index), clones, bytes, subject)
     }
 
-    /// How many turns whatever is held at `checkpoint` has taken.
-    ///
-    /// The observer handle is taken for the length of this read alone: holding
-    /// one keeps the registry entry teardown gives back, and re-opens the
-    /// address-reuse race the fixture closes.
-    pub fn checkpoint_polls(&self, checkpoint: LifecycleCheckpoint) -> usize {
-        self.listener
-            .controller()
-            .checkpoint_polls(checkpoint)
-            .expect("read the held checkpoint's poll count")
-    }
-
     /// Admit and drain one small shared frame on every recipient from `first`.
     ///
     /// A measured window taken cold counts the queue block and waker each
@@ -454,6 +434,7 @@ where
                 .expect("owned server requires a Tokio runtime")
         },
         |listener| async move {
+            listener.hold_callbacks(handoff.take_gate());
             let clients = connect_clients(&listener, &mut handoff, recipients).await;
             case(SharedPayloadFixture { listener, clients }).await;
             drop(handoff);

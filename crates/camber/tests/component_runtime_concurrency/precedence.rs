@@ -1,12 +1,14 @@
 use crate::common::{
-    ArmedWatch, BOUND, RecordingResource, SHORT_DRAIN, WedgedHandle, assert_forced_abort,
-    block_on_detached, ignore_hook, join_bounded, observe_armed_sequence, observe_armed_window,
-    registry_len,
+    ArmedWatch, BOUND, NamedSubject, RecordingResource, SHORT_DRAIN, WedgedHandle,
+    assert_forced_abort, block_on_detached, ignore_hook, join_bounded, observe_armed_sequence,
+    observe_armed_window, reached,
 };
 use crate::lifecycle_kinds;
 use crate::scope_builders::{probed_runtime, scope_runtime};
 use camber::RuntimeError;
-use camber::runtime_test_support::{RuntimeCheckpoint, RuntimeController, wait_scope_closing};
+use camber::runtime_test_support::{
+    AdmittedScope, RuntimeCheckpoint, RuntimeController, wait_scope_closing,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -28,19 +30,20 @@ const AWAITING_ONE: RuntimeCheckpoint = RuntimeCheckpoint::ScopeWaitObserved(1);
 /// The drain's terminal observation, taken after the forced join.
 const DRAINED: RuntimeCheckpoint = RuntimeCheckpoint::ScopeWaitObserved(0);
 
-/// The scope's join acknowledgment and its retained-handle count, read as one
-/// observation so the pair is always taken at the same instant.
+/// One named child's join acknowledgment and whether its owner still holds it,
+/// read as one observation so the pair is always taken at the same instant.
 ///
-/// Both readings take the sentinel [`registry_len`] carries: a failed probe
-/// must still release the window it paused, or the runtime never returns.
-fn read_scope(controller: &RuntimeController) -> (usize, usize) {
+/// Both readings take the sentinel [`reached`] carries: a failed probe must
+/// still release the window it paused, or the runtime never returns.
+fn read_child(child: &AdmittedScope) -> (bool, bool) {
     (
-        controller.scope_joined_count().unwrap_or(usize::MAX),
-        registry_len(controller),
+        reached(child, AdmittedScope::joined),
+        reached(child, AdmittedScope::retained),
     )
 }
 
-/// Run a runtime, sampling [`read_scope`] at the drain's terminal observation.
+/// Run a runtime, sampling the named child at the drain's terminal
+/// observation.
 ///
 /// That checkpoint is the last point at which the runtime is still alive to
 /// read: once `run` returns, the scope is gone and a probe has nothing to
@@ -48,15 +51,22 @@ fn read_scope(controller: &RuntimeController) -> (usize, usize) {
 fn observe_drain_end<F, T>(
     shutdown_timeout: Duration,
     body: F,
-) -> (Result<T, RuntimeError>, Option<(usize, usize)>)
+) -> (Result<T, RuntimeError>, Option<(bool, bool)>)
 where
     F: FnOnce() -> T,
 {
+    let named = NamedSubject::new();
+    let body_named = named.clone();
     observe_armed_window(
         |builder| builder.shutdown_timeout(shutdown_timeout),
         DRAINED,
-        |_| body(),
-        read_scope,
+        move |controller: &RuntimeController| {
+            // Named before the body admits anything, so the reading below is
+            // about the child this case started.
+            body_named.name_next(controller);
+            body()
+        },
+        move |_| read_child(named.get("the drain-end probe")),
     )
 }
 
@@ -156,12 +166,12 @@ fn wedged_async_child_is_aborted_joined_and_reported() {
         1,
         "the drain did not report one outstanding child",
     );
-    let (joined, entries) = probe.expect("the drain never paused at its terminal observation");
-    assert_eq!(
-        joined, 1,
+    let (joined, retained) = probe.expect("the drain never paused at its terminal observation");
+    assert!(
+        joined,
         "the owner never awaited the aborted child's Tokio handle"
     );
-    assert_eq!(entries, 0, "the aborted child left a handle behind");
+    assert!(!retained, "the aborted child left a handle behind");
 
     let outcome = block_on_detached(join_bounded(wedged.take(), BOUND));
     assert_forced_abort(&outcome);
@@ -277,8 +287,13 @@ fn nonpreemptible_blocking_child_still_yields_bounded_return() {
 fn resource_shutdown_runs_only_after_stoppable_children_are_drained_or_aborted() {
     let (controller, builder) = probed_runtime(SHORT_DRAIN);
     let joined_at_shutdown = WedgedHandle::new();
-    let resource_controller = Arc::clone(&controller);
     let resource_joined = joined_at_shutdown.clone();
+    // Named from inside the closure, immediately before the wedged child is
+    // admitted: the runtime admits its own children during setup, so a claim
+    // taken out here would name one of those instead. The hook then reads this
+    // child's own join acknowledgment rather than a runtime-wide total.
+    let subject = NamedSubject::new();
+    let closure_subject = subject.clone();
 
     let result = builder
         .resource(RecordingResource::new(
@@ -287,11 +302,15 @@ fn resource_shutdown_runs_only_after_stoppable_children_are_drained_or_aborted()
             move || {
                 // Reads the join acknowledgment as shutdown runs, so the ordering
                 // between the two is observed rather than inferred.
-                resource_joined.record(resource_controller.scope_joined_count()?);
+                resource_joined.record(reached(
+                    subject.get("the join-order hook"),
+                    AdmittedScope::joined,
+                ));
                 Ok(())
             },
         ))
-        .run(|| {
+        .run(move || {
+            closure_subject.name_next(&controller);
             camber::spawn_async(async { std::future::pending::<()>().await });
         });
 
@@ -302,10 +321,9 @@ fn resource_shutdown_runs_only_after_stoppable_children_are_drained_or_aborted()
         1,
         "the wedged child was not reported outstanding",
     );
-    assert_eq!(
+    assert!(
         joined_at_shutdown
-            .take_expecting("the resource shutdown hook never recorded the join count"),
-        1,
+            .take_expecting("the resource shutdown hook never recorded the join acknowledgment"),
         "resource shutdown began before the aborted child's handle was joined"
     );
 }
@@ -319,13 +337,19 @@ fn resource_shutdown_runs_only_after_stoppable_children_are_drained_or_aborted()
 /// can move the pair from `(0, 1)` to `(1, 0)`.
 #[test]
 fn deadline_drains_registered_async_child_to_zero() {
+    let named = NamedSubject::new();
+    let body_named = named.clone();
+
     let (result, (awaiting, drained)) = observe_armed_sequence(
         |builder| builder.shutdown_timeout(SHORT_DRAIN),
-        |gate| {
+        move |gate| {
+            // Named before the admission, so both windows below read this one
+            // child rather than whatever the scope was holding.
+            body_named.name_next(gate.controller());
             camber::spawn_async(async { std::future::pending::<()>().await });
             gate.arm(AWAITING_ONE);
         },
-        observe_escalation_boundary,
+        move |watch| observe_escalation_boundary(watch, &named),
     );
 
     lifecycle_kinds::assert_scope_drain(
@@ -337,29 +361,31 @@ fn deadline_drains_registered_async_child_to_zero() {
     );
     assert_eq!(
         awaiting,
-        Some((0, 1)),
+        Some((false, true)),
         "before escalation the child was not registered and unjoined"
     );
     assert_eq!(
         drained,
-        Some((1, 0)),
+        Some((true, false)),
         "after escalation the child was not joined with its handle removed"
     );
 }
 
 /// The observer half of [`deadline_drains_registered_async_child_to_zero`]:
-/// read the scope on each side of the escalation boundary.
+/// read the named child on each side of the escalation boundary.
 fn observe_escalation_boundary(
     watch: &ArmedWatch<'_>,
-) -> (Option<(usize, usize)>, Option<(usize, usize)>) {
+    named: &NamedSubject,
+) -> (Option<(bool, bool)>, Option<(bool, bool)>) {
+    let read = || read_child(named.get("the escalation-boundary probe"));
     watch.wait_armed();
     // The drain is waiting on exactly this child, and holding it here spends
     // none of the escalation budget: the seam credits the paused time back.
-    let awaiting = watch.probe(AWAITING_ONE, read_scope);
+    let awaiting = watch.probe(AWAITING_ONE, |_| read());
     // The seam holds one checkpoint at a time, so the terminal observation is
     // armed only once the window above has been released. The child never
-    // completes, so no count between the two windows is reachable.
+    // completes, so no state between the two windows is reachable.
     watch.controller().pause_once(DRAINED).unwrap();
-    let drained = watch.probe(DRAINED, read_scope);
+    let drained = watch.probe(DRAINED, |_| read());
     (awaiting, drained)
 }

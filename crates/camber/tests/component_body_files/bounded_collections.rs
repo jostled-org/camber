@@ -8,7 +8,7 @@ use crate::trace_capture;
 
 use camber::__private::DEFAULT_STATIC_FILE_LIMIT;
 use camber::RuntimeError;
-use camber::http::mock::{self, LifecycleCheckpoint, LifecycleController};
+use camber::http::mock::{self, BlockingWorkerEdge};
 use camber::http::{ByteBoundary, Router};
 use camber::runtime;
 use std::future::Future;
@@ -61,7 +61,7 @@ const ROUTED_CROSSING_KIND: &str = "kind=internal_service";
 /// chunks as their own. The controller is declared first so it closes before
 /// the directory it watches is removed.
 struct StaticRoot {
-    controller: LifecycleController,
+    controller: mock::ScopedBlockingWorker,
     dir: tempfile::TempDir,
 }
 
@@ -70,7 +70,7 @@ impl StaticRoot {
     fn holding(name: &str, contents: &str) -> Self {
         let dir = tempfile::tempdir().expect("a temporary static root");
         let root = Self {
-            controller: mock::static_file_lifecycle(dir.path()).expect("one observer per root"),
+            controller: mock::static_file_worker(dir.path()).expect("one observer per root"),
             dir,
         };
         root.write(name, contents);
@@ -103,10 +103,10 @@ struct Retention {
 }
 
 impl Retention {
-    fn of(controller: &LifecycleController) -> Self {
+    fn of(controller: &mock::WorkerRetention) -> Self {
         Self {
-            polled: controller.collected_chunks_polled(),
-            peak: controller.collected_peak_retained_bytes(),
+            polled: controller.collected.collected_chunks_polled(),
+            peak: controller.collected.collected_peak_retained_bytes(),
         }
     }
 }
@@ -115,8 +115,8 @@ impl Retention {
 ///
 /// Published by the collector that enforces it, so a spelling that froze no
 /// ceiling reports [`UNBOUNDED`] here however small the file it served was.
-fn frozen_ceiling(controller: &LifecycleController) -> usize {
-    controller.static_files_observed().frozen_ceiling
+fn frozen_ceiling(controller: &mock::WorkerRetention) -> usize {
+    controller.worker.static_files_observed().frozen_ceiling
 }
 
 /// Assert one answer is the typed static-file ceiling refusal.
@@ -159,7 +159,8 @@ async fn assert_declared_oversize_is_refused_unread() {
 async fn assert_growth_past_the_ceiling_drops_the_crossing_chunk() {
     let root = StaticRoot::holding("growing.txt", ADMITTED);
     root.controller
-        .pause_once(LifecycleCheckpoint::StaticFileMetadataObserved)
+        .worker
+        .pause_once(BlockingWorkerEdge::StaticFileMetadataObserved)
         .expect("one armed metadata checkpoint");
 
     let base = root.path().to_path_buf();
@@ -167,12 +168,14 @@ async fn assert_growth_past_the_ceiling_drops_the_crossing_chunk() {
         camber::http::serve_file_with_limit(&base, "growing.txt", CEILING).await
     });
     root.controller
-        .wait_until_paused(LifecycleCheckpoint::StaticFileMetadataObserved)
+        .worker
+        .wait_until_paused(BlockingWorkerEdge::StaticFileMetadataObserved)
         .await
         .expect("the worker measured the file");
     root.write("growing.txt", GROWN);
     root.controller
-        .release(LifecycleCheckpoint::StaticFileMetadataObserved)
+        .worker
+        .release(BlockingWorkerEdge::StaticFileMetadataObserved)
         .expect("the measured worker resumes");
 
     let refusal = reading
@@ -335,8 +338,8 @@ fn single_worker_runtime() -> tokio::runtime::Runtime {
 }
 
 /// Assert `reads` bounded reads each resolved, measured, and read off-worker.
-fn assert_off_worker(controller: &LifecycleController, reads: usize) {
-    let observed = controller.static_files_observed();
+fn assert_off_worker(controller: &mock::WorkerRetention, reads: usize) {
+    let observed = controller.worker.static_files_observed();
     assert_eq!(observed.workers_entered, reads, "workers entered");
     assert_eq!(observed.workers_returned, reads, "workers returned");
     assert_eq!(
@@ -370,7 +373,7 @@ fn assert_no_runtime_refusal_precedes_filesystem_work() {
         other => panic!("expected an absent runtime to be refused, got {other:?}"),
     }
 
-    let observed = root.controller.static_files_observed();
+    let observed = root.controller.worker.static_files_observed();
     assert_eq!(observed.workers_entered, 0, "nothing was offloaded");
     assert_eq!(
         observed.canonicalized_off_caller + observed.steps_on_caller,
@@ -430,14 +433,16 @@ fn assert_cancelled_wait_leaves_the_worker_its_ownership() {
     let root = StaticRoot::holding("gated.txt", ADMITTED);
     let base = root.path().to_path_buf();
     root.controller
-        .pause_once(LifecycleCheckpoint::StaticFileWorkerEntered)
+        .worker
+        .pause_once(BlockingWorkerEdge::StaticFileWorkerEntered)
         .expect("one armed worker checkpoint");
 
     single_worker_runtime().block_on(async {
         let reading =
             tokio::spawn(async move { camber::http::serve_file(&base, "gated.txt").await });
         root.controller
-            .wait_until_paused(LifecycleCheckpoint::StaticFileWorkerEntered)
+            .worker
+            .wait_until_paused(BlockingWorkerEdge::StaticFileWorkerEntered)
             .await
             .expect("the worker entered");
 
@@ -449,7 +454,7 @@ fn assert_cancelled_wait_leaves_the_worker_its_ownership() {
                 .is_cancelled(),
         );
 
-        let held = root.controller.static_files_observed();
+        let held = root.controller.worker.static_files_observed();
         assert_eq!(held.workers_entered, 1);
         assert_eq!(
             held.workers_returned, 0,
@@ -473,13 +478,18 @@ fn assert_cancelled_wait_leaves_the_worker_its_ownership() {
         );
 
         root.controller
-            .release(LifecycleCheckpoint::StaticFileWorkerEntered)
+            .worker
+            .release(BlockingWorkerEdge::StaticFileWorkerEntered)
             .expect("the abandoned worker resumes");
     });
 
     assert!(
         http_support::poll_until(WORKER_BOUND, || {
-            root.controller.static_files_observed().workers_returned == 1
+            root.controller
+                .worker
+                .static_files_observed()
+                .workers_returned
+                == 1
         }),
         "the released worker returned what it owned",
     );

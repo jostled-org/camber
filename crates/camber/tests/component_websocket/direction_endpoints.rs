@@ -11,17 +11,13 @@ use std::marker::PhantomData;
 use std::time::Duration;
 
 use crate::common::{
-    BEFORE_WRITE, CLOSE, DIRECTION_DEADLINE, assert_broken_pipe, assert_closed_with,
+    AFTER_COMMIT, BEFORE_WRITE, CLOSE, DIRECTION_DEADLINE, assert_broken_pipe, assert_closed_with,
     assert_received_text, closed_cause, direction_row, fill_outbound_behind_the_writer,
     host_direction_row, read_ws_binary_frame, read_ws_frame_raw, read_ws_text_frame, receive_once,
     received_message, write_masked_frame, write_ws_close_frame, write_ws_text_frame,
 };
 use camber::RuntimeError;
-use camber::http::mock::LifecycleCheckpoint;
 use camber::http::{WsCloseCause, WsMessage, WsReceive, WsReceiver, WsSender};
-
-/// The checkpoint that holds the coordinator once its cause is fixed.
-const SELECTED: LifecycleCheckpoint = LifecycleCheckpoint::WebSocketTerminalSelected;
 
 /// The WebSocket ping and pong opcodes.
 const PING: u8 = 0x09;
@@ -574,15 +570,15 @@ fn write_ws_binary_frame_pair(peer: &mut std::net::TcpStream) {
 async fn assert_closed_facade_sends_report_broken_pipe() {
     direction_row(4, |fixture, mut peer, connection| async move {
         let mut connection = connection;
-        fixture.arm(SELECTED);
+        fixture.arm(AFTER_COMMIT);
         write_ws_close_frame(&mut peer);
-        fixture.wait_paused(SELECTED).await;
+        fixture.wait_paused(AFTER_COMMIT).await;
         assert_eq!(
             fixture.observed().terminal,
             Some(WsCloseCause::PeerClosed),
             "the facade's connection ended for a reason other than the peer's close"
         );
-        fixture.release(SELECTED);
+        fixture.release(AFTER_COMMIT);
         assert_eq!(
             connection
                 .recv_timeout(DIRECTION_DEADLINE)

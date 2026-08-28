@@ -1,6 +1,6 @@
 use crate::runtime_support as common;
 
-use camber::http::mock::{InboundTerminal, LifecycleController, TransferObservation};
+use camber::http::mock::{InboundTerminal, TransferObservation, TransferOwnerController};
 use camber::http::{Request, Router, StreamResponse, TransferBudget};
 use camber::{RuntimeError, runtime};
 use std::io::{self, BufReader, Read, Write};
@@ -23,7 +23,7 @@ const BUFFERED_MAX_BYTES: usize = 64;
 /// The release alone is [`crate::stream_support::released_download`]; this is
 /// that wait with the terminal added, because the rows below read both facts and
 /// a wait that settled on one would race the turn that fixes the other.
-fn settled_download(controller: &LifecycleController, row: &str) -> TransferObservation {
+fn settled_download(controller: &TransferOwnerController, row: &str) -> TransferObservation {
     crate::stream_support::download_observed(controller, row, "settled", |observed| {
         observed.download.terminal.is_some() && observed.download.releases >= 1
     })
@@ -169,7 +169,7 @@ fn stream_failure_is_observable_to_client_or_owner() {
         .run(|| {
             let mut router = Router::new();
             router.proxy_stream("/api", &format!("http://{upstream_addr}"));
-            let port = crate::http::reserve_observed();
+            let port = crate::http::reserve_transfer_owner();
             let server = port.serve(router);
             let completion = common::block_on(observe_h2_completion(server.addr(), close_tx));
             // 11.T2 and 11.T4: the truncation the peer or the owner reports is
@@ -241,7 +241,7 @@ fn stream_response_sends_chunks_incrementally() {
                 })
             });
 
-            let port = crate::http::reserve_observed();
+            let port = crate::http::reserve_transfer_owner();
             let server = port.serve(router);
             let addr = server.addr();
 
@@ -303,7 +303,7 @@ fn assert_chunks_arrive_one_at_a_time(
 /// Both budgeted rows end here: one names the maximum on the response and one
 /// inherits it from the router, and what each proves about the owner that
 /// carried it is the same four facts.
-fn assert_budgeted_download(controller: &LifecycleController, row: &str, maximum: usize) {
+fn assert_budgeted_download(controller: &TransferOwnerController, row: &str, maximum: usize) {
     let observed = settled_download(controller, row);
     assert_eq!(
         observed.download.max_bytes,
@@ -421,7 +421,7 @@ fn stream_response_client_disconnect_drops_sender() {
                 })
             });
 
-            let port = crate::http::reserve_observed();
+            let port = crate::http::reserve_transfer_owner();
             let server = port.serve(router);
             let addr = server.addr();
 
@@ -490,7 +490,7 @@ fn stream_response_empty_body() {
                 })
             });
 
-            let port = crate::http::reserve_observed();
+            let port = crate::http::reserve_transfer_owner();
             let server = port.serve(router);
             let addr = server.addr();
 
@@ -521,7 +521,7 @@ fn stream_response_empty_body() {
 /// The peer's view is the same empty body a dropped sender gives, so what tells
 /// the two apart is the owner's own record: it polled a frame, charged it
 /// nothing, released nothing, and ended on the source's own end.
-fn assert_empty_frame_row(addr: SocketAddr, controller: &LifecycleController) {
+fn assert_empty_frame_row(addr: SocketAddr, controller: &TransferOwnerController) {
     let row = "an empty frame";
     let answered = crate::http::request(
         addr,
@@ -613,7 +613,7 @@ fn stream_response_with_buffer_preserves_streaming_behavior() {
             let inherited = TransferBudget::unbounded()
                 .with_max_bytes(BUFFERED_MAX_BYTES)
                 .expect("the router's download maximum is accepted");
-            let port = crate::http::reserve_observed();
+            let port = crate::http::reserve_transfer_owner();
             let server = port.serve(router.download_budget(inherited));
             let addr = server.addr();
 
@@ -626,12 +626,7 @@ fn stream_response_with_buffer_preserves_streaming_behavior() {
             let row = "a backpressured buffer";
             assert_budgeted_download(server.controller(), row, BUFFERED_MAX_BYTES);
             assert!(
-                server
-                    .controller()
-                    .transfers_observed()
-                    .download
-                    .frames_polled
-                    >= 3,
+                server.controller().observed().download.frames_polled >= 3,
                 "{row}: each chunk crossed the owner as its own frame"
             );
 
