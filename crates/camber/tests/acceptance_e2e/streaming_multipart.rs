@@ -2027,17 +2027,17 @@ impl SessionTerminal {
         }
     }
 
-    /// The escalation this row's terminal must not be preempted by.
+    /// The optional escalation this row must not be preempted by.
     ///
     /// A graceful stop that reaches its own deadline escalates to a forced
     /// abort, and that abort takes the connection task where it stands. Both
     /// deadlines are the same declared value, and the session's is minted when it
     /// first observes the transition — after the server minted its own — so the
     /// two expire together and whichever task runs first decides whether the
-    /// session settles or is taken away mid-turn. The escalation is held at the
-    /// production checkpoint the supervisor selects it from, so what ends this
-    /// row is the bound it configured rather than that race.
-    const fn escalation(self) -> Option<ServerStopEdge> {
+    /// session settles or is taken away mid-turn. The checkpoint is a barrier,
+    /// not an expected event: a session that drains first lets the supervisor
+    /// finish without selecting the escalation at all.
+    const fn preemption_barrier(self) -> Option<ServerStopEdge> {
         match self {
             Self::Shutdown => Some(ServerStopEdge::SupervisorSelectedDeadline),
             Self::BodyIdle | Self::RequestTotal | Self::TransferTotal | Self::Disconnect => None,
@@ -2103,7 +2103,7 @@ async fn assert_session_revoked(stall: Stall, terminal: SessionTerminal) {
         .expect("the owned server requires a Tokio runtime");
     let before = controller.sessions.observed();
 
-    if let Some(edge) = terminal.escalation() {
+    if let Some(edge) = terminal.preemption_barrier() {
         controller
             .stop
             .pause_once(edge)
@@ -2142,13 +2142,11 @@ async fn assert_session_revoked(stall: Stall, terminal: SessionTerminal) {
 
     assert_session_answer(terminal, answered.as_ref(), &fixture, &label);
     assert_session_released(&controller, &fixture, before, terminal, &label);
-    // Released only now: the session has answered and let go of everything it
-    // owned, so the escalation this row held back has nothing left to preempt.
-    if let Some(checkpoint) = terminal.escalation() {
-        wait_stalled(&controller, checkpoint, &label).await;
-    }
     assert_grammar_unchanged(terminal, addr, &fixture, &label).await;
 
+    // Closing the controller releases the preemption barrier whether the
+    // supervisor reached it or the completed drain made it unnecessary.
+    drop(controller);
     handle.cancel();
     assert!(
         tokio::time::timeout(BOUND, handle).await.is_ok(),
