@@ -9,7 +9,7 @@ camber_workflow_checks() {
 
 require_workflow_tools() {
     local tool
-    for tool in git cargo cargo-deny pedant protoc; do
+    for tool in git cargo cargo-deny pedant protoc rg; do
         command -v "${tool}" >/dev/null 2>&1 || {
             printf 'INFRASTRUCTURE: required workflow tool is unavailable: %s\n' \
                 "${tool}" >&2

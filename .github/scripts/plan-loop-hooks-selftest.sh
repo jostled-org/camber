@@ -19,39 +19,69 @@ assert_output() {
     [ "${actual}" = "${expected}" ] || fail "${label}"
 }
 
-for script in \
-    .github/scripts/check-pedant.sh \
-    .github/scripts/check-supply-chain.sh \
-    .github/scripts/reproduce-ci.sh \
-    .github/scripts/verify-packages.sh; do
-    require_executable "${script}"
-done
+assert_workflow_entry() {
+    local pattern="$1" label="$2" status=0
+    rg -qF -- "${pattern}" "${ROOT}/.github/workflows/ci.yml" || status=$?
+    case "${status}" in
+        0) return 0 ;;
+        1) fail "CI omits ${label}" ;;
+        *)
+            printf 'plan-loop hook self-test: workflow search failed (rg exit %s)\n' \
+                "${status}" >&2
+            return "${status}"
+            ;;
+    esac
+}
 
-CAMBER_HOOK_LIBRARY_MODE=1 source "${ROOT}/.github/scripts/check-pedant.sh"
-assert_output \
-    $'camber\ncamber-bench\ncamber-build\ncamber-cli\ncamber-macros' \
-    "$(camber_pedant_packages)" \
-    'Pedant package inventory drifted'
+check_hook_inventories() {
+    local script
+    for script in \
+        .github/scripts/check-pedant.sh \
+        .github/scripts/check-supply-chain.sh \
+        .github/scripts/reproduce-ci.sh \
+        .github/scripts/verify-packages.sh; do
+        require_executable "${script}"
+    done
 
-CAMBER_HOOK_LIBRARY_MODE=1 source "${ROOT}/.github/scripts/verify-packages.sh"
-assert_output \
-    $'camber-build\ncamber-macros\ncamber\ncamber-cli' \
-    "$(camber_publishable_packages)" \
-    'publishable package inventory drifted'
+    CAMBER_HOOK_LIBRARY_MODE=1 source "${ROOT}/.github/scripts/check-pedant.sh"
+    assert_output \
+        $'camber\ncamber-bench\ncamber-build\ncamber-cli\ncamber-macros' \
+        "$(camber_pedant_packages)" \
+        'Pedant package inventory drifted'
 
-CAMBER_HOOK_LIBRARY_MODE=1 source "${ROOT}/.github/scripts/reproduce-ci.sh"
-assert_output \
-    $'hook-contract\nfmt\nclippy\ntest\ndeny\npedant-source\npedant-tests\nsupply-chain' \
-    "$(camber_workflow_checks)" \
-    'workflow check inventory drifted'
+    CAMBER_HOOK_LIBRARY_MODE=1 source "${ROOT}/.github/scripts/verify-packages.sh"
+    assert_output \
+        $'camber-build\ncamber-macros\ncamber\ncamber-cli' \
+        "$(camber_publishable_packages)" \
+        'publishable package inventory drifted'
 
-rg -qF -- ".github/scripts/plan-loop-hooks-selftest.sh" \
-    "${ROOT}/.github/workflows/ci.yml" || fail 'CI omits hook self-test'
-rg -qF -- ".github/scripts/check-pedant.sh source" \
-    "${ROOT}/.github/workflows/ci.yml" || fail 'CI omits shared source Pedant hook'
-rg -qF -- ".github/scripts/check-pedant.sh tests" \
-    "${ROOT}/.github/workflows/ci.yml" || fail 'CI omits shared test Pedant hook'
-rg -qF -- ".github/scripts/check-supply-chain.sh" \
-    "${ROOT}/.github/workflows/ci.yml" || fail 'CI omits shared supply-chain hook'
+    CAMBER_HOOK_LIBRARY_MODE=1 source "${ROOT}/.github/scripts/reproduce-ci.sh"
+    assert_output \
+        $'hook-contract\nfmt\nclippy\ntest\ndeny\npedant-source\npedant-tests\nsupply-chain' \
+        "$(camber_workflow_checks)" \
+        'workflow check inventory drifted'
+}
 
-printf 'plan-loop hook self-test: PASS\n'
+check_workflow_entries() {
+    assert_workflow_entry '.github/scripts/plan-loop-hooks-selftest.sh' \
+        'hook self-test' || return $?
+    assert_workflow_entry '.github/scripts/check-pedant.sh source' \
+        'shared source Pedant hook' || return $?
+    assert_workflow_entry '.github/scripts/check-pedant.sh tests' \
+        'shared test Pedant hook' || return $?
+    assert_workflow_entry '.github/scripts/check-supply-chain.sh' \
+        'shared supply-chain hook' || return $?
+}
+
+plan_loop_hooks_selftest_main() {
+    command -v rg >/dev/null 2>&1 || {
+        printf 'INFRASTRUCTURE: required hook tool is unavailable: rg\n' >&2
+        return 75
+    }
+    check_hook_inventories || return $?
+    check_workflow_entries || return $?
+    bash "${ROOT}/.github/scripts/tests/hook-prerequisites.sh" || return $?
+    printf 'plan-loop hook self-test: PASS\n'
+}
+
+[ "${CAMBER_HOOK_LIBRARY_MODE:-0}" = 1 ] || plan_loop_hooks_selftest_main "$@"
