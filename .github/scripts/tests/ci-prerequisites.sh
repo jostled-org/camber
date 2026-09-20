@@ -3,10 +3,10 @@
 set -euo pipefail
 
 ROOT=$(CDPATH='' cd "${BASH_SOURCE[0]%/*}/../../.." && pwd)
-SELFTEST="${ROOT}/.github/scripts/plan-loop-hooks-selftest.sh"
+SELFTEST="${ROOT}/.github/scripts/ci-selftest.sh"
 REPRODUCE="${ROOT}/.github/scripts/reproduce-ci.sh"
 BASH_EXE="${BASH}"
-FIXTURE=$(mktemp -d "${TMPDIR:-/tmp}/camber-hook-prerequisites.XXXXXX")
+FIXTURE=$(mktemp -d "${TMPDIR:-/tmp}/camber-ci-prerequisites.XXXXXX")
 trap 'rm -rf -- "${FIXTURE}"' EXIT
 mkdir "${FIXTURE}/bin"
 ln -s "$(command -v dirname)" "${FIXTURE}/bin/dirname"
@@ -56,7 +56,7 @@ expect_message 'required workflow tool is unavailable: rg'
 
 expect_exit 0 'present workflow entry' "${BASH_EXE}" -s -- "${SELFTEST}" <<'BASH'
     CAMBER_HOOK_LIBRARY_MODE=1 source "$1"
-    assert_workflow_entry ".github/scripts/plan-loop-hooks-selftest.sh" "hook self-test"
+    assert_workflow_entry ".github/scripts/ci-selftest.sh" "hook self-test"
 BASH
 
 expect_exit 1 'absent workflow entry' "${BASH_EXE}" -s -- "${SELFTEST}" <<'BASH'
@@ -68,9 +68,52 @@ expect_message 'CI omits fixture entry'
 expect_exit 2 'workflow search error' "${BASH_EXE}" -s -- "${SELFTEST}" <<'BASH'
     CAMBER_HOOK_LIBRARY_MODE=1 source "$1"
     rg() { return 2; }
-    assert_workflow_entry ".github/scripts/plan-loop-hooks-selftest.sh" "hook self-test"
+    assert_workflow_entry ".github/scripts/ci-selftest.sh" "hook self-test"
 BASH
 expect_message 'workflow search failed (rg exit 2)'
 reject_message 'CI omits hook self-test'
 
-printf 'Hook prerequisite regression tests: PASS\n'
+mkdir -p "${FIXTURE}/workflow/.github/scripts"
+for hook in ci-selftest check-pedant check-supply-chain; do
+    ln -s /usr/bin/true "${FIXTURE}/workflow/.github/scripts/${hook}.sh"
+done
+
+for doc_status in 0 42 75; do
+    expect_exit "${doc_status}" "workflow documentation status ${doc_status}" \
+        "${BASH_EXE}" -s -- "${REPRODUCE}" "${FIXTURE}/workflow" "${doc_status}" <<'BASH'
+    CAMBER_HOOK_LIBRARY_MODE=1 source "$1"
+    DOC_STATUS="$3"
+    DOC_SEEN=0
+    cargo() {
+        case "$*" in
+            '--config build.rustdocflags=["-D","warnings"] doc --workspace --lib --features profiling,ws,grpc,acme,dns01,nats,sqs,otel --no-deps')
+                DOC_SEEN=1
+                printf 'documentation command observed\n'
+                return "${DOC_STATUS}"
+                ;;
+            'deny --workspace check') printf 'post-documentation phase observed\n' ;;
+        esac
+        return 0
+    }
+    status=0
+    run_workflow_checks "$2" "$2" || status=$?
+    [ "${DOC_SEEN}" = 1 ] || exit 98
+    exit "${status}"
+BASH
+    expect_message 'documentation command observed'
+    case "${doc_status}" in
+        0) expect_message 'post-documentation phase observed' ;;
+        *) reject_message 'post-documentation phase observed' ;;
+    esac
+done
+
+expect_exit 1 'changed manifests after reviewed dependency base' \
+    "${BASH_EXE}" -s -- "${ROOT}/.github/scripts/check-supply-chain.sh" <<'BASH'
+    CAMBER_HOOK_LIBRARY_MODE=1 source "$1"
+    CAMBER_DEPENDENCY_BASE_SHA=reviewed-base
+    git() { printf 'dependency diff: %s\n' "$*"; return 1; }
+    validate_dependency_inputs
+BASH
+expect_message 'dependency diff: diff --quiet reviewed-base..HEAD'
+
+printf 'CI prerequisite regression tests: PASS\n'

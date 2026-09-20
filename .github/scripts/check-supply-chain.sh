@@ -12,11 +12,12 @@ validate_dependency_inputs() {
         printf 'ERROR: Cargo.lock changed without a reviewed supply-chain baseline\n' >&2
         return 1
     }
-    [ -z "${PLAN_BASE_SHA:-}" ] \
-        || git diff --quiet "${PLAN_BASE_SHA}"..HEAD -- \
+    # Callers may pin the reviewed commit that bounds manifest changes.
+    [ -z "${CAMBER_DEPENDENCY_BASE_SHA:-}" ] \
+        || git diff --quiet "${CAMBER_DEPENDENCY_BASE_SHA}"..HEAD -- \
             Cargo.toml ':(glob)**/Cargo.toml' \
         || {
-            printf 'ERROR: Cargo manifests changed during the plan\n' >&2
+            printf 'ERROR: Cargo manifests changed since the reviewed dependency base\n' >&2
             return 1
         }
 }

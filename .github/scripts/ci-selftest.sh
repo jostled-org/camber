@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
 fail() {
-    printf 'plan-loop hook self-test failed: %s\n' "$1" >&2
+    printf 'CI self-test failed: %s\n' "$1" >&2
     exit 1
 }
 
@@ -26,7 +26,7 @@ assert_workflow_entry() {
         0) return 0 ;;
         1) fail "CI omits ${label}" ;;
         *)
-            printf 'plan-loop hook self-test: workflow search failed (rg exit %s)\n' \
+            printf 'CI self-test: workflow search failed (rg exit %s)\n' \
                 "${status}" >&2
             return "${status}"
             ;;
@@ -57,13 +57,16 @@ check_hook_inventories() {
 
     CAMBER_HOOK_LIBRARY_MODE=1 source "${ROOT}/.github/scripts/reproduce-ci.sh"
     assert_output \
-        $'hook-contract\nfmt\nclippy\ntest\ndeny\npedant-source\npedant-tests\nsupply-chain' \
+        $'hook-contract\nfmt\nclippy\ndoc\ntest\ndeny\npedant-source\npedant-tests\nsupply-chain' \
         "$(camber_workflow_checks)" \
         'workflow check inventory drifted'
 }
 
 check_workflow_entries() {
-    assert_workflow_entry '.github/scripts/plan-loop-hooks-selftest.sh' \
+    assert_workflow_entry 'cargo --config '\''build.rustdocflags=["-D","warnings"]'\'' doc' \
+        'warning-denying API documentation check' || return $?
+    assert_workflow_entry "'**/*.md'" 'Markdown change trigger' || return $?
+    assert_workflow_entry '.github/scripts/ci-selftest.sh' \
         'hook self-test' || return $?
     assert_workflow_entry '.github/scripts/check-pedant.sh source' \
         'shared source Pedant hook' || return $?
@@ -73,15 +76,15 @@ check_workflow_entries() {
         'shared supply-chain hook' || return $?
 }
 
-plan_loop_hooks_selftest_main() {
+ci_selftest_main() {
     command -v rg >/dev/null 2>&1 || {
         printf 'INFRASTRUCTURE: required hook tool is unavailable: rg\n' >&2
         return 75
     }
     check_hook_inventories || return $?
     check_workflow_entries || return $?
-    bash "${ROOT}/.github/scripts/tests/hook-prerequisites.sh" || return $?
-    printf 'plan-loop hook self-test: PASS\n'
+    bash "${ROOT}/.github/scripts/tests/ci-prerequisites.sh" || return $?
+    printf 'CI self-test: PASS\n'
 }
 
-[ "${CAMBER_HOOK_LIBRARY_MODE:-0}" = 1 ] || plan_loop_hooks_selftest_main "$@"
+[ "${CAMBER_HOOK_LIBRARY_MODE:-0}" = 1 ] || ci_selftest_main "$@"

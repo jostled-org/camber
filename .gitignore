@@ -12,3 +12,4 @@ docs/**
 crates/camber-bench/examples/*/Cargo.lock
 crates/camber-macros/tests/fixtures/*/Cargo.lock
 logs/
+.pedant/proofs/

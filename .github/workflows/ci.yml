@@ -23,9 +23,9 @@ jobs:
           filters: |
             code:
               - '**/*.rs'
+              - '**/*.md'
               - '**/Cargo.toml'
               - '**/Cargo.lock'
-              - '.manifest.toml'
               - '.pedant.toml'
               - '.pedant/**'
               - 'deny.toml'
@@ -47,9 +47,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: .github/scripts/plan-loop-hooks-selftest.sh
+      - run: .github/scripts/ci-selftest.sh
       - run: cargo fmt --check
       - run: cargo clippy --workspace --features "${CAMBER_CI_FEATURES}" -- -D warnings
+      - name: Check API documentation
+        run: >-
+          cargo --config 'build.rustdocflags=["-D","warnings"]' doc
+          --workspace --lib --features "${CAMBER_CI_FEATURES}" --no-deps
       # camber-bench measurements have no place on a shared runner, so its tests
       # stay out of this lane. Static source and test policy still covers it in
       # the Pedant matrices below.

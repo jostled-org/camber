@@ -4,7 +4,7 @@ set -euo pipefail
 
 camber_workflow_checks() {
     printf '%s\n' \
-        hook-contract fmt clippy test deny pedant-source pedant-tests supply-chain
+        hook-contract fmt clippy doc test deny pedant-source pedant-tests supply-chain
 }
 
 require_workflow_tools() {
@@ -21,10 +21,12 @@ require_workflow_tools() {
 run_workflow_checks() {
     local source_root="$1" checkout="$2"
     cd "${checkout}" || return 75
-    "${source_root}/.github/scripts/plan-loop-hooks-selftest.sh"
+    "${source_root}/.github/scripts/ci-selftest.sh"
     cargo fmt --check
     cargo clippy --workspace \
         --features 'profiling,ws,grpc,acme,dns01,nats,sqs,otel' -- -D warnings
+    cargo --config 'build.rustdocflags=["-D","warnings"]' doc --workspace --lib \
+        --features 'profiling,ws,grpc,acme,dns01,nats,sqs,otel' --no-deps || return $?
     cargo test --workspace --exclude camber-bench \
         --features 'profiling,ws,grpc,acme,dns01,nats,sqs,otel'
     cargo deny --workspace check
