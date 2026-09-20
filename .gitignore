@@ -2,6 +2,7 @@
 .DS_Store
 .mcp.json
 .manifest.toml
+CLAUDE.md
 docs/**
 !docs/guides/
 !docs/guides/**

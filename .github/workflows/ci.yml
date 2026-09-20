@@ -29,7 +29,7 @@ jobs:
               - '.pedant.toml'
               - '.pedant/**'
               - 'deny.toml'
-              - '.github/workflows/**'
+              - '.github/**'
 
   check:
     needs: changes
@@ -47,6 +47,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - run: .github/scripts/plan-loop-hooks-selftest.sh
       - run: cargo fmt --check
       - run: cargo clippy --workspace --features "${CAMBER_CI_FEATURES}" -- -D warnings
       # camber-bench measurements have no place on a shared runner, so its tests
@@ -90,12 +91,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install pedant
       - name: Check package source tree
-        run: |
-          files=()
-          while IFS= read -r file; do
-            files+=("$file")
-          done < <(git ls-files "crates/${{ matrix.package }}/src")
-          pedant check --format github "${files[@]}"
+        run: .github/scripts/check-pedant.sh source "${{ matrix.package }}"
 
   pedant-tests:
     needs: changes
@@ -111,12 +107,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install pedant
       - name: Check package test tree
-        run: |
-          files=()
-          while IFS= read -r file; do
-            files+=("$file")
-          done < <(git ls-files "crates/${{ matrix.package }}/tests")
-          pedant check --format github "${files[@]}"
+        run: .github/scripts/check-pedant.sh tests "${{ matrix.package }}"
 
   supply-chain:
     needs: changes
@@ -126,7 +117,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: jostled-org/pedant/.github/actions/supply-chain-check@04cc045ab6d61f9cab4fb182f296f9b12e17930f
-        with:
-          baseline-path: .pedant/baselines
-          fail-on: hash-mismatch
+      - run: cargo install pedant
+      - run: .github/scripts/check-supply-chain.sh
