@@ -31,6 +31,9 @@ pub enum DeadlineBoundary {
     ClientRequest,
     /// The quiet interval allowed between outbound response body frames.
     ClientResponseIdle,
+    /// One outbound client call's whole retry sequence: every attempt, every
+    /// delay between them, and collection of the final response body.
+    ClientRetry,
     /// A resource's initial readiness health callback.
     ResourceStartupHealth,
     /// A resource's periodic health callback.
@@ -48,7 +51,7 @@ impl DeadlineBoundary {
     /// from the enum rather than transcribed beside it: a name a label may
     /// carry and a name this enum spells are the same list or they are two
     /// lists that drift.
-    pub(super) const ALL: [Self; 15] = [
+    pub(super) const ALL: [Self; 16] = [
         Self::Header,
         Self::RequestBodyIdle,
         Self::RequestTotal,
@@ -60,6 +63,7 @@ impl DeadlineBoundary {
         Self::ClientConnect,
         Self::ClientRequest,
         Self::ClientResponseIdle,
+        Self::ClientRetry,
         Self::ResourceStartupHealth,
         Self::ResourcePeriodicHealth,
         Self::ResourceShutdown,
@@ -84,6 +88,7 @@ impl DeadlineBoundary {
             Self::ClientConnect => "client_connect",
             Self::ClientRequest => "client_request",
             Self::ClientResponseIdle => "client_response_idle",
+            Self::ClientRetry => "client_retry",
             Self::ResourceStartupHealth => "resource_startup_health",
             Self::ResourcePeriodicHealth => "resource_periodic_health",
             Self::ResourceShutdown => "resource_shutdown",
@@ -162,6 +167,10 @@ impl std::fmt::Display for ByteBoundary {
 /// selected terminal, a completion record — each answer it once. Absence is a
 /// name of its own rather than a missing value: a counter whose boundary label
 /// is sometimes absent splits one time series into two.
+///
+/// A failed source is the one row that is not a configured bound. It still
+/// belongs here: once a head has committed, no rejection can name why the body
+/// ended, so this is the only dimension that can say the source failed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(super) enum CrossedBound {
     /// This operation crossed no configured bound.
@@ -169,17 +178,21 @@ pub(super) enum CrossedBound {
     None,
     Deadline(DeadlineBoundary),
     Bytes(ByteBoundary),
+    /// The body's source failed, or ended cleanly with declared bytes owed.
+    SourceFailure,
 }
 
 impl CrossedBound {
     /// Every name a crossed-bound label may carry, over both vocabularies.
     ///
-    /// Built from the two declared lists and the stated absence, so a published
-    /// vocabulary and the bounds production can actually name are one list.
+    /// Built from the two declared lists, the stated absence, and the failed
+    /// source, so a published vocabulary and the bounds production can actually
+    /// name are one list.
     pub(super) fn vocabulary() -> Box<[&'static str]> {
         std::iter::once(Self::None.label())
             .chain(DeadlineBoundary::ALL.map(|deadline| Self::Deadline(deadline).label()))
             .chain(ByteBoundary::ALL.map(|bytes| Self::Bytes(bytes).label()))
+            .chain(std::iter::once(Self::SourceFailure.label()))
             .collect()
     }
 
@@ -189,6 +202,7 @@ impl CrossedBound {
             Self::None => "none",
             Self::Deadline(deadline) => deadline.label(),
             Self::Bytes(bytes) => bytes.label(),
+            Self::SourceFailure => "source_failure",
         }
     }
 }

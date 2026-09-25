@@ -48,14 +48,17 @@ Each boundary is separate. One does not lend time to another.
 | `request_timeout` | 30 seconds | One whole attempt, connect through body end |
 | `response_idle_timeout` | 30 seconds | Each gap between response body reads |
 | response maximum | eight MiB | Bytes one response may retain |
+| `retry_timeout` | 30 seconds | The whole retry sequence, when retries are configured |
 
 `request_timeout` replaces the former `read_timeout`. That name claimed a
 read-level boundary it never had: the value has always bounded the complete
 attempt. The per-read boundary is now `response_idle_timeout`.
 
-The last three are one stored `TransferBudget`. `response_budget` replaces all
-of it; `request_timeout` and `response_idle_timeout` write one field each. Call
-order is authoritative — the last write to a field is the one the client uses.
+`request_timeout`, `response_idle_timeout`, and the response maximum are one
+stored `TransferBudget`. `retry_timeout` is not part of it. `response_budget`
+replaces all of the budget; `request_timeout` and `response_idle_timeout` write
+one field each. Call order is authoritative — the last write to a field is the
+one the client uses.
 Read the result back with `response_policy()`.
 
 ```rust
@@ -96,7 +99,7 @@ trust. Both deadlines survive the opt-out.
 
 Retries are unaffected by any of this. Retry eligibility, count, backoff, and
 the unsafe-method opt-in are unchanged, and `request_timeout` bounds each
-attempt rather than the sequence.
+attempt rather than the sequence. `retry_timeout` bounds the sequence.
 
 ## Retry Behavior
 
@@ -107,16 +110,109 @@ Retries apply to transient failures such as:
 - `429`
 - `502`, `503`, `504`
 
-Backoff uses exponential delay with jitter.
+Backoff uses exponential delay with jitter: `base · 2^attempt`, plus a jitter
+below `base`. Every step saturates, so a large attempt count or base never
+wraps to a short wait.
+
+### Server-Stated Delay
+
+A transient response can state its own wait in `Retry-After`. Camber reads both
+forms:
+
+- **Delta-seconds** such as `120`: that many seconds.
+- **HTTP-date** such as `Sun, 06 Nov 1994 08:49:37 GMT`: the time from now
+  until that date. A date that is now or in the past means retry at once.
+
+A valid value replaces the backoff for that retry. An invalid value is ignored,
+and the configured backoff applies. Either delay is clipped to the retry
+deadline below: a stated wait past it ends the call at the deadline with no
+further attempt.
+
+### One Deadline For The Sequence
+
+`retry_timeout` bounds the whole sequence: every attempt, every response head,
+every delay, and the final response body. It defaults to 30 seconds. Values
+below one millisecond are clamped to one millisecond, and values above thirty
+years are clamped to thirty years.
+
+```rust
+let client = camber::http::client()
+    .retries(3)
+    .retry_timeout(std::time::Duration::from_secs(10));
+```
+
+The deadline is fixed once, when the call begins. No attempt or delay resets
+it. When it expires, Camber drops the attempt in flight and returns
+`RuntimeError::DeadlineExceeded(DeadlineBoundary::ClientRetry)`. No attempt
+starts after it. A delay that would end past it ends at it instead.
+
+Runtime shutdown ends the sequence too. A pending attempt or delay returns
+`RuntimeError::Cancelled`, and no further attempt starts. Dropping the call
+future is ordinary caller cancellation: the attempt in flight is dropped and
+nothing more is sent.
+
+Each attempt keeps its own boundaries. A connect, request, or response-idle
+timeout that expires first returns its own result. Before the response head
+arrives, that result can still earn another attempt. A failure while Camber
+collects the final response body is returned. When the deadline and another
+result become ready with no order between them, either one can be the answer.
+
+With zero retries there is no sequence. `retry_timeout` is then ignored, and
+the attempt's own boundaries bound the whole call. The free functions never
+retry.
+
+Every replay decision belongs to Camber. The underlying Reqwest client is built
+with its own retry policy disabled, so no second sender resends a request this
+client refused to repeat.
+
+### Which Methods Retry
+
+`GET`, `HEAD`, and `OPTIONS` retry by default. Repeating one of them cannot
+duplicate server-visible work.
+
+`POST`, `PUT`, `PATCH`, and `DELETE` run at most one attempt unless you opt in:
+
+```rust
+let client = camber::http::client()
+    .retries(3)
+    .retry_unsafe_methods(true);
+```
+
+### What The Opt-In Authorizes
+
+Repeating an unsafe method can duplicate a write, so the opt-in authorizes a
+replay only where there is evidence the first attempt did no work.
+
+| Outcome | Safe method | Unsafe method with opt-in |
+| --- | --- | --- |
+| `429`, `502`, `503`, `504` | retry | retry |
+| Connect-stage failure | retry | retry |
+| Any other transport failure | retry | return the error |
+| Any other status | return the response | return the response |
+
+A transient response is the server's own statement that it did not act on the
+request, so the request is sent again. Its body is sent again with it.
+
+A connect-stage failure means no server saw the request, so the attempt is
+repeated.
+
+Every other transport failure is ambiguous. Once a connection is established, a
+failed send proves nothing: request headers or a body prefix may already have
+reached the peer, and nothing on this side distinguishes a peer that ignored
+them from one that acted on them. Camber returns that transport error rather
+than writing twice.
+
+Widen this only where you know the endpoint tolerates a duplicate — an
+idempotency key, a conditional write, or a `PUT` of the whole resource.
 
 ## Response Access
 
 Responses expose:
 
 - `status()`
-- `body()`
-- `header(name)`
-- `headers()`
+- `body()`, the body as text
+- `body_bytes()`, the raw body
+- `headers()`, every header as a name and value pair
 
 ## Trace Propagation
 

@@ -4,6 +4,8 @@ mod drain;
 mod external;
 #[path = "../support/h2_client.rs"]
 mod h2_client;
+#[path = "../support/halt.rs"]
+mod halt;
 #[path = "../support/http.rs"]
 mod http;
 #[path = "../support/metrics_scrape.rs"]

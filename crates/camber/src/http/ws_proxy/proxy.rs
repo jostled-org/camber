@@ -10,24 +10,33 @@ use super::super::Request;
 use super::super::body::HyperResponseBody;
 use super::super::proxy_upstream::ProxyUpstream;
 use super::super::rejection::Rejected;
-use super::super::response::HeaderPair;
 use super::super::server_lifecycle::{ConnectionLifecycle, ConnectionPermit, ServerControl};
+use super::backend::{
+    BackendHandshake, BackendTarget, BackendTrust, BackendWs, NegotiatedBackend,
+    ValidatedBackendUpgrade, forwarded_offer_headers,
+};
 use super::framing::{
-    WsClose, WsError, WsFrame, WsFrameMessage, close_transport, drain_until_close, flush_transport,
+    WsError, WsFrame, WsFrameMessage, close_transport, drain_until_close, flush_transport,
     next_control, next_frame, send_close, shutdown_client_transport, until_abort,
 };
-use super::handoff::{WsHandoff, WsHandoffOutcome, WsRefusal, prepare_ws_handoff};
+use super::handoff::{WsHandoffOutcome, WsRefusal, prepare_ws_handoff};
 use super::handshake::WsUpgrade;
-use super::ownership::{ClientWs, open_bridge, own_upgrade_bridge};
+use super::ownership::{BridgeAttachment, ClientWs, open_bridge};
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::Duration;
 
-/// Validate the upgrade pair, build the backend URL, spawn the bridge, return 101.
+/// Admit the client's offer, negotiate it with the backend, and only then
+/// build the `101`, register the bridge, and return it.
 ///
-/// The upstream owner is read here and not carried into the bridge: the only
-/// thing the bridge needs from it is the deadline its dial runs under, and that
-/// is a value the frozen route already decided.
+/// The backend is reached and validated on the request task, inside the
+/// request total, and under the deadlines the route froze. Backend negotiation
+/// failures become mapped Proxy refusals. Inbound validation, request-total
+/// expiry, and bridge registration retain their own rejection categories.
+/// The peer never sees a `101` for a backend that refused, broke its handshake,
+/// or never answered. The `101` names only what the backend selected, and the
+/// registered bridge frames over the transport negotiated here — it never
+/// dials a second time. Any exit before the bridge takes that transport drops
+/// it, which releases the backend.
 pub(in crate::http) async fn handle_proxy_ws(
     ws_upgrade: WsUpgrade,
     req: Request,
@@ -36,133 +45,40 @@ pub(in crate::http) async fn handle_proxy_ws(
     upstream: &ProxyUpstream,
     lifecycle: &ConnectionLifecycle,
 ) -> Result<hyper::Response<HyperResponseBody>, WsRefusal> {
-    let prepared = match prepare_ws_handoff(ws_upgrade, &req, lifecycle) {
+    let offer = ws_upgrade.admit(&req).map_err(WsRefusal::unnegotiated)?;
+    let target = BackendTarget::resolve(req.raw_path_and_query(), &prefix, &backend)
+        .map_err(backend_refusal)?;
+    let NegotiatedBackend { upgrade, selection } =
+        BackendHandshake::new(target, forwarded_offer_headers(&req), offer.protocols())
+            .map_err(backend_refusal)?
+            .negotiate(upstream, &BackendTrust::Public)
+            .await
+            .map_err(backend_refusal)?;
+    let prepared = match prepare_ws_handoff(offer, selection, &req, lifecycle) {
         WsHandoffOutcome::Ready(prepared) => prepared,
         WsHandoffOutcome::Refused(refusal) => return Err(refusal),
     };
-    // Borrowed rather than owned: this bridge never takes the request, so the
-    // selected protocol stays readable for as long as a refusal could name it.
-    // Only a refusal allocates it, and an upgrade takes at most one of them.
-    let subprotocol = prepared.subprotocol;
-
-    let backend_ws_url = match build_backend_ws_url(req.raw_path_and_query(), &prefix, &backend) {
-        Ok(url) => url,
-        Err(rejected) => return Err(WsRefusal::negotiated(rejected, subprotocol)),
-    };
-
-    // The backend is offered the protocol the client was already promised, so
-    // it cannot select a different one.
-    let forwarded_headers = collect_forwardable_ws_headers(&req, subprotocol);
-    let dial_deadline = upstream.request_timeout();
-    let WsHandoff {
-        on_upgrade,
-        response,
-        permit,
-        handoff,
-        ..
-    } = prepared;
-    own_upgrade_bridge(lifecycle, response, &handoff, move |attachment| {
-        bridge_ws_proxy(
-            on_upgrade,
-            backend_ws_url,
-            forwarded_headers,
-            attachment,
-            permit,
-            dial_deadline,
-        )
-    })
-    .await
-    .map_err(|rejected| WsRefusal::negotiated(rejected, subprotocol))
+    prepared
+        .register(lifecycle, move |on_upgrade, permit, attachment| {
+            bridge_ws_proxy(on_upgrade, upgrade, attachment, permit)
+        })
+        .await
 }
 
-/// Collect headers safe to forward on a proxied WebSocket connection.
+/// A backend that could not be targeted, offered, reached, or validated.
 ///
-/// Forwards Authorization, Cookie, and non-forwarded X-* headers. The selected
-/// subprotocol is appended separately so the backend cannot select a protocol
-/// different from the client-facing commitment.
-fn collect_forwardable_ws_headers(req: &Request, subprotocol: Option<&str>) -> Box<[HeaderPair]> {
-    let headers = req
-        .headers()
-        .filter(|(name, _)| is_forwardable_ws_header(name))
-        .map(|(name, value)| {
-            (
-                std::borrow::Cow::Owned(name.to_owned()),
-                std::borrow::Cow::Owned(value.to_owned()),
-            )
-        });
-    let selected = subprotocol.into_iter().map(|protocol| {
-        (
-            std::borrow::Cow::Borrowed("Sec-WebSocket-Protocol"),
-            std::borrow::Cow::Owned(protocol.to_owned()),
-        )
-    });
-    headers.chain(selected).collect()
+/// Nothing was selected: a protocol the backend never validly chose is not one
+/// the refusal may report.
+fn backend_refusal(failure: super::super::async_proxy::ProxyFailure) -> WsRefusal {
+    WsRefusal::unnegotiated(Rejected::from_proxy_failure(failure))
 }
 
-/// A WS proxy header is forwardable if it is Authorization, Cookie,
-/// a non-forwarded X-* header.
-/// Other WebSocket handshake headers (sec-websocket-key, sec-websocket-version, etc.)
-/// are excluded — the proxy generates its own.
-fn is_forwardable_ws_header(name: &str) -> bool {
-    match name {
-        n if n.eq_ignore_ascii_case("authorization") => true,
-        n if n.eq_ignore_ascii_case("cookie") => true,
-        n if n.eq_ignore_ascii_case("sec-websocket-protocol") => false,
-        n if n
-            .get(..2)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("x-"))
-            && !super::super::async_proxy::is_forwarded_metadata(n) =>
-        {
-            true
-        }
-        _ => false,
-    }
-}
-
-/// Convert an HTTP backend URL + request path into a WebSocket URL.
-fn build_backend_ws_url(path: &str, prefix: &str, backend: &str) -> Result<Box<str>, Rejected> {
-    let remainder = match super::super::async_proxy::strip_prefix(path, prefix) {
-        Some(remainder) => remainder,
-        None => {
-            // The one fault that check refuses. A path that simply does not
-            // carry the prefix is returned whole, so it never arrives here.
-            return Err(unbuildable_ws_target(
-                super::super::async_proxy::TRAVERSAL_SEGMENT,
-            ));
-        }
-    };
-    match backend {
-        s if s.starts_with("http://") => {
-            Ok(format!("ws://{}{remainder}", &s["http://".len()..]).into_boxed_str())
-        }
-        s if s.starts_with("https://") => {
-            Ok(format!("wss://{}{remainder}", &s["https://".len()..]).into_boxed_str())
-        }
-        _ => Err(unbuildable_ws_target(
-            "the configured backend names no scheme this proxy can upgrade over",
-        )),
-    }
-}
-
-/// Refuse a proxied upgrade whose target this proxy cannot build.
-///
-/// Classified as the same proxy fault the buffered and streaming classes raise
-/// on the same peer input, so a traversal probe reads one way across all three
-/// and never as a backend outage.
-fn unbuildable_ws_target(detail: &'static str) -> Rejected {
-    Rejected::from_proxy_failure(super::super::async_proxy::ProxyFailure::UnbuildableTarget(
-        detail,
-    ))
-}
-
-/// Bridge frames bidirectionally between client and backend WebSocket connections.
+/// Bridge frames bidirectionally between the client and the negotiated backend.
 async fn bridge_ws_proxy(
     on_upgrade: hyper::upgrade::OnUpgrade,
-    backend_ws_url: Box<str>,
-    forwarded_headers: Box<[HeaderPair]>,
-    attachment: super::ownership::BridgeAttachment,
+    backend: ValidatedBackendUpgrade,
+    attachment: BridgeAttachment,
     permit: Arc<ConnectionPermit>,
-    dial_deadline: Duration,
 ) {
     let opened = open_bridge(
         on_upgrade,
@@ -174,82 +90,18 @@ async fn bridge_ws_proxy(
         Some(opened) => opened,
         None => return,
     };
-
-    // Past the dispatch commitment the peer holds an upgraded transport, so
-    // every exit from here owes it the same close the framing loop's exits
-    // give it — a backend that never answers is not a reason to drop the
-    // client socket without one.
-    let backend_request = match build_ws_backend_request(&backend_ws_url, &forwarded_headers) {
-        Some(req) => req,
-        None => {
-            end_client_transport(&mut client_ws, Some(backend_fault_close())).await;
-            return;
-        }
-    };
-
-    let mut backend_ws = match dial_backend(backend_request, &backend_ws_url, dial_deadline).await {
-        Some(backend_ws) => backend_ws,
-        None => {
-            end_client_transport(&mut client_ws, Some(backend_fault_close())).await;
-            return;
-        }
-    };
-
+    let mut backend_ws = backend.into_websocket().await;
     let exit = forward_proxy_frames(&mut control, &mut client_ws, &mut backend_ws).await;
     settle_proxy_transports(exit, &mut client_ws, &mut backend_ws).await;
     drop(permit);
 }
 
-/// The backend transport one proxied bridge frames against.
-type BackendWs =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-/// Reach the backend under the deadline this route froze.
-///
-/// The dial is the one upstream phase nothing else bounds. It runs in the
-/// registered bridge, which the supervisor releases only once the `101` is
-/// committed, so the request total the negotiation spent has already ended — and
-/// a backend that blackholes the SYN would otherwise hold this task, and the
-/// connection permit under it, until the operating system gave up on the
-/// handshake. The route's request deadline is what ends it instead: this call
-/// establishes the transport and completes the upgrade handshake, which is the
-/// same span that deadline bounds on every ordinary forward — the arrival of a
-/// usable upstream head.
-///
-/// `None` is every way the backend failed to answer. The caller owes the peer a
-/// close either way, so the reason is logged here rather than returned to a
-/// caller that could only discard it.
-async fn dial_backend(
-    request: hyper::Request<()>,
-    url: &str,
-    within: Duration,
-) -> Option<BackendWs> {
-    match tokio::time::timeout(within, tokio_tungstenite::connect_async(request)).await {
-        Ok(Ok((backend_ws, _))) => Some(backend_ws),
-        Ok(Err(error)) => {
-            tracing::warn!(%url, %error, "WebSocket proxy backend connection failed");
-            None
-        }
-        Err(_) => {
-            tracing::warn!(
-                %url,
-                deadline = ?within,
-                "WebSocket proxy backend did not answer the upgrade in time"
-            );
-            None
-        }
-    }
-}
-
 /// Forward frames in both directions until one side ends the bridge.
-async fn forward_proxy_frames<B>(
+async fn forward_proxy_frames(
     control: &mut tokio::sync::watch::Receiver<ServerControl>,
     client_ws: &mut ClientWs,
-    backend_ws: &mut tokio_tungstenite::WebSocketStream<B>,
-) -> ProxyExit
-where
-    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
+    backend_ws: &mut BackendWs,
+) -> ProxyExit {
     use futures_util::StreamExt;
     loop {
         let flow = tokio::select! {
@@ -272,13 +124,11 @@ where
 }
 
 /// End both transports according to what the framing loop left them owed.
-async fn settle_proxy_transports<B>(
+async fn settle_proxy_transports(
     exit: ProxyExit,
     client_ws: &mut ClientWs,
-    backend_ws: &mut tokio_tungstenite::WebSocketStream<B>,
-) where
-    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
+    backend_ws: &mut BackendWs,
+) {
     match exit {
         // The control arm closed both transports and drained the answering
         // closes already. Closing either again is a write after the close
@@ -286,7 +136,7 @@ async fn settle_proxy_transports<B>(
         ProxyExit::Settled => shutdown_client_transport(client_ws).await,
         ProxyExit::Owed => {
             close_transport(backend_ws).await;
-            end_client_transport(client_ws, None).await;
+            end_client_transport(client_ws).await;
         }
     }
 }
@@ -315,25 +165,12 @@ fn owes_close(flow: ControlFlow<()>) -> ControlFlow<ProxyExit> {
 ///
 /// A raw shutdown alone leaves the peer reading `1006`, the code for a
 /// connection that simply dropped. Every post-commitment exit ends here
-/// instead, so the peer is told the transport closed; `reason` is what
-/// distinguishes a backend fault from the ordinary end of frame flow.
-async fn end_client_transport(stream: &mut ClientWs, reason: Option<WsClose>) {
-    send_close(stream, reason).await;
+/// instead, so the peer is told the transport closed. The backend was
+/// validated before the `101`, so no exit here is a backend that never
+/// answered.
+async fn end_client_transport(stream: &mut ClientWs) {
+    send_close(stream).await;
     shutdown_client_transport(stream).await;
-}
-
-/// The close a peer is given when the backend, not the peer, ended the bridge.
-///
-/// `1011` is the server-side internal-error code: the handshake succeeded and
-/// the fault is on Camber's side of the bridge, which is exactly what a peer
-/// reading `1006` cannot tell from its own connection dropping.
-fn backend_fault_close() -> WsClose {
-    WsClose {
-        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Error,
-        reason: tokio_tungstenite::tungstenite::Utf8Bytes::from_static(
-            "WebSocket proxy backend unavailable",
-        ),
-    }
 }
 
 /// End the proxy bridge on a server control transition.
@@ -374,8 +211,8 @@ async fn graceful_close_proxy<C, B>(
     C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    send_close(client, None).await;
-    send_close(backend, None).await;
+    send_close(client).await;
+    send_close(backend).await;
     drain_proxy_close(client, backend).await;
 }
 
@@ -456,65 +293,4 @@ async fn drain_proxy_close<C, B>(
     B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let ((), ()) = tokio::join!(drain_until_close(client), drain_until_close(backend));
-}
-
-/// Build an HTTP request for the backend WebSocket connection with forwarded headers.
-fn build_ws_backend_request(url: &str, headers: &[HeaderPair]) -> Option<hyper::Request<()>> {
-    let uri: hyper::Uri = match url.parse() {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::warn!(url = %url, error = %e, "WebSocket backend URI parse failed");
-            return None;
-        }
-    };
-    // A backend configured as an `http://` URL with no authority builds a
-    // `ws:///…` this request can never be sent to. The peer is already past the
-    // `101` by then, so it is answered with a `1011` close and nothing else:
-    // named here, or an operator reads that close with no account of it at all.
-    let host = match backend_host_header(&uri) {
-        Some(host) => host,
-        None => {
-            tracing::warn!(url = %url, "WebSocket backend URL names no authority");
-            return None;
-        }
-    };
-
-    let mut builder = hyper::Request::builder()
-        .uri(uri)
-        .header("Host", &*host)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        );
-
-    for (name, value) in headers {
-        builder = builder.header(name.as_ref(), value.as_ref());
-    }
-
-    match builder.body(()) {
-        Ok(req) => Some(req),
-        Err(e) => {
-            tracing::warn!(url = %url, error = %e, "WebSocket backend request build failed");
-            None
-        }
-    }
-}
-
-/// The `Host` header a backend upgrade carries, or `None` for a URL that names
-/// no authority.
-///
-/// Built from the host and the port rather than from the whole authority. An
-/// authority also carries userinfo, so a backend configured as
-/// `http://user:secret@internal:8080` would otherwise send its credentials in a
-/// `Host` header — one strict backends reject, and one every intermediary and
-/// access log downstream reads.
-fn backend_host_header(uri: &hyper::Uri) -> Option<Box<str>> {
-    let host = uri.host()?;
-    match uri.port_u16() {
-        Some(port) => Some(format!("{host}:{port}").into_boxed_str()),
-        None => Some(Box::from(host)),
-    }
 }

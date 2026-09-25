@@ -266,10 +266,11 @@ pub(in crate::http) fn optional_vocabulary<const N: usize>(
 /// upload maximum is never reported as the download's. Every other row names one
 /// bound whichever direction observed it, or names none at all.
 ///
-/// The three rows that name nothing are the ones where the bound is not this
-/// operation's: a departing peer crossed no configured maximum, a source that
-/// failed is the source's own account, and a response head arriving is the
-/// inbound side reaching its normal end.
+/// The two rows that name nothing are the ones where the bound is not this
+/// operation's: a departing peer crossed no configured maximum, and a response
+/// head arriving is the inbound side reaching its normal end. A source that
+/// failed crossed no configured bound either, but it names itself: after a
+/// committed head nothing else can say why the body ended.
 const fn crossed_by(terminal: InboundTerminal, direction: TransferDirection) -> CrossedBound {
     match terminal {
         InboundTerminal::ShutdownDeadline | InboundTerminal::ForcedCancellation => {
@@ -281,9 +282,8 @@ const fn crossed_by(terminal: InboundTerminal, direction: TransferDirection) -> 
         InboundTerminal::TransferIdle => CrossedBound::Deadline(DeadlineBoundary::TransferIdle),
         InboundTerminal::TransferTotal => CrossedBound::Deadline(DeadlineBoundary::TransferTotal),
         InboundTerminal::RequestTotal => CrossedBound::Deadline(DeadlineBoundary::RequestTotal),
-        InboundTerminal::Disconnect
-        | InboundTerminal::SourceFailure
-        | InboundTerminal::ResponseHead => CrossedBound::None,
+        InboundTerminal::SourceFailure => CrossedBound::SourceFailure,
+        InboundTerminal::Disconnect | InboundTerminal::ResponseHead => CrossedBound::None,
     }
 }
 

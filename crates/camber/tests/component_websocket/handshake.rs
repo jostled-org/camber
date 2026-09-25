@@ -15,6 +15,8 @@
 #![cfg(feature = "ws")]
 
 use crate::common;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 
 /// One header line of an upgrade request.
 ///
@@ -32,11 +34,19 @@ pub const LOCAL_HOST: &str = "localhost";
 /// copy that can drift from what Camber accepts, and the copy that drifts stops
 /// provoking what its cases claim while going on reporting success.
 pub fn accepted(host: &str) -> [Header<'_>; 5] {
+    accepted_keyed(host, common::WS_KEY)
+}
+
+/// The accepted head, addressed to `host` and offering `key`.
+///
+/// A generated case varies the key per row; every other line stays the one
+/// accepted head.
+pub fn accepted_keyed<'a>(host: &'a str, key: &'a str) -> [Header<'a>; 5] {
     [
         ("Host", host),
         ("Upgrade", "websocket"),
         ("Connection", "Upgrade"),
-        ("Sec-WebSocket-Key", common::WS_KEY),
+        ("Sec-WebSocket-Key", key),
         ("Sec-WebSocket-Version", "13"),
     ]
 }
@@ -82,8 +92,138 @@ pub fn accepted_with<'a>(host: &'a str, replaced: &str, value: &'a str) -> Box<[
 /// header through `common::ws_upgrade_request_with` and one that stated its
 /// whole list here cannot disagree about how a header line is spelled.
 pub fn handshake_request(path: &str, headers: &[Header<'_>]) -> Box<str> {
-    let mut head = format!("GET {path} HTTP/1.1\r\n");
-    common::append_headers(&mut head, headers.iter().copied());
-    head.push_str("\r\n");
-    head.into_boxed_str()
+    raw_request(
+        RequestLine {
+            method: "GET",
+            path,
+            version: "HTTP/1.1",
+        },
+        headers.iter().copied(),
+        "",
+    )
+}
+
+/// The request line a raw request opens with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RequestLine<'a> {
+    pub method: &'a str,
+    pub path: &'a str,
+    pub version: &'a str,
+}
+
+/// Any request, stated line by line, with `body` after the head.
+///
+/// The form a case uses when the request line or body is its subject. It frames
+/// the head exactly as [`handshake_request`] does, so the two cannot disagree
+/// on anything but what the case varies.
+pub fn raw_request<'h>(
+    line: RequestLine<'_>,
+    headers: impl IntoIterator<Item = Header<'h>>,
+    body: &str,
+) -> Box<str> {
+    let RequestLine {
+        method,
+        path,
+        version,
+    } = line;
+    let mut request = format!("{method} {path} {version}\r\n");
+    common::append_headers(&mut request, headers);
+    request.push_str("\r\n");
+    request.push_str(body);
+    request.into_boxed_str()
+}
+
+/// Send `request` and read the response it answers with.
+///
+/// The connection and its bounds come from `common::connect`, and the head is
+/// parsed by the shared response reader: a handshake case owns what it sends
+/// and what the head must say, not a second statement of how a socket is
+/// opened or how a status line is split.
+///
+/// Read under the bounded form, which arms one deadline over the whole reply.
+/// The socket's own timeout bounds a single syscall, so a peer dribbling one
+/// byte per read would never be cut off by it.
+pub fn perform_raw_ws_handshake(
+    addr: std::net::SocketAddr,
+    request: &str,
+) -> (TcpStream, common::HttpResponse) {
+    let mut stream = common::connect(addr).expect("connect raw WebSocket client");
+    stream
+        .write_all(request.as_bytes())
+        .expect("write raw WebSocket handshake");
+    let response = common::read_http_response_bounded(&mut stream)
+        .expect("read raw WebSocket handshake reply");
+    (stream, response)
+}
+
+/// The switch an accepted upgrade answers with, transport disposition included.
+///
+/// A `101` that does not say `Connection: Upgrade` is one RFC 6455 §4.1
+/// requires a conforming client to fail the handshake over, so no row is
+/// entitled to a weaker predicate. The only request that could earn a different
+/// answer — one declaring a payload the bridge would leave unframed — is
+/// refused at the head instead.
+pub fn assert_websocket_switch_accepting(head: &common::HttpResponse, accept: &str, context: &str) {
+    assert_eq!(head.status, 101, "{context}: unexpected status: {head:?}");
+    let upgrade = head.header_values("upgrade");
+    assert_eq!(upgrade.len(), 1, "{context}: Upgrade header: {head:?}");
+    assert!(
+        upgrade[0].eq_ignore_ascii_case("websocket"),
+        "{context}: invalid Upgrade header: {head:?}"
+    );
+    assert_eq!(
+        *head.header_values("sec-websocket-accept"),
+        [accept],
+        "{context}: Sec-WebSocket-Accept header"
+    );
+    let connection = head.header_values("connection");
+    assert_eq!(
+        connection.len(),
+        1,
+        "{context}: Connection header: {head:?}"
+    );
+    assert!(
+        connection[0].eq_ignore_ascii_case("upgrade"),
+        "{context}: invalid Connection header: {head:?}"
+    );
+}
+
+/// A refused handshake: the expected status, and nothing a `101` would carry.
+pub fn assert_handshake_rejected(head: &common::HttpResponse, expected_status: u16, context: &str) {
+    assert_eq!(
+        head.status, expected_status,
+        "{context}: unexpected rejection: {head:?}"
+    );
+    assert!(
+        head.header_values("sec-websocket-accept").is_empty(),
+        "{context}: rejection exposed Sec-WebSocket-Accept: {head:?}"
+    );
+    assert!(
+        head.header_values("sec-websocket-protocol").is_empty(),
+        "{context}: rejection selected a subprotocol: {head:?}"
+    );
+}
+
+/// Finish the close a server-side callback started by returning.
+///
+/// The server's close frame first, then the reply it is owed, then the end of
+/// the transport. A peer that dropped its socket at the `101` would leave the
+/// bridge it was served by racing the teardown of the server under test.
+pub fn complete_server_close(stream: &mut TcpStream, context: &str) {
+    let (opcode, _) = common::try_read_ws_frame_raw(stream)
+        .unwrap_or_else(|error| panic!("{context}: server close frame: {error}"));
+    assert_eq!(opcode, 0x8, "{context}: expected the server's close frame");
+    common::write_ws_close_frame(stream);
+    assert_transport_ends(stream, context);
+}
+
+/// Read the end of a transport whose close handshake has completed.
+pub fn assert_transport_ends(stream: &mut TcpStream, context: &str) {
+    let mut rest = [0_u8; 64];
+    match stream.read(&mut rest) {
+        Ok(0) => {}
+        Err(error) if common::is_closed_connection_error(&error) => {}
+        Ok(count) => panic!("{context}: {count} bytes after the close handshake"),
+        Err(error) => panic!("{context}: transport did not end after close: {error}"),
+    }
 }

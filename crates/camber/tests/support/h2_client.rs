@@ -259,6 +259,7 @@ impl PersistentH2Client {
             response: Some(response),
             body: None,
             status: 0,
+            headers: Box::default(),
             bytes: 0,
             stream,
             bound: self.bound,
@@ -764,14 +765,29 @@ async fn drain_body(
     operation: &str,
     mut received: impl FnMut(&[u8]),
 ) -> Result<(), h2::Error> {
-    while let Some(chunk) = bounded(body.data(), remaining(deadline), operation).await {
-        let chunk = chunk?;
+    while let Some(chunk) = next_chunk(body, deadline, operation).await {
+        received(&chunk?);
+    }
+    Ok(())
+}
+
+/// Read one HTTP/2 response body frame, and hand its bytes back to the
+/// sender's window.
+///
+/// `None` is end of stream. The one place a frame is taken, so no reader here
+/// can take one and leave its capacity held.
+async fn next_chunk(
+    body: &mut h2::RecvStream,
+    deadline: Instant,
+    operation: &str,
+) -> Option<Result<Bytes, h2::Error>> {
+    let chunk = bounded(body.data(), remaining(deadline), operation).await?;
+    if let Ok(chunk) = &chunk {
         body.flow_control()
             .release_capacity(chunk.len())
             .expect("the HTTP/2 reader could not release its flow-control capacity");
-        received(&chunk);
     }
-    Ok(())
+    Some(chunk)
 }
 
 /// Read one committed answer body's ending as one of the three it can have.
@@ -783,10 +799,16 @@ async fn drain_body(
 /// kept apart rather than merged into one failure flag: a row that recorded a
 /// collapse as a reset would pass for a reason it does not claim.
 fn body_end(ended: Result<(), h2::Error>) -> H2BodyEnd {
-    match ended {
-        Ok(()) => H2BodyEnd::Ended,
-        Err(error) if error.is_reset() => H2BodyEnd::Reset,
-        Err(error) => H2BodyEnd::Collapsed(error.to_string().into_boxed_str()),
+    let error = match ended {
+        Ok(()) => return H2BodyEnd::Ended,
+        Err(error) => error,
+    };
+    match (error.is_reset(), error.reason()) {
+        (true, Some(reason)) => H2BodyEnd::Reset(H2Reset {
+            reason,
+            remote: error.is_remote(),
+        }),
+        _ => H2BodyEnd::Collapsed(error.to_string().into_boxed_str()),
     }
 }
 
@@ -797,7 +819,7 @@ fn body_end(ended: Result<(), h2::Error>) -> H2BodyEnd {
 fn ended_in_reset(ended: Result<(), h2::Error>, operation: &str, delivered: usize) -> bool {
     match body_end(ended) {
         H2BodyEnd::Ended => false,
-        H2BodyEnd::Reset => true,
+        H2BodyEnd::Reset(_) => true,
         H2BodyEnd::Collapsed(failure) => {
             panic!("the {operation} failed after {delivered} bytes: {failure}")
         }
@@ -867,10 +889,24 @@ fn report_driver(joined: Result<Result<(), h2::Error>, tokio::task::JoinError>) 
 pub enum H2BodyEnd {
     /// End of stream: the whole body arrived.
     Ended,
-    /// This stream alone was reset under its committed head.
-    Reset,
+    /// This stream alone was reset under its committed head, by the side and
+    /// with the reason it carries.
+    Reset(H2Reset),
     /// The connection beneath this stream went away.
     Collapsed(Box<str>),
+}
+
+/// Who reset one stream, and with what reason.
+///
+/// A reset alone does not say which side sent it. The `h2` client checks
+/// content-length itself: a clean END_STREAM that arrives with declared bytes
+/// still owed becomes a local `library_reset(PROTOCOL_ERROR)`, which a row
+/// whose claim is the server's own reset must not read as the server's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct H2Reset {
+    pub reason: h2::Reason,
+    /// Whether the reset arrived in a frame the peer sent.
+    pub remote: bool,
 }
 
 /// What one HTTP/2 peer saw of a committed streaming response.
@@ -888,6 +924,7 @@ pub struct H2Download {
     response: Option<h2::client::ResponseFuture>,
     body: Option<h2::RecvStream>,
     status: u16,
+    headers: Box<[(Box<str>, Box<str>)]>,
     bytes: usize,
     stream: h2::SendStream<Bytes>,
     bound: Duration,
@@ -904,8 +941,54 @@ impl H2Download {
             .await
             .expect("no HTTP/2 download head");
         self.status = response.status().as_u16();
+        self.headers = header_pairs(response.headers());
         self.body = Some(response.into_body());
         self.status
+    }
+
+    /// Read the committed head unless the case already has.
+    ///
+    /// Shared by every body reader, so each covers both the rows whose cause is
+    /// the producer and the rows that act between the head and the body.
+    async fn read_head_once(&mut self) {
+        if self.response.is_some() {
+            self.head().await;
+        }
+    }
+
+    /// The first value one response-header name carries, once the head is
+    /// read.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        pair_value(&self.headers, name)
+    }
+
+    /// Read at least `length` body bytes, leaving the rest on the stream.
+    ///
+    /// For the rows that act between a committed prefix and the body's end.
+    /// The body ending or failing first is a fault, because the prefix is what
+    /// the source produced before anything the row controls.
+    pub async fn read_prefix(&mut self, length: usize) -> Box<[u8]> {
+        self.read_head_once().await;
+        let deadline = Instant::now() + self.bound;
+        let body = self
+            .body
+            .as_mut()
+            .expect("this HTTP/2 download's body was already drained");
+        let mut prefix = Vec::with_capacity(length);
+        while prefix.len() < length {
+            let chunk = next_chunk(body, deadline, "HTTP/2 download prefix")
+                .await
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the HTTP/2 download ended after {} of {length} prefix bytes",
+                        prefix.len()
+                    )
+                })
+                .unwrap_or_else(|error| panic!("the HTTP/2 download prefix failed: {error}"));
+            prefix.extend_from_slice(&chunk);
+        }
+        self.bytes += prefix.len();
+        prefix.into_boxed_slice()
     }
 
     /// Read this download until its body ends, however it ends.
@@ -918,9 +1001,7 @@ impl H2Download {
     /// the server under its own download is entitled to lose the connection
     /// while a caller whose producer failed is not.
     pub async fn drain(&mut self) -> H2Streamed {
-        if self.response.is_some() {
-            self.head().await;
-        }
+        self.read_head_once().await;
         let deadline = Instant::now() + self.bound;
         let mut body = self
             .body

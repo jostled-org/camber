@@ -10,23 +10,31 @@ env:
   RUSTFLAGS: -D warnings
   CAMBER_CI_FEATURES: profiling,ws,grpc,acme,dns01,nats,sqs,otel
 
+# Actions are pinned to immutable commits. Resolved on 2026-09-22 from the
+# previously selected tags: actions/checkout v4, dorny/paths-filter v3,
+# Swatinem/rust-cache v2. rustup installs the toolchain rust-toolchain.toml
+# pins, `reproduce-ci.sh install-tools` installs the Cargo-built tools at the
+# versions .github/workflow-tools.toml pins, and every tool-using job admits
+# its tools through `reproduce-ci.sh require-tools` against those records.
 jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         id: filter
         with:
           filters: |
             code:
               - '**/*.rs'
+              - 'crates/**'
               - '**/*.md'
               - '**/Cargo.toml'
               - '**/Cargo.lock'
-              - '.pedant.toml'
+              - 'rust-toolchain.toml'
+              - '**/.pedant.toml'
               - '.pedant/**'
               - 'deny.toml'
               - '.github/**'
@@ -36,17 +44,15 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup toolchain install
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
 
-      - name: Install protoc and ripgrep
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler ripgrep
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
-      - uses: Swatinem/rust-cache@v2
-
+      - run: .github/scripts/reproduce-ci.sh require-tools git rg rustc cargo clippy rustfmt
       - run: .github/scripts/ci-selftest.sh
       - run: cargo fmt --check
       - run: cargo clippy --workspace --features "${CAMBER_CI_FEATURES}" -- -D warnings
@@ -75,10 +81,11 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-deny
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: .github/scripts/reproduce-ci.sh install-tools cargo-deny
+      - run: .github/scripts/reproduce-ci.sh require-tools rustc cargo cargo-deny
       - run: cargo deny --workspace check
 
   pedant-source:
@@ -90,10 +97,11 @@ jobs:
       matrix:
         package: [camber, camber-bench, camber-build, camber-cli, camber-macros]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install pedant
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: .github/scripts/reproduce-ci.sh install-tools pedant
+      - run: .github/scripts/reproduce-ci.sh require-tools rustc cargo pedant
       - name: Check package source tree
         run: .github/scripts/check-pedant.sh source "${{ matrix.package }}"
 
@@ -106,10 +114,11 @@ jobs:
       matrix:
         package: [camber, camber-bench, camber-build, camber-cli, camber-macros]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install pedant
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: .github/scripts/reproduce-ci.sh install-tools pedant
+      - run: .github/scripts/reproduce-ci.sh require-tools rustc cargo pedant
       - name: Check package test tree
         run: .github/scripts/check-pedant.sh tests "${{ matrix.package }}"
 
@@ -118,8 +127,9 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install pedant
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: .github/scripts/reproduce-ci.sh install-tools pedant
+      - run: .github/scripts/reproduce-ci.sh require-tools rustc cargo pedant
       - run: .github/scripts/check-supply-chain.sh

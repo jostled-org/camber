@@ -7,6 +7,13 @@ pub use super::operation::{InboundTerminal, OperationStage};
 use super::rejection::{RejectionKind, RejectionProtocol};
 use super::response::HeaderPair;
 pub use super::response_commitment::{ResponseCommit, ResponseOrigin};
+/// The proxy's own backend WebSocket handshake owner, under test trust.
+///
+/// A test seam, not API: it lets a test prove authenticated `wss` negotiation
+/// against a local certificate authority through the owner production runs.
+#[doc(hidden)]
+#[cfg(feature = "ws")]
+pub use super::ws_proxy::{BackendWs, BackendWsConnection, backend_ws_handshake};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 

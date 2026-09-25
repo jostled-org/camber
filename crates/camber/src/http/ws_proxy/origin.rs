@@ -18,7 +18,7 @@ use super::handshake::named_request_headers;
 /// states no single `Host` to compare against, and one whose authorities
 /// genuinely differ are three faults, and one sentence for all three tells an
 /// operator something false about two of them.
-pub(in crate::http) fn check_ws_origin(req: &Request) -> Option<Rejected> {
+pub(super) fn check_ws_origin(req: &Request) -> Option<Rejected> {
     let origin = match unique_request_header(req, "origin") {
         HeaderPresence::Absent => return None,
         HeaderPresence::Unique(origin) => origin,

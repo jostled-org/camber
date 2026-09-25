@@ -5,6 +5,7 @@
 //! instantiate. The harness supplies frames and scheduling; it chooses no parser
 //! state, no budget, no terminal summary, and no refusal.
 
+use crate::deterministic::{DeterministicCase, DeterministicGenerator};
 use crate::streaming_multipart as fixture;
 
 use camber::RuntimeError;
@@ -12,7 +13,10 @@ use camber::http::mock::{
     self, MultipartObservation, MultipartOutcome, MultipartSession, MultipartTerminalKind,
 };
 use camber::http::{MultipartField, MultipartLimits, MultipartStream};
+use std::collections::BTreeSet;
 use std::future::Future;
+use std::io::Write;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -35,14 +39,61 @@ struct Part<'a> {
 /// The framing itself belongs to the shared fixture, so a case here and a case
 /// on a served route cannot come to disagree about how a part is delimited.
 fn build(boundary: &str, parts: &[Part<'_>], epilogue: &[u8]) -> Vec<u8> {
-    let raw: Vec<(&str, &[u8])> = parts.iter().map(|part| (part.headers, part.data)).collect();
+    frame_raw(
+        boundary,
+        parts.iter().map(|part| (part.headers, part.data)),
+        epilogue,
+    )
+}
+
+/// Hand raw header blocks and data to the shared fixture's framing.
+fn frame_raw<'a>(
+    boundary: &str,
+    parts: impl Iterator<Item = (&'a str, &'a [u8])>,
+    epilogue: &[u8],
+) -> Vec<u8> {
+    let raw: Box<[(&str, &[u8])]> = parts.collect();
     fixture::raw_multipart_body(boundary, &raw, epilogue)
 }
 
-/// One row's limits, with the parser buffer at exactly the peak they require.
-///
-/// Tight rather than generous: a buffer with slack would hide an accounting
-/// error the bound is supposed to catch.
+/// The bytes of the opening delimiter line `--boundary\r\n`.
+fn opening_bytes(boundary: &str) -> usize {
+    2 + boundary.len() + 2
+}
+
+/// The structural numbers one row reads under, before a boundary fixes the
+/// delimiter carry they oblige.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Bounds {
+    fields: usize,
+    field_bytes: usize,
+    headers: usize,
+    header_bytes: usize,
+    chunk: usize,
+}
+
+impl Bounds {
+    /// These bounds under one boundary, with the parser buffer at exactly the
+    /// peak they require.
+    ///
+    /// Tight rather than generous: a buffer with slack would hide an accounting
+    /// error the bound is supposed to catch.
+    fn within(self, boundary: &str) -> MultipartLimits {
+        let required = (2 * self.header_bytes).max(self.chunk + boundary.len() + 5);
+        MultipartLimits::builder()
+            .max_fields(self.fields)
+            .max_field_bytes(self.field_bytes)
+            .max_headers_per_field(self.headers)
+            .max_header_bytes_per_field(self.header_bytes)
+            .max_boundary_bytes(boundary.len())
+            .max_chunk_bytes(self.chunk)
+            .max_parser_buffer_bytes(required)
+            .build()
+            .expect("the row's limits are a valid combination")
+    }
+}
+
+/// One row's limits under this module's boundary.
 fn limits(
     fields: usize,
     field_bytes: usize,
@@ -50,17 +101,14 @@ fn limits(
     header_bytes: usize,
     chunk: usize,
 ) -> MultipartLimits {
-    let required = (2 * header_bytes).max(chunk + BOUNDARY.len() + 5);
-    MultipartLimits::builder()
-        .max_fields(fields)
-        .max_field_bytes(field_bytes)
-        .max_headers_per_field(headers)
-        .max_header_bytes_per_field(header_bytes)
-        .max_boundary_bytes(BOUNDARY.len())
-        .max_chunk_bytes(chunk)
-        .max_parser_buffer_bytes(required)
-        .build()
-        .expect("the row's limits are a valid combination")
+    Bounds {
+        fields,
+        field_bytes,
+        headers,
+        header_bytes,
+        chunk,
+    }
+    .within(BOUNDARY)
 }
 
 /// Limits generous enough that only the row's own subject can refuse anything.
@@ -71,10 +119,21 @@ fn permissive(chunk: usize) -> MultipartLimits {
 /// What one field turned out to be.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Collected {
-    name: String,
-    filename: Option<String>,
-    content_type: Option<String>,
+    name: Box<str>,
+    filename: Option<Box<str>>,
+    content_type: Option<Box<str>>,
     data: Vec<u8>,
+}
+
+impl Collected {
+    /// The field's name, filename, and content type, without its data.
+    fn metadata(&self) -> (&str, Option<&str>, Option<&str>) {
+        (
+            &self.name,
+            self.filename.as_deref(),
+            self.content_type.as_deref(),
+        )
+    }
 }
 
 /// What one complete read of a session produced.
@@ -88,10 +147,7 @@ struct Reading {
 impl Reading {
     /// Every field name in the order the wire carried them.
     fn names(&self) -> Vec<&str> {
-        self.fields
-            .iter()
-            .map(|field| field.name.as_str())
-            .collect()
+        self.fields.iter().map(|field| &*field.name).collect()
     }
 
     /// How many payload bytes reached application code.
@@ -138,9 +194,9 @@ async fn read_stream(stream: &mut MultipartStream) -> Reading {
 /// Read one field's chunks into the running result.
 async fn read_field(mut field: MultipartField<'_>, reading: &mut Reading) -> Option<RuntimeError> {
     let mut collected = Collected {
-        name: field.name().to_owned(),
-        filename: field.filename().map(str::to_owned),
-        content_type: field.content_type().map(str::to_owned),
+        name: field.name().into(),
+        filename: field.filename().map(Box::from),
+        content_type: field.content_type().map(Box::from),
         data: Vec::new(),
     };
     loop {
@@ -282,25 +338,25 @@ fn ordered_parts() -> (Vec<u8>, Vec<Collected>) {
     ];
     let expected = vec![
         Collected {
-            name: "alpha".to_owned(),
+            name: "alpha".into(),
             filename: None,
             content_type: None,
             data: b"one".to_vec(),
         },
         Collected {
-            name: "file".to_owned(),
-            filename: Some("a\"b .txt".to_owned()),
-            content_type: Some("application/octet-stream".to_owned()),
+            name: "file".into(),
+            filename: Some("a\"b .txt".into()),
+            content_type: Some("application/octet-stream".into()),
             data: binary.to_vec(),
         },
         Collected {
-            name: "empty".to_owned(),
+            name: "empty".into(),
             filename: None,
             content_type: None,
             data: Vec::new(),
         },
         Collected {
-            name: "alpha".to_owned(),
+            name: "alpha".into(),
             filename: None,
             content_type: None,
             data: b"two".to_vec(),
@@ -715,8 +771,7 @@ async fn streaming_multipart_memory_high_water_covers_active_metadata_and_pendin
         }],
         b"",
     );
-    let opening = 2 + BOUNDARY.len() + 2;
-    let head = opening + header_bytes;
+    let head = opening_bytes(BOUNDARY) + header_bytes;
 
     let mut session = mock::multipart_session(BOUNDARY, row)
         .frame(&body[..head])
@@ -1240,4 +1295,1353 @@ async fn nested_multipart_is_rejected_without_filesystem_capability() {
         Some(body.len().div_ceil(17)),
         "every controlled source frame released its in-memory backing"
     );
+}
+
+/// The checked-in seed every generated streaming multipart case derives from.
+const STREAMING_PROPERTY_SEED: u64 = 0x4d50_5354_5245_0b11;
+
+/// Generated cases one run reads, at the plan's cap for parser families.
+const GENERATED_STREAMING_CASES: u64 = 128;
+
+/// The most one generated body may carry.
+const MAX_GENERATED_BODY_BYTES: usize = 64 * 1024;
+
+/// The bytes that end one part's header block, charged to its header bound.
+const HEADER_TERMINATOR_BYTES: usize = 4;
+
+/// How many index slots one rotation of case shapes spans.
+const SHAPE_SLOTS: u64 = 16;
+
+/// Boundaries the generator frames bodies with: short, single-byte, long,
+/// every punctuation byte the grammar admits, an inner space, and the
+/// protocol maximum of 70 bytes.
+const GENERATED_BOUNDARIES: [&str; 6] = [
+    "Bnd9",
+    "x",
+    "----WebKitFormBoundary7MA4YWxkTrZu0gW",
+    "a'()+_,-./:=?z",
+    "in ner",
+    "0123456789012345678901234567890123456789012345678901234567890123456789",
+];
+
+/// One parameter value as the wire spells it, and the value quoting decodes
+/// it to.
+///
+/// The decoded column is written by hand from the quoted-string rules, never
+/// computed by Camber's parser.
+#[derive(Debug, Eq, PartialEq)]
+struct Spelling {
+    label: &'static str,
+    wire: &'static str,
+    decoded: &'static str,
+}
+
+const PARAMETER_SPELLINGS: [Spelling; 7] = [
+    Spelling {
+        label: "unquoted-token",
+        wire: "field_1",
+        decoded: "field_1",
+    },
+    Spelling {
+        label: "quoted-space",
+        wire: "\"plain name\"",
+        decoded: "plain name",
+    },
+    Spelling {
+        label: "quoted-separators",
+        wire: "\"a;b=c\"",
+        decoded: "a;b=c",
+    },
+    Spelling {
+        label: "escaped-quote",
+        wire: "\"say \\\"hi\\\"\"",
+        decoded: "say \"hi\"",
+    },
+    Spelling {
+        label: "escaped-backslash",
+        wire: "\"dir\\\\file\"",
+        decoded: "dir\\file",
+    },
+    Spelling {
+        label: "quoted-pair",
+        wire: "\"\\a\\b\"",
+        decoded: "ab",
+    },
+    Spelling {
+        label: "non-ascii",
+        wire: "\"caf\u{e9}\"",
+        decoded: "caf\u{e9}",
+    },
+];
+
+/// Disposition parameters the grammar checks and then ignores.
+const IGNORED_PARAMETERS: [&str; 3] = ["x-token=1", "note=\"q;v=w\"", "filename*=UTF-8''ignored"];
+
+/// Representations a part may declare that do not nest multipart.
+const CONTENT_TYPES: [(&str, &str); 4] = [
+    ("text-type", "text/plain; charset=utf-8"),
+    ("octet-type", "application/octet-stream"),
+    ("multipart-lookalike-type", "multipartial/plain"),
+    ("multipart-suffix-type", "application/x-multipart"),
+];
+
+/// Representations that nest multipart, in the spellings case folding admits.
+const NESTED_CONTENT_TYPES: [&str; 4] = [
+    "multipart/mixed; boundary=inner",
+    "MULTIPART/FORM-DATA",
+    "Multipart/Related",
+    "multipart/",
+];
+
+/// How much of the boundary one delimiter lookalike repeats.
+#[derive(Clone, Copy)]
+enum Echo {
+    Whole,
+    DropLast,
+    Omit,
+}
+
+/// A payload run that looks like framing and is not.
+///
+/// A `\r\n--` run is framing only when the whole boundary follows it and then
+/// `\r\n` or `--`; each row breaks exactly one of those conditions.
+struct Lookalike {
+    label: &'static str,
+    before: &'static [u8],
+    echo: Echo,
+    after: &'static [u8],
+}
+
+impl Lookalike {
+    fn write(&self, boundary: &str, data: &mut Vec<u8>) {
+        data.extend_from_slice(self.before);
+        let echoed = match self.echo {
+            Echo::Whole => boundary,
+            Echo::DropLast => &boundary[..boundary.len() - 1],
+            Echo::Omit => "",
+        };
+        data.extend_from_slice(echoed.as_bytes());
+        data.extend_from_slice(self.after);
+    }
+}
+
+const DELIMITER_LOOKALIKES: [Lookalike; 6] = [
+    Lookalike {
+        label: "lookalike-wrong-suffix",
+        before: b"\r\n--",
+        echo: Echo::Whole,
+        after: b"x",
+    },
+    Lookalike {
+        label: "lookalike-single-dash-suffix",
+        before: b"\r\n--",
+        echo: Echo::Whole,
+        after: b"-x",
+    },
+    Lookalike {
+        label: "lookalike-short-boundary",
+        before: b"\r\n--",
+        echo: Echo::DropLast,
+        after: b"\r\n",
+    },
+    Lookalike {
+        label: "lookalike-single-dash",
+        before: b"\r\n-",
+        echo: Echo::Whole,
+        after: b"\r\n",
+    },
+    Lookalike {
+        label: "lookalike-no-leading-crlf",
+        before: b"z--",
+        echo: Echo::Whole,
+        after: b"\r\n",
+    },
+    Lookalike {
+        label: "lookalike-binary",
+        before: b"\x00\xff\r\n--",
+        echo: Echo::Omit,
+        after: b"\xfe",
+    },
+];
+
+/// Header blocks the grammar refuses, one broken rule each.
+const MALFORMED_HEADERS: [(&str, &str); 15] = [
+    (
+        "unterminated-quote",
+        "Content-Disposition: form-data; name=\"open",
+    ),
+    (
+        "escaped-closing-quote",
+        "Content-Disposition: form-data; name=\"open\\\"",
+    ),
+    (
+        "control-in-quotes",
+        "Content-Disposition: form-data; name=\"a\u{1}b\"",
+    ),
+    (
+        "space-in-token",
+        "Content-Disposition: form-data; name=two words",
+    ),
+    ("empty-parameter", "Content-Disposition: form-data;; name=a"),
+    (
+        "parameter-without-value",
+        "Content-Disposition: form-data; name",
+    ),
+    ("empty-name", "Content-Disposition: form-data; name=\"\""),
+    (
+        "repeated-name",
+        "Content-Disposition: form-data; name=a; NAME=b",
+    ),
+    (
+        "missing-name",
+        "Content-Disposition: form-data; filename=f.txt",
+    ),
+    ("not-form-data", "Content-Disposition: attachment; name=a"),
+    (
+        "empty-filename",
+        "Content-Disposition: form-data; name=a; filename=\"\"",
+    ),
+    (
+        "line-without-colon",
+        "Content-Disposition: form-data; name=a\r\nX-Broken",
+    ),
+    (
+        "repeated-content-type",
+        "Content-Disposition: form-data; name=a\r\nContent-Type: text/plain\r\ncontent-type: text/html",
+    ),
+    (
+        "repeated-disposition",
+        "Content-Disposition: form-data; name=a\r\nContent-Disposition: form-data; name=b",
+    ),
+    ("no-disposition", "X-Only: value"),
+];
+
+/// Endings after the closing delimiter the grammar refuses.
+const REFUSED_EPILOGUES: [(&str, &[u8]); 5] = [
+    ("epilogue-blank-line", b"\r\n\r\n"),
+    ("epilogue-text", b"trailing"),
+    ("epilogue-dashes", b"--"),
+    ("epilogue-crlf-dash", b"\r\n-"),
+    ("epilogue-partial-crlf", b"\r"),
+];
+
+/// Endings after the closing delimiter the grammar accepts.
+const ACCEPTED_EPILOGUES: [(&str, &[u8]); 2] = [("no-epilogue", b""), ("crlf-epilogue", b"\r\n")];
+
+const CHUNK_SIZES: [usize; 5] = [1, 5, 17, 64, 256];
+const FRAME_SIZES: [usize; 4] = [1, 7, 64, usize::MAX];
+
+const LOOKALIKE_RUNS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
+const FILLER_BYTES: NonZeroUsize = NonZeroUsize::new(129).unwrap();
+/// One part in eight carries no data at all, unless its case needs bytes.
+const EMPTY_DATA_ONE_IN: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+const FIELD_COUNT: NonZeroUsize = NonZeroUsize::new(4).unwrap();
+
+/// Which family of rows one generated case belongs to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Shape {
+    Accepted,
+    Epilogue,
+    Truncated,
+    Opening,
+    MalformedHeader,
+    Nested,
+    StructuralLimit,
+    ByteLimit,
+}
+
+impl Shape {
+    /// The shape one index lands on, and how many cases of that shape came
+    /// before it.
+    ///
+    /// The ordinal rotates each shape through its own variant table, so every
+    /// variant is reached within the case cap rather than left to chance.
+    fn of(index: u64) -> (Self, usize) {
+        let (shape, first, slots) = match index % SHAPE_SLOTS {
+            0..=5 => (Self::Accepted, 0, 6),
+            6 => (Self::Epilogue, 6, 1),
+            7 => (Self::Truncated, 7, 1),
+            8 => (Self::Opening, 8, 1),
+            9..=11 => (Self::MalformedHeader, 9, 3),
+            12 => (Self::Nested, 12, 1),
+            13 => (Self::StructuralLimit, 13, 1),
+            _ => (Self::ByteLimit, 14, 2),
+        };
+        let ordinal = (index / SHAPE_SLOTS) * slots + (index % SHAPE_SLOTS - first);
+        (shape, ordinal as usize)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Epilogue => "refused-epilogue",
+            Self::Truncated => "truncated",
+            Self::Opening => "refused-opening",
+            Self::MalformedHeader => "malformed-header",
+            Self::Nested => "nested-part",
+            Self::StructuralLimit => "structural-limit",
+            Self::ByteLimit => "byte-limit",
+        }
+    }
+
+    /// What the parts of this shape must carry for its refusal to exist.
+    fn demand(self, ordinal: usize) -> Demand {
+        match (self, ordinal % 3) {
+            (Self::StructuralLimit, 0) => Demand::with_fields(2),
+            (Self::StructuralLimit, 1) => Demand::with_extra_header(),
+            (Self::ByteLimit, _) => Demand::with_data(),
+            _ => Demand::with_fields(1),
+        }
+    }
+}
+
+/// The least a case's parts must carry.
+#[derive(Clone, Copy)]
+struct Demand {
+    min_fields: usize,
+    extra_header: bool,
+    min_data: usize,
+}
+
+impl Demand {
+    fn with_fields(min_fields: usize) -> Self {
+        Self {
+            min_fields,
+            extra_header: false,
+            min_data: 0,
+        }
+    }
+
+    fn with_extra_header() -> Self {
+        Self {
+            extra_header: true,
+            ..Self::with_fields(1)
+        }
+    }
+
+    fn with_data() -> Self {
+        Self {
+            min_data: 2,
+            ..Self::with_fields(1)
+        }
+    }
+}
+
+/// One generated part: its exact header block and what it must read as.
+#[derive(Debug, Eq, PartialEq)]
+struct GeneratedPart {
+    headers: Box<str>,
+    expected: Collected,
+}
+
+impl GeneratedPart {
+    fn lines(&self) -> usize {
+        self.headers.split("\r\n").count()
+    }
+
+    fn header_bytes(&self) -> usize {
+        self.headers.len() + HEADER_TERMINATOR_BYTES
+    }
+
+    fn data_bytes(&self) -> usize {
+        self.expected.data.len()
+    }
+}
+
+/// How one session's body is cut into source frames: everything before `edge`
+/// as one frame, then the rest in frames of at most `size` bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Framing {
+    edge: usize,
+    size: usize,
+}
+
+/// How one generated session must end.
+#[derive(Debug, Eq, PartialEq)]
+enum Ending {
+    Clean,
+    /// `complete` leading fields arrive whole. An `open` refusal may also
+    /// deliver the next field's metadata and a prefix of its data.
+    Refused {
+        terminal: MultipartTerminalKind,
+        complete: usize,
+        open: bool,
+        diagnostic: Option<&'static str>,
+    },
+}
+
+impl Ending {
+    fn structural(complete: usize) -> Self {
+        Self::Refused {
+            terminal: MultipartTerminalKind::Structural,
+            complete,
+            open: false,
+            diagnostic: None,
+        }
+    }
+
+    fn open(terminal: MultipartTerminalKind, complete: usize) -> Self {
+        Self::Refused {
+            terminal,
+            complete,
+            open: true,
+            diagnostic: None,
+        }
+    }
+}
+
+/// One reproducible generated session family.
+#[derive(Debug, Eq, PartialEq)]
+struct StreamingCase {
+    labels: Box<[&'static str]>,
+    boundary: &'static str,
+    body: Box<[u8]>,
+    limits: MultipartLimits,
+    body_limit: usize,
+    framings: Box<[Framing]>,
+    expected: Box<[Collected]>,
+    ending: Ending,
+}
+
+/// Where each part sits in a body framed by the shared fixture.
+///
+/// Computed from lengths alone and then checked against the framed bytes, so a
+/// layout that disagreed with the framing fails the case instead of cutting it
+/// somewhere else.
+struct Layout {
+    header_starts: Box<[usize]>,
+    data_starts: Box<[usize]>,
+    data_ends: Box<[usize]>,
+    delimiter: usize,
+}
+
+impl Layout {
+    fn of(boundary: &str, parts: &[GeneratedPart]) -> Self {
+        let mut at = opening_bytes(boundary);
+        let delimiter = 2 + at;
+        let mut header_starts = Vec::with_capacity(parts.len());
+        let mut data_starts = Vec::with_capacity(parts.len());
+        let mut data_ends = Vec::with_capacity(parts.len());
+        for part in parts {
+            header_starts.push(at);
+            let data_start = at + part.header_bytes();
+            data_starts.push(data_start);
+            let data_end = data_start + part.data_bytes();
+            data_ends.push(data_end);
+            at = data_end + delimiter;
+        }
+        Self {
+            header_starts: header_starts.into_boxed_slice(),
+            data_starts: data_starts.into_boxed_slice(),
+            data_ends: data_ends.into_boxed_slice(),
+            delimiter,
+        }
+    }
+
+    /// The layout of one framed body, checked against its bytes.
+    fn checked(boundary: &str, parts: &[GeneratedPart], body: &[u8]) -> Self {
+        let layout = Self::of(boundary, parts);
+        for (index, part) in parts.iter().enumerate() {
+            assert_eq!(
+                &body[layout.data_starts[index]..layout.data_ends[index]],
+                part.expected.data.as_slice(),
+                "the layout locates part {index}'s data"
+            );
+        }
+        layout
+    }
+
+    /// Where the opening delimiter line ends.
+    fn opening(&self) -> usize {
+        *self
+            .header_starts
+            .first()
+            .expect("a generated body has a part")
+    }
+
+    fn closing(&self) -> usize {
+        *self.data_ends.last().expect("a generated body has a part")
+    }
+}
+
+/// Every part the generator frames obeys the sender's rule: the boundary's
+/// delimiter first occurs where the part's data ends.
+///
+/// Stated from the multipart framing rule, not read from Camber's search: a
+/// payload that already contained its own delimiter would be a different body.
+fn assert_delimiter_free(data: &[u8], boundary: &str) {
+    let prefix = [data, b"\r\n--", boundary.as_bytes()].concat();
+    let mut framed = Vec::with_capacity(prefix.len() + 2);
+    for suffix in [b"\r\n".as_slice(), b"--"] {
+        framed.clear();
+        framed.extend_from_slice(&prefix);
+        framed.extend_from_slice(suffix);
+        let delimiter = &framed[data.len()..];
+        let first = framed
+            .windows(delimiter.len())
+            .position(|window| window == delimiter);
+        assert_eq!(
+            first,
+            Some(data.len()),
+            "a generated payload never carries its own delimiter"
+        );
+    }
+}
+
+/// One part's payload: delimiter lookalikes, filler, and possibly a partial
+/// delimiter as its final bytes.
+fn generated_data(
+    case: &mut DeterministicCase,
+    boundary: &str,
+    min_data: usize,
+    labels: &mut Vec<&'static str>,
+) -> Vec<u8> {
+    let mut data = Vec::new();
+    if min_data == 0 && case.bounded(EMPTY_DATA_ONE_IN) == 0 {
+        labels.push("empty-data");
+        return data;
+    }
+    for run in 0..case.bounded(LOOKALIKE_RUNS) {
+        let lookalike = case.pick(&DELIMITER_LOOKALIKES);
+        labels.push(lookalike.label);
+        lookalike.write(boundary, &mut data);
+        write!(data, "|{}.{run}", case.index()).expect("a Vec accepts every write");
+    }
+    let filler = case
+        .bounded(FILLER_BYTES)
+        .max(min_data.saturating_sub(data.len()));
+    data.extend((0..filler).map(|offset| b'a' + (offset % 26) as u8));
+    if case.boolean() {
+        labels.push("partial-delimiter-at-end");
+        data.extend_from_slice(b"\r\n--");
+        data.extend_from_slice(&boundary.as_bytes()[..boundary.len() / 2]);
+    }
+    assert_delimiter_free(&data, boundary);
+    data
+}
+
+/// One `Content-Disposition` value in a generated spelling.
+fn disposition_value(
+    case: &mut DeterministicCase,
+    name: &Spelling,
+    filename: Option<&Spelling>,
+    labels: &mut Vec<&'static str>,
+) -> String {
+    let token = case.pick(&["form-data", "FORM-DATA", "Form-Data"]);
+    let separator = case.pick(&["; ", ";", " ;  "]);
+    let equals = case.pick(&["=", " = "]);
+    if separator.len() != 2 || equals.len() != 1 {
+        labels.push("parameter-whitespace");
+    }
+    let name_key = case.pick(&["name", "NAME", "Name"]);
+    let mut parameters = vec![format!("{name_key}{equals}{}", name.wire)];
+    if let Some(filename) = filename {
+        let key = case.pick(&["filename", "FILENAME", "FileName"]);
+        let parameter = format!("{key}{equals}{}", filename.wire);
+        labels.push(place_filename(case, &mut parameters, parameter));
+    }
+    if case.boolean() {
+        labels.push("ignored-parameter");
+        let ignored = *case.pick(&IGNORED_PARAMETERS);
+        parameters.push(ignored.to_owned());
+    }
+    format!("{token}{separator}{}", parameters.join(separator))
+}
+
+/// Place one filename parameter before or after the name, and label where.
+fn place_filename(
+    case: &mut DeterministicCase,
+    parameters: &mut Vec<String>,
+    parameter: String,
+) -> &'static str {
+    match case.boolean() {
+        true => {
+            parameters.insert(0, parameter);
+            "filename-first"
+        }
+        false => {
+            parameters.push(parameter);
+            "filename"
+        }
+    }
+}
+
+/// One part with a generated header block and payload.
+fn generated_part(
+    case: &mut DeterministicCase,
+    boundary: &str,
+    demand: Demand,
+    labels: &mut Vec<&'static str>,
+) -> GeneratedPart {
+    let name = case.pick(&PARAMETER_SPELLINGS);
+    labels.push(name.label);
+    let filename = case.boolean().then(|| case.pick(&PARAMETER_SPELLINGS));
+    let content_type = case.boolean().then(|| *case.pick(&CONTENT_TYPES));
+    let disposition = disposition_value(case, name, filename, labels);
+    let disposition_header = case.pick(&[
+        "Content-Disposition",
+        "content-disposition",
+        "CONTENT-DISPOSITION",
+    ]);
+    let mut lines = vec![format!("{disposition_header}: {disposition}")];
+    if let Some((label, value)) = content_type {
+        labels.push(label);
+        let header = case.pick(&["Content-Type", "content-type", "CONTENT-TYPE"]);
+        lines.push(format!("{header}: {value}"));
+    }
+    if demand.extra_header || case.boolean() {
+        labels.push("extra-header");
+        let at = case.bounded(NonZeroUsize::MIN.saturating_add(lines.len()));
+        lines.insert(at, "X-Extra: kept".to_owned());
+    }
+    let data = generated_data(case, boundary, demand.min_data, labels);
+    GeneratedPart {
+        headers: lines.join("\r\n").into_boxed_str(),
+        expected: Collected {
+            name: name.decoded.into(),
+            filename: filename.map(|spelling| spelling.decoded.into()),
+            content_type: content_type.map(|(_, value)| value.into()),
+            data,
+        },
+    }
+}
+
+/// The parts one case frames, in wire order.
+fn generated_parts(
+    case: &mut DeterministicCase,
+    boundary: &str,
+    demand: Demand,
+    labels: &mut Vec<&'static str>,
+) -> Box<[GeneratedPart]> {
+    let count = (1 + case.bounded(FIELD_COUNT)).max(demand.min_fields);
+    let parts: Box<[GeneratedPart]> = (0..count)
+        .map(|_| generated_part(case, boundary, demand, labels))
+        .collect();
+    let mut names: Vec<&str> = parts.iter().map(|part| &*part.expected.name).collect();
+    names.sort_unstable();
+    if names.windows(2).any(|pair| pair[0] == pair[1]) {
+        labels.push("duplicate-name");
+    }
+    parts
+}
+
+/// The bounds every part fits exactly: each maximum equals what the largest
+/// part needs.
+fn tight_bounds(parts: &[GeneratedPart], chunk: usize) -> Bounds {
+    let largest = |measure: fn(&GeneratedPart) -> usize| first_largest(parts, measure).1.max(1);
+    Bounds {
+        fields: parts.len(),
+        field_bytes: largest(GeneratedPart::data_bytes),
+        headers: largest(GeneratedPart::lines),
+        header_bytes: largest(GeneratedPart::header_bytes),
+        chunk,
+    }
+}
+
+/// The first part whose measure is the largest, and that measure.
+fn first_largest(parts: &[GeneratedPart], measure: fn(&GeneratedPart) -> usize) -> (usize, usize) {
+    let largest = parts.iter().map(measure).max().expect("a case has parts");
+    let index = parts
+        .iter()
+        .position(|part| measure(part) == largest)
+        .expect("the largest measure belongs to a part");
+    (index, largest)
+}
+
+/// Frame the generated parts under the shared fixture's framing.
+fn frame_parts(boundary: &str, parts: &[GeneratedPart], epilogue: &[u8]) -> Vec<u8> {
+    frame_raw(
+        boundary,
+        parts
+            .iter()
+            .map(|part| (&*part.headers, part.expected.data.as_slice())),
+        epilogue,
+    )
+}
+
+/// Everything a shape needs to turn parts into one case.
+struct Draft {
+    labels: Vec<&'static str>,
+    boundary: &'static str,
+    parts: Box<[GeneratedPart]>,
+    chunk: usize,
+    frame: usize,
+    ordinal: usize,
+}
+
+impl Draft {
+    /// Seal a draft into its case, reading the parts as its expectations.
+    fn seal(
+        self,
+        body: Vec<u8>,
+        bounds: Bounds,
+        body_limit: usize,
+        framings: Box<[Framing]>,
+        ending: Ending,
+    ) -> StreamingCase {
+        StreamingCase {
+            labels: self.labels.into_boxed_slice(),
+            boundary: self.boundary,
+            body: body.into_boxed_slice(),
+            limits: bounds.within(self.boundary),
+            body_limit,
+            framings,
+            expected: self.parts.into_iter().map(|part| part.expected).collect(),
+            ending,
+        }
+    }
+
+    /// Seal one refusal read as a single uniformly framed session.
+    fn refuse(self, body: Vec<u8>, bounds: Bounds, ending: Ending) -> StreamingCase {
+        let framing = Framing {
+            edge: 0,
+            size: self.frame,
+        };
+        let body_limit = body.len();
+        self.seal(body, bounds, body_limit, Box::new([framing]), ending)
+    }
+
+    /// Seal one whole body read cleanly under tight bounds, once per framing.
+    fn accept(self, body: Vec<u8>, framings: Box<[Framing]>) -> StreamingCase {
+        let bounds = self.tight();
+        let body_limit = body.len();
+        self.seal(body, bounds, body_limit, framings, Ending::Clean)
+    }
+
+    fn tight(&self) -> Bounds {
+        tight_bounds(&self.parts, self.chunk)
+    }
+
+    /// The draft's parts framed under its boundary.
+    fn framed(&self, epilogue: &[u8]) -> Vec<u8> {
+        frame_parts(self.boundary, &self.parts, epilogue)
+    }
+
+    /// Where each part sits in `body`, checked against its bytes.
+    fn layout(&self, body: &[u8]) -> Layout {
+        Layout::checked(self.boundary, &self.parts, body)
+    }
+
+    /// One part index, drawn uniformly.
+    fn any_part(&self, case: &mut DeterministicCase) -> usize {
+        case.below(self.parts.len())
+    }
+
+    /// Replace one part's header block, so the refusal it carries is the
+    /// case's own.
+    fn replace_headers(&mut self, target: usize, headers: &str) {
+        self.parts[target].headers = headers.into();
+    }
+}
+
+/// A body read cleanly under exactly tight limits, with a frame edge at every
+/// offset of one selected delimiter.
+fn accepted_case(mut draft: Draft, case: &mut DeterministicCase) -> StreamingCase {
+    let (label, epilogue) = *case.pick(&ACCEPTED_EPILOGUES);
+    draft.labels.push(label);
+    let body = draft.framed(epilogue);
+    let layout = draft.layout(&body);
+    let site = case.bounded(NonZeroUsize::MIN.saturating_add(draft.parts.len()));
+    let (label, start, end) = match site {
+        0 => ("split-opening", 0, layout.opening()),
+        site if site == draft.parts.len() => ("split-closing", layout.closing(), body.len()),
+        site => {
+            let start = layout.data_ends[site - 1];
+            ("split-separator", start, start + layout.delimiter)
+        }
+    };
+    draft.labels.push(label);
+    let framings = (start..=end)
+        .map(|edge| Framing {
+            edge,
+            size: draft.frame,
+        })
+        .collect();
+    draft.accept(body, framings)
+}
+
+/// Every field arrives, and the ending after the closing delimiter is refused.
+fn epilogue_case(mut draft: Draft) -> StreamingCase {
+    let (label, epilogue) = REFUSED_EPILOGUES[draft.ordinal % REFUSED_EPILOGUES.len()];
+    draft.labels.push(label);
+    let body = draft.framed(epilogue);
+    let (bounds, complete) = (draft.tight(), draft.parts.len());
+    draft.refuse(body, bounds, Ending::structural(complete))
+}
+
+/// The body stops inside the closing delimiter or inside the last header.
+fn truncated_case(mut draft: Draft, case: &mut DeterministicCase) -> StreamingCase {
+    let mut body = draft.framed(b"");
+    let layout = draft.layout(&body);
+    let last = draft.parts.len() - 1;
+    let (label, cut, ending) = match draft.ordinal % 2 {
+        0 => {
+            let cut = layout.closing() + case.below(layout.delimiter);
+            let ending = Ending::open(MultipartTerminalKind::Structural, last);
+            ("truncated-in-closing-delimiter", cut, ending)
+        }
+        _ => {
+            let within = draft.parts[last].header_bytes();
+            let cut = layout.header_starts[last] + case.below(within);
+            ("truncated-in-last-header", cut, Ending::structural(last))
+        }
+    };
+    draft.labels.push(label);
+    body.truncate(cut);
+    let bounds = draft.tight();
+    draft.refuse(body, bounds, ending)
+}
+
+/// The body does not open with this boundary's delimiter line.
+fn opening_case(mut draft: Draft) -> StreamingCase {
+    let framed = draft.framed(b"");
+    let suffix_at = 2 + draft.boundary.len();
+    let (label, body) = match draft.ordinal % 3 {
+        0 => (
+            "opening-preamble",
+            [b"preamble\r\n".as_slice(), &framed].concat(),
+        ),
+        1 => {
+            let mut body = framed;
+            body[suffix_at..suffix_at + 2].copy_from_slice(b"x-");
+            ("opening-suffix", body)
+        }
+        _ => (
+            "opening-other-boundary",
+            frame_parts("Other7", &draft.parts, b""),
+        ),
+    };
+    draft.labels.push(label);
+    let bounds = draft.tight();
+    draft.refuse(body, bounds, Ending::structural(0))
+}
+
+/// One part's header block breaks one grammar rule.
+fn malformed_header_case(mut draft: Draft, case: &mut DeterministicCase) -> StreamingCase {
+    let (label, headers) = MALFORMED_HEADERS[draft.ordinal % MALFORMED_HEADERS.len()];
+    draft.labels.push(label);
+    let target = draft.any_part(case);
+    draft.replace_headers(target, headers);
+    let body = draft.framed(b"");
+    let bounds = draft.tight();
+    draft.refuse(body, bounds, Ending::structural(target))
+}
+
+/// One part declares a nested multipart representation.
+fn nested_case(mut draft: Draft, case: &mut DeterministicCase) -> StreamingCase {
+    let spelling = NESTED_CONTENT_TYPES[draft.ordinal % NESTED_CONTENT_TYPES.len()];
+    draft.labels.push("nested");
+    let target = draft.any_part(case);
+    let headers =
+        format!("Content-Disposition: form-data; name=\"nested\"\r\nContent-Type: {spelling}");
+    draft.replace_headers(target, &headers);
+    let body = draft.framed(b"");
+    let bounds = draft.tight();
+    let ending = Ending::Refused {
+        terminal: MultipartTerminalKind::Structural,
+        complete: target,
+        open: false,
+        diagnostic: Some("nested"),
+    };
+    draft.refuse(body, bounds, ending)
+}
+
+/// One structural bound sits one below what the body needs.
+fn structural_limit_case(mut draft: Draft) -> StreamingCase {
+    let body = draft.framed(b"");
+    let tight = draft.tight();
+    let (label, bounds, complete) = match draft.ordinal % 3 {
+        0 => {
+            let fields = draft.parts.len() - 1;
+            ("fields-over-bound", Bounds { fields, ..tight }, fields)
+        }
+        1 => {
+            let (target, lines) = first_largest(&draft.parts, GeneratedPart::lines);
+            let headers = lines - 1;
+            ("headers-over-bound", Bounds { headers, ..tight }, target)
+        }
+        _ => {
+            let (target, bytes) = first_largest(&draft.parts, GeneratedPart::header_bytes);
+            let header_bytes = bytes - 1;
+            (
+                "header-bytes-over-bound",
+                Bounds {
+                    header_bytes,
+                    ..tight
+                },
+                target,
+            )
+        }
+    };
+    draft.labels.push(label);
+    draft.refuse(body, bounds, Ending::structural(complete))
+}
+
+/// A field's bytes, or the admitted total, cross by exactly one byte.
+fn byte_limit_case(draft: Draft, case: &mut DeterministicCase) -> StreamingCase {
+    match draft.ordinal % 2 {
+        0 => field_bytes_case(draft),
+        _ => body_bytes_case(draft, case),
+    }
+}
+
+/// The largest field is one byte over its per-field bound.
+fn field_bytes_case(mut draft: Draft) -> StreamingCase {
+    draft.labels.push("field-bytes-over-bound");
+    let body = draft.framed(b"");
+    let (target, bytes) = first_largest(&draft.parts, GeneratedPart::data_bytes);
+    let bounds = Bounds {
+        field_bytes: bytes - 1,
+        ..draft.tight()
+    };
+    let ending = Ending::open(MultipartTerminalKind::ByteLimit, target);
+    draft.refuse(body, bounds, ending)
+}
+
+/// The admitted total ends inside one field's data, and the frame that
+/// crosses it is the first frame after that field's header block.
+fn body_bytes_case(mut draft: Draft, case: &mut DeterministicCase) -> StreamingCase {
+    draft.labels.push("body-bytes-over-bound");
+    let body = draft.framed(b"");
+    let layout = draft.layout(&body);
+    let target = draft.any_part(case);
+    let length = NonZeroUsize::new(draft.parts[target].data_bytes())
+        .expect("a byte-limit case carries data in every part");
+    let edge = layout.data_starts[target];
+    let body_limit = edge + case.bounded(length);
+    let framings = Box::new([Framing {
+        edge,
+        size: draft.frame,
+    }]);
+    let ending = Ending::open(MultipartTerminalKind::ByteLimit, target);
+    let tight = draft.tight();
+    draft.seal(body, tight, body_limit, framings, ending)
+}
+
+/// Build one generated case from its seed and index alone.
+fn generated_streaming_case(case: &mut DeterministicCase) -> StreamingCase {
+    let (shape, ordinal) = Shape::of(case.index());
+    let boundary = *case.pick(&GENERATED_BOUNDARIES);
+    let mut labels = vec![shape.label()];
+    let parts = generated_parts(case, boundary, shape.demand(ordinal), &mut labels);
+    let chunk = *case.pick(&CHUNK_SIZES);
+    let frame = *case.pick(&FRAME_SIZES);
+    let draft = Draft {
+        labels,
+        boundary,
+        parts,
+        chunk,
+        frame,
+        ordinal,
+    };
+    match shape {
+        Shape::Accepted => accepted_case(draft, case),
+        Shape::Epilogue => epilogue_case(draft),
+        Shape::Truncated => truncated_case(draft, case),
+        Shape::Opening => opening_case(draft),
+        Shape::MalformedHeader => malformed_header_case(draft, case),
+        Shape::Nested => nested_case(draft, case),
+        Shape::StructuralLimit => structural_limit_case(draft),
+        Shape::ByteLimit => byte_limit_case(draft, case),
+    }
+}
+
+/// Start one controlled session over a generated body cut by one framing, and
+/// report how many source frames it was handed.
+fn start_generated(generated: &StreamingCase, framing: Framing) -> (MultipartSession, usize) {
+    let (head, tail) = generated.body.split_at(framing.edge);
+    let mut builder = mock::multipart_session(generated.boundary, generated.limits)
+        .body_limit(generated.body_limit)
+        .with_permit();
+    if !head.is_empty() {
+        builder = builder.frame(head);
+    }
+    let frames = usize::from(!head.is_empty()) + tail.chunks(framing.size).count();
+    (builder.frames_of(tail, framing.size).start(), frames)
+}
+
+/// Whether one refusal reached application code under its own provenance.
+fn refused_with(terminal: MultipartTerminalKind, error: Option<&RuntimeError>) -> bool {
+    matches!(
+        (terminal, error),
+        (
+            MultipartTerminalKind::Structural,
+            Some(RuntimeError::Multipart(_))
+        ) | (
+            MultipartTerminalKind::ByteLimit,
+            Some(RuntimeError::RequestBodyLimit(_))
+        )
+    )
+}
+
+/// The fields before a refusal arrive whole; an open refusal may add the next
+/// field's metadata with a prefix of its data, and nothing else arrives.
+fn assert_refused_delivery(
+    context: &str,
+    expected: &[Collected],
+    delivered: &[Collected],
+    complete: usize,
+    open: bool,
+) {
+    assert!(
+        delivered.len() >= complete,
+        "{context}: {complete} fields precede the refusal, {} arrived",
+        delivered.len()
+    );
+    let (whole, rest) = delivered.split_at(complete);
+    assert_eq!(
+        whole,
+        &expected[..complete],
+        "{context}: fields before the refusal"
+    );
+    match (open, rest) {
+        (_, []) => {}
+        (true, [partial]) => {
+            let field = &expected[complete];
+            assert_eq!(
+                partial.metadata(),
+                field.metadata(),
+                "{context}: refused field metadata"
+            );
+            assert!(
+                field.data.starts_with(&partial.data),
+                "{context}: the refused field delivered {} bytes that are not its prefix",
+                partial.data.len()
+            );
+        }
+        _ => panic!("{context}: {} fields arrived past the refusal", rest.len()),
+    }
+}
+
+/// The reading, and the terminal the driver returned, match the case.
+fn assert_generated_ending(
+    context: &str,
+    generated: &StreamingCase,
+    reading: &Reading,
+    outcome: &MultipartOutcome,
+) {
+    let chunk = generated.limits.max_chunk_bytes();
+    assert!(
+        reading.chunks.iter().all(|size| (1..=chunk).contains(size)),
+        "{context}: every chunk carries 1..={chunk} bytes: {:?}",
+        reading.chunks
+    );
+    match generated.ending {
+        Ending::Clean => {
+            assert!(
+                reading.error.is_none(),
+                "{context}: a valid body under validated limits reads cleanly, got {:?}",
+                reading.error
+            );
+            assert_eq!(&*reading.fields, &*generated.expected, "{context}: fields");
+            assert_eq!(
+                outcome.terminal(),
+                MultipartTerminalKind::Clean,
+                "{context}"
+            );
+        }
+        Ending::Refused {
+            terminal,
+            complete,
+            open,
+            diagnostic,
+        } => {
+            let context = format!("{context} error={:?}", reading.error);
+            assert!(
+                refused_with(terminal, reading.error.as_ref()),
+                "{context}: must be refused as {terminal:?}"
+            );
+            assert_refused_delivery(
+                &context,
+                &generated.expected,
+                &reading.fields,
+                complete,
+                open,
+            );
+            assert_eq!(outcome.terminal(), terminal, "{context}: terminal");
+            let named = diagnostic
+                .is_none_or(|rule| outcome.diagnostic().is_some_and(|text| text.contains(rule)));
+            assert!(named, "{context}: diagnostic {:?}", outcome.diagnostic());
+        }
+    }
+}
+
+/// The finished session held no more than its bounds and released every frame
+/// backing, its permit, and its reply exactly once.
+fn assert_generated_release(
+    context: &str,
+    generated: &StreamingCase,
+    outcome: &MultipartOutcome,
+    frames: usize,
+) {
+    let observed = outcome.observed();
+    let limits = generated.limits;
+    assert!(
+        observed.parser_peak_bytes() <= limits.max_parser_buffer_bytes(),
+        "{context}: parser peak {} over {}",
+        observed.parser_peak_bytes(),
+        limits.max_parser_buffer_bytes()
+    );
+    assert!(
+        observed.reply_peak_bytes() <= limits.max_reply_bytes(),
+        "{context}: reply peak {} over {}",
+        observed.reply_peak_bytes(),
+        limits.max_reply_bytes()
+    );
+    assert!(
+        observed.active_metadata_peak_bytes() <= limits.max_header_bytes_per_field(),
+        "{context}: active metadata peak {} over {}",
+        observed.active_metadata_peak_bytes(),
+        limits.max_header_bytes_per_field()
+    );
+    assert_eq!(
+        observed.source_frame_backings_freed(),
+        Some(frames),
+        "{context}: frames"
+    );
+    assert_eq!(
+        observed.permit_owners_dropped(),
+        1,
+        "{context}: permit owner"
+    );
+    assert_eq!(
+        observed.permit_backings_freed(),
+        Some(1),
+        "{context}: permit"
+    );
+    assert_eq!(observed.drivers_terminated(), 1, "{context}: driver");
+    assert_eq!(observed.reply_retained_bytes(), 0, "{context}: reply");
+    if generated.ending == Ending::Clean {
+        assert_eq!(observed.parser_retained_bytes(), 0, "{context}: parser");
+    }
+}
+
+/// Read one generated case under one framing to its terminal, require the
+/// ending and release the case names, and hand back the reading.
+async fn assert_generated_framing(
+    context: &str,
+    generated: &StreamingCase,
+    framing: Framing,
+) -> Reading {
+    let (mut session, frames) = start_generated(generated, framing);
+    let reading = read_all(&mut session).await;
+    let outcome = finish(session).await;
+    assert_generated_ending(context, generated, &reading, &outcome);
+    assert_generated_release(context, generated, &outcome, frames);
+    reading
+}
+
+/// Read one generated case under every framing it names, to its terminal.
+async fn assert_generated_case(case: &DeterministicCase, generated: &StreamingCase) {
+    let labels = generated.labels.join(",");
+    assert!(
+        generated.body.len() <= MAX_GENERATED_BODY_BYTES,
+        "{case} [{labels}]: {} body bytes",
+        generated.body.len()
+    );
+    for framing in generated.framings.iter().copied() {
+        let context = format!(
+            "{case} [{labels}] edge={} frame={}",
+            framing.edge, framing.size
+        );
+        assert_generated_framing(&context, generated, framing).await;
+    }
+}
+
+/// Every label a complete run must reach.
+///
+/// The shape labels come from the rotation itself, so a shape added to it is
+/// required without a second list to keep in step.
+fn required_streaming_labels() -> impl Iterator<Item = &'static str> {
+    let fixed = [
+        "split-opening",
+        "split-separator",
+        "split-closing",
+        "partial-delimiter-at-end",
+        "empty-data",
+        "duplicate-name",
+        "filename-first",
+        "ignored-parameter",
+        "parameter-whitespace",
+        "extra-header",
+        "truncated-in-closing-delimiter",
+        "truncated-in-last-header",
+        "opening-preamble",
+        "opening-suffix",
+        "opening-other-boundary",
+        "fields-over-bound",
+        "headers-over-bound",
+        "header-bytes-over-bound",
+        "field-bytes-over-bound",
+        "body-bytes-over-bound",
+    ];
+    (0..SHAPE_SLOTS)
+        .map(|index| Shape::of(index).0.label())
+        .chain(fixed)
+        .chain(PARAMETER_SPELLINGS.iter().map(|spelling| spelling.label))
+        .chain(CONTENT_TYPES.iter().map(|(label, _)| *label))
+        .chain(DELIMITER_LOOKALIKES.iter().map(|lookalike| lookalike.label))
+        .chain(MALFORMED_HEADERS.iter().map(|(label, _)| *label))
+        .chain(REFUSED_EPILOGUES.iter().map(|(label, _)| *label))
+        .chain(ACCEPTED_EPILOGUES.iter().map(|(label, _)| *label))
+}
+
+#[tokio::test]
+async fn generated_streaming_multipart_fragments_preserve_field_contract() {
+    let generator = DeterministicGenerator::new(STREAMING_PROPERTY_SEED);
+    let mut reached = BTreeSet::new();
+    for index in 0..GENERATED_STREAMING_CASES {
+        let (case, generated) = generator.reproducible(index, generated_streaming_case);
+        assert_eq!(
+            case.seed(),
+            STREAMING_PROPERTY_SEED,
+            "{case}: checked-in seed"
+        );
+        assert_generated_case(&case, &generated).await;
+        reached.extend(generated.labels.iter().copied());
+    }
+    generator.assert_reached(
+        GENERATED_STREAMING_CASES,
+        required_streaming_labels(),
+        &reached,
+    );
+}
+
+/// The chunk bound the reduced regression reads under: above its header bound.
+const OVERLAP_CHUNK_BYTES: usize = 256;
+
+/// The two parts reduced from `seed=0x4d50535452450b11 case=6`.
+///
+/// The second header block is the larger, so it sets the header bound, and its
+/// data outruns one chunk so a data window can fill past the first delimiter.
+fn overlap_parts() -> Box<[GeneratedPart]> {
+    let part = |headers: String, name: &str, data: Vec<u8>| GeneratedPart {
+        headers: headers.into_boxed_str(),
+        expected: Collected {
+            name: name.into(),
+            filename: None,
+            content_type: None,
+            data,
+        },
+    };
+    Box::new([
+        part(
+            "Content-Disposition: form-data; name=\"first\"".to_owned(),
+            "first",
+            b"one".to_vec(),
+        ),
+        part(
+            format!(
+                "Content-Disposition: form-data; name=\"second\"\r\nX-Padding: {}",
+                "p".repeat(40)
+            ),
+            "second",
+            vec![b'd'; 200],
+        ),
+    ])
+}
+
+/// The largest header block the overlap body carries.
+fn overlap_header_bytes() -> usize {
+    first_largest(&overlap_parts(), GeneratedPart::header_bytes).1
+}
+
+/// The overlap body under tight bounds at one chunk limit, expected clean.
+///
+/// Two framings: the whole body as one source frame, and the same bytes cut
+/// where the second header block begins. The cut frame hands the header phase
+/// an empty buffer; the whole frame hands it whatever the data window filled.
+fn overlap_case(chunk: usize) -> StreamingCase {
+    let draft = Draft {
+        labels: vec!["overlap-regression"],
+        boundary: BOUNDARY,
+        parts: overlap_parts(),
+        chunk,
+        frame: usize::MAX,
+        ordinal: 0,
+    };
+    let body = draft.framed(b"");
+    let layout = draft.layout(&body);
+    let framings = Box::new([
+        Framing {
+            edge: 0,
+            size: usize::MAX,
+        },
+        Framing {
+            edge: layout.header_starts[1],
+            size: usize::MAX,
+        },
+    ]);
+    draft.accept(body, framings)
+}
+
+/// Read the overlap body under one framing, finish the session, then require a
+/// clean read of both exact fields within the validated buffer and a complete
+/// release.
+async fn assert_overlap_reads_cleanly(generated: &StreamingCase, framing: Framing) -> Reading {
+    let limits = generated.limits;
+    let context = format!(
+        "overlap chunk={} header={} buffer={} edge={}",
+        limits.max_chunk_bytes(),
+        limits.max_header_bytes_per_field(),
+        limits.max_parser_buffer_bytes(),
+        framing.edge
+    );
+    assert_eq!(
+        generated.ending,
+        Ending::Clean,
+        "{context}: the overlap body"
+    );
+    assert_generated_framing(&context, generated, framing).await
+}
+
+/// Both framings of the overlap body at one chunk limit read the same fields.
+async fn assert_framings_agree(chunk: usize) {
+    let generated = overlap_case(chunk);
+    let whole = assert_overlap_reads_cleanly(&generated, generated.framings[0]).await;
+    let split = assert_overlap_reads_cleanly(&generated, generated.framings[1]).await;
+    assert_eq!(
+        whole.fields, split.fields,
+        "chunk={chunk}: whole-frame and split-frame delivery read the same fields"
+    );
+}
+
+/// Reduced from `seed=0x4d50535452450b11 case=6`, read as one source frame.
+///
+/// A valid two-field body under limits the builder validated: the chunk bound
+/// exceeds the header bound, and one source frame carries the first field, its
+/// delimiter, the whole second header block, and more data. The data phase
+/// fills to one chunk plus delimiter carry, so the second header block and the
+/// data after it are already retained when that block's metadata is reserved.
+#[tokio::test]
+async fn header_metadata_beside_a_filled_data_window_fits_the_validated_buffer() {
+    let generated = overlap_case(OVERLAP_CHUNK_BYTES);
+    assert!(
+        generated.limits.max_chunk_bytes() > generated.limits.max_header_bytes_per_field(),
+        "this case configures chunk bytes above header bytes"
+    );
+    let reading = assert_overlap_reads_cleanly(&generated, generated.framings[0]).await;
+    assert_eq!(reading.names(), vec!["first", "second"]);
+}
+
+/// The same body and limits, cut where the second header block begins: the
+/// header phase starts from an empty buffer, so no data window overlaps it.
+#[tokio::test]
+async fn overlap_body_split_before_the_second_header_block_reads_cleanly() {
+    let generated = overlap_case(OVERLAP_CHUNK_BYTES);
+    let reading = assert_overlap_reads_cleanly(&generated, generated.framings[1]).await;
+    assert_eq!(reading.names(), vec!["first", "second"]);
+}
+
+/// A chunk bound below the header bound leaves a filled data window smaller
+/// than one header block, in either framing.
+#[tokio::test]
+async fn chunk_limit_below_the_header_limit_reads_the_overlap_body_in_either_framing() {
+    assert_framings_agree(overlap_header_bytes() - 1).await;
+}
+
+/// A chunk bound equal to the header bound, in either framing.
+#[tokio::test]
+async fn chunk_limit_equal_to_the_header_limit_reads_the_overlap_body_in_either_framing() {
+    assert_framings_agree(overlap_header_bytes()).await;
 }

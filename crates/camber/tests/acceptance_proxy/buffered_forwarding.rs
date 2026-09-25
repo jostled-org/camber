@@ -11,6 +11,7 @@ use std::time::Duration;
 const OVERLAP_REQUEST_COUNT: usize = 4;
 const OVERLAP_TIMEOUT: Duration = Duration::from_secs(2);
 const GENERATED_FORWARDING_CASE_COUNT: u64 = 32;
+pub(crate) const FORWARDING_METADATA_LEAK: &str = "peer forwarding metadata reached upstream";
 const FIXED_HOP_HEADERS: [&str; 9] = [
     "connection",
     "keep-alive",
@@ -23,7 +24,7 @@ const FIXED_HOP_HEADERS: [&str; 9] = [
     "upgrade",
 ];
 
-type ReceivedHeaders = Vec<(String, String)>;
+type ReceivedHeaders = Box<[(Box<str>, Box<str>)]>;
 
 fn complete_header_echo_upstream() -> SocketAddr {
     let mut upstream = Router::new();
@@ -50,7 +51,7 @@ fn raw_proxy_header_request(proxy_addr: SocketAddr, request: &str) -> ReceivedHe
     assert_eq!(
         common::status_from_raw(&response),
         200,
-        "header-recording upstream request failed: {response}"
+        "header-recording upstream request failed"
     );
 
     let body = response
@@ -59,34 +60,39 @@ fn raw_proxy_header_request(proxy_addr: SocketAddr, request: &str) -> ReceivedHe
         .expect("response has a header/body separator");
     body.lines()
         .filter_map(|line| line.split_once(':'))
-        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .map(|(name, value)| (Box::from(name), Box::from(value)))
         .collect()
 }
 
-fn header_values<'a>(headers: &'a ReceivedHeaders, expected_name: &str) -> Vec<&'a str> {
+fn header_values<'a>(
+    headers: &'a ReceivedHeaders,
+    expected_name: &str,
+) -> impl Iterator<Item = &'a str> {
     headers
         .iter()
-        .filter(|(name, _)| name.eq_ignore_ascii_case(expected_name))
-        .map(|(_, value)| value.as_str())
-        .collect()
+        .filter(move |(name, _)| name.eq_ignore_ascii_case(expected_name))
+        .map(|(_, value)| value.as_ref())
 }
 
 fn assert_header_absent(headers: &ReceivedHeaders, name: &str, case: &str) {
     assert!(
-        header_values(headers, name).is_empty(),
-        "{case}: {name} must not reach upstream; received {headers:?}"
+        header_values(headers, name).next().is_none(),
+        "{case}: {name} must not reach upstream"
     );
 }
 
 fn assert_single_header(headers: &ReceivedHeaders, name: &str, value: &str, case: &str) {
     assert_eq!(
-        header_values(headers, name),
+        *header_values(headers, name).collect::<Box<[_]>>(),
         [value],
-        "{case}: {name} must appear exactly once with Camber's value; received {headers:?}"
+        "{case}: {name} must appear exactly once with Camber's value"
     );
 }
 
-fn generated_header_case(source: &str, generator: &mut common::DeterministicCase) -> String {
+pub(crate) fn generated_header_case(
+    source: &str,
+    generator: &mut common::DeterministicCase,
+) -> String {
     source
         .chars()
         .map(
@@ -98,7 +104,7 @@ fn generated_header_case(source: &str, generator: &mut common::DeterministicCase
         .collect()
 }
 
-fn generated_connection_value(
+pub(crate) fn generated_connection_value(
     tokens: &[&str],
     generator: &mut common::DeterministicCase,
 ) -> String {
@@ -121,10 +127,55 @@ fn generated_connection_value(
         })
 }
 
+/// The `X-Forwarded-` suffixes a peer may spell beyond the three Camber writes.
+///
+/// Every one is a valid token and a field real intermediaries send. What is
+/// under test is the prefix rather than this list: an upstream that trusts this
+/// hop reads each of them as something the hop vouched for, and Camber vouches
+/// for none it did not write.
+///
+/// [`generated_forwarded_field`] is the one owner every module generates a
+/// peer-supplied suffix through. A second list would let a face be proven
+/// against a narrower family than the one the policy claims.
+const FORWARDED_SUFFIXES: [&str; 10] = [
+    "Port",
+    "Prefix",
+    "Scheme",
+    "Server",
+    "Ssl",
+    "Uri",
+    "Path",
+    "Method",
+    "Client-Cert",
+    "Protocol",
+];
+
+/// One `X-Forwarded-` field name this case spells, beyond the three Camber
+/// writes, in generated casing.
+pub(crate) fn generated_forwarded_field(case: &mut common::DeterministicCase) -> String {
+    let suffix = case
+        .select(&FORWARDED_SUFFIXES)
+        .copied()
+        .expect("non-empty suffix set");
+    generated_header_case(&format!("x-forwarded-{suffix}"), case)
+}
+
+/// The optional whitespace a field value may carry at either edge.
+const EDGE_OWS: [&str; 3] = ["", " ", "\t"];
+
+/// `value` with the optional whitespace a field may carry at either edge.
+pub(crate) fn generated_padding(value: &str, case: &mut common::DeterministicCase) -> String {
+    let leading_ows = case.select(&EDGE_OWS).copied().expect("non-empty OWS set");
+    let trailing_ows = case.select(&EDGE_OWS).copied().expect("non-empty OWS set");
+    format!("{leading_ows}{value}{trailing_ows}")
+}
+
 struct GeneratedForwardingCase {
     request: Box<str>,
     first_token: Box<str>,
     second_token: Box<str>,
+    /// The three peer-supplied `X-Forwarded-` fields this case spells.
+    forwarded_fields: Box<[Box<str>]>,
     end_to_end_value: Box<str>,
     label: Box<str>,
 }
@@ -143,13 +194,13 @@ fn generated_forwarding_case(
         first_token.as_str(),
         second_token.as_str(),
     ];
-    let connection_tokens = generated_connection_value(&tokens, &mut case);
-    let edge_ows = ["", " ", "\t"];
-    let leading_ows = case.select(&edge_ows).copied().expect("non-empty OWS set");
-    let trailing_ows = case.select(&edge_ows).copied().expect("non-empty OWS set");
-    let connection_value = format!("{leading_ows}{connection_tokens}{trailing_ows}");
+    let connection_value =
+        generated_padding(&generated_connection_value(&tokens, &mut case), &mut case);
     let first_header_name = generated_header_case("x-generated-hop-one", &mut case);
     let second_header_name = generated_header_case("x-generated-hop-two", &mut case);
+    let port_field = generated_header_case("x-forwarded-port", &mut case);
+    let prefix_field = generated_header_case("x-forwarded-prefix", &mut case);
+    let generated_field = generated_forwarded_field(&mut case);
     let end_to_end_value = format!("preserved-{index}");
     let request = format!(
         concat!(
@@ -158,6 +209,9 @@ fn generated_forwarding_case(
             "{connection_name}: {connection_value}\r\n",
             "{first_header_name}: remove-one\r\n",
             "{second_header_name}: remove-two\r\n",
+            "{port_field}: 4443\r\n",
+            "{prefix_field}: /spoofed\r\n",
+            "{generated_field}: spoofed-suffix\r\n",
             "Keep-Alive: timeout=5\r\n",
             "Proxy-Authenticate: Basic realm=test\r\n",
             "Proxy-Authorization: Basic dGVzdA==\r\n",
@@ -179,12 +233,19 @@ fn generated_forwarding_case(
         connection_value = connection_value,
         first_header_name = first_header_name,
         second_header_name = second_header_name,
+        port_field = port_field,
+        prefix_field = prefix_field,
+        generated_field = generated_field,
         end_to_end_value = end_to_end_value,
     );
     GeneratedForwardingCase {
         request: request.into_boxed_str(),
         first_token: first_token.into_boxed_str(),
         second_token: second_token.into_boxed_str(),
+        forwarded_fields: [port_field, prefix_field, generated_field]
+            .into_iter()
+            .map(String::into_boxed_str)
+            .collect(),
         end_to_end_value: end_to_end_value.into_boxed_str(),
         label: case.to_string().into_boxed_str(),
     }
@@ -197,6 +258,13 @@ fn assert_generated_forwarding_case(received: &ReceivedHeaders, case: &Generated
         .iter()
         .for_each(|name| assert_header_absent(received, name, &case.label));
     assert_header_absent(received, "forwarded", &case.label);
+    case.forwarded_fields.iter().for_each(|name| {
+        assert!(
+            header_values(received, name).next().is_none(),
+            "{FORWARDING_METADATA_LEAK} ({}): {name}",
+            case.label
+        );
+    });
     assert_single_header(
         received,
         "x-end-to-end",
@@ -218,7 +286,7 @@ async fn wait_for_request_overlap(gate: &tokio::sync::Barrier) {
 #[camber::test]
 async fn proxy_forwards_get_request() {
     let mut backend = Router::new();
-    backend.get("/hello", |_req: &Request| async {
+    backend.get("/hello", |_: &Request| async {
         Response::text(200, "from-backend")
     });
     let backend_addr = common::spawn_server(backend);
@@ -306,15 +374,13 @@ async fn proxy_returns_502_on_backend_failure() {
 #[camber::test]
 async fn proxy_coexists_with_normal_routes() {
     let mut backend = Router::new();
-    backend.get("/hello", |_req: &Request| async {
+    backend.get("/hello", |_: &Request| async {
         Response::text(200, "proxied")
     });
     let backend_addr = common::spawn_server(backend);
 
     let mut main = Router::new();
-    main.get("/health", |_req: &Request| async {
-        Response::text(200, "ok")
-    });
+    main.get("/health", |_: &Request| async { Response::text(200, "ok") });
     main.proxy("/api", &format!("http://{backend_addr}"));
     let main_addr = common::spawn_server(main);
 
@@ -377,7 +443,7 @@ async fn proxy_round_trips_binary_data() {
 #[camber::test]
 async fn proxy_streams_large_response() {
     let mut backend = Router::new();
-    backend.get("/large", |_req: &Request| async {
+    backend.get("/large", |_: &Request| async {
         // 1MB response body: repeated pattern
         let pattern = b"abcdefghij";
         let mut data = Vec::with_capacity(1_000_000);
@@ -410,7 +476,7 @@ async fn proxy_streams_large_response() {
 #[camber::test]
 async fn proxy_preserves_backend_content_type() {
     let mut backend = Router::new();
-    backend.get("/data", |_req: &Request| async {
+    backend.get("/data", |_: &Request| async {
         Response::bytes(200, vec![1, 2, 3]).map(|r| r.with_content_type("application/octet-stream"))
     });
     let backend_addr = common::spawn_server(backend);
@@ -437,7 +503,7 @@ async fn proxy_preserves_backend_content_type() {
 #[camber::test]
 async fn proxy_strips_upgrade_headers_from_backend() {
     let mut backend = Router::new();
-    backend.get("/with-upgrade", |_req: &Request| async {
+    backend.get("/with-upgrade", |_: &Request| async {
         Response::text(200, "ok").map(|r| r.with_header("Upgrade", "h2c"))
     });
     let backend_addr = common::spawn_server(backend);
@@ -469,7 +535,7 @@ async fn proxy_async_concurrent_requests() {
     let overlap_gate = Arc::new(tokio::sync::Barrier::new(OVERLAP_REQUEST_COUNT + 1));
     let upstream_gate = Arc::clone(&overlap_gate);
     let mut backend = Router::new();
-    backend.get("/slow", move |_req: &Request| {
+    backend.get("/slow", move |_: &Request| {
         let request_gate = Arc::clone(&upstream_gate);
         async move {
             request_gate.wait().await;
@@ -507,7 +573,7 @@ async fn proxy_concurrent_requests_still_work() {
     let overlap_gate = Arc::new(tokio::sync::Barrier::new(OVERLAP_REQUEST_COUNT + 1));
     let upstream_gate = Arc::clone(&overlap_gate);
     let mut backend = Router::new();
-    backend.get("/slow", move |_req: &Request| {
+    backend.get("/slow", move |_: &Request| {
         let request_gate = Arc::clone(&upstream_gate);
         async move {
             request_gate.wait().await;
@@ -598,6 +664,8 @@ async fn connection_header_tokens_are_removed_before_proxying() {
         "Host: client.example\r\n",
         "Connection: close, X-Remove-One, invalid token\r\n",
         "cOnNeCtIoN:\tX-Remove-Two\r\n",
+        "CONNECTION: Authorization\r\n",
+        "Authorization: Bearer connection-named-credential\r\n",
         "X-Remove-One: first-hop-only\r\n",
         "x-remove-two: second-hop-only\r\n",
         "X-End-To-End: preserved\r\n",
@@ -608,6 +676,9 @@ async fn connection_header_tokens_are_removed_before_proxying() {
     assert_header_absent(&received, "connection", "fixed connection field");
     assert_header_absent(&received, "x-remove-one", "first Connection token");
     assert_header_absent(&received, "x-remove-two", "second Connection token");
+    // A credential the peer marked hop-by-hop is one field among the rest: the
+    // name a `Connection` value carries decides, not what the field holds.
+    assert_header_absent(&received, "authorization", "Connection-named credential");
     assert_single_header(&received, "x-end-to-end", "preserved", "end-to-end field");
 
     runtime::request_shutdown();
@@ -616,13 +687,14 @@ async fn connection_header_tokens_are_removed_before_proxying() {
 #[camber::test]
 async fn connection_header_tokens_are_removed_from_proxy_responses() {
     let mut upstream = Router::new();
-    upstream.get("/response-headers", |_request: &Request| async {
+    upstream.get("/response-headers", |_: &Request| async {
         Response::text(200, "ok").map(|response| {
             response
                 .with_header("Connection", "X-Response-One, invalid token")
                 .with_header("cOnNeCtIoN", "x-response-two")
                 .with_header("X-Response-One", "first-hop-only")
                 .with_header("X-Response-Two", "second-hop-only")
+                .with_header("X-Forwarded-Port", "4443")
                 .with_header("X-End-To-End", "preserved")
         })
     });
@@ -646,6 +718,10 @@ async fn connection_header_tokens_are_removed_from_proxy_responses() {
     assert_eq!(response.header("x-end-to-end"), Some("preserved"));
     assert_eq!(response.header("x-response-one"), None);
     assert_eq!(response.header("x-response-two"), None);
+    // An answer's filtering is hop-by-hop and `Connection`-named only. The
+    // request-side forwarding-metadata family has no meaning on this face, and
+    // a policy that spread to it would silently eat an upstream's own field.
+    assert_eq!(response.header("x-forwarded-port"), Some("4443"));
     runtime::request_shutdown();
 }
 
@@ -669,7 +745,7 @@ async fn generated_forwarding_headers_strip_spoofed_and_connection_named_fields(
 #[camber::test]
 async fn auth_middleware_blocks_unauthenticated_proxy() {
     let mut backend = Router::new();
-    backend.get("/hello", |_req: &Request| async {
+    backend.get("/hello", |_: &Request| async {
         Response::text(200, "from-backend")
     });
     let backend_addr = common::spawn_server(backend);
@@ -721,9 +797,7 @@ async fn logging_middleware_captures_proxy_status() {
     let mw_status = Arc::clone(&logged_status);
 
     let mut backend = Router::new();
-    backend.get("/hello", |_req: &Request| async {
-        Response::text(200, "ok")
-    });
+    backend.get("/hello", |_: &Request| async { Response::text(200, "ok") });
     let backend_addr = common::spawn_server(backend);
 
     let mut main = Router::new();
@@ -757,7 +831,7 @@ async fn proxy_concurrent_streaming() {
     let overlap_gate = Arc::new(tokio::sync::Barrier::new(OVERLAP_REQUEST_COUNT + 1));
     let upstream_gate = Arc::clone(&overlap_gate);
     let mut backend = Router::new();
-    backend.get("/slow", move |_req: &Request| {
+    backend.get("/slow", move |_: &Request| {
         let request_gate = Arc::clone(&upstream_gate);
         async move {
             request_gate.wait().await;
@@ -794,7 +868,7 @@ async fn proxy_concurrent_streaming() {
 #[camber::test]
 async fn buffered_proxy_still_materializes_response_body() {
     let mut backend = Router::new();
-    backend.get("/data", |_req: &Request| async {
+    backend.get("/data", |_: &Request| async {
         Response::text(200, "fully-buffered-body")
     });
     let backend_addr = common::spawn_server(backend);

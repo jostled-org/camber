@@ -56,6 +56,17 @@ pub fn self_signed_server_and_connector() -> (Arc<rustls::ServerConfig>, tokio_r
 }
 
 pub fn tls_client_config(cert_pems: &[&[u8]]) -> rustls::ClientConfig {
+    rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(root_store_trusting(cert_pems))
+    .with_no_client_auth()
+}
+
+/// A root store that trusts every certificate in `cert_pems` and nothing else.
+pub fn root_store_trusting(cert_pems: &[&[u8]]) -> rustls::RootCertStore {
     let mut root_store = rustls::RootCertStore::empty();
     cert_pems.iter().for_each(|pem| {
         rustls::pki_types::CertificateDer::pem_slice_iter(pem)
@@ -64,13 +75,20 @@ pub fn tls_client_config(cert_pems: &[&[u8]]) -> rustls::ClientConfig {
             .into_iter()
             .for_each(|cert| root_store.add(cert).unwrap());
     });
-    rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_root_certificates(root_store)
-    .with_no_client_auth()
+    root_store
+}
+
+/// Whether a failed TLS handshake failed because the peer sent an alert.
+///
+/// A peer that refused the handshake says so with an alert. Every other
+/// failure — a reset, an early end of stream, a local fault — is not a refusal,
+/// and a fixture that reads it as one passes a refusal row for a reason the row
+/// does not claim.
+pub fn is_alert_received(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+        .is_some_and(|inner| matches!(inner, rustls::Error::AlertReceived(_)))
 }
 
 fn parse_pem(

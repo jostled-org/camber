@@ -20,7 +20,7 @@ workspace = true
 
 [features]
 profiling = ["dep:pprof"]
-ws = ["dep:tokio-tungstenite"]
+ws = ["dep:tokio-tungstenite", "hyper/client"]
 grpc = ["dep:tonic", "dep:tonic-reflection", "dep:tonic-health"]
 acme = ["dep:rustls-acme"]
 dns01 = ["dep:instant-acme"]
@@ -36,6 +36,7 @@ chrono = { version = "0.4.20", default-features = false, features = ["now"] }
 cron = "0.17"
 crossbeam-channel = "0.5"
 http-body-util = "0.1"
+httpdate = "1"
 itoa = "1"
 hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["http1", "http2", "server", "tokio"] }

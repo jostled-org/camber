@@ -22,8 +22,9 @@ use crate::http as http_support;
 
 #[cfg(feature = "profiling")]
 use camber::__private::DEFAULT_PROFILING_RESPONSE_LIMIT;
+use camber::http::mock::ScopedUnwatched;
 #[cfg(feature = "profiling")]
-use camber::http::mock::{self, BlockingWorkerEdge, ScopedUnwatched};
+use camber::http::mock::{self, BlockingWorkerEdge};
 use camber::http::{Request, Response};
 #[cfg(feature = "profiling")]
 use camber::http::{Router, ServerPolicy};
@@ -1242,7 +1243,7 @@ fn assert_body_limit_records_its_boundary(fixture: &CompletionFixture) {
         fixture.addr(),
         LIMITED_METHOD,
         LIMITED_PATH,
-        &vec![b'x'; COMPLETION_MAX_BODY * 4],
+        &[b'x'; COMPLETION_MAX_BODY * 4],
     );
     assert_eq!(refused.status, 413, "limited: wire status");
     assert_recorded_once(&before, &Recorded::scraped(fixture.addr()), &expected);
@@ -2284,7 +2285,7 @@ fn user_panic_resumes_after_displaced_lifecycle_event() {
 
     let payload = unwinding_run(&log).expect_err("the user closure's panic did not resume");
     assert_eq!(
-        panic_text(payload.as_ref()),
+        http_support::panic_text(payload.as_ref()),
         USER_PANIC,
         "a teardown failure replaced the closure's own payload"
     );
@@ -2330,21 +2331,6 @@ fn unwinding_run(
             .resource(failing)
             .run(|| panic!("{USER_PANIC}"))
     }))
-}
-
-/// The text one caught panic payload carries.
-///
-/// The row's claim is about the payload a caller receives, so it is read as the
-/// value `resume_unwind` handed on rather than through any rendering production
-/// might have applied to it.
-fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
-    match payload.downcast_ref::<String>() {
-        Some(owned) => owned,
-        None => payload
-            .downcast_ref::<&str>()
-            .copied()
-            .unwrap_or("the payload carried no readable text"),
-    }
 }
 
 // ---------------------------------------------------------------------------

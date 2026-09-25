@@ -10,21 +10,9 @@ use super::super::body::HyperResponseBody;
 use super::super::disconnect::DisconnectSignal;
 use super::super::rejection::Rejected;
 use super::super::server_lifecycle::{ConnectionLifecycle, ConnectionPermit};
-use super::handshake::{
-    WsHandshakeError, WsUpgrade, extract_ws_subprotocol, ws_handshake_rejection,
-    ws_switching_protocols,
-};
+use super::handshake::{WsHandshakeOffer, WsProtocolOffers, WsSelection};
+use super::ownership::{BridgeAttachment, own_upgrade_bridge};
 use std::sync::Arc;
-
-/// Extract the upgrade pair when the request contained valid WS upgrade headers.
-fn ws_upgrade_pair(
-    ws_upgrade: WsUpgrade,
-) -> Result<(hyper::upgrade::OnUpgrade, Box<str>), WsHandshakeError> {
-    match ws_upgrade {
-        WsUpgrade::Ready(on_upgrade, accept_key) => Ok((on_upgrade, accept_key)),
-        WsUpgrade::Rejected(error) => Err(error),
-    }
-}
 
 /// What a validated handshake hands the bridge that will serve it.
 ///
@@ -32,13 +20,49 @@ fn ws_upgrade_pair(
 /// builds this: the permit is taken only once the `101` exists, so the arm that
 /// cannot build one never holds a connection slot for an upgrade that will not
 /// happen, and the disconnect handoff is captured before the request can move
-/// into a bridge.
-pub(super) struct WsHandoff<'a> {
-    pub(super) on_upgrade: hyper::upgrade::OnUpgrade,
-    pub(super) subprotocol: Option<&'a str>,
-    pub(super) response: hyper::Response<HyperResponseBody>,
-    pub(super) permit: Arc<ConnectionPermit>,
-    pub(super) handoff: DisconnectSignal,
+/// into a bridge. The client's offers travel beside the upgrade with the
+/// selection the `101` names, owned rather than borrowed from the request, so a
+/// refusal after the request has moved into a bridge can still name what the
+/// `101` selected.
+pub(super) struct WsHandoff {
+    on_upgrade: hyper::upgrade::OnUpgrade,
+    offers: WsProtocolOffers,
+    selection: WsSelection,
+    response: hyper::Response<HyperResponseBody>,
+    permit: Arc<ConnectionPermit>,
+    handoff: DisconnectSignal,
+}
+
+impl WsHandoff {
+    /// Register the bridge `build_bridge` makes from this handoff's upgrade and
+    /// permit, and return the `101` it earned.
+    ///
+    /// Both upgrade kinds register here. The offers stay behind while the
+    /// bridge takes the rest, so a registration refusal still names what the
+    /// `101` had selected.
+    pub(super) async fn register<F, Fut>(
+        self,
+        lifecycle: &ConnectionLifecycle,
+        build_bridge: F,
+    ) -> Result<hyper::Response<HyperResponseBody>, WsRefusal>
+    where
+        F: FnOnce(hyper::upgrade::OnUpgrade, Arc<ConnectionPermit>, BridgeAttachment) -> Fut,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let Self {
+            on_upgrade,
+            offers,
+            selection,
+            response,
+            permit,
+            handoff,
+        } = self;
+        own_upgrade_bridge(lifecycle, response, &handoff, move |attachment| {
+            build_bridge(on_upgrade, permit, attachment)
+        })
+        .await
+        .map_err(|rejected| WsRefusal::negotiated(rejected, offers.named(selection)))
+    }
 }
 
 /// One refused upgrade, and what negotiation had established when it failed.
@@ -53,8 +77,8 @@ pub(in crate::http) struct WsRefusal {
 }
 
 impl WsRefusal {
-    /// A refusal found before subprotocol negotiation ran.
-    fn unnegotiated(rejected: Rejected) -> Self {
+    /// A refusal found before negotiation selected anything.
+    pub(super) fn unnegotiated(rejected: Rejected) -> Self {
         Self {
             rejected: Box::new(rejected),
             subprotocol: None,
@@ -62,7 +86,7 @@ impl WsRefusal {
     }
 
     /// A refusal found after negotiation settled on what it settled on.
-    pub(super) fn negotiated(rejected: Rejected, subprotocol: Option<&str>) -> Self {
+    fn negotiated(rejected: Rejected, subprotocol: Option<&str>) -> Self {
         Self {
             rejected: Box::new(rejected),
             subprotocol: subprotocol.map(Box::from),
@@ -76,44 +100,40 @@ impl WsRefusal {
 /// bridge is still to be built, or the refusal that replaces it. Written as
 /// its own enum rather than a `Result` because that is what it means, and
 /// because `clippy::result_large_err` does not apply to it.
-pub(super) enum WsHandoffOutcome<'a> {
+pub(super) enum WsHandoffOutcome {
     /// The handshake stands; here is everything the `101` handoff needs.
-    Ready(WsHandoff<'a>),
+    Ready(WsHandoff),
     /// The peer gets this instead: a rejected handshake, or a `101` that could
     /// not be built.
     Refused(WsRefusal),
 }
 
-/// Validate the handshake and build everything the `101` handoff needs.
+/// Build everything the `101` handoff for an admitted offer needs.
 ///
 /// Both upgrade kinds enter here, so neither can restate that ordering or
-/// answer a refused handshake differently.
-pub(super) fn prepare_ws_handoff<'a>(
-    ws_upgrade: WsUpgrade,
-    req: &'a Request,
+/// answer a refused handshake differently. The `101` names what `selection`
+/// names: the first offer for a direct bridge, and whatever the backend chose
+/// for a proxied one.
+pub(super) fn prepare_ws_handoff(
+    offer: WsHandshakeOffer,
+    selection: WsSelection,
+    req: &Request,
     lifecycle: &ConnectionLifecycle,
-) -> WsHandoffOutcome<'a> {
-    let (on_upgrade, accept_key) = match ws_upgrade_pair(ws_upgrade) {
-        Ok(pair) => pair,
-        Err(error) => {
-            return WsHandoffOutcome::Refused(WsRefusal::unnegotiated(ws_handshake_rejection(
-                error,
-            )));
-        }
-    };
-    let subprotocol = extract_ws_subprotocol(req);
-    let response = match ws_switching_protocols(accept_key.as_ref(), subprotocol) {
+) -> WsHandoffOutcome {
+    let response = match offer.switching_protocols(selection) {
         Ok(response) => response,
         Err(error) => {
             return WsHandoffOutcome::Refused(WsRefusal::negotiated(
                 Rejected::ws_upgrade_unbuildable(error),
-                subprotocol,
+                offer.protocols().named(selection),
             ));
         }
     };
+    let (on_upgrade, offers) = offer.into_transfer();
     WsHandoffOutcome::Ready(WsHandoff {
         on_upgrade,
-        subprotocol,
+        offers,
+        selection,
         response,
         permit: lifecycle.permit(),
         handoff: req.on_disconnect(),

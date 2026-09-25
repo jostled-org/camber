@@ -769,7 +769,7 @@ impl FrozenRouter {
             // The frozen owner travels with the upgrade for the same reason it
             // travels with every other forward this route makes: the deadlines
             // the route configured are the route's, and an upgrade that left it
-            // behind dialed its upstream under no bound at all.
+            // behind would negotiate with its backend under no bound at all.
             return DispatchResult::ProxyWebSocket(
                 req,
                 Arc::clone(route.backend),

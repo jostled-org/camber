@@ -8,6 +8,34 @@ pub(crate) fn strip_quotes(v: &str) -> &str {
     }
 }
 
+/// Whether `value` is an RFC 9110 `token`: one or more `tchar`.
+///
+/// The one spelling of the grammar every header Camber parses by token uses:
+/// `Connection` options, multipart parameters, and WebSocket offers.
+pub(crate) fn is_token(value: &[u8]) -> bool {
+    !value.is_empty()
+        && value.iter().all(|&byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
 /// Why a blocking worker never handed back an answer.
 ///
 /// One rule for every offloaded owner Camber awaits — the static-file reader and

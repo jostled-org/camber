@@ -27,31 +27,16 @@ pub(super) type WsError = tokio_tungstenite::tungstenite::Error;
 /// What a WebSocket stream yields for one frame.
 pub(super) type WsFrame = Option<Result<WsFrameMessage, WsError>>;
 
-/// The close frame a peer is given when Camber ends a bridge.
-pub(super) type WsClose = tokio_tungstenite::tungstenite::protocol::CloseFrame;
-
-/// Build the close frame a peer is given.
+/// Send an empty close frame, reporting a failure the teardown cannot act on.
 ///
-/// One place turns a reason into a frame, so a reason and the frame it becomes
-/// stay stated together and the two bridges cannot hand a peer differently
-/// shaped closes. This owns the shape of a close, not every close sent:
-/// `close_transport` ends a transport through the sink's own close, which
-/// writes an empty close frame this never sees.
-fn close_frame(reason: Option<WsClose>) -> WsFrameMessage {
-    WsFrameMessage::Close(reason)
-}
-
-/// Send a close frame, reporting a failure the teardown cannot act on.
-///
-/// `None` is the ordinary end of a bridge, which carries no status code; a
-/// frame is given only where the peer would otherwise have to guess at a fault
-/// that was not its own.
-pub(super) async fn send_close<S>(sink: &mut S, reason: Option<WsClose>)
+/// Every bridge end carries no status code: a fault the peer did not cause
+/// was refused before the `101`, so no close has a reason to give.
+pub(super) async fn send_close<S>(sink: &mut S)
 where
     S: futures_util::Sink<WsFrameMessage, Error = WsError> + Unpin,
 {
     use futures_util::SinkExt;
-    match sink.send(close_frame(reason)).await {
+    match sink.send(WsFrameMessage::Close(None)).await {
         Ok(()) => {}
         Err(error) => tracing::debug!(%error, "WebSocket close frame send failed"),
     }
@@ -59,12 +44,12 @@ where
 
 /// Close a WebSocket transport, reporting a failure the teardown cannot act on.
 ///
-/// Not a spelling of `send_close(sink, None)`. The sink's own close writes the
+/// Not a spelling of `send_close`. The sink's own close writes the
 /// same empty close frame, then keeps flushing until the handshake finishes,
 /// and it counts a transport the peer already closed as success where
-/// `send_close` reports that transport as a failure. A teardown with no reason
-/// to give and no answering close to wait on ends here; a teardown that carries
-/// a reason, or that goes on to drain the answer, ends at `send_close`.
+/// `send_close` reports that transport as a failure. A teardown with no
+/// answering close to wait on ends here; a teardown that goes on to drain the
+/// answer ends at `send_close`.
 pub(super) async fn close_transport<S>(sink: &mut S)
 where
     S: futures_util::Sink<WsFrameMessage, Error = WsError> + Unpin,

@@ -11,7 +11,7 @@ use crate::common::{
 };
 
 use camber::http::{
-    Next, RejectionKind, RejectionProtocol, Request, Response, Router, StreamResponse,
+    Next, ProxyPolicy, RejectionKind, RejectionProtocol, Request, Response, Router, StreamResponse,
 };
 use camber::{RuntimeError, runtime};
 use std::io::{Read, Write};
@@ -27,9 +27,11 @@ const ORIGIN: &str = "acceptance_proxy";
 /// The bound every transport leg in this module runs under.
 ///
 /// Named apart from the support module's `WIRE_TIMEOUT` rather than shadowing
-/// it: this is a deliberate override, because a stalled upstream is answered by
-/// the proxy's own deadline and that deadline outlasts any ordinary exchange.
-/// One name carrying two numbers would let either value read as the other's.
+/// it: this is a deliberate override, because every answer here is written only
+/// after a refusal the proxy raised, and a bound sized for an ordinary exchange
+/// would report a busy machine as a proxy that never answered. It bounds a
+/// hung fixture and nothing else — no row's claim is read off it. One name
+/// carrying two numbers would let either value read as the other's.
 const PROXY_WIRE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// The prefix the buffered proxy routes answer under.
@@ -46,6 +48,16 @@ const UNHEALTHY: &str = "/unhealthy";
 
 /// The prefix whose streaming backend is declared unhealthy for the whole module.
 const UNHEALTHY_STREAM: &str = "/unhealthy-stream";
+
+/// The upstream request deadline the stalled row is refused by.
+///
+/// Both this bound and the route's own request total default to thirty seconds,
+/// and a stalled upstream trips whichever of the two the scheduler reaches
+/// first. Under load that is the route total, and the row then reads a request
+/// timeout where it asserted a gateway one — a race, not a behavior change.
+/// Named short here, the proxy's deadline is the only one that can expire, so
+/// the row proves the mapping it claims.
+const PREHEADER_DEADLINE: Duration = Duration::from_millis(200);
 
 // ── Talking to the proxy ───────────────────────────────────────────
 
@@ -64,8 +76,9 @@ fn send(addr: SocketAddr, path: &str) -> TcpStream {
 /// Send one request and read the whole answer off the socket.
 ///
 /// Read against this module's own deadline rather than the shared bounded form,
-/// which arms the suite's five seconds: a refusal this module waits for is the
-/// proxy's own upstream deadline, and that outlasts an ordinary exchange.
+/// which arms the suite's five seconds: what this module waits for is a refusal
+/// the proxy raised on its own, and [`PROXY_WIRE_TIMEOUT`] says why that waits
+/// longer than an ordinary exchange.
 fn get(addr: SocketAddr, path: &str) -> common::HttpResponse {
     let mut peer = send(addr, path);
     common::read_http_response(&mut peer, Some(Instant::now() + PROXY_WIRE_TIMEOUT))
@@ -292,15 +305,24 @@ fn ordering_gate(router: &mut Router, trail: &Trail) {
 /// The proxy every row in this module is answered by.
 ///
 /// One router with every producer on it, so a row's category comes from the
-/// producer that raised it rather than from which server answered.
-fn proxy_router(journal: &Journal, trail: &Trail, backend: &str) -> Router {
+/// producer that raised it rather than from which server answered. The policy
+/// is the caller's, because a row whose refusal is a proxy deadline has to name
+/// that deadline: left at its default it is the same thirty seconds the route's
+/// own request total carries, and which of two equal timers fires first is not
+/// a contract.
+fn proxy_router(journal: &Journal, trail: &Trail, backend: &str, policy: ProxyPolicy) -> Router {
     let mut router = Router::new();
     ordering_gate(&mut router, trail);
-    router.proxy(BUFFERED, backend);
-    router.proxy_stream(STREAMING, backend);
-    router.proxy_checked(UNHEALTHY, backend, Arc::new(AtomicBool::new(false)));
-    router.proxy_checked_stream(UNHEALTHY_STREAM, backend, Arc::new(AtomicBool::new(false)));
-    router.get(FAULTING, |_req: &Request| async {
+    router.proxy_with_policy(BUFFERED, backend, policy);
+    router.proxy_stream_with_policy(STREAMING, backend, policy);
+    router.proxy_checked_with_policy(UNHEALTHY, backend, Arc::new(AtomicBool::new(false)), policy);
+    router.proxy_checked_stream_with_policy(
+        UNHEALTHY_STREAM,
+        backend,
+        Arc::new(AtomicBool::new(false)),
+        policy,
+    );
+    router.get(FAULTING, |_: &Request| async {
         Err::<Response, RuntimeError>(RuntimeError::Http("the route could not be served".into()))
     });
     router.rejection_mapper(marking(
@@ -319,9 +341,14 @@ fn proxy_router(journal: &Journal, trail: &Trail, backend: &str) -> Router {
 /// than shared, because the router it spawns is this module's proxy and nothing
 /// else's.
 fn proxy_fixture(backend: &str) -> (Journal, Trail, SocketAddr) {
+    proxy_fixture_with_policy(backend, ProxyPolicy::default())
+}
+
+/// The same fixture, under the upstream bounds a row names for itself.
+fn proxy_fixture_with_policy(backend: &str, policy: ProxyPolicy) -> (Journal, Trail, SocketAddr) {
     let journal = Journal::default();
     let trail: Trail = Arc::new(Mutex::new(Vec::new()));
-    let addr = common::spawn_server(proxy_router(&journal, &trail, backend));
+    let addr = common::spawn_server(proxy_router(&journal, &trail, backend, policy));
     (journal, trail, addr)
 }
 
@@ -611,7 +638,12 @@ fn proxy_preheader_deadline_maps_as_a_gateway_timeout() {
     common::test_runtime()
         .run(|| {
             let upstream = scripted_upstream(UpstreamScript::Stall);
-            let (journal, _trail, addr) = proxy_fixture(&upstream.backend());
+            let (journal, _, addr) = proxy_fixture_with_policy(
+                &upstream.backend(),
+                ProxyPolicy::default()
+                    .request_timeout(PREHEADER_DEADLINE)
+                    .expect("the pre-header deadline is a servable duration"),
+            );
 
             let answered = get_until_closed(addr, "/buffered/slow");
             assert!(
@@ -649,7 +681,7 @@ fn refused_proxy_routes_never_reach_an_application_handler() {
 
             let mut upstream = Router::new();
             let counted = Arc::clone(&entries);
-            upstream.get_stream("/data", move |_req: &Request| {
+            upstream.get_stream("/data", move |_: &Request| {
                 counted.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async {
                     let (response, _sender) = StreamResponse::new(200);
@@ -657,7 +689,7 @@ fn refused_proxy_routes_never_reach_an_application_handler() {
                 })
             });
             let upstream_addr = common::spawn_server(upstream);
-            let (journal, _trail, addr) = proxy_fixture(&format!("http://{upstream_addr}"));
+            let (journal, _, addr) = proxy_fixture(&format!("http://{upstream_addr}"));
 
             // The counted handler is proved live first. Without it the refusal's
             // zero would read the same way if the upstream had never started, if

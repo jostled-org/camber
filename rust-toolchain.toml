@@ -1,0 +1,6 @@
+# The exact toolchain every workflow job and reproduction admits. Change it
+# only with `.github/workflow-tools.toml`, which names its component versions.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

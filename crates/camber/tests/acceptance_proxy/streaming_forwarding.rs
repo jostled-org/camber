@@ -1,9 +1,17 @@
 use crate::common;
+use crate::raw_upstream::{UpstreamAnswers, scripted_upstream};
+use crate::source_failure::{
+    COMPLETION_EVENT, HeldBody, Release, SOURCE_FAILURE_BOUND, assert_complete_framing,
+    assert_incomplete_framing, assert_normal, assert_one_record, assert_source_failure_completion,
+    declared_short_row, exchange_after_head, held_route, one_completion_record, run_every_row,
+};
+use crate::trace_capture::{TraceCapture, capture_events};
 
+use camber::http::mock::InboundTerminal;
 use camber::http::{Request, Response, Router, StreamResponse};
 use camber::runtime;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -48,7 +56,7 @@ fn large_stream_backend(
     let (chunk_permit_tx, chunk_permits) = chunk_permit_channel();
     let (producer_result_tx, producer_result_rx) = mpsc::sync_channel(1);
     let mut backend = Router::new();
-    backend.get_stream("/data", move |_req: &Request| {
+    backend.get_stream("/data", move |_: &Request| {
         let mut chunk_permits = take_chunk_permits(&chunk_permits);
         let producer_result_tx = producer_result_tx.clone();
         Box::pin(async move {
@@ -169,7 +177,7 @@ fn proxy_preserves_status_and_headers() {
         .shutdown_timeout(Duration::from_secs(5))
         .run(|| {
             let mut backend = Router::new();
-            backend.get_stream("/check", |_req: &Request| {
+            backend.get_stream("/check", |_: &Request| {
                 Box::pin(async {
                     let (resp, sender) = StreamResponse::new(201);
                     let resp = resp.with_header("X-Upstream", "present");
@@ -240,7 +248,7 @@ fn proxy_handles_upstream_error_mid_stream() {
             let (chunk_permit_tx, chunk_permits) = chunk_permit_channel();
             let (producer_result_tx, producer_result_rx) = mpsc::sync_channel(1);
             let mut backend = Router::new();
-            backend.get_stream("/fail", move |_req: &Request| {
+            backend.get_stream("/fail", move |_: &Request| {
                 let mut chunk_permits = take_chunk_permits(&chunk_permits);
                 let producer_result_tx = producer_result_tx.clone();
                 Box::pin(async move {
@@ -329,7 +337,7 @@ fn proxy_stream_preserves_status_and_headers() {
         .shutdown_timeout(Duration::from_secs(5))
         .run(|| {
             let mut backend = Router::new();
-            backend.get_stream("/check", |_req: &Request| {
+            backend.get_stream("/check", |_: &Request| {
                 Box::pin(async {
                     let (resp, sender) = StreamResponse::new(201);
                     let resp = resp.with_header("X-Upstream", "present");
@@ -417,7 +425,7 @@ fn streaming_limit_hosts(
         STREAM_HOST,
         child
             .max_request_body(STREAM_CEILING)
-            .body_admission(move |_context: &camber::http::BodyAdmissionContext<'_>| {
+            .body_admission(move |_: &camber::http::BodyAdmissionContext<'_>| {
                 Ok(camber::http::BodyAdmission::with_permit(
                     STREAM_CEILING,
                     common::permit_probe(&permits),
@@ -553,7 +561,7 @@ fn proxy_stream_middleware_can_reject_before_upstream_call() {
             let (backend_hit_tx, backend_hit_rx) = std::sync::mpsc::channel();
 
             let mut backend = Router::new();
-            backend.get("/anything", move |_req: &Request| {
+            backend.get("/anything", move |_: &Request| {
                 backend_hit_tx
                     .send(())
                     .expect("middleware-rejected upstream observer remains active");
@@ -604,7 +612,7 @@ fn proxy_stream_middleware_sees_params_and_remote_addr() {
         .shutdown_timeout(Duration::from_secs(5))
         .run(|| {
             let mut backend = Router::new();
-            backend.get("/echo", |_req: &Request| async {
+            backend.get("/echo", |_: &Request| async {
                 Response::text(200, "upstream-ok")
             });
             let backend_addr = common::spawn_server(backend);
@@ -846,4 +854,218 @@ fn non_utf8_upstream_connection_value_still_strips_its_named_response_header() {
             runtime::request_shutdown();
         })
         .unwrap();
+}
+
+/// The prefix every 9.T3 short source sends before its release.
+const SOURCE_PREFIX: &[u8] = b"known-source-prefix";
+
+/// The length the short sources declare, past what they send.
+const SOURCE_DECLARED: usize = SOURCE_PREFIX.len() + 17;
+
+/// The whole body the complete local sources send after their release.
+const WHOLE_BODY: &[u8] = b"whole-local-body";
+
+/// The local route that sends exactly its declared length.
+const LOCAL_EXACT_PATH: &str = "/local/exact";
+
+/// The local route that declares no length and closes normally.
+const LOCAL_UNFRAMED_PATH: &str = "/local/unframed";
+
+/// The local route that closes cleanly before its declared length.
+const LOCAL_SHORT_PATH: &str = "/local/declared-short";
+
+/// The proxy prefix whose upstream sends a short Content-Length body.
+const PROXY_LENGTH_PREFIX: &str = "/upstream-length";
+
+/// The proxy prefix whose upstream sends incomplete chunk framing.
+const PROXY_CHUNKED_PREFIX: &str = "/upstream-chunked";
+
+/// The path every proxy row asks its upstream for, under its own prefix.
+const PROXY_SUFFIX: &str = "/short";
+
+/// How long the private child may take to run every row.
+const SOURCE_FAILURE_CHILD_BOUND: Duration = Duration::from_secs(60);
+
+/// An upstream answer that declares more than it sends.
+fn short_length_answer() -> Box<[u8]> {
+    let mut answer = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {SOURCE_DECLARED}\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes();
+    answer.extend_from_slice(SOURCE_PREFIX);
+    answer.into_boxed_slice()
+}
+
+/// An upstream answer whose chunk framing never ends.
+fn incomplete_chunk_answer() -> Box<[u8]> {
+    let mut answer = format!(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n",
+        SOURCE_PREFIX.len()
+    )
+    .into_bytes();
+    answer.extend_from_slice(SOURCE_PREFIX);
+    answer.extend_from_slice(b"\r\n");
+    answer.into_boxed_slice()
+}
+
+/// One local row whose source completes: one normal completion.
+fn complete_local_row(capture: &TraceCapture, addr: SocketAddr, path: &str, release: &Release) {
+    let row = path;
+    let exchange = exchange_after_head(addr, path, row, || release.release(row));
+    assert_eq!(exchange.status, 200, "{row}: the committed status");
+    assert_complete_framing(&exchange, WHOLE_BODY, row);
+    let record = one_completion_record(capture, path, row);
+    assert_normal(&record, row);
+}
+
+/// One proxy row whose upstream fails after the head.
+///
+/// The upstream answers as soon as the proxied head arrives and then holds its
+/// connection. The peer releases it only after it has read the proxied head,
+/// and dropping the upstream then cuts its body short at a known point.
+///
+/// The upstream's own read error is the source failure here, so the download
+/// owner fixes it. The download terminal is retained-green proof of that path,
+/// and cannot prove the clean-EOF branch the local short row owns. The record's
+/// `boundary=source_failure` is new: this path once published `boundary=none`.
+fn upstream_failure_row(capture: &TraceCapture, prefix: &str, answer: Box<[u8]>) {
+    let row = prefix;
+    let upstream = scripted_upstream(answer, UpstreamAnswers::OnHeadThenHold);
+    let mut router = Router::new();
+    router.proxy_stream(prefix, &upstream.backend());
+    let server = crate::http::reserve_transfer_owner().serve(router);
+    let path = format!("{prefix}{PROXY_SUFFIX}");
+
+    let exchange = exchange_after_head(server.addr(), &path, row, || drop(upstream));
+    assert_eq!(exchange.status, 200, "{row}: the committed status");
+    assert_incomplete_framing(&exchange, row);
+
+    let observed =
+        crate::stream::download_observed(server.controller(), row, "settled", |observed| {
+            observed.download.terminal.is_some() && observed.download.releases >= 1
+        });
+    assert_eq!(
+        observed.download.terminal,
+        Some(InboundTerminal::SourceFailure),
+        "{row}: the upstream's read error is the download terminal: {observed:?}"
+    );
+    assert_eq!(
+        observed.download.releases, 1,
+        "{row}: the download owner released its upstream source once: {observed:?}"
+    );
+    assert_source_failure_completion(capture, &path, row);
+
+    server
+        .shutdown_bounded(SOURCE_FAILURE_BOUND)
+        .expect("the proxy fixture server stopped and joined");
+    assert_one_record(capture, &path, row);
+}
+
+/// Drive every 9.T3 row through live listeners, and hand back what the
+/// completion records captured.
+///
+/// Every row runs even after another fails, so a missing source-failure
+/// boundary on one row cannot hide a regression in any other.
+fn drive_source_failure_rows() -> TraceCapture {
+    common::test_runtime()
+        .with_tracing()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let capture = capture_events(COMPLETION_EVENT);
+            let mut router = Router::new();
+            let exact = held_route(
+                &mut router,
+                LOCAL_EXACT_PATH,
+                HeldBody {
+                    declared: Some(WHOLE_BODY.len()),
+                    before: b"",
+                    after: WHOLE_BODY,
+                },
+            );
+            let unframed = held_route(
+                &mut router,
+                LOCAL_UNFRAMED_PATH,
+                HeldBody {
+                    declared: None,
+                    before: b"",
+                    after: WHOLE_BODY,
+                },
+            );
+            let short = held_route(
+                &mut router,
+                LOCAL_SHORT_PATH,
+                HeldBody {
+                    declared: Some(SOURCE_DECLARED),
+                    before: SOURCE_PREFIX,
+                    after: b"",
+                },
+            );
+            let addr = common::spawn_server(router);
+
+            let rows: [(&str, &dyn Fn()); 5] = [
+                (LOCAL_EXACT_PATH, &|| {
+                    complete_local_row(&capture, addr, LOCAL_EXACT_PATH, &exact);
+                }),
+                (LOCAL_UNFRAMED_PATH, &|| {
+                    complete_local_row(&capture, addr, LOCAL_UNFRAMED_PATH, &unframed);
+                }),
+                (PROXY_LENGTH_PREFIX, &|| {
+                    upstream_failure_row(&capture, PROXY_LENGTH_PREFIX, short_length_answer());
+                }),
+                (PROXY_CHUNKED_PREFIX, &|| {
+                    upstream_failure_row(&capture, PROXY_CHUNKED_PREFIX, incomplete_chunk_answer());
+                }),
+                (LOCAL_SHORT_PATH, &|| {
+                    declared_short_row(
+                        &capture,
+                        addr,
+                        LOCAL_SHORT_PATH,
+                        SOURCE_DECLARED,
+                        SOURCE_PREFIX,
+                        &short,
+                        "a local source that closes before its declared length",
+                    );
+                }),
+            ];
+            run_every_row(rows);
+
+            runtime::request_shutdown();
+            capture
+        })
+        .expect("the source-failure runtime ran to completion")
+}
+
+/// The private child's whole claim: every row, then one record per request
+/// once every finalizer has settled.
+fn assert_source_failure_completions() {
+    let capture = drive_source_failure_rows();
+    for path in [LOCAL_EXACT_PATH, LOCAL_UNFRAMED_PATH, LOCAL_SHORT_PATH] {
+        assert_one_record(&capture, path, path);
+    }
+    for prefix in [PROXY_LENGTH_PREFIX, PROXY_CHUNKED_PREFIX] {
+        let path = format!("{prefix}{PROXY_SUFFIX}");
+        assert_one_record(&capture, &path, prefix);
+    }
+}
+
+/// 9.T3 — invariant 14
+///
+/// A live Camber listener serves local streaming routes and streaming proxy
+/// routes. After the peer reads the committed status, each source is released.
+/// Every request leaves exactly one completion record and keeps its status. A
+/// local source that closes cleanly before its declared length records a
+/// download source failure and a non-normal result. A proxy upstream that
+/// fails is the retained upstream read-error path; it records the same
+/// download source failure and a non-normal result. Unframed and exact-length
+/// local sources each record one normal completion. The completion readings
+/// are process-global, so the rows run in a private child.
+#[test]
+fn source_failure_records_one_non_normal_completion() {
+    crate::process::run_in_child(
+        "streaming_forwarding::source_failure_records_one_non_normal_completion",
+        "source-failure-completion",
+        "SOURCE_FAILURE_COMPLETION_COMPLETE",
+        SOURCE_FAILURE_CHILD_BOUND,
+        assert_source_failure_completions,
+    );
 }

@@ -1,15 +1,24 @@
 #[path = "support/deterministic.rs"]
 pub mod deterministic;
+#[path = "support/halt.rs"]
+pub mod halt;
 #[path = "support/http.rs"]
 pub mod http;
+// Mounted for the private child 4.T4 reads its global capture in.
+#[path = "support/process.rs"]
+pub mod process;
 #[path = "support/rejection.rs"]
 pub mod rejection_support;
+#[path = "support/retry_upstream.rs"]
+pub mod retry_upstream;
 #[path = "support/runtime.rs"]
 pub mod runtime_support;
 #[path = "support/streaming_multipart.rs"]
 pub mod streaming_multipart;
 #[path = "support/temp.rs"]
 pub mod temp;
+#[path = "support/trace_capture.rs"]
+pub mod trace_capture;
 #[cfg(feature = "ws")]
 #[path = "support/ws.rs"]
 pub mod ws_support;
@@ -44,6 +53,8 @@ mod path_parameters;
 mod query_parameters;
 #[path = "component_http_routing/response_metadata.rs"]
 mod response_metadata;
+#[path = "component_http_routing/retry_lifetime.rs"]
+mod retry_lifetime;
 #[path = "component_http_routing/retry_policy.rs"]
 mod retry_policy;
 #[path = "component_http_routing/route_dispatch.rs"]

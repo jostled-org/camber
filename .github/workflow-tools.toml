@@ -1,0 +1,9 @@
+# Exact tool identities the workflow admits. `rust-toolchain.toml` pins rustc
+# and cargo; these lines pin the components that toolchain ships and the tools
+# CI installs through `reproduce-ci.sh install-tools`, which passes each value
+# to `cargo install --locked --version`. `reproduce-ci.sh` compares each tool's
+# version report against these values before any workflow phase runs.
+clippy = "0.1.98"
+rustfmt = "1.9.0-stable"
+pedant = "0.30.1"
+cargo-deny = "0.19.0"

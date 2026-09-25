@@ -331,7 +331,7 @@ impl PolicyArm {
         match path {
             named if named == fallback => Self::Unanswerable,
             named if named == displaced => Self::Displaced,
-            named if custom.iter().any(|declared| *declared == named) => Self::Mapped,
+            named if custom.contains(&named) => Self::Mapped,
             _ => Self::PassedThrough,
         }
     }
@@ -896,8 +896,31 @@ fn assert_counted_rows(before: &common::RejectionCounters, after: &common::Rejec
     }
 }
 
+/// How long the private child may take to drive every counted row.
+///
+/// Fifteen rows, each under [`WIRE_TIMEOUT`], plus two scrapes and a child
+/// spawn: a whole-matrix bound, not a per-request one.
+const METRIC_MATRIX_BOUND: Duration = Duration::from_secs(60);
+
 #[test]
 fn rejection_metric_labels_are_bounded() {
+    common::run_in_child(
+        "framework_rejections::rejection_metric_labels_are_bounded",
+        "rejection-metric-labels",
+        "REJECTION_METRIC_LABELS_COMPLETE",
+        METRIC_MATRIX_BOUND,
+        assert_rejection_metric_labels,
+    );
+}
+
+/// Run the counted matrix over a registry no sibling test has written into.
+///
+/// The recorder is installed once per process, and the rejection counter is
+/// labelled by category and status alone. A sibling that refuses an oversized
+/// payload is counted under the same `body_limit`/`413` pair as this matrix's
+/// row, and no label can tell the two apart — so a shared-binary scrape read two
+/// refusals where this journey drove one.
+fn assert_rejection_metric_labels() {
     common::test_runtime()
         .with_metrics()
         .run(|| {
@@ -924,12 +947,8 @@ fn rejection_metric_labels_are_bounded() {
             let request_id = common::request_id_of(&named, "metric identity");
 
             // The deltas below are taken against the process-global Prometheus
-            // registry, and recording is gated per runtime by the metrics
-            // handle — so every metrics-enabled test in this binary contributes
-            // to the same counters. The rows measure statuses 202, 400, 404,
-            // 405, 413, 500, and 599; no other metrics-enabled test in this
-            // root may produce one of those, or a concurrent completion would
-            // land inside this journey's window and make the delta wrong.
+            // registry. This body runs in a private child, so every sample in
+            // it was produced by this journey and the window holds no sibling.
             let before = common::rejection_counters(|| scrape(addr));
             let oversized = vec![b'x'; METRIC_BODY_LIMIT * 2].into_boxed_slice();
             let mut rows = 0_usize;

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroUsize;
 
@@ -36,6 +37,59 @@ impl DeterministicGenerator {
             state,
         }
     }
+
+    /// Builds one case, then rebuilds it from the same seed and index.
+    ///
+    /// Both builds must yield the same value and leave the same stream state,
+    /// so a failure reported as `seed=… case=…` reproduces from those two
+    /// numbers alone.
+    pub fn reproducible<T, F>(&self, index: u64, build: F) -> (DeterministicCase, T)
+    where
+        T: PartialEq + fmt::Debug,
+        F: Fn(&mut DeterministicCase) -> T,
+    {
+        let mut case = self.case(index);
+        let built = build(&mut case);
+        let mut replay = self.case(index);
+        let rebuilt = build(&mut replay);
+        assert_eq!(built, rebuilt, "{case}: a rebuild yields the same case");
+        assert_eq!(case, replay, "{case}: a rebuild draws the same stream");
+        (case, built)
+    }
+
+    /// Fails with this seed when `cases` cases left a required label unreached.
+    pub fn assert_reached<'a>(
+        &self,
+        cases: u64,
+        required: impl IntoIterator<Item = &'a str>,
+        reached: &BTreeSet<&str>,
+    ) {
+        let unreached: Box<[&str]> = required
+            .into_iter()
+            .filter(|label| !reached.contains(*label))
+            .collect();
+        assert!(
+            unreached.is_empty(),
+            "seed={:#x}: {cases} cases never reached {unreached:?}",
+            self.seed
+        );
+    }
+}
+
+/// One named family: a seed, and the rule that turns each of its cases into a row.
+pub struct Family<Row> {
+    pub name: &'static str,
+    pub seed: u64,
+    pub generate: fn(u64, &mut DeterministicCase) -> Row,
+}
+
+impl<Row: PartialEq + fmt::Debug> Family<Row> {
+    /// Yields cases `0..count` of this family, each with its reproducible row.
+    pub fn rows(&self, count: u64) -> impl Iterator<Item = (DeterministicCase, Row)> + '_ {
+        let generator = DeterministicGenerator::new(self.seed);
+        (0..count)
+            .map(move |index| generator.reproducible(index, |case| (self.generate)(index, case)))
+    }
 }
 
 /// One mutable SplitMix64 stream, identified by its immutable seed and case index.
@@ -68,6 +122,19 @@ impl DeterministicCase {
     pub fn select<'a, T>(&mut self, values: &'a [T]) -> Option<&'a T> {
         let upper = NonZeroUsize::new(values.len())?;
         values.get(self.bounded(upper))
+    }
+
+    /// Borrows one item from a generator table that must not be empty.
+    pub fn pick<'a, T>(&mut self, values: &'a [T]) -> &'a T {
+        self.select(values)
+            .unwrap_or_else(|| panic!("{self}: a generator table is empty"))
+    }
+
+    /// Returns a value in `0..upper_exclusive`, which must not be zero.
+    pub fn below(&mut self, upper_exclusive: usize) -> usize {
+        let upper = NonZeroUsize::new(upper_exclusive)
+            .unwrap_or_else(|| panic!("{self}: a generated bound is zero"));
+        self.bounded(upper)
     }
 
     fn next_u64(&mut self) -> u64 {

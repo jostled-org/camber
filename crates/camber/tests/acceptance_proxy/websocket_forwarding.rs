@@ -1,21 +1,29 @@
 #![cfg(feature = "ws")]
 
+use crate::backend_negotiation::{
+    BACKEND_REFUSED, BUFFERED, NegotiatingProxy, assert_mapped_before_upgrade, offer, route_of,
+};
+use crate::buffered_forwarding::FORWARDING_METADATA_LEAK;
 use crate::common;
 use crate::common::{
-    EXPIRING_STOP, assert_graceful_close_then_eof, assert_http_ok, assert_optional_close_then_eof,
-    assert_refusal_body_then_eof, assert_transport_eof, assert_within_one_deadline,
-    attach_dispatch_probe, lifecycle_event, read_async_http_head, read_async_ws_frame_or_eof,
-    read_until_double_crlf, read_ws_text_frame, status_from_raw, write_async_ws_frame,
-    write_ws_close_frame, write_ws_text_frame,
+    Collapsed, EXPIRING_STOP, assert_classification, assert_graceful_close_then_eof,
+    assert_http_ok, assert_optional_close_then_eof, assert_refusal_body_then_eof,
+    assert_transport_eof, assert_within_one_deadline, attach_dispatch_probe, lifecycle_event,
+    read_async_head_unbounded, read_async_http_head, read_async_ws_frame_or_eof,
+    read_until_double_crlf, read_ws_text_frame, status_from_raw, unless_halted,
+    write_async_ws_frame, write_ws_close_frame, write_ws_text_frame,
 };
+use crate::header_properties::CONNECTION_NAMED_LEAK;
+use crate::retry_upstream::{RunnableDriver, settle_wakeups, within_watchdog};
+use crate::ws_backend_script::{BackendEvent, BackendScript, ScriptedWsBackend};
 use camber::RuntimeError;
 use camber::http::mock::{
     ConnectionOwnerEdge, ScopedFaultedRegistration, ScopedUpgradeOwner, UpgradeOwnerEdge,
     connection_owner, faulted_registration, registration_selection, upgrade_owner,
 };
 use camber::http::{
-    self, DisconnectCause, DisconnectSignal, Next, Request, Response, Router, ServerHandleFuture,
-    WsConn,
+    self, DisconnectCause, DisconnectSignal, Next, ProxyPolicy, RejectionKind, Request,
+    RequestBudget, Response, Router, ServerHandleFuture, WsConn,
 };
 use camber::runtime;
 use futures_util::{SinkExt, StreamExt};
@@ -26,6 +34,50 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+/// The peer-supplied fields a proxied offer must never carry to its backend.
+///
+/// One from each rule the offer perimeter is built from: a field Camber
+/// replaces on an ordinary request, a field only the whole `X-Forwarded-`
+/// family covers, and a field the peer's own `Connection` named.
+const STOPPED_AT_THE_WS_PROXY: [&str; 3] =
+    ["x-forwarded-for", "x-forwarded-prefix", "authorization"];
+
+/// What a backend saw of the fields that had to stop at the proxy.
+///
+/// Names only: every row that reads this report offers a credential, so what
+/// crosses the bridge and lands in a failure message is the field's name.
+fn ws_leak_report(leaked: &[&str]) -> Box<str> {
+    match leaked.is_empty() {
+        true => "none".into(),
+        false => leaked.join(",").into_boxed_str(),
+    }
+}
+
+/// Check both leak families without hiding either failure or printing credentials.
+fn assert_ws_header_report(report: &str) {
+    let (leaked, control) = report.split_once('|').expect("header report has a control");
+    let failures = [
+        (
+            leaked.split(',').any(|name| name == "authorization"),
+            CONNECTION_NAMED_LEAK,
+        ),
+        (
+            leaked
+                .split(',')
+                .any(|name| name.starts_with("x-forwarded-")),
+            FORWARDING_METADATA_LEAK,
+        ),
+        (
+            control != "preserved",
+            "unnamed end-to-end control did not reach backend",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(failed, diagnostic)| failed.then_some(diagnostic))
+    .collect::<Box<[_]>>();
+    assert!(failures.is_empty(), "{failures:?}; header names: {leaked}");
+}
 
 async fn send_async_proxy_upgrade(stream: &mut tokio::net::TcpStream) {
     tokio::io::AsyncWriteExt::write_all(stream, common::ws_upgrade_request("/ws/echo").as_bytes())
@@ -92,7 +144,58 @@ impl LifecycleWsBackend {
     }
 }
 
-async fn spawn_lifecycle_ws_backend(connection_count: Arc<AtomicUsize>) -> LifecycleWsBackend {
+/// What one lifecycle backend saw across every connection it accepted.
+///
+/// A proxied upgrade negotiates its backend before the `101` is offered for
+/// registration, so a refused handoff still reaches the backend. What it must
+/// never do is bridge it: the tally tells a negotiated backend the refusal
+/// released apart from one a bridge carried frames over.
+#[derive(Clone)]
+struct BackendTally {
+    /// Handshakes the backend completed.
+    negotiated: tokio::sync::watch::Sender<usize>,
+    /// Negotiated connections the proxy released before any frame crossed.
+    released_unbridged: tokio::sync::watch::Sender<usize>,
+}
+
+impl BackendTally {
+    fn new() -> Self {
+        Self {
+            negotiated: tokio::sync::watch::Sender::new(0),
+            released_unbridged: tokio::sync::watch::Sender::new(0),
+        }
+    }
+
+    fn negotiated(&self) -> usize {
+        *self.negotiated.borrow()
+    }
+
+    async fn require_negotiated(&self, count: usize) {
+        let mut negotiated = self.negotiated.subscribe();
+        lifecycle_event(
+            "refused handoff skipped backend negotiation",
+            negotiated.wait_for(|seen| *seen >= count),
+        )
+        .await
+        .expect("the lifecycle backend tally outlives its readers");
+        assert_eq!(
+            self.negotiated(),
+            count,
+            "refused handoff skipped backend negotiation"
+        );
+    }
+
+    /// Wait until `count` negotiated connections were released unbridged.
+    async fn await_released_unbridged(&self, count: usize, context: &str) {
+        let mut released = self.released_unbridged.subscribe();
+        lifecycle_event(context, released.wait_for(|seen| *seen >= count))
+            .await
+            .expect("the lifecycle backend tally outlives its readers");
+    }
+}
+
+/// An echo backend that serves every connection it accepts until shut down.
+async fn spawn_lifecycle_ws_backend(tally: BackendTally) -> LifecycleWsBackend {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind lifecycle WebSocket backend");
@@ -101,36 +204,68 @@ async fn spawn_lifecycle_ws_backend(connection_count: Arc<AtomicUsize>) -> Lifec
         .expect("lifecycle WebSocket backend address");
     let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
-        let accepted = tokio::select! {
-            biased;
-            _ = &mut shutdown_rx => return,
-            accepted = listener.accept() => accepted.expect("accept lifecycle backend peer"),
-        };
-        let mut websocket = tokio_tungstenite::accept_async(accepted.0)
-            .await
-            .expect("accept lifecycle backend WebSocket");
-        connection_count.fetch_add(1, Ordering::AcqRel);
-
+        let (halt, halted) = tokio::sync::watch::channel(false);
+        let mut peers = tokio::task::JoinSet::new();
         loop {
-            let message = tokio::select! {
+            let accepted = tokio::select! {
                 biased;
                 _ = &mut shutdown_rx => break,
-                message = websocket.next() => message,
+                accepted = listener.accept() => accepted.expect("accept lifecycle backend peer"),
             };
-            let message = match message {
-                Some(Ok(message)) => message,
-                Some(Err(_)) | None => break,
-            };
-            let closes = message.is_close();
-            if websocket.send(message).await.is_err() || closes {
-                break;
-            }
+            peers.spawn(serve_lifecycle_peer(
+                accepted.0,
+                tally.clone(),
+                halted.clone(),
+            ));
+        }
+        drop(listener);
+        halt.send_replace(true);
+        while let Some(joined) = peers.join_next().await {
+            joined.expect("a lifecycle backend peer joined");
         }
     });
     LifecycleWsBackend {
         addr,
         shutdown,
         task,
+    }
+}
+
+/// Echo one negotiated connection until it ends, and tally how it ended.
+async fn serve_lifecycle_peer(
+    stream: tokio::net::TcpStream,
+    tally: BackendTally,
+    mut halt: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut websocket =
+        match unless_halted(&mut halt, tokio_tungstenite::accept_async(stream)).await {
+            Some(handshake) => handshake.expect("accept lifecycle backend WebSocket"),
+            None => return,
+        };
+    tally.negotiated.send_modify(|negotiated| *negotiated += 1);
+
+    let mut carried = false;
+    loop {
+        let message = match unless_halted(&mut halt, websocket.next()).await {
+            Some(Some(Ok(message))) => message,
+            Some(Some(Err(_)) | None) => break,
+            None => return,
+        };
+        carried = true;
+        let closes = message.is_close();
+        let sent = match unless_halted(&mut halt, websocket.send(message)).await {
+            Some(sent) => sent,
+            None => return,
+        };
+        if sent.is_err() || closes {
+            break;
+        }
+    }
+    match carried {
+        true => {}
+        false => tally
+            .released_unbridged
+            .send_modify(|released| *released += 1),
     }
 }
 
@@ -176,7 +311,7 @@ fn capture_proxy_signals(
 // still joins the registered bridge at shutdown.
 #[camber::test]
 async fn proxied_websocket_resolves_completed_at_handoff() {
-    let backend = spawn_lifecycle_ws_backend(Arc::new(AtomicUsize::new(0))).await;
+    let backend = spawn_lifecycle_ws_backend(BackendTally::new()).await;
     let backend_addr = backend.addr;
     let mut proxy = lifecycle_proxy_router(backend_addr);
     let mut captured = capture_proxy_signals(&mut proxy);
@@ -260,14 +395,7 @@ async fn proxied_websocket_resolves_completed_at_handoff() {
 /// serves, so no handshake logic is duplicated.
 fn echo_ws_backend() -> Router {
     let mut backend = Router::new();
-    backend.ws("/echo", |_req: &Request, mut conn: WsConn| {
-        while let Some(message) = conn.recv() {
-            if conn.send(&message).is_err() {
-                break;
-            }
-        }
-        Ok(())
-    });
+    backend.ws("/echo", common::echo_ws);
     backend
 }
 
@@ -387,7 +515,7 @@ fn websocket_proxy_handles_client_close() {
         .run(|| {
             // Backend: sends 3 messages then waits
             let mut backend = Router::new();
-            backend.ws("/chat", |_req: &Request, mut conn: WsConn| {
+            backend.ws("/chat", |_: &Request, mut conn: WsConn| {
                 conn.send("one")?;
                 conn.send("two")?;
                 conn.send("three")?;
@@ -429,7 +557,7 @@ fn websocket_proxy_coexists_with_http_proxy() {
         .run(|| {
             // Backend: serves both HTTP and WebSocket
             let mut backend = echo_ws_backend();
-            backend.get("/hello", |_req: &Request| async {
+            backend.get("/hello", |_: &Request| async {
                 Response::text(200, "http-ok")
             });
             let backend_addr = common::spawn_server(backend);
@@ -473,7 +601,7 @@ fn websocket_proxy_rejects_cross_host_origin_before_upstream_upgrade() {
         .run(|| {
             // Backend: WebSocket echo server
             let mut backend = Router::new();
-            backend.ws("/echo", |_req: &Request, conn: WsConn| {
+            backend.ws("/echo", |_: &Request, conn: WsConn| {
                 conn.send("should not reach")?;
                 Ok(())
             });
@@ -498,20 +626,26 @@ fn websocket_proxy_rejects_cross_host_origin_before_upstream_upgrade() {
 }
 
 #[test]
-fn ws_proxy_forwards_sec_websocket_protocol() {
-    common::test_runtime()
+fn ws_proxy_strips_spoofed_forwarded_headers() {
+    let report = common::test_runtime()
         .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
-            // Backend: echo Sec-WebSocket-Protocol as first WS message
             let mut backend = Router::new();
             backend.ws("/echo", |req: &Request, conn: WsConn| {
-                let proto = req
+                let leaked = req
                     .headers()
-                    .find(|(k, _)| k.eq_ignore_ascii_case("sec-websocket-protocol"))
-                    .map(|(_, v)| v.to_owned())
-                    .unwrap_or_else(|| "none".to_owned());
-                conn.send(&proto)?;
+                    .filter_map(|(name, _)| {
+                        STOPPED_AT_THE_WS_PROXY
+                            .into_iter()
+                            .find(|stopped| name.eq_ignore_ascii_case(stopped))
+                    })
+                    .collect::<Box<[&str]>>();
+                let control = req
+                    .headers()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("x-end-to-end"))
+                    .map_or("missing", |(_, value)| value);
+                conn.send(&format!("{}|{control}", ws_leak_report(&leaked)))?;
                 Ok(())
             });
             let backend_addr = common::spawn_server(backend);
@@ -519,71 +653,32 @@ fn ws_proxy_forwards_sec_websocket_protocol() {
             let proxy_addr = common::spawn_server(lifecycle_proxy_router(backend_addr));
 
             let mut stream = TcpStream::connect(proxy_addr).unwrap();
+            // Three peer-supplied fields a proxied offer must not carry: one
+            // Camber replaces on an ordinary request, one that only the
+            // `X-Forwarded-` family covers, and one the peer itself marked
+            // hop-by-hop through a repeated `Connection` value.
             let upgrade_req = common::ws_upgrade_request_with(
                 "/ws/echo",
-                &[("Sec-WebSocket-Protocol", "graphql-ws, graphql-transport-ws")],
+                &[
+                    ("X-Forwarded-For", "6.6.6.6"),
+                    ("X-Forwarded-Prefix", "/spoofed"),
+                    ("Connection", "Authorization"),
+                    ("Authorization", "Bearer connection-named-credential"),
+                    ("X-End-To-End", "preserved"),
+                ],
             );
-            stream.write_all(upgrade_req.as_bytes()).unwrap();
-
-            let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(status_from_raw(&resp), 101, "response: {resp}");
-            // Client should see the subprotocol in the 101 response
-            let lower = resp.to_lowercase();
-            assert!(
-                lower.contains("sec-websocket-protocol: graphql-ws"),
-                "expected Sec-WebSocket-Protocol in 101 response: {resp}"
-            );
-
-            // The backend receives only the protocol committed to the client.
-            let msg = read_ws_text_frame(&mut stream);
-            assert_eq!(
-                &*msg, "graphql-ws",
-                "backend should receive Sec-WebSocket-Protocol header"
-            );
-
-            write_ws_close_frame(&mut stream);
-
-            runtime::request_shutdown();
-        })
-        .unwrap();
-}
-
-#[test]
-fn ws_proxy_strips_spoofed_forwarded_headers() {
-    common::test_runtime()
-        .header_timeout(Duration::from_millis(200))
-        .shutdown_timeout(Duration::from_secs(2))
-        .run(|| {
-            let mut backend = Router::new();
-            backend.ws("/echo", |req: &Request, conn: WsConn| {
-                let forwarded_for = req
-                    .headers()
-                    .find(|(k, _)| k.eq_ignore_ascii_case("x-forwarded-for"))
-                    .map(|(_, v)| v.to_owned())
-                    .unwrap_or_else(|| "none".to_owned());
-                conn.send(&forwarded_for)?;
-                Ok(())
-            });
-            let backend_addr = common::spawn_server(backend);
-
-            let proxy_addr = common::spawn_server(lifecycle_proxy_router(backend_addr));
-
-            let mut stream = TcpStream::connect(proxy_addr).unwrap();
-            let upgrade_req =
-                common::ws_upgrade_request_with("/ws/echo", &[("X-Forwarded-For", "6.6.6.6")]);
             stream.write_all(upgrade_req.as_bytes()).unwrap();
 
             let resp = read_until_double_crlf(&mut stream);
             assert_eq!(status_from_raw(&resp), 101, "response: {resp}");
 
             let msg = read_ws_text_frame(&mut stream);
-            assert_eq!(&*msg, "none", "spoofed forwarding header reached backend");
-
             write_ws_close_frame(&mut stream);
-
             runtime::request_shutdown();
+            msg
         })
         .unwrap();
+    assert_ws_header_report(&report);
 }
 
 #[test]
@@ -686,8 +781,8 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             runtime::block_on(async {
-                let backend_connections = Arc::new(AtomicUsize::new(0));
-                let backend = spawn_lifecycle_ws_backend(Arc::clone(&backend_connections)).await;
+                let tally = BackendTally::new();
+                let backend = spawn_lifecycle_ws_backend(tally.clone()).await;
                 let mut proxy = lifecycle_proxy_router(backend.addr);
                 let mut dispatched = attach_dispatch_probe(&mut proxy);
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -699,7 +794,7 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
                     .expect("owned server requires a Tokio runtime");
                 let mut websocket = connect_async_proxy_websocket(proxy_addr).await;
                 assert_proxy_echo(&mut websocket).await;
-                assert_eq!(backend_connections.load(Ordering::Acquire), 1);
+                assert_eq!(tally.negotiated(), 1);
                 controller
                     .pause_once(ConnectionOwnerEdge::PermitWaitPending)
                     .expect("pause when the proxy permit wait becomes pending");
@@ -752,7 +847,7 @@ fn proxied_websocket_bridge_holds_permit_and_finishes_before_owned_completion() 
 // 1.T18, graceful proxied WebSocket portion.
 #[camber::test]
 async fn graceful_proxy_websocket_shutdown_sends_close_before_eof_and_join() {
-    let backend = spawn_lifecycle_ws_backend(Arc::new(AtomicUsize::new(0))).await;
+    let backend = spawn_lifecycle_ws_backend(BackendTally::new()).await;
     let backend_addr = backend.addr;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -777,7 +872,7 @@ async fn graceful_proxy_websocket_shutdown_sends_close_before_eof_and_join() {
 // 1.T18, forced proxied WebSocket portion.
 #[camber::test]
 async fn forced_proxy_websocket_abort_releases_transport_before_cancelled() {
-    let backend = spawn_lifecycle_ws_backend(Arc::new(AtomicUsize::new(0))).await;
+    let backend = spawn_lifecycle_ws_backend(BackendTally::new()).await;
     let backend_addr = backend.addr;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -874,111 +969,173 @@ fn forced_proxy_abort_bounds_a_backend_that_never_answers_its_close() {
         .unwrap();
 }
 
-/// The deadline this row's proxy route freezes for reaching its backend.
+/// The deadline the route-deadline row's proxy freezes for its backend.
 const DIAL_DEADLINE: Duration = Duration::from_millis(300);
 
-/// How long the expired dial's close is waited for before the bound is broken.
+/// The inbound request total the inbound-total row's proxy serves under.
 ///
-/// Room for the deadline itself plus the close it writes afterwards, and far
-/// short of the operating system's own handshake timeout — which is the only
-/// other thing that could end an unbounded dial.
-const DIAL_BOUND: Duration = Duration::from_secs(3);
+/// Shorter than [`DIAL_DEADLINE`], so it is the one of the two that ends the
+/// same held handshake.
+const INBOUND_TOTAL: Duration = Duration::from_millis(100);
 
-/// A backend that accepts the transport and never answers the handshake.
-///
-/// Distinct from [`spawn_silent_ws_backend`], which completes the handshake
-/// first: this one never becomes a WebSocket at all, so a dial against it can
-/// only end on a deadline.
-async fn spawn_unanswering_backend() -> LifecycleWsBackend {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind unanswering WebSocket backend");
-    let addr = listener
-        .local_addr()
-        .expect("unanswering WebSocket backend address");
-    let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(async move {
-        let accepted = tokio::select! {
-            biased;
-            _ = &mut shutdown_rx => return,
-            accepted = listener.accept() => accepted.expect("accept unanswering backend peer"),
-        };
-        // Held unread and unanswered. The proxy's upgrade request lands in this
-        // socket's receive buffer and nothing here ever looks at it.
-        let _ = shutdown_rx.await;
-        drop(accepted);
-    });
-    LifecycleWsBackend {
-        addr,
-        shutdown,
-        task,
-    }
+/// A bound no row in this case reaches on the paused clock.
+const UNREACHED: Duration = Duration::from_secs(3600);
+
+/// One backend offer held open under a deadline, and what refusing it earns.
+struct HeldOfferRow {
+    label: &'static str,
+    router: fn(&str) -> Router,
+    /// How far the paused clock is stepped once the backend holds the offer.
+    step: Duration,
+    /// The whole classification the refusal keeps: category, status, and the
+    /// client-safe message its producer fixed.
+    refused: Collapsed<'static>,
 }
 
-/// The deadline a proxy route froze bounds the dial its upgrade makes.
+/// The route-deadline row's proxy: its own upstream deadline, no shorter total.
+fn route_deadline_router(backend: &str) -> Router {
+    let mut proxy = Router::new();
+    proxy.proxy_with_policy(
+        BUFFERED,
+        backend,
+        ProxyPolicy::default()
+            .request_timeout(DIAL_DEADLINE)
+            .expect("a short upstream deadline"),
+    );
+    proxy
+}
+
+/// The inbound-total row's proxy: a request total shorter than any upstream
+/// deadline it serves under.
+fn inbound_total_router(backend: &str) -> Router {
+    let mut proxy = Router::new().request_budget(
+        RequestBudget::bounded(UNREACHED, INBOUND_TOTAL).expect("a short inbound request total"),
+    );
+    proxy.proxy_with_policy(
+        BUFFERED,
+        backend,
+        ProxyPolicy::default()
+            .request_timeout(UNREACHED)
+            .expect("an upstream deadline the row never reaches"),
+    );
+    proxy
+}
+
+const HELD_OFFER_ROWS: [HeldOfferRow; 2] = [
+    HeldOfferRow {
+        label: "the inbound request total ends the held handshake",
+        router: inbound_total_router,
+        step: INBOUND_TOTAL,
+        refused: Collapsed {
+            kind: RejectionKind::RequestTimeout,
+            status: 408,
+            message: "request timed out",
+        },
+    },
+    HeldOfferRow {
+        label: "the route deadline ends the held handshake",
+        router: route_deadline_router,
+        step: DIAL_DEADLINE,
+        refused: Collapsed {
+            kind: RejectionKind::Proxy,
+            status: 504,
+            message: "gateway timeout",
+        },
+    },
+];
+
+/// 6.T4
 ///
-/// The dial runs inside the registered bridge, which the supervisor releases
-/// only after the `101` is committed — so the request total the negotiation
-/// spent has already ended, and the route's own deadline is the only bound left.
-/// Without it a backend that answers no handshake holds the bridge task, and the
-/// connection permit under it, until the operating system gives up. The peer is
-/// past its upgrade by then, so it is told with the `1011` every backend fault
-/// on this bridge gets rather than left reading a dropped socket.
-#[test]
-fn proxied_upgrade_bounds_its_backend_dial_by_the_route_deadline() {
-    runtime::builder()
-        .shutdown_timeout(Duration::from_secs(2))
-        .run(|| {
-            runtime::block_on(async {
-                let backend = spawn_unanswering_backend().await;
-                let mut proxy = Router::new();
-                proxy.proxy_with_policy(
-                    "/ws",
-                    &format!("http://{}", backend.addr),
-                    camber::http::ProxyPolicy::default()
-                        .request_timeout(DIAL_DEADLINE)
-                        .expect("a short upstream deadline"),
-                );
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("bind unanswered-dial proxy listener");
-                let proxy_addr = listener
-                    .local_addr()
-                    .expect("unanswered-dial proxy address");
-                let handle = camber::http::serve_background(listener, proxy)
-                    .expect("owned server requires a Tokio runtime");
-                let mut websocket = connect_async_proxy_websocket(proxy_addr).await;
+/// The deadline a proxied upgrade runs under ends its backend handshake before
+/// the peer is told anything. The backend acknowledges the whole offer and
+/// then holds it; stepping the paused clock onto the deadline refuses the peer
+/// with a mapped head, never a `101`, and releases the backend. The inbound
+/// request total cancels the same handshake when it is the shorter bound.
+///
+/// A backend behind `https` whose certificate nothing trusts is refused the
+/// same way, before any `101`, and it only ever sees a TLS hello: a TLS
+/// failure is never retried as plaintext.
+#[tokio::test(start_paused = true)]
+async fn proxied_upgrade_bounds_its_backend_dial_by_the_route_deadline() {
+    let context = camber::runtime_test_support::install_runtime_context();
+    for row in &HELD_OFFER_ROWS {
+        assert_held_offer_refused(row).await;
+    }
+    assert_untrusted_backend_refused().await;
+    drop(context);
+}
 
-                let dialed_at = tokio::time::Instant::now();
-                let (opcode, payload) =
-                    read_async_ws_frame_or_eof(&mut websocket, "the expired dial's close")
-                        .await
-                        .expect("an expired dial closes the peer its 101 already answered");
-                let waited = dialed_at.elapsed();
-                assert_eq!(opcode, 0x8, "expected a close frame for the expired dial");
-                assert_eq!(
-                    payload.get(..2),
-                    Some([0x03, 0xf3].as_slice()),
-                    "expected the 1011 a backend fault closes with, got {payload:?}"
-                );
-                assert!(
-                    waited < DIAL_BOUND,
-                    "the dial outlived the route's {DIAL_DEADLINE:?} deadline by {waited:?}"
-                );
+/// One held-offer row, driven onto its deadline on the paused clock.
+async fn assert_held_offer_refused(row: &HeldOfferRow) {
+    let label = row.label;
+    let driver = RunnableDriver::start();
+    let mut backend = ScriptedWsBackend::bind(Box::new([BackendScript::Hold])).await;
+    let proxy = NegotiatingProxy::serve((row.router)(&backend.http_url())).await;
 
-                handle.shutdown();
-                lifecycle_event("unanswered-dial proxy join", handle.into_future())
-                    .await
-                    .expect("the proxy server joined after its bridge released");
-                backend.shutdown().await;
-            });
-        })
-        .unwrap();
+    let mut peer = offer(proxy.addr(), BUFFERED, &[]).await;
+    backend.offered(0, label).await;
+    tokio::time::advance(row.step).await;
+    settle_wakeups().await;
+    let head = read_refused_head(&mut peer, "the held downstream head", label).await;
+    let seen = assert_mapped_before_upgrade(&head, &proxy, &route_of(BUFFERED), label);
+    assert_classification(&seen, &row.refused, label);
+    backend.expect(BackendEvent::Released(0), label).await;
+
+    settle_refused_row(peer, driver, proxy, backend, label).await;
+}
+
+/// Read the head a refused paused-clock row's peer was answered with.
+///
+/// Bounded by the watchdog's wall clock: a tokio timeout would fire on the
+/// paused clock the moment every task parks.
+async fn read_refused_head(peer: &mut tokio::net::TcpStream, what: &str, label: &str) -> Box<str> {
+    within_watchdog(read_async_head_unbounded(peer, what))
+        .await
+        .unwrap_or_else(|| panic!("{label}: the peer was never answered"))
+}
+
+/// Tear one refused paused-clock row down: the peer, the driver, the proxy's
+/// clean join, and a backend that saw nothing no row consumed.
+async fn settle_refused_row(
+    peer: tokio::net::TcpStream,
+    driver: RunnableDriver,
+    proxy: NegotiatingProxy,
+    backend: ScriptedWsBackend,
+    label: &str,
+) {
+    drop(peer);
+    driver.stop().await;
+    let stopped = within_watchdog(proxy.stop())
+        .await
+        .unwrap_or_else(|| panic!("{label}: the proxy never joined"));
+    assert!(stopped.is_ok(), "{label}: the proxy stopped as {stopped:?}");
+    backend.finish(label).await;
+}
+
+/// The untrusted-TLS row: refused before `101`, with no plaintext fallback.
+async fn assert_untrusted_backend_refused() {
+    let label = "an untrusted TLS backend";
+    let (cert_pem, key_pem) = common::generate_cert_with_san("127.0.0.1");
+    let config = common::build_server_config(&cert_pem, &key_pem);
+    let driver = RunnableDriver::start();
+    let mut backend =
+        ScriptedWsBackend::bind(Box::new([BackendScript::UntrustedTls(config)])).await;
+    let mut router = Router::new();
+    router.proxy(BUFFERED, &backend.https_url());
+    let proxy = NegotiatingProxy::serve(router).await;
+
+    let mut peer = offer(proxy.addr(), BUFFERED, &[]).await;
+    let head = read_refused_head(&mut peer, "the untrusted downstream head", label).await;
+    let seen = assert_mapped_before_upgrade(&head, &proxy, &route_of(BUFFERED), label);
+    assert_classification(&seen, &BACKEND_REFUSED, label);
+    backend.expect(BackendEvent::TlsRefused(0), label).await;
+
+    settle_refused_row(peer, driver, proxy, backend, label).await;
 }
 
 async fn pending_proxy_upgrade_shutdown_is_rejected(forced: bool) {
-    let backend_connections = Arc::new(AtomicUsize::new(0));
-    let backend = spawn_lifecycle_ws_backend(Arc::clone(&backend_connections)).await;
+    let tally = BackendTally::new();
+    let backend = spawn_lifecycle_ws_backend(tally.clone()).await;
     let backend_addr = backend.addr;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1028,21 +1185,13 @@ async fn pending_proxy_upgrade_shutdown_is_rejected(forced: bool) {
         .expect("release pending proxy upgrade into shutdown");
     let mut owner = Box::pin(handle.into_future());
     let response = read_async_http_head(&mut pending, "the rejected proxy-upgrade response").await;
-    let status = status_from_raw(&response);
-    let response_lower = response.to_ascii_lowercase();
-    assert_eq!(
-        status, 503,
-        "shutdown committed an unexpected proxy upgrade response: {response}"
-    );
-    assert!(
-        response_lower.contains("connection: close"),
-        "proxy upgrade rejection omitted Connection: close: {response}"
-    );
-    assert_eq!(
-        backend_connections.load(Ordering::Acquire),
-        0,
-        "rejected proxy upgrade reached its backend"
-    );
+    assert_proxy_shutdown_head(&response);
+    // The backend is negotiated before the upgrade is offered for
+    // registration, so the refusal reaches it — and must release it unbridged.
+    tally.require_negotiated(1).await;
+    tally
+        .await_released_unbridged(1, "the rejected proxy upgrade's backend release")
+        .await;
     assert_refusal_body_then_eof(
         &mut pending,
         "service unavailable",
@@ -1060,13 +1209,11 @@ async fn pending_proxy_upgrade_shutdown_is_rejected(forced: bool) {
 // 1.T21, proxied WebSocket registrar-cancellation portion.
 #[camber::test]
 async fn cancelled_pending_proxy_upgrade_is_joined_and_connection_local() {
-    let backend_connections = Arc::new(AtomicUsize::new(0));
-    let backend = spawn_lifecycle_ws_backend(Arc::clone(&backend_connections)).await;
+    let tally = BackendTally::new();
+    let backend = spawn_lifecycle_ws_backend(tally.clone()).await;
     let backend_addr = backend.addr;
     let mut proxy = lifecycle_proxy_router(backend_addr);
-    proxy.get("/ok", |_request: &Request| async {
-        Response::text(200, "ok")
-    });
+    proxy.get("/ok", |_: &Request| async { Response::text(200, "ok") });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1090,11 +1237,10 @@ async fn cancelled_pending_proxy_upgrade_is_joined_and_connection_local() {
         "the proxy listener after registrar cancellation",
     )
     .await;
-    assert_eq!(
-        backend_connections.load(Ordering::Acquire),
-        0,
-        "cancelled proxy upgrade reached its backend"
-    );
+    tally.require_negotiated(1).await;
+    tally
+        .await_released_unbridged(1, "the cancelled proxy upgrade's backend release")
+        .await;
     runtime::request_shutdown();
     assert!(
         lifecycle_event(
@@ -1121,7 +1267,7 @@ async fn forced_shutdown_rejects_unacknowledged_proxy_upgrade() {
 
 struct ProxyUnwindScenario {
     backend: LifecycleWsBackend,
-    backend_connections: Arc<AtomicUsize>,
+    tally: BackendTally,
     /// Held for the whole case, not just its setup.
     ///
     /// Dropping the controller closes its script and unregisters the address, so
@@ -1135,8 +1281,8 @@ struct ProxyUnwindScenario {
 }
 
 async fn start_proxy_unwind_scenario() -> ProxyUnwindScenario {
-    let backend_connections = Arc::new(AtomicUsize::new(0));
-    let backend = spawn_lifecycle_ws_backend(Arc::clone(&backend_connections)).await;
+    let tally = BackendTally::new();
+    let backend = spawn_lifecycle_ws_backend(tally.clone()).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind proxy unwind listener");
@@ -1146,7 +1292,7 @@ async fn start_proxy_unwind_scenario() -> ProxyUnwindScenario {
         .expect("owned server requires a Tokio runtime");
     let mut acknowledged = connect_async_proxy_websocket(proxy_addr).await;
     assert_proxy_echo(&mut acknowledged).await;
-    assert_eq!(backend_connections.load(Ordering::Acquire), 1);
+    assert_eq!(tally.negotiated(), 1);
     controller
         .upgrades
         .pause_once(UpgradeOwnerEdge::AfterHandoffSubmitted)
@@ -1183,7 +1329,7 @@ async fn start_proxy_unwind_scenario() -> ProxyUnwindScenario {
         .expect("release the held proxy transfer edge");
     ProxyUnwindScenario {
         backend,
-        backend_connections,
+        tally,
         controller,
         handle,
         acknowledged,
@@ -1196,26 +1342,18 @@ async fn finish_proxy_unwind_scenario(mut scenario: ProxyUnwindScenario) {
     assert_optional_close_then_eof(&mut scenario.acknowledged, "unwound proxy").await;
     let pending_response =
         read_async_http_head(&mut scenario.pending, "the unwound proxy-upgrade response").await;
-    let pending_status = status_from_raw(&pending_response);
     // A refusal rather than an internal failure: the connection holding the
     // offer reads the forced phase the unwinding supervisor committed, so it
     // knows the server stopped admitting rather than only that an owner went
     // away.
-    assert_eq!(
-        pending_status, 503,
-        "pending proxy upgrade committed an unexpected response: {pending_response}"
-    );
-    assert!(
-        pending_response
-            .to_ascii_lowercase()
-            .contains("connection: close"),
-        "pending proxy unwind response omitted Connection: close: {pending_response}"
-    );
-    assert_eq!(
-        scenario.backend_connections.load(Ordering::Acquire),
-        1,
-        "pending proxy upgrade reached its backend during unwind"
-    );
+    assert_proxy_shutdown_head(&pending_response);
+    // The acknowledged bridge and the pending offer both negotiated their
+    // backend; only the pending one is released without a frame crossing.
+    scenario.tally.require_negotiated(2).await;
+    scenario
+        .tally
+        .await_released_unbridged(1, "the unwound pending upgrade's backend release")
+        .await;
     assert_refusal_body_then_eof(
         &mut scenario.pending,
         "service unavailable",
@@ -1228,6 +1366,18 @@ async fn finish_proxy_unwind_scenario(mut scenario: ProxyUnwindScenario) {
     }
     scenario.backend.shutdown().await;
     drop(scenario.controller);
+}
+
+fn assert_proxy_shutdown_head(response: &str) {
+    assert_eq!(
+        status_from_raw(response),
+        503,
+        "shutdown committed an unexpected proxy upgrade response: {response}"
+    );
+    assert!(
+        response.to_ascii_lowercase().contains("connection: close"),
+        "proxy upgrade rejection omitted Connection: close: {response}"
+    );
 }
 
 // 1.T21, proxied WebSocket supervisor-unwind portion.

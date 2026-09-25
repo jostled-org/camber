@@ -6,6 +6,7 @@
 //! second copy of these rules would let one accept a body the other refuses.
 
 use crate::RuntimeError;
+use crate::http::util::is_token;
 use std::borrow::Cow;
 
 /// The multipart protocol's own maximum boundary length.
@@ -114,27 +115,6 @@ impl<'a> Iterator for HeaderParameters<'a> {
     }
 }
 
-fn is_token_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric()
-        || matches!(
-            byte,
-            b'!' | b'#'
-                | b'$'
-                | b'%'
-                | b'&'
-                | b'\''
-                | b'*'
-                | b'+'
-                | b'-'
-                | b'.'
-                | b'^'
-                | b'_'
-                | b'`'
-                | b'|'
-                | b'~'
-        )
-}
-
 fn is_quoted_text(ch: char) -> bool {
     match ch {
         '\t' | ' ' | '!' | '#'..='[' | ']'..='~' => true,
@@ -199,7 +179,7 @@ fn parse_parameter_value(value: &str) -> Result<ParameterValue<'_>, RuntimeError
         return Ok(ParameterValue::Quoted(inner));
     }
 
-    match !value.is_empty() && value.bytes().all(is_token_byte) {
+    match is_token(value.as_bytes()) {
         true => Ok(ParameterValue::Unquoted(value)),
         false => Err(malformed("invalid multipart unquoted parameter")),
     }
@@ -212,7 +192,7 @@ fn parse_parameter(segment: &str) -> Result<HeaderParameter<'_>, RuntimeError> {
     let key = key.trim();
     let value = value.trim();
 
-    match !key.is_empty() && key.bytes().all(is_token_byte) {
+    match is_token(key.as_bytes()) {
         true => Ok(HeaderParameter {
             name: key,
             value: parse_parameter_value(value)?,

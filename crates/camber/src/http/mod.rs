@@ -81,7 +81,8 @@
 //!         .request_timeout(Duration::from_secs(10))
 //!         .response_idle_timeout(Duration::from_secs(2))
 //!         .retries(3)
-//!         .backoff(Duration::from_millis(100));
+//!         .backoff(Duration::from_millis(100))
+//!         .retry_timeout(Duration::from_secs(20));
 //!
 //!     let response = client.get("https://example.com/health").await?;
 //!     let _status = response.status();
@@ -114,7 +115,7 @@ pub(crate) mod body_admission;
 mod boundary;
 mod buffer_config;
 mod checked_collect;
-mod client;
+pub(crate) mod client;
 mod completion;
 /// Response compression helpers.
 pub mod compression;

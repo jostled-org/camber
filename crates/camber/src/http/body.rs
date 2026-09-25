@@ -1,6 +1,6 @@
 use super::disconnect::ResponseGuard;
 use super::operation::InboundTerminal;
-use super::transfer::{ChannelSource, Transfer, TransferOwner, UpstreamSource};
+use super::transfer::{ChannelSource, Transfer, TransferDirection, TransferOwner, UpstreamSource};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum BodyError {
@@ -15,7 +15,7 @@ pub(super) enum BodyError {
     #[error("upstream proxy body read failed: {0}")]
     UpstreamProxy(Box<str>),
     /// One committed response body ended on a bound its download owner
-    /// enforced.
+    /// enforced, or on a source that failed to produce what it owed.
     ///
     /// The head is already on the wire, so this replaces no status and reaches
     /// no mapper. It is what tells the transport that the framing cannot
@@ -29,6 +29,21 @@ pub(super) enum BodyError {
     },
 }
 
+impl BodyError {
+    /// A committed body whose source ended cleanly with declared bytes owed.
+    ///
+    /// The source reported no error of its own, so the declared length is the
+    /// only witness. It is still the source that failed: no configured bound
+    /// was crossed, and the peer cannot receive the length its head promised.
+    fn declared_truncation(owed: u64) -> Self {
+        Self::Transfer {
+            direction: TransferDirection::Download.label(),
+            terminal: InboundTerminal::SourceFailure,
+            diagnostic: format!("the source ended with {owed} declared bytes still owed").into(),
+        }
+    }
+}
+
 /// Response body that owns this response's disconnect guard.
 ///
 /// The guard moves here from the per-request service future, so the body is
@@ -40,12 +55,23 @@ pub(super) enum BodyError {
 /// own drop — and the finalizer it carries — is what records. A record written
 /// at the head would name a streaming, proxied, gRPC, or upgraded request as
 /// finished while every byte of it was still owed.
+///
+/// It is also the one owner that sees both the length the head declared and
+/// the final poll of the body under it. A source that ends cleanly with
+/// declared bytes still owed is therefore failed here, as one typed source
+/// failure, and never passed on as a clean end of stream.
 pub(super) struct GuardedBody {
     inner: HyperResponseBody,
     guard: ResponseGuard,
     /// Bytes left to produce when the length is known before the first poll.
     /// `None` for a body whose length only its end-of-stream can report.
     remaining: Option<u64>,
+    /// Whether this body has already handed its transport a failure.
+    ///
+    /// One body fails its transport once. A poll after that reports the end
+    /// of stream and polls nothing, so no second failure and no late
+    /// completion follows the first.
+    failed: bool,
 }
 
 impl GuardedBody {
@@ -69,6 +95,7 @@ impl GuardedBody {
             inner,
             guard,
             remaining,
+            failed: false,
         };
         // Both halves of "Hyper will not poll this body". The report is asked
         // of the wrapper, which forwards it, so it is the exact report Hyper
@@ -80,6 +107,14 @@ impl GuardedBody {
             false => {}
         }
         hyper::Response::from_parts(parts, body)
+    }
+
+    /// The declared bytes this body still owes its peer, if it owes any.
+    const fn owed(&self) -> Option<u64> {
+        match self.remaining {
+            Some(owed @ 1..) => Some(owed),
+            Some(0) | None => None,
+        }
     }
 
     /// Count a produced frame against a known content length.
@@ -106,52 +141,62 @@ impl GuardedBody {
     /// last frame is tonic's trailer set, and the HTTP/2 encoder ends the
     /// stream on it — so without this the response produced in full would fall
     /// through to the cause table.
+    ///
+    /// A last frame that leaves declared bytes owed completes nothing. This
+    /// body then reports no end of stream, so Hyper polls once more and the
+    /// trailing `None` fails the body.
     fn last_frame(&mut self) {
         use hyper::body::Body;
-        match self.inner.is_end_stream() {
-            true => self.finished(),
-            false => {}
+        match (self.inner.is_end_stream(), self.owed()) {
+            (true, None) => self.guard.complete(),
+            (true, Some(_)) | (false, _) => {}
         }
     }
 
     /// Resolve an end of stream against what the body still owed.
     ///
     /// End of stream completes only a body that owed nothing more. A body that
-    /// declared a length and stopped short was not produced in full, so it
-    /// falls through to the cause table rather than claiming completion. The
-    /// streaming proxy is the reachable case: `content-length` is not
-    /// hop-by-hop, so an upstream's declared length is forwarded to the peer,
-    /// and an upstream body that dies mid-read closes the channel — an end of
-    /// stream with bytes still owed.
+    /// declared a length and stopped short was not produced in full, so its
+    /// source failed, even though the source itself ended cleanly: a local
+    /// producer closed its channel early. That end becomes one source failure,
+    /// so HTTP/1 closes the connection, HTTP/2 resets this one stream, and the
+    /// account records the failed source rather than normal completion.
     ///
-    /// The tradeoff is that a response declaring MORE bytes than it produces
-    /// now resolves `PeerDisconnect` or `StreamReset` instead of `Completed`.
-    /// That response is already a protocol violation Hyper fails the connection
-    /// over, so non-completion is the honest answer.
-    fn finished(&self) {
-        match self.remaining {
-            None | Some(0) => self.guard.complete(),
-            Some(_) => {}
+    /// The committed status is never replaced. The head is already on the
+    /// wire, so the error reaches only the transport.
+    fn end_of_stream(&mut self) -> BodyFramePoll {
+        match self.owed() {
+            None => {
+                self.guard.complete();
+                std::task::Poll::Ready(None)
+            }
+            Some(owed) => {
+                let error = self.ended_on(BodyError::declared_truncation(owed));
+                std::task::Poll::Ready(Some(Err(error)))
+            }
         }
     }
 
-    /// Name the bound a download owner this body ran enforced.
+    /// Hand the transport one failure, and name its cause in the account.
     ///
     /// Read off the error the transport is about to be given, so an operator's
     /// record and the peer's transport disposition name the same cause. Only a
-    /// transfer terminal is one: an upstream read that failed is the source's
-    /// own account, and the connection end names that row.
+    /// transfer terminal names one: an upstream read that failed before it
+    /// reached a download owner carries only the source's own account, and the
+    /// connection end names that row.
     ///
     /// Written where the failure happens rather than kept for the drop, because
     /// the boundary cell is set-once: the first download owner to end on a bound
-    /// is the one that ended this body.
-    fn ended_on(&self, error: &BodyError) {
-        match error {
+    /// is the one that ended this body. A later failure cannot overwrite it.
+    fn ended_on(&mut self, error: BodyError) -> BodyError {
+        self.failed = true;
+        match &error {
             BodyError::Transfer { terminal, .. } => {
                 self.guard.account().record_download_boundary(*terminal);
             }
             BodyError::UpstreamProxy(_) => {}
         }
+        error
     }
 }
 
@@ -164,30 +209,38 @@ impl hyper::body::Body for GuardedBody {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
         let this = self.get_mut();
-        let outcome = std::pin::Pin::new(&mut this.inner).poll_frame(cx);
-        match &outcome {
-            std::task::Poll::Ready(None) => this.finished(),
-            std::task::Poll::Ready(Some(Ok(frame))) => {
-                this.produced(frame);
-                this.last_frame();
-            }
-            std::task::Poll::Ready(Some(Err(error))) => this.ended_on(error),
-            std::task::Poll::Pending => {}
+        if this.failed {
+            return std::task::Poll::Ready(None);
         }
-        outcome
+        match std::pin::Pin::new(&mut this.inner).poll_frame(cx) {
+            std::task::Poll::Ready(None) => this.end_of_stream(),
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                this.produced(&frame);
+                this.last_frame();
+                std::task::Poll::Ready(Some(Ok(frame)))
+            }
+            std::task::Poll::Ready(Some(Err(error))) => {
+                std::task::Poll::Ready(Some(Err(this.ended_on(error))))
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
     }
 
     fn size_hint(&self) -> hyper::body::SizeHint {
         self.inner.size_hint()
     }
 
-    /// Report the wrapped body's end-of-stream unchanged.
+    /// Report the wrapped body's end-of-stream, unless declared bytes are owed.
     ///
-    /// A wrapper that hid it would make Hyper poll a body with nothing to
-    /// produce; reporting it is what lets an empty response go out with no
+    /// A wrapper that hid a true end would make Hyper poll a body with nothing
+    /// to produce; reporting it is what lets an empty response go out with no
     /// poll at all, which is why `attach` completes such a body itself.
+    ///
+    /// A body that still owes declared bytes is not at a clean end, whatever
+    /// its inner body says. Hyper must poll it once more, so the failure this
+    /// body owes reaches the transport instead of a clean end of stream.
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        self.inner.is_end_stream() && self.owed().is_none()
     }
 }
 

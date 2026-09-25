@@ -985,7 +985,7 @@ async fn dispatch_built_request<'a>(
     // One merge for every class this dispatch answers, whichever owner produced
     // the head: the chain ran once, so its metadata reaches the real answer once
     // — including a refusal raised after the chain admitted the request.
-    let answered = answer_admitted_dispatch(
+    let answered = finish_dispatched(
         result,
         #[cfg(feature = "ws")]
         ws_upgrade,
@@ -994,50 +994,6 @@ async fn dispatch_built_request<'a>(
     )
     .await?;
     Ok(projection.merged_into(answered))
-}
-
-/// Answer one admitted class, or the handshake refusal raised after its gate.
-///
-/// Held apart from the gate above so each half states one thing: the chain
-/// decides whether this request proceeds, and this decides which producer
-/// answers it once the chain has.
-async fn answer_admitted_dispatch<'a>(
-    result: DispatchResult,
-    #[cfg(feature = "ws")] ws_upgrade: WsUpgrade,
-    scope: &RejectionScope,
-    request_dispatch: &RequestDispatch<'a>,
-) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    let &RequestDispatch {
-        ctx,
-        account,
-        operation,
-        ..
-    } = request_dispatch;
-    #[cfg(feature = "ws")]
-    let refused_origin = result
-        .is_websocket()
-        .then(|| ws_proxy::check_ws_origin(result.request_ref()))
-        .flatten();
-    #[cfg(not(feature = "ws"))]
-    let refused_origin: Option<Rejected> = None;
-
-    match refused_origin {
-        // A handshake refused on its declared origin is answered by the mapper,
-        // so the framework is the producer of this operation's head. It reaches
-        // the commitment for the same reason every other producer does: the
-        // request is answered here and by nothing after it.
-        Some(rejected) => Ok(answer_framework(ctx, scope, rejected, account, operation)),
-        None => {
-            finish_dispatched(
-                result,
-                #[cfg(feature = "ws")]
-                ws_upgrade,
-                scope,
-                request_dispatch,
-            )
-            .await
-        }
-    }
 }
 
 /// Answer one dispatched result under the scope and operation it resolved to.
@@ -1431,11 +1387,10 @@ fn finish_async(
 /// The negotiation runs inside the request total, which ends at the handoff
 /// this records, so an upgrade whose peer never completes it is refused on the
 /// same deadline every other admitted route answers to. The upstream leg of a
-/// proxied upgrade is NOT inside it: the dial and the backend handshake run in
-/// the registered bridge task, which the supervisor only releases once the
-/// `101` is committed, and the route's own frozen deadline is what bounds them.
-/// The session past that `101` spends no request time either: it is bounded by
-/// the WebSocket quotas its own registration carries.
+/// proxied upgrade is inside it too: the backend is reached and its handshake
+/// validated on this task before the `101` exists, under the route's own
+/// frozen deadlines as well. The session past that `101` spends no request
+/// time: it is bounded by the WebSocket quotas its own registration carries.
 #[cfg(feature = "ws")]
 async fn record_upgrade<F, Fut>(
     ctx: &ConnCtx,

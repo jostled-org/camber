@@ -30,9 +30,9 @@ use super::framing::{
     WsError, WsFrameMessage, close_transport, drain_until_close, flush_transport, next_control,
     next_frame, send_close, shutdown_client_transport, until_abort,
 };
-use super::handoff::{WsHandoff, WsHandoffOutcome, WsRefusal, prepare_ws_handoff};
+use super::handoff::{WsHandoffOutcome, WsRefusal, prepare_ws_handoff};
 use super::handshake::WsUpgrade;
-use super::ownership::{BridgeAttachment, ClientWs, open_bridge, own_upgrade_bridge};
+use super::ownership::{BridgeAttachment, ClientWs, open_bridge};
 use futures_util::stream::{SplitSink, SplitStream};
 use std::ops::ControlFlow;
 use std::pin::Pin;
@@ -49,7 +49,8 @@ pub(in crate::http) enum WsDirection {
     Outbound,
 }
 
-/// Validate the upgrade pair, spawn background work, return 101.
+/// Admit the client's offer, select its first protocol, spawn background
+/// work, return 101.
 pub(in crate::http) async fn handle_ws_upgrade(
     ws_upgrade: WsUpgrade,
     handler: WsHandler,
@@ -57,40 +58,28 @@ pub(in crate::http) async fn handle_ws_upgrade(
     buffer_size: usize,
     lifecycle: &ConnectionLifecycle,
 ) -> Result<hyper::Response<HyperResponseBody>, WsRefusal> {
-    let prepared = match prepare_ws_handoff(ws_upgrade, &req, lifecycle) {
+    let offer = ws_upgrade.admit(&req).map_err(WsRefusal::unnegotiated)?;
+    let selection = offer.protocols().first();
+    let prepared = match prepare_ws_handoff(offer, selection, &req, lifecycle) {
         WsHandoffOutcome::Ready(prepared) => prepared,
         WsHandoffOutcome::Refused(refusal) => return Err(refusal),
     };
-    // Taken as an owned value before the request moves into the bridge: a
-    // registration refusal past this point still has to say what negotiation
-    // had selected.
-    let selected: Option<Box<str>> = prepared.subprotocol.map(Box::from);
-    let WsHandoff {
-        on_upgrade,
-        response,
-        permit,
-        handoff,
-        ..
-    } = prepared;
     // Present when a controller is registered for this server's address, which
     // every serving entry point now carries alike.
     let script = lifecycle.script();
-    own_upgrade_bridge(lifecycle, response, &handoff, move |attachment| {
-        bridge_ws_handler(
-            on_upgrade,
-            handler,
-            req,
-            buffer_size,
-            attachment,
-            script,
-            permit,
-        )
-    })
-    .await
-    .map_err(|rejected| WsRefusal {
-        rejected: Box::new(rejected),
-        subprotocol: selected,
-    })
+    prepared
+        .register(lifecycle, move |on_upgrade, permit, attachment| {
+            bridge_ws_handler(
+                on_upgrade,
+                handler,
+                req,
+                buffer_size,
+                attachment,
+                script,
+                permit,
+            )
+        })
+        .await
 }
 
 /// The two bounded queues one direct connection's application side owns.
@@ -509,7 +498,7 @@ impl DirectBridge<'_> {
         match cause {
             WsCloseCause::ServerCancelled | WsCloseCause::PeerDisconnected => {}
             WsCloseCause::ServerShutdown => {
-                send_close(&mut self.outbound.sink, None).await;
+                send_close(&mut self.outbound.sink).await;
                 LifecycleScript::pause_at_ws_terminal(
                     self.script,
                     WebSocketTerminalEdge::BeforePeerCloseAwait,

@@ -1,10 +1,13 @@
 #![cfg(feature = "ws")]
 
 use crate::common;
-#[path = "../support/deterministic.rs"]
-mod deterministic;
+use crate::deterministic;
 
-use crate::handshake::{Header, LOCAL_HOST, accepted, accepted_plus, handshake_request};
+use crate::handshake::{
+    Header, LOCAL_HOST, accepted, accepted_plus, assert_handshake_rejected,
+    assert_websocket_switch_accepting, complete_server_close, handshake_request,
+    perform_raw_ws_handshake,
+};
 
 use crate::common::{
     ASYNC_EVENT_TIMEOUT, assert_http_ok, assert_optional_close_then_eof,
@@ -21,7 +24,6 @@ use camber::http::mock::{
 use camber::http::{Request, Response, Router, WsConn, WsMessage};
 use camber::runtime;
 use std::future::IntoFuture;
-use std::io::Write;
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -185,77 +187,14 @@ fn case_handshake(case: &InvalidHandshakeCase) -> Box<[Header<'static>]> {
         .collect()
 }
 
-/// Send `request` and read the response it answers with.
+/// The switch every accepted upgrade answers with, for the RFC 6455 key.
 ///
-/// The connection and its bounds come from `common::connect`, and the head is
-/// parsed by the shared response reader: a handshake case owns what it sends
-/// and what the head must say, not a second statement of how a socket is
-/// opened or how a status line is split.
-///
-/// Read under the bounded form, which arms one deadline over the whole reply.
-/// The socket's own timeout bounds a single syscall, so a peer dribbling one
-/// byte per read would never be cut off by it.
-fn perform_raw_ws_handshake(
-    addr: std::net::SocketAddr,
-    request: &str,
-) -> (TcpStream, common::HttpResponse) {
-    let mut stream = common::connect(addr).expect("connect raw WebSocket client");
-    stream
-        .write_all(request.as_bytes())
-        .expect("write raw WebSocket handshake");
-    let response = common::read_http_response_bounded(&mut stream)
-        .expect("read raw WebSocket handshake reply");
-    (stream, response)
-}
-
-/// The switch every accepted upgrade answers with, transport disposition
-/// included.
-///
-/// One helper for every accepted upgrade, on both serving families: a `101`
-/// that does not say `Connection: Upgrade` is one RFC 6455 §4.1 requires a
-/// conforming client to fail the handshake over, so no row is entitled to a
-/// weaker predicate. The only request that could earn a different answer — one
-/// declaring a payload the bridge would leave unframed — is refused at the head
-/// instead, and `websocket_upgrade_excludes_body_policy_and_refuses_a_declared_payload`
-/// owns that row.
+/// The accept value is the RFC's own literal rather than one derived here, so
+/// these rows prove the derivation instead of restating it. The
+/// `websocket_upgrade_excludes_body_policy_and_refuses_a_declared_payload` row
+/// owns the one request that could earn a different answer.
 fn assert_websocket_switch(head: &common::HttpResponse, context: &str) {
-    assert_eq!(head.status, 101, "{context}: unexpected status: {head:?}");
-    let upgrade = head.header_values("upgrade");
-    assert_eq!(upgrade.len(), 1, "{context}: Upgrade header: {head:?}");
-    assert!(
-        upgrade[0].eq_ignore_ascii_case("websocket"),
-        "{context}: invalid Upgrade header: {head:?}"
-    );
-    assert_eq!(
-        *head.header_values("sec-websocket-accept"),
-        [VALID_WEBSOCKET_ACCEPT],
-        "{context}: Sec-WebSocket-Accept header"
-    );
-    let connection = head.header_values("connection");
-    assert_eq!(
-        connection.len(),
-        1,
-        "{context}: Connection header: {head:?}"
-    );
-    assert!(
-        connection[0].eq_ignore_ascii_case("upgrade"),
-        "{context}: invalid Connection header: {head:?}"
-    );
-}
-
-fn assert_handshake_rejected(head: &common::HttpResponse, expected_status: u16, context: &str) {
-    assert_eq!(
-        head.status, expected_status,
-        "{context}: unexpected rejection: {head:?}"
-    );
-    assert!(
-        head.header_values("sec-websocket-accept").is_empty(),
-        "{context}: rejection exposed Sec-WebSocket-Accept: {head:?}"
-    );
-    assert!(
-        head.header_values("sec-websocket-protocol").is_empty(),
-        "{context}: rejection selected a subprotocol: {head:?}"
-    );
+    assert_websocket_switch_accepting(head, VALID_WEBSOCKET_ACCEPT, context);
 }
 
 fn websocket_probe_router(dispatch_count: Arc<AtomicUsize>) -> Router {
@@ -268,9 +207,10 @@ fn websocket_probe_router(dispatch_count: Arc<AtomicUsize>) -> Router {
     router
 }
 
+/// Read the probe's one frame, then finish the close its return started.
 fn assert_connected_frame(stream: &mut TcpStream, context: &str) {
     assert_eq!(&*read_ws_text_frame(stream), "connected", "{context}");
-    write_ws_close_frame(stream);
+    complete_server_close(stream, context);
 }
 
 fn assert_invalid_handshake_matrix(addr: std::net::SocketAddr, dispatch_count: &AtomicUsize) {
@@ -332,13 +272,6 @@ fn assert_valid_handshake_after_rejections(
     assert_eq!(dispatch_count.load(Ordering::Acquire), 1);
 }
 
-/// How many origin categories [`generated_origin`] can produce.
-///
-/// The modulus and the arm count are the same number, named once: a category
-/// added without widening this — or the reverse — fails the generator's own
-/// `unreachable!` instead of silently narrowing what the case set covers.
-const ORIGIN_CATEGORIES: u64 = 11;
-
 /// One generated case: what it offers as `Origin`, and whether Camber takes it.
 ///
 /// The values alone, not the header lines they are sent as: every one of them
@@ -369,6 +302,84 @@ fn generated_host_case(host: &str, case: &mut deterministic::DeterministicCase) 
         .collect()
 }
 
+/// What every origin rule may draw on: the case index and the values drawn for it.
+struct OriginInput<'a> {
+    index: u64,
+    zone: &'a str,
+    host: &'a str,
+    mixed_host: &'a str,
+    path: &'a str,
+    port: &'a str,
+}
+
+/// One origin category: the rule that builds its case. The table's length is
+/// the modulus, so a category cannot be added without joining the cycle.
+type OriginRule = fn(&OriginInput<'_>) -> GeneratedOrigin;
+
+const ORIGIN_RULES: [OriginRule; 11] = [
+    |input| GeneratedOrigin {
+        label: "normalized scheme and authority case",
+        origins: one_origin(format!("HtTp://{}", input.mixed_host)),
+        accepted: true,
+    },
+    |input| GeneratedOrigin {
+        label: "normalized HTTP default port",
+        origins: one_origin(format!("HTTP://{}:80", input.mixed_host)),
+        accepted: true,
+    },
+    |input| GeneratedOrigin {
+        label: "normalized HTTPS default port",
+        origins: one_origin(format!("hTtPs://{}:443", input.mixed_host)),
+        accepted: true,
+    },
+    |_| GeneratedOrigin {
+        label: "null origin",
+        origins: one_origin("null".to_owned()),
+        accepted: false,
+    },
+    |input| GeneratedOrigin {
+        label: "wrong authority",
+        origins: one_origin(format!(
+            "http://attacker-{}.{}.test",
+            input.index, input.zone
+        )),
+        accepted: false,
+    },
+    |input| GeneratedOrigin {
+        label: "wrong port",
+        origins: one_origin(format!("http://{}:{}", input.host, input.port)),
+        accepted: false,
+    },
+    |input| GeneratedOrigin {
+        label: "userinfo",
+        origins: one_origin(format!("http://attacker@{}", input.host)),
+        accepted: false,
+    },
+    |input| GeneratedOrigin {
+        label: "path",
+        origins: one_origin(format!("http://{}{}", input.host, input.path)),
+        accepted: false,
+    },
+    |input| GeneratedOrigin {
+        label: "query",
+        origins: one_origin(format!("http://{}?case={}", input.host, input.index)),
+        accepted: false,
+    },
+    |input| GeneratedOrigin {
+        label: "fragment",
+        origins: one_origin(format!("http://{}#case-{}", input.host, input.index)),
+        accepted: false,
+    },
+    |input| GeneratedOrigin {
+        label: "multiple origins",
+        origins: Box::new([
+            format!("http://{}", input.host).into_boxed_str(),
+            format!("http://attacker-{}.{}.test", input.index, input.zone).into_boxed_str(),
+        ]),
+        accepted: false,
+    },
+];
+
 fn generated_origin(
     index: u64,
     case: &mut deterministic::DeterministicCase,
@@ -388,67 +399,16 @@ fn generated_origin(
         .copied()
         .expect("origin port set is non-empty");
 
-    let origin = match index % ORIGIN_CATEGORIES {
-        0 => GeneratedOrigin {
-            label: "normalized scheme and authority case",
-            origins: one_origin(format!("HtTp://{mixed_host}")),
-            accepted: true,
-        },
-        1 => GeneratedOrigin {
-            label: "normalized HTTP default port",
-            origins: one_origin(format!("HTTP://{mixed_host}:80")),
-            accepted: true,
-        },
-        2 => GeneratedOrigin {
-            label: "normalized HTTPS default port",
-            origins: one_origin(format!("hTtPs://{mixed_host}:443")),
-            accepted: true,
-        },
-        3 => GeneratedOrigin {
-            label: "null origin",
-            origins: one_origin("null".to_owned()),
-            accepted: false,
-        },
-        4 => GeneratedOrigin {
-            label: "wrong authority",
-            origins: one_origin(format!("http://attacker-{index}.{zone}.test")),
-            accepted: false,
-        },
-        5 => GeneratedOrigin {
-            label: "wrong port",
-            origins: one_origin(format!("http://{host}:{generated_port}")),
-            accepted: false,
-        },
-        6 => GeneratedOrigin {
-            label: "userinfo",
-            origins: one_origin(format!("http://attacker@{host}")),
-            accepted: false,
-        },
-        7 => GeneratedOrigin {
-            label: "path",
-            origins: one_origin(format!("http://{host}{generated_path}")),
-            accepted: false,
-        },
-        8 => GeneratedOrigin {
-            label: "query",
-            origins: one_origin(format!("http://{host}?case={index}")),
-            accepted: false,
-        },
-        9 => GeneratedOrigin {
-            label: "fragment",
-            origins: one_origin(format!("http://{host}#case-{index}")),
-            accepted: false,
-        },
-        10 => GeneratedOrigin {
-            label: "multiple origins",
-            origins: Box::new([
-                format!("http://{host}").into_boxed_str(),
-                format!("http://attacker-{index}.{zone}.test").into_boxed_str(),
-            ]),
-            accepted: false,
-        },
-        _ => unreachable!("modulo bounds origin categories"),
+    let input = OriginInput {
+        index,
+        zone,
+        host: &host,
+        mixed_host: &mixed_host,
+        path: generated_path,
+        port: generated_port,
     };
+    let slot = usize::try_from(index).expect("a case index fits") % ORIGIN_RULES.len();
+    let origin = ORIGIN_RULES[slot](&input);
     (host.into_boxed_str(), origin)
 }
 
@@ -469,40 +429,75 @@ fn websocket_rejects_invalid_version_and_key() {
         .unwrap();
 }
 
+/// One offer a direct route selects from, and the token it must echo.
+struct SubprotocolOffer {
+    label: &'static str,
+    /// Each entry is one `Sec-WebSocket-Protocol` field, in the order sent.
+    fields: &'static [&'static str],
+    selected: Option<&'static str>,
+}
+
+/// Direct selection is the first offered token, read across repeated fields in
+/// the order the client sent them. No offer selects nothing.
+const SUBPROTOCOL_OFFERS: [SubprotocolOffer; 4] = [
+    SubprotocolOffer {
+        label: "one field with two offers",
+        fields: &["chat, superchat"],
+        selected: Some("chat"),
+    },
+    SubprotocolOffer {
+        label: "repeated fields keep their order",
+        fields: &["superchat", "chat, v2.json"],
+        selected: Some("superchat"),
+    },
+    SubprotocolOffer {
+        label: "optional whitespace around offers",
+        fields: &[" \tv2.json ,chat"],
+        selected: Some("v2.json"),
+    },
+    SubprotocolOffer {
+        label: "no offers",
+        fields: &[],
+        selected: None,
+    },
+];
+
 #[test]
 fn websocket_selects_one_offered_subprotocol() {
-    const OFFERED_AND_SUPPORTED: [&str; 2] = ["chat", "superchat"];
-
     common::test_runtime()
         .header_timeout(Duration::from_millis(200))
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let dispatch_count = Arc::new(AtomicUsize::new(0));
             let addr = common::spawn_server(websocket_probe_router(Arc::clone(&dispatch_count)));
-            let request = handshake_request(
-                "/ws",
-                &accepted_plus(LOCAL_HOST, &[("Sec-WebSocket-Protocol", "chat, superchat")]),
-            );
-            let (mut stream, head) = perform_raw_ws_handshake(addr, &request);
 
-            assert_websocket_switch(&head, "subprotocol handshake");
-            let selected = head.header_values("sec-websocket-protocol");
-            assert_eq!(
-                selected.len(),
-                1,
-                "server must emit one Sec-WebSocket-Protocol header: {head:?}"
-            );
-            assert_eq!(
-                selected[0].split(',').count(),
-                1,
-                "server echoed the offered subprotocol list: {head:?}"
-            );
-            assert!(
-                OFFERED_AND_SUPPORTED.contains(&selected[0]),
-                "server selected an unsupported or unoffered subprotocol: {head:?}"
-            );
-            assert_connected_frame(&mut stream, "selected subprotocol did not dispatch");
-            assert_eq!(dispatch_count.load(Ordering::Acquire), 1);
+            SUBPROTOCOL_OFFERS
+                .iter()
+                .enumerate()
+                .for_each(|(dispatched, offer)| {
+                    let fields: Box<[Header<'_>]> = offer
+                        .fields
+                        .iter()
+                        .map(|value| ("Sec-WebSocket-Protocol", *value))
+                        .collect();
+                    let request = handshake_request("/ws", &accepted_plus(LOCAL_HOST, &fields));
+                    let (mut stream, head) = perform_raw_ws_handshake(addr, &request);
+
+                    assert_websocket_switch(&head, offer.label);
+                    assert_eq!(
+                        *head.header_values("sec-websocket-protocol"),
+                        *offer.selected.as_slice(),
+                        "{}: server must echo exactly the first offer: {head:?}",
+                        offer.label
+                    );
+                    assert_connected_frame(&mut stream, offer.label);
+                    assert_eq!(
+                        dispatch_count.load(Ordering::Acquire),
+                        dispatched + 1,
+                        "{}: selection and handler dispatch diverged",
+                        offer.label
+                    );
+                });
 
             runtime::request_shutdown();
         })
@@ -597,14 +592,7 @@ fn websocket_echo() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |_req: &Request, mut conn: WsConn| {
-                while let Some(msg) = conn.recv() {
-                    if conn.send(&msg).is_err() {
-                        break;
-                    }
-                }
-                Ok(())
-            });
+            router.ws("/ws", common::echo_ws);
 
             let addr = common::spawn_server(router);
 
@@ -912,14 +900,7 @@ fn auth_middleware_blocks_unauthenticated_websocket() {
                         as std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>>,
                 }
             });
-            router.ws("/chat", |_req: &Request, mut conn: WsConn| {
-                while let Some(msg) = conn.recv() {
-                    if conn.send(&msg).is_err() {
-                        break;
-                    }
-                }
-                Ok(())
-            });
+            router.ws("/chat", common::echo_ws);
 
             let addr = common::spawn_server(router);
 
@@ -1027,11 +1008,7 @@ fn auth_middleware_allows_authenticated_websocket() {
             });
             router.ws("/chat", |_req: &Request, mut conn: WsConn| {
                 conn.send("welcome")?;
-                while let Some(msg) = conn.recv() {
-                    if conn.send(&msg).is_err() {
-                        break;
-                    }
-                }
+                common::echo_until_closed(&mut conn);
                 Ok(())
             });
 

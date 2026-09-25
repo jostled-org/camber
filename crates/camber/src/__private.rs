@@ -8,6 +8,22 @@ pub use crossbeam_channel;
 /// body, or owns anything.
 pub use crate::http::body_admission::{checked_body_frame_total, declared_length_exceeds_limit};
 
+/// The exact decision the outbound client replays a failed send from.
+///
+/// Re-exported for the reason the pair above is: a focused contract that
+/// classified its own copy of a Reqwest error would prove its own rule, not the
+/// one a retried request is actually refused or admitted by. It reads an error,
+/// a method, and the configured opt-in, and owns nothing.
+pub use crate::http::client::client_retryable_transport;
+
+/// The exact functions the outbound client chooses each retry delay with.
+///
+/// Re-exported for the reason the decision above is: a focused contract that
+/// parsed its own `Retry-After` or multiplied its own backoff would prove its
+/// own arithmetic, not the wait a retried request actually takes. The wall
+/// clock and the jitter sample are inputs, and neither function owns anything.
+pub use crate::http::client::{client_retry_after_delay, client_retry_backoff};
+
 /// The exact accessor a registered buffered proxy route freezes its ceiling
 /// through.
 ///

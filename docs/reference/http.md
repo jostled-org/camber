@@ -219,7 +219,7 @@ The signal is `Send + Sync + Clone`, and every clone resolves to the same cause.
 
 **`Completed` means produced, not delivered.** It fires when Camber has handed the whole response body to Hyper, which is what an in-flight producer needs to know: it can release subprocesses, cursors, permits, and temp files. Hyper exposes frame production, not transport delivery, so "the last byte reached the client" is not observable and is not what this reports.
 
-A response that hands its transport on rather than writing a body still completes at that handoff. A WebSocket upgrade resolves `Completed` when the `101` is committed — the point where the WebSocket subsystem takes over and the HTTP response is over; the upgraded peer's lifetime is the WebSocket close contract, not this signal. Building the `101` is not that point: an upgrade held short of its handoff has not resolved there, and one the server refuses never reaches the handoff at all. A refused upgrade falls back to its own response body, which is an ordinary one — `400` or `426` from handshake validation, `403` for a rejected Origin, and on an owned server `503` when the supervisor rejects the registration or `500` when it is unavailable — so it resolves `Completed` when that body is produced. A peer that abandons the handshake before the `101` resolves `PeerDisconnect`. A gRPC request resolves `Completed` when Camber's own body around tonic's answer has produced tonic's last frame and its trailers; see [gRPC handoff](#grpc-handoff).
+A response that hands its transport on rather than writing a body still completes at that handoff. A WebSocket upgrade resolves `Completed` when the `101` is committed — the point where the WebSocket subsystem takes over and the HTTP response is over; the upgraded peer's lifetime is the WebSocket close contract, not this signal. Building the `101` is not that point: an upgrade held short of its handoff has not resolved there, and one the server refuses never reaches the handoff at all. A refused upgrade falls back to its own response body, which is an ordinary one — `400` or `426` from handshake validation, `403` for a rejected Origin, `502`, `504`, or `408` for a proxied upgrade whose backend negotiation failed (see [Proxied WebSocket upgrades](#proxied-websocket-upgrades)), and on an owned server `503` when the supervisor rejects the registration or `500` when it is unavailable — so it resolves `Completed` when that body is produced. A peer that abandons the handshake before the `101` resolves `PeerDisconnect`. A gRPC request resolves `Completed` when Camber's own body around tonic's answer has produced tonic's last frame and its trailers; see [gRPC handoff](#grpc-handoff).
 
 **Hold the signal somewhere that outlives the handler.** Camber's per-request future is dropped when the peer goes away — that drop is the observation — so a handler awaiting its own signal is cancelled instead of woken. Clone the signal into the task that owns the resource:
 
@@ -460,8 +460,9 @@ request does not end on one thing.
 - `connection_end` is `peer-disconnected`, `stream-reset`, or `transport-failed`, and
   `none` for an operation whose connection outlived it.
 - `boundary` is the configured bound that ended it, drawn from the same
-  `DeadlineBoundary` and `ByteBoundary` vocabularies every typed failure names, or
-  `none` when the operation crossed no bound.
+  `DeadlineBoundary` and `ByteBoundary` vocabularies every typed failure names.
+  It is `source_failure` when the body's source failed instead, and `none` when
+  the operation crossed no bound.
 - `shutdown` is the last server phase committed before the operation finalized —
   `graceful`, `cancelled`, or `deadline-expired` — and `none` for a running server.
 - `status` is the status the peer was given, and `none` when no head committed.
@@ -912,6 +913,16 @@ cross the payload maximum is never written, HTTP/1 closes the connection whose
 framing cannot continue, and HTTP/2 resets the one affected stream. The route's
 rejection mapper is not called — there is no response left to map.
 
+A source that fails after the head is committed ends the response the same way.
+Two cases count as a source failure: an upstream on a streaming proxy that fails
+a read or goes quiet past its `upstream_idle_timeout`, and a body that ends with
+bytes still owed against its declared `Content-Length`.
+The second applies even when the producer closed its sender cleanly. Camber never
+sends a short declared body as a clean end. The committed status stays, HTTP/1
+closes the connection, and HTTP/2 resets only the affected stream. The completion
+record names `delivery=interrupted` and `boundary=source_failure`. It never
+records a normal completion for that body.
+
 Upload and download are accounted separately. A streaming upload's bytes, quiet
 interval, and lifetime are its own, and route-aware body admission remains the
 only authority over request payload bytes; a transfer policy adds time to that
@@ -991,6 +1002,85 @@ One owner is process-wide, and only one: `proxy_forward(...)` takes a backend
 and a prefix and no policy, so the documented defaults are the only bounds it
 can carry. Every `proxy_forward` call in a process shares that default-policy
 client and its connection pool. Register a route to name your own bounds.
+
+### The forwarding header perimeter
+
+Every proxied request reads one header policy. A buffered request, a streaming
+request, and a proxied WebSocket offer apply the same three rules, in this
+order:
+
+1. Drop every field the peer's own `Connection` values name. Camber scans all
+   repeated `Connection` fields, in any casing, with the padding and separators
+   HTTP permits. A fragment that is not a token names no field and is dropped on
+   its own, so the valid names beside it still apply.
+2. Drop every peer-supplied forwarding field. That is the whole case-insensitive
+   `X-Forwarded-` family — `X-Forwarded-Port` and `X-Forwarded-Prefix` stop here
+   with `X-Forwarded-For` — plus `Forwarded` and `X-Real-IP`.
+3. Drop the fixed hop-by-hop fields: `Connection`, `Keep-Alive`,
+   `Proxy-Authenticate`, `Proxy-Authorization`, `Proxy-Connection`, `TE`,
+   `Trailer`, `Transfer-Encoding`, `Upgrade`, and `Host`.
+
+An ordinary proxied request then carries Camber's own metadata: one
+`X-Forwarded-For` and one `X-Real-IP` naming the peer the transport reported,
+one `X-Forwarded-Host` carrying the peer's `Host` field, and one
+`X-Forwarded-Proto` naming the scheme the request arrived over. A field whose
+source is absent is not sent: no `X-Forwarded-For` or `X-Real-IP` without a
+reported peer address, and no `X-Forwarded-Host` for a request that carried no
+`Host` field, such as an HTTP/2 request that states only `:authority`. An
+upstream reads each field it receives once. Camber vouches for no forwarding
+field it did not write, which is why the whole prefix family stops at this hop.
+
+A proxied WebSocket offer is narrower still. Camber builds its own handshake
+fields and forwards only `Authorization`, `Cookie`, and `X-*` fields that the
+first two rules left. It adds no forwarding metadata of its own. A handshake
+whose `Connection` list cannot be read as tokens is refused `400` at ingress
+rather than sanitized — a list Camber cannot read is not one it can honour.
+
+Upstream answers keep their own contract. Camber strips the hop-by-hop fields
+and the fields the upstream's own `Connection` names, and nothing else. An
+answer never acquires forwarding metadata, and an answer that carries an
+`X-Forwarded-` field the upstream wrote reaches the peer unchanged.
+
+### Proxied WebSocket upgrades
+
+A proxy route that receives a WebSocket offer negotiates with its backend
+before it answers the peer. Camber sends the offer, waits for the backend's
+answer, and validates that answer. Only then does it build the downstream `101`
+and register the bridge:
+
+1. Camber admits the peer's offer under the same handshake and Origin rules as
+   a direct route.
+2. Camber connects to the backend. An `https` backend is reached over TLS. The
+   certificate must chain to the public WebPKI roots and name the configured
+   host, and ALPN offers HTTP/1.1 only. A TLS failure never falls back to
+   plaintext.
+3. Camber sends the backend every protocol the peer offered, in the peer's
+   order. It does not select a protocol for the backend.
+4. The backend's answer must be `101`, with one `Upgrade: websocket`, a valid
+   `upgrade` token in `Connection`, and one `Sec-WebSocket-Accept` that matches
+   the key Camber sent. It must not name an extension. If it names a protocol,
+   that must be exactly one token the peer offered.
+5. The downstream `101` names the protocol the backend selected, or none.
+
+Backend negotiation failures are `Proxy` refusals mapped through the route's
+rejection policy. Camber answers `502` when the backend refuses, sends an
+invalid answer, or cannot be reached. It also answers `502` when the peer's
+path holds a traversal segment, or when the configured backend forms no
+`http` or `https` target. It answers `504` when the route's
+`connect` or `request` deadline expires. A failed backend negotiation reports
+no negotiated subprotocol.
+
+Inbound offer validation and bridge registration retain their own rejection
+categories. The inbound request `total` also bounds negotiation; its expiry
+produces a `RequestTimeout` rejection with default status `408`. A handoff
+refusal after successful negotiation retains the backend's selected protocol,
+if any. Camber releases the backend connection on every refusal.
+
+A registered bridge frames over the connection negotiated here and never
+connects a second time. Bytes the backend sent after its `101` reach the peer.
+
+A direct route selects the first protocol the peer offered. A proxied route
+never makes that selection: only the backend selects.
 
 ## Host Routing
 

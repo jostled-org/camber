@@ -75,6 +75,12 @@ impl ProxyUpstream {
             .map_err(|error| RuntimeError::Http(Arc::clone(error)))
     }
 
+    /// How long this route may take to establish an upstream transport.
+    #[cfg(feature = "ws")]
+    pub(super) const fn connect_timeout(&self) -> Duration {
+        self.policy.connect()
+    }
+
     /// How long this route's request may run before a usable head arrives.
     pub(super) const fn request_timeout(&self) -> Duration {
         self.policy.request()

@@ -128,7 +128,7 @@ pub fn build_tls_config_from_resolver(
     .with_cert_resolver(Arc::new(store));
 
     // ALPN negotiation: prefer h2, fall back to http/1.1
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![b"h2".to_vec(), HTTP1_ALPN.to_vec()];
 
     Ok(Arc::new(config))
 }
@@ -149,39 +149,99 @@ pub async fn connect_with(
     server_name: &str,
     config: Arc<rustls::ClientConfig>,
 ) -> Result<TlsStream, RuntimeError> {
-    let connector = tokio_rustls::TlsConnector::from(config);
-    let sni = rustls::pki_types::ServerName::try_from(server_name)
-        .map_err(|e| RuntimeError::Tls(format!("invalid server name: {e}").into()))?
-        .to_owned();
+    let sni = client_server_name(server_name)?;
     let tcp = tokio::net::TcpStream::connect(addr).await?;
-    let tls = connector
-        .connect(sni, tcp)
-        .await
-        .map_err(|e| RuntimeError::Tls(e.to_string().into()))?;
+    let tls = client_handshake(config, sni, tcp).await?;
     Ok(TlsStream::from_client(tls))
 }
 
+/// The name a client verifies its peer's certificate against, and sends as SNI.
+///
+/// Parsed before anything is dialled, so a name no certificate could carry
+/// never costs a connection.
+pub(crate) fn client_server_name(
+    server_name: &str,
+) -> Result<rustls::pki_types::ServerName<'static>, RuntimeError> {
+    rustls::pki_types::ServerName::try_from(server_name)
+        .map(|name| name.to_owned())
+        .map_err(|e| RuntimeError::Tls(format!("invalid server name: {e}").into()))
+}
+
+/// Authenticate an established transport as the client side of TLS.
+pub(crate) async fn client_handshake(
+    config: Arc<rustls::ClientConfig>,
+    server_name: rustls::pki_types::ServerName<'static>,
+    transport: tokio::net::TcpStream,
+) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, RuntimeError> {
+    tokio_rustls::TlsConnector::from(config)
+        .connect(server_name, transport)
+        .await
+        .map_err(|e| RuntimeError::Tls(e.to_string().into()))
+}
+
+/// A client config cell built once per process from the public WebPKI roots.
+type CachedClientConfig = std::sync::OnceLock<Result<Arc<rustls::ClientConfig>, Box<str>>>;
+
 fn default_client_config() -> Result<Arc<rustls::ClientConfig>, RuntimeError> {
-    static CONFIG: std::sync::OnceLock<Result<Arc<rustls::ClientConfig>, Box<str>>> =
-        std::sync::OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let root_store =
-                rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            rustls::ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .map(|builder| {
-                Arc::new(
-                    builder
-                        .with_root_certificates(root_store)
-                        .with_no_client_auth(),
-                )
-            })
-            .map_err(|e| format!("TLS config error: {e}").into())
-        })
-        .as_ref()
-        .map(Arc::clone)
-        .map_err(|e| RuntimeError::Tls(e.clone()))
+    static CONFIG: CachedClientConfig = std::sync::OnceLock::new();
+    webpki_client_config(&CONFIG, |roots| client_config(roots, &[]))
+}
+
+/// The config a proxied WebSocket verifies its `wss` backend with.
+///
+/// The public WebPKI roots, like every other outbound TLS connection Camber
+/// makes, under the offer [`backend_client_config`] owns.
+#[cfg(feature = "ws")]
+pub(crate) fn http1_client_config() -> Result<Arc<rustls::ClientConfig>, RuntimeError> {
+    static CONFIG: CachedClientConfig = std::sync::OnceLock::new();
+    webpki_client_config(&CONFIG, backend_client_config)
+}
+
+/// The config a proxied WebSocket verifies a `wss` backend under `roots` with.
+///
+/// The one place the backend upgrade's ALPN offer is named: HTTP/1.1 alone,
+/// because the upgrade is an HTTP/1.1 exchange and a backend that negotiated
+/// anything else could not answer it. Production's public roots and the test
+/// adapter's local ones are both built here, so neither can offer a protocol
+/// set the other does not.
+#[cfg(feature = "ws")]
+pub(crate) fn backend_client_config(
+    roots: rustls::RootCertStore,
+) -> Result<rustls::ClientConfig, Box<str>> {
+    client_config(roots, &[HTTP1_ALPN])
+}
+
+/// The ALPN identifier of HTTP/1.1.
+const HTTP1_ALPN: &[u8] = b"http/1.1";
+
+/// Build one cached config from the public WebPKI roots on first use.
+fn webpki_client_config(
+    cell: &CachedClientConfig,
+    build: impl FnOnce(rustls::RootCertStore) -> Result<rustls::ClientConfig, Box<str>>,
+) -> Result<Arc<rustls::ClientConfig>, RuntimeError> {
+    cell.get_or_init(|| {
+        let roots =
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        build(roots).map(Arc::new)
+    })
+    .as_ref()
+    .map(Arc::clone)
+    .map_err(|e| RuntimeError::Tls(e.clone()))
+}
+
+/// Build a client config that trusts `roots` and offers `alpn`, under the
+/// same crypto provider and protocol versions as every Camber TLS endpoint.
+fn client_config(
+    roots: rustls::RootCertStore,
+    alpn: &[&[u8]],
+) -> Result<rustls::ClientConfig, Box<str>> {
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| format!("TLS config error: {e}"))?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
+    Ok(config)
 }

@@ -54,7 +54,7 @@ impl TransferDirection {
     }
 
     /// The direction's name, for the diagnostics that state it.
-    const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Upload => "upload",
             Self::Download => "download",

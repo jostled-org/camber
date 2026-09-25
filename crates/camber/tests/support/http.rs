@@ -1174,6 +1174,39 @@ impl HttpResponse {
     }
 }
 
+/// Every value one header name carries in a raw head, in order.
+///
+/// The first line is the request or status line and never a field, and the
+/// first empty line ends the fields, so bytes read past the head can never
+/// answer for one. Public so every raw fixture reads a head's fields one way.
+pub fn header_values<'a>(head: &'a str, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+    head.split("\r\n")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(move |line| {
+            let (field, value) = line.split_once(':')?;
+            field
+                .trim()
+                .eq_ignore_ascii_case(name)
+                .then_some(value.trim())
+        })
+}
+
+/// The text one caught panic payload carries.
+///
+/// Read as the value the unwind handed on, not through any rendering
+/// production might have applied to it. Public so every root that catches a
+/// panic reads its payload one way.
+pub fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
+    match payload.downcast_ref::<String>() {
+        Some(owned) => owned,
+        None => payload
+            .downcast_ref::<&str>()
+            .copied()
+            .unwrap_or("the payload carried no readable text"),
+    }
+}
+
 /// The authority a request is addressed to when the case turns on no other one.
 ///
 /// Public because the writers that take an authority as a parameter still need
@@ -3215,7 +3248,10 @@ fn validated_body_length(length: usize) -> io::Result<BodyKind> {
     }
 }
 
-fn parse_head(bytes: &[u8]) -> io::Result<(u16, Box<[(Box<str>, Box<str>)]>)> {
+/// One response head's header fields, in wire order.
+type HeadFields = Box<[(Box<str>, Box<str>)]>;
+
+fn parse_head(bytes: &[u8]) -> io::Result<(u16, HeadFields)> {
     let head = std::str::from_utf8(bytes)
         .map_err(|error| invalid_data(format!("response head was not UTF-8: {error}")))?;
     let mut lines = head.split("\r\n");

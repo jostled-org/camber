@@ -12,6 +12,7 @@ use camber::http::{
     TransferBudget,
 };
 use camber::{ResourceBudget, ResourcePhase, RuntimeError};
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -63,11 +64,118 @@ fn deadline_name(boundary: DeadlineBoundary) -> &'static str {
         DeadlineBoundary::ClientConnect => "client-connect",
         DeadlineBoundary::ClientRequest => "client-request",
         DeadlineBoundary::ClientResponseIdle => "client-response-idle",
+        DeadlineBoundary::ClientRetry => "client-retry",
         DeadlineBoundary::ResourceStartupHealth => "resource-startup-health",
         DeadlineBoundary::ResourcePeriodicHealth => "resource-periodic-health",
         DeadlineBoundary::ResourceShutdown => "resource-shutdown",
         DeadlineBoundary::AggregateShutdown => "aggregate-shutdown",
     }
+}
+
+/// Every closed deadline boundary, in declaration order.
+///
+/// A new variant fails to compile in [`deadline_name`]'s wildcard-free match,
+/// not here: an array that leaves a member out still compiles. What catches a
+/// member missing here, or missing from production's own list, is
+/// [`assert_deadline_vocabulary_is_published`].
+const EVERY_DEADLINE: [DeadlineBoundary; 16] = [
+    DeadlineBoundary::Header,
+    DeadlineBoundary::RequestBodyIdle,
+    DeadlineBoundary::RequestTotal,
+    DeadlineBoundary::TransferIdle,
+    DeadlineBoundary::TransferTotal,
+    DeadlineBoundary::ProxyConnect,
+    DeadlineBoundary::ProxyRequest,
+    DeadlineBoundary::ProxyUpstreamIdle,
+    DeadlineBoundary::ClientConnect,
+    DeadlineBoundary::ClientRequest,
+    DeadlineBoundary::ClientResponseIdle,
+    DeadlineBoundary::ClientRetry,
+    DeadlineBoundary::ResourceStartupHealth,
+    DeadlineBoundary::ResourcePeriodicHealth,
+    DeadlineBoundary::ResourceShutdown,
+    DeadlineBoundary::AggregateShutdown,
+];
+
+/// Every deadline has one name in the caller's match and one reported label,
+/// and no two deadlines share either.
+fn assert_deadline_vocabulary_is_closed_and_unique() {
+    let names: HashSet<&str> = EVERY_DEADLINE
+        .iter()
+        .map(|&boundary| deadline_name(boundary))
+        .collect();
+    assert_eq!(names.len(), EVERY_DEADLINE.len(), "duplicate match names");
+
+    let labels: HashSet<String> = EVERY_DEADLINE
+        .iter()
+        .map(|boundary| boundary.to_string())
+        .collect();
+    assert_eq!(
+        labels.len(),
+        EVERY_DEADLINE.len(),
+        "duplicate reported labels"
+    );
+
+    assert_eq!(deadline_name(DeadlineBoundary::ClientRetry), "client-retry");
+    assert_eq!(DeadlineBoundary::ClientRetry.to_string(), "client_retry");
+}
+
+/// Every closed byte boundary, in declaration order.
+const EVERY_BYTE: [ByteBoundary; 7] = [
+    ByteBoundary::RequestBody,
+    ByteBoundary::TransferUpload,
+    ByteBoundary::TransferDownload,
+    ByteBoundary::ClientResponse,
+    ByteBoundary::ProxyBufferedResponse,
+    ByteBoundary::StaticFile,
+    ByteBoundary::ProfilingResponse,
+];
+
+/// The name a completion records when it crossed no configured bound.
+const NO_BOUND: &str = "none";
+
+/// The name a completion records when its source failed rather than a bound.
+const SOURCE_FAILURE: &str = "source_failure";
+
+/// Production's own deadline list is the one a completion label is published
+/// under, and it holds every deadline and nothing else.
+///
+/// The published crossed-bound vocabulary is built from `DeadlineBoundary::ALL`,
+/// so a deadline dropped from that list disappears here even though the enum,
+/// its label, and every exhaustive match still compile.
+fn assert_deadline_vocabulary_is_published(published: &[&str]) {
+    let bytes: HashSet<String> = EVERY_BYTE.iter().map(ToString::to_string).collect();
+    // Compared as sorted lists, not sets, so a deadline published twice fails
+    // beside one left out.
+    let mut deadlines: Box<[&str]> = published
+        .iter()
+        .copied()
+        .filter(|&name| name != NO_BOUND && name != SOURCE_FAILURE && !bytes.contains(name))
+        .collect();
+    deadlines.sort_unstable();
+    let mut expected: Box<[String]> = EVERY_DEADLINE.iter().map(ToString::to_string).collect();
+    expected.sort_unstable();
+
+    assert_eq!(
+        deadlines[..],
+        expected[..],
+        "the published deadline vocabulary is not exactly every deadline: {published:?}"
+    );
+}
+
+/// A failed source is published under its own name, exactly once.
+///
+/// The deadline check above filters this name out, so it alone cannot see the
+/// name go missing or appear twice.
+fn assert_source_failure_is_published(published: &[&str]) {
+    let named = published
+        .iter()
+        .filter(|&&name| name == SOURCE_FAILURE)
+        .count();
+    assert_eq!(
+        named, 1,
+        "the published boundary vocabulary does not name {SOURCE_FAILURE} exactly once: {published:?}"
+    );
 }
 
 /// Every closed byte boundary, matched without a wildcard.
@@ -563,6 +671,10 @@ fn budget_constructors_validate_every_finite_value_and_explicit_unbounded_choice
         deadline_name(DeadlineBoundary::AggregateShutdown),
         "aggregate-shutdown"
     );
+    assert_deadline_vocabulary_is_closed_and_unique();
+    let published = camber::http::mock::completion_vocabulary().boundaries;
+    assert_deadline_vocabulary_is_published(&published);
+    assert_source_failure_is_published(&published);
     assert_eq!(
         byte_name(ByteBoundary::ProfilingResponse),
         "profiling-response"

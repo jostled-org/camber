@@ -1,10 +1,22 @@
 use crate::runtime_support as common;
 
+use crate::h2_client::{H2BodyEnd, H2Reset, H2Streamed, PersistentH2Client};
+use crate::http::{DEFAULT_HOST, HttpResponse};
+use crate::source_failure::{
+    COMPLETION_EVENT, HeldBody, Release, SOURCE_FAILURE_BOUND, TRUNCATION_DIAGNOSTIC,
+    assert_normal, assert_source_failure_completion, declared_length, declared_short_row,
+    held_route, one_completion_record, run_every_row,
+};
+use crate::trace_capture::capture_events;
+
 use camber::http::mock::{InboundTerminal, TransferObservation, TransferOwnerController};
-use camber::http::{Request, Router, StreamResponse, TransferBudget};
+use camber::http::{
+    Rejection, RejectionContext, Request, Response, Router, StreamResponse, TransferBudget,
+};
 use camber::{RuntimeError, runtime};
-use std::io::{self, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -48,7 +60,8 @@ fn spawn_content_length_truncating_upstream() -> (
 
 fn serve_truncated_response(listener: TcpListener, close_rx: mpsc::Receiver<()>) {
     let (mut stream, _) = listener.accept().expect("accept proxy connection");
-    let request_head = read_request_head(&mut stream).expect("read proxy request head");
+    let request_head = crate::http::read_head(&mut stream, crate::http::WIRE_TIMEOUT)
+        .expect("read proxy request head");
     let request_head = std::str::from_utf8(&request_head).expect("proxy request head is UTF-8");
     assert!(
         request_head.starts_with("GET /failure HTTP/1.1\r\n"),
@@ -67,23 +80,6 @@ fn serve_truncated_response(listener: TcpListener, close_rx: mpsc::Receiver<()>)
 
     close_rx.recv().expect("client releases upstream close");
     // Dropping the socket here truncates the advertised body at a controlled point.
-}
-
-fn read_request_head(stream: &mut TcpStream) -> io::Result<Box<[u8]>> {
-    const LIMIT: usize = 16 * 1024;
-    let mut head = Vec::new();
-    while !head.ends_with(b"\r\n\r\n") {
-        if head.len() == LIMIT {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "upstream request head exceeded fixture limit",
-            ));
-        }
-        let mut byte = [0_u8; 1];
-        stream.read_exact(&mut byte)?;
-        head.push(byte[0]);
-    }
-    Ok(head.into_boxed_slice())
 }
 
 async fn observe_h2_completion(
@@ -633,4 +629,235 @@ fn stream_response_with_buffer_preserves_streaming_behavior() {
             runtime::request_shutdown();
         })
         .unwrap();
+}
+
+/// The two local declared-length rows 9.T1 drives.
+///
+/// Both sources end cleanly with bytes still owed. One owes every byte; the
+/// other owes the remainder after one data frame.
+const DECLARED_TRUNCATION_ROWS: [(&str, &str, &[u8]); 2] = [
+    ("zero produced bytes", "/declared/empty", b""),
+    (
+        "a remainder after a data frame",
+        "/declared/partial",
+        TRUNCATED_PREFIX,
+    ),
+];
+
+/// 9.T1 — invariant 14
+///
+/// A local streaming source declares a length, and closes cleanly after the
+/// peer has read the head. The source reports no error, so only the declared
+/// length says the body is short. The committed status stays, the wire framing
+/// stays incomplete, and the completion account records the source failure as
+/// its download boundary. No upstream proxy takes part. Each row runs even
+/// after the other fails, so both report their own diagnostic.
+#[test]
+fn declared_stream_truncation_records_source_failure() {
+    common::test_runtime()
+        .with_tracing()
+        .shutdown_timeout(Duration::from_secs(2))
+        .run(|| {
+            let capture = capture_events(COMPLETION_EVENT);
+            let mut router = Router::new();
+            let releases = DECLARED_TRUNCATION_ROWS.map(|(_, path, before)| {
+                held_route(
+                    &mut router,
+                    path,
+                    HeldBody {
+                        declared: Some(ADVERTISED_BODY_LENGTH),
+                        before,
+                        after: b"",
+                    },
+                )
+            });
+            let addr = common::spawn_server(router);
+
+            let capture = &capture;
+            run_every_row(DECLARED_TRUNCATION_ROWS.into_iter().zip(&releases).map(
+                |((row, path, before), release)| {
+                    (row, move || {
+                        declared_short_row(
+                            capture,
+                            addr,
+                            path,
+                            ADVERTISED_BODY_LENGTH,
+                            before,
+                            release,
+                            row,
+                        );
+                    })
+                },
+            ));
+
+            runtime::request_shutdown();
+        })
+        .expect("the declared-truncation runtime ran to completion");
+}
+
+/// The route whose HTTP/2 stream ends short.
+const H2_SHORT_PATH: &str = "/h2/declared-short";
+
+/// The buffered route a sibling stream on the same connection reads.
+const H2_SIBLING_PATH: &str = "/h2/sibling";
+
+/// The body the sibling stream must receive whole.
+const H2_SIBLING_BODY: &str = "sibling-complete";
+
+/// The reason Hyper resets a server stream with when its body fails.
+///
+/// Hyper's `on_user_err` resets with the `h2::Reason` found in the body error's
+/// cause chain, else `INTERNAL_ERROR`. A source failure carries no h2 reason.
+const SERVER_BODY_FAILURE_REASON: h2::Reason = h2::Reason::INTERNAL_ERROR;
+
+/// What the HTTP/2 peer read from the short stream and its sibling.
+#[derive(Debug)]
+struct H2ShortOutcome {
+    declared: Option<usize>,
+    prefix: Box<[u8]>,
+    short: H2Streamed,
+    sibling: HttpResponse,
+}
+
+/// Read the short stream's head and prefix, release its source, read its end,
+/// then read a sibling stream on the same connection.
+async fn short_stream_beside_sibling(
+    addr: SocketAddr,
+    release: &Release,
+    row: &str,
+) -> H2ShortOutcome {
+    let mut client = PersistentH2Client::connect(addr, SOURCE_FAILURE_BOUND).await;
+    let mut download = client.open_download(H2_SHORT_PATH).await;
+    download.head().await;
+    let declared = download
+        .header("content-length")
+        .map(|value| declared_length(value, row));
+    let prefix = download.read_prefix(TRUNCATED_PREFIX.len()).await;
+    release.release(row);
+    let short = download.drain().await;
+    drop(download);
+
+    let sibling = client
+        .send_complete("GET", H2_SIBLING_PATH, DEFAULT_HOST, &[], b"")
+        .await;
+    client.close().await;
+    H2ShortOutcome {
+        declared,
+        prefix,
+        short,
+        sibling,
+    }
+}
+
+fn assert_short_stream_reset(outcome: &H2ShortOutcome, row: &str) {
+    assert_eq!(outcome.short.status, 200, "{row}: the committed status");
+    assert_eq!(
+        outcome.declared,
+        Some(ADVERTISED_BODY_LENGTH),
+        "{row}: the head declared the source's length"
+    );
+    assert_eq!(
+        outcome.prefix.as_ref(),
+        TRUNCATED_PREFIX,
+        "{row}: the prefix"
+    );
+    if outcome.short.end == H2BodyEnd::Ended {
+        panic!(
+            "{TRUNCATION_DIAGNOSTIC}: {row}: the short stream ended cleanly after \
+             {} more bytes: {outcome:?}",
+            outcome.short.bytes.saturating_sub(outcome.prefix.len())
+        );
+    }
+    assert_eq!(
+        outcome.short.end,
+        H2BodyEnd::Reset(H2Reset {
+            reason: SERVER_BODY_FAILURE_REASON,
+            remote: true,
+        }),
+        "{TRUNCATION_DIAGNOSTIC}: {row}: the short stream was not reset by the \
+         server with {SERVER_BODY_FAILURE_REASON:?}: {outcome:?}"
+    );
+}
+
+fn assert_sibling_response(sibling: &HttpResponse, row: &str) {
+    assert_eq!(sibling.status, 200, "{row}: the sibling stream's status");
+    assert_eq!(
+        sibling.body.as_ref(),
+        H2_SIBLING_BODY.as_bytes(),
+        "{row}: the sibling stream on the same connection completed"
+    );
+}
+
+/// 9.T2 — invariant 14
+///
+/// The local declared-length source from 9.T1, over HTTP/2. One stream ends
+/// short after its head; a sibling on the same connection completes. The
+/// server resets the failed stream: the reset must arrive from the server,
+/// because the `h2` client resets a short END_STREAM locally on its own
+/// content-length check. Its source is released once, no mapper runs after
+/// the commit, and the completion account records the source failure. Source
+/// release and completion cause are read as separate facts.
+#[test]
+fn source_failure_resets_only_its_http2_stream() {
+    let row = "an HTTP/2 stream that ends short";
+    common::test_runtime()
+        .with_tracing()
+        .shutdown_timeout(Duration::from_secs(2))
+        .run(|| {
+            let capture = capture_events(COMPLETION_EVENT);
+            let mapped = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&mapped);
+            let mut router = Router::new().rejection_mapper(
+                move |rejection: &Rejection, _: &RejectionContext| {
+                    counted.fetch_add(1, Ordering::AcqRel);
+                    Response::text(rejection.status(), rejection.message())
+                },
+            );
+            let release = held_route(
+                &mut router,
+                H2_SHORT_PATH,
+                HeldBody {
+                    declared: Some(ADVERTISED_BODY_LENGTH),
+                    before: TRUNCATED_PREFIX,
+                    after: b"",
+                },
+            );
+            router.get(H2_SIBLING_PATH, |_req: &Request| async {
+                Response::text(200, H2_SIBLING_BODY)
+            });
+            let server = crate::http::reserve_transfer_owner().serve(router);
+            // The readiness probe is the fixture's own request; only what the
+            // exchange below adds belongs to this row.
+            let mapped_before = mapped.load(Ordering::Acquire);
+
+            let outcome = common::block_on(tokio::time::timeout(
+                SOURCE_FAILURE_BOUND,
+                short_stream_beside_sibling(server.addr(), &release, row),
+            ))
+            .unwrap_or_else(|_| panic!("{row}: the HTTP/2 exchange did not settle"));
+            assert_short_stream_reset(&outcome, row);
+            assert_sibling_response(&outcome.sibling, row);
+
+            let observed = crate::stream_support::released_download(server.controller(), row);
+            assert_eq!(
+                observed.download.releases, 1,
+                "{row}: the download owner released its source once: {observed:?}"
+            );
+            assert_eq!(
+                mapped.load(Ordering::Acquire),
+                mapped_before,
+                "{row}: a post-commit failure reached the rejection mapper"
+            );
+
+            let sibling_row = "the sibling stream";
+            let sibling = one_completion_record(&capture, H2_SIBLING_PATH, sibling_row);
+            assert_normal(&sibling, sibling_row);
+            assert_source_failure_completion(&capture, H2_SHORT_PATH, row);
+
+            server
+                .shutdown_bounded(SOURCE_FAILURE_BOUND)
+                .expect("the HTTP/2 fixture server stopped and joined");
+            runtime::request_shutdown();
+        })
+        .expect("the HTTP/2 source-failure runtime ran to completion");
 }

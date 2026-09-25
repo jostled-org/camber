@@ -433,11 +433,11 @@ async fn refuse_the_offered_upgrade(
         "the offered upgrade never reached its connection's transfer edge",
     )
     .await;
-    handle.cancel();
     owners
         .stop
         .pause_once(ServerStopEdge::SupervisorSelectedControl)
         .unwrap();
+    handle.cancel();
     owners
         .upgrades
         .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)

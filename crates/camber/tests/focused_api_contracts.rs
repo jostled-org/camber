@@ -1,5 +1,16 @@
+#[path = "support/delivery_fixture.rs"]
+pub mod delivery_fixture;
+#[path = "support/deterministic.rs"]
+pub mod deterministic;
+// Mounted for the bounded poll `process` reaps its children through, and for
+// the head read and address-reuse check the ambiguous transport row in
+// `retry_delays` uses.
+#[path = "support/http.rs"]
+pub mod http;
 #[path = "support/lifecycle_kinds.rs"]
 pub mod lifecycle_kinds;
+#[path = "support/process.rs"]
+pub mod process;
 #[path = "support/rejection_kinds.rs"]
 pub mod rejection_kinds;
 #[path = "support/temp.rs"]
@@ -17,6 +28,8 @@ mod channel_errors;
 mod configuration_loading;
 #[path = "focused_api_contracts/configuration_validation.rs"]
 mod configuration_validation;
+#[path = "focused_api_contracts/delivery_inputs.rs"]
+mod delivery_inputs;
 #[path = "focused_api_contracts/framework_rejections.rs"]
 mod framework_rejections;
 #[path = "focused_api_contracts/owned_server_api.rs"]
@@ -31,6 +44,8 @@ mod query_identity;
 mod request_validation;
 #[path = "focused_api_contracts/response_validation.rs"]
 mod response_validation;
+#[path = "focused_api_contracts/retry_delays.rs"]
+mod retry_delays;
 #[path = "focused_api_contracts/runtime_configuration.rs"]
 mod runtime_configuration;
 #[path = "focused_api_contracts/runtime_results.rs"]

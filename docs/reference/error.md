@@ -213,6 +213,13 @@ Two request boundaries reach a served peer today:
   the selected download `TransferBudget`, not to the request. Classified as
   `RequestTimeout`, answered `408`, with the same unread-payload disposition.
 
+One client boundary bounds more than one attempt:
+
+- `ClientRetry` — an outbound client call with configured retries outlived its
+  `retry_timeout`. The deadline is fixed at call entry and covers every
+  attempt, every delay, and the final response body. The attempt in flight is
+  dropped and no attempt starts after it.
+
 ## Configured Byte Maximums
 
 `LimitExceeded` carries a `ByteBoundary`, and it is the other half of the same

@@ -243,18 +243,18 @@ impl IncrementalParser {
 
     /// Read one field's header block and publish what it establishes.
     ///
-    /// The search is bounded, not just the fill. A preceding data phase fills to
-    /// `max_chunk_bytes` plus carry, so the buffer can already hold more of this
-    /// block than the header bound admits; searching the whole buffer would read
-    /// a header block the bound refuses.
+    /// The buffer never holds more than the header bound here. A data phase
+    /// retains nothing past the delimiter line that ends it, so whatever it
+    /// hands over was read ahead by an earlier header fill, which the same bound
+    /// already capped. The metadata reservation beside it therefore fits the
+    /// header peak the builder admitted.
     fn step_headers(&mut self, source: &mut Bytes) -> Result<Step, RuntimeError> {
         let ceiling = self.limits.max_header_bytes_per_field();
         self.fill(source, ceiling.saturating_sub(self.buffer.len()))?;
 
         let terminator = grammar::HEADER_TERMINATOR;
         let from = self.scanned.saturating_sub(terminator.len() - 1);
-        let searchable = ceiling.min(self.buffer.len());
-        let end = match grammar::find_bytes(&self.buffer[..searchable], terminator, from) {
+        let end = match grammar::find_bytes(&self.buffer, terminator, from) {
             Some(end) => end,
             None => return self.await_header_terminator(ceiling),
         };
@@ -322,17 +322,54 @@ impl IncrementalParser {
     }
 
     /// Read one field's data, yielding right-sized chunks up to the delimiter.
+    ///
+    /// A delimiter already buffered is answered without reading further. Only a
+    /// fruitless search pulls more of the source frame.
     fn step_data(&mut self, source: &mut Bytes) -> Result<Step, RuntimeError> {
         let carry = grammar::delimiter_carry_over(self.boundary.len());
-        let ceiling = self.limits.max_chunk_bytes() + carry;
-        self.fill(source, ceiling.saturating_sub(self.buffer.len()))?;
-
         let from = self.scanned.saturating_sub(carry);
-        match grammar::find_delimiter(&self.buffer, &self.boundary, from) {
+        let delimiter = match grammar::find_delimiter(&self.buffer, &self.boundary, from) {
+            Some(pos) => Some(pos),
+            None => self.fill_to_delimiter(source, carry)?,
+        };
+        match delimiter {
             Some(0) => self.close_field(),
             Some(pos) => self.yield_chunk(pos),
             None => self.yield_before_carry(carry),
         }
+    }
+
+    /// Fill the data window, but retain nothing past the next delimiter line.
+    ///
+    /// The window is filled to `max_chunk_bytes` plus carry and searched. If a
+    /// delimiter line ends inside it, the bytes after that line are dropped
+    /// and their reservation is released. The source frame is advanced only
+    /// past what the buffer keeps, so the next field's header bytes stay in the
+    /// source frame until the header phase reserves them. Without this, those
+    /// bytes would sit beside the metadata copied from them, and that overlap
+    /// is larger than the admitted buffer.
+    fn fill_to_delimiter(
+        &mut self,
+        source: &mut Bytes,
+        carry: usize,
+    ) -> Result<Option<usize>, RuntimeError> {
+        let retained = self.buffer.len();
+        let ceiling = self.limits.max_chunk_bytes() + carry;
+        let take = ceiling.saturating_sub(retained).min(source.len());
+        self.retain(&source[..take])?;
+
+        let from = retained.saturating_sub(carry);
+        let delimiter = grammar::find_delimiter(&self.buffer, &self.boundary, from);
+        let kept = delimiter.map_or(take, |pos| pos + self.delimiter_line_bytes() - retained);
+        self.buffer.truncate(retained + kept);
+        self.budget.release(take - kept);
+        source.advance(kept);
+        Ok(delimiter)
+    }
+
+    /// The bytes one delimiter line after the first occupies on the wire.
+    fn delimiter_line_bytes(&self) -> usize {
+        grammar::DELIMITER_PREFIX.len() + self.boundary.len() + grammar::DELIMITER_SUFFIX_BYTES
     }
 
     /// Wait for a header terminator this frame did not carry, or refuse the
@@ -362,7 +399,7 @@ impl IncrementalParser {
     fn close_field(&mut self) -> Result<Step, RuntimeError> {
         let suffix_at = grammar::DELIMITER_PREFIX.len() + self.boundary.len();
         let next = self.delimiter_suffix(suffix_at)?;
-        self.consume(suffix_at + grammar::DELIMITER_SUFFIX_BYTES);
+        self.consume(self.delimiter_line_bytes());
         self.scanned = 0;
         self.state = next;
         Ok(Step::Event(ParserEvent::FieldEnd))
@@ -423,9 +460,18 @@ impl IncrementalParser {
         if take == 0 {
             return Ok(());
         }
-        self.budget.reserve(take)?;
-        self.buffer.extend_from_slice(&source[..take]);
+        self.retain(&source[..take])?;
         source.advance(take);
+        Ok(())
+    }
+
+    /// Copy `bytes` into the buffer under a reservation for exactly them.
+    ///
+    /// The one place buffered bytes are admitted, so the budget and the buffer
+    /// can never disagree about what the parser holds.
+    fn retain(&mut self, bytes: &[u8]) -> Result<(), RuntimeError> {
+        self.budget.reserve(bytes.len())?;
+        self.buffer.extend_from_slice(bytes);
         Ok(())
     }
 

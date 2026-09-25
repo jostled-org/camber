@@ -907,6 +907,7 @@ dependencies = [
  "h2 0.4.16",
  "http 1.5.0",
  "http-body-util",
+ "httpdate",
  "hyper 1.11.0",
  "hyper-util",
  "instant-acme",

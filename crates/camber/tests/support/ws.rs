@@ -3,7 +3,8 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 const WS_IO_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// The largest payload any fixture frame reader accepts.
+pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// The longest a whole frame can be: the payload limit plus the widest header —
 /// two opcode-and-length bytes, an eight-byte extended length, and a four-byte
 /// mask key.
@@ -145,9 +146,7 @@ pub fn write_ws_text_frame(stream: &mut TcpStream, text: &str) {
 /// filled, or that was refused outright, never reached the server — and the
 /// disconnect probes then read a cause on the assumption it did.
 pub fn write_ws_close_frame(stream: &mut TcpStream) {
-    match with_write_timeout(stream, |stream| {
-        stream.write_all(&[0x88, 0x80, 0x00, 0x00, 0x00, 0x00])
-    }) {
+    match try_write_raw_frame(stream, &zero_key_frame(0x08, &[])) {
         Ok(()) => {}
         Err(error) if super::http::is_closed_connection_error(&error) => {}
         Err(error) => panic!("the WebSocket close frame could not be sent: {error}"),
@@ -164,16 +163,8 @@ pub fn write_ws_close_frame(stream: &mut TcpStream) {
 /// A peer that has already gone is accepted, and every other failure is not,
 /// for the reason [`write_ws_close_frame`] gives.
 pub fn write_unmasked_text_frame(stream: &mut TcpStream, text: &str) {
-    let payload = text.as_bytes();
-    assert!(
-        payload.len() < 126,
-        "the unmasked fixture frame writes one length byte"
-    );
-    let mut frame = Vec::with_capacity(payload.len() + 2);
-    frame.push(0x81);
-    frame.push(u8::try_from(payload.len()).expect("the unmasked fixture frame is short"));
-    frame.extend_from_slice(payload);
-    match with_write_timeout(stream, |stream| stream.write_all(&frame)) {
+    let frame = RawFrame::complete(0x01, text.as_bytes()).encode();
+    match try_write_raw_frame(stream, &frame) {
         Ok(()) => {}
         Err(error) if super::http::is_closed_connection_error(&error) => {}
         Err(error) => panic!("the unmasked WebSocket frame could not be sent: {error}"),
@@ -315,26 +306,94 @@ fn try_write_masked_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) ->
             "WebSocket frame exceeded size limit",
         ));
     }
-    let capacity = payload
-        .len()
-        .checked_add(14)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "frame length overflowed"))?;
-    let mut frame = Vec::with_capacity(capacity);
-    frame.push(0x80 | opcode);
-    match payload.len() {
-        length @ 0..=125 => frame.push(0x80 | length as u8),
-        length @ 126..=65535 => {
-            frame.push(0x80 | 126);
-            frame.extend_from_slice(&(length as u16).to_be_bytes());
-        }
-        length => {
-            frame.push(0x80 | 127);
-            frame.extend_from_slice(&(length as u64).to_be_bytes());
+    try_write_raw_frame(stream, &zero_key_frame(opcode, payload))
+}
+
+/// A final frame masked with the all-zero key.
+///
+/// Any key satisfies the masking rule, and the zero key leaves the payload
+/// readable in a packet capture of a failing fixture.
+fn zero_key_frame(opcode: u8, payload: &[u8]) -> Box<[u8]> {
+    RawFrame {
+        mask: Some([0; 4]),
+        ..RawFrame::complete(opcode, payload)
+    }
+    .encode()
+}
+
+/// One client frame, stated field by field.
+///
+/// Every header bit is the caller's, so a case can state a frame a conforming
+/// client never sends: a clear mask bit, a reserved bit, a reserved opcode, a
+/// fragmented control frame. The encoder picks only the length form, and it
+/// picks the shortest one, as RFC 6455 §5.2 requires.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RawFrame<'a> {
+    pub fin: bool,
+    /// The three reserved bits, in the low bits of this value.
+    pub rsv: u8,
+    pub opcode: u8,
+    /// The mask key, or `None` for a frame with its mask bit clear.
+    pub mask: Option<[u8; 4]>,
+    pub payload: &'a [u8],
+}
+
+impl<'a> RawFrame<'a> {
+    /// A final, unmasked frame with no reserved bits set.
+    pub const fn complete(opcode: u8, payload: &'a [u8]) -> Self {
+        Self {
+            fin: true,
+            rsv: 0,
+            opcode,
+            mask: None,
+            payload,
         }
     }
-    frame.extend_from_slice(&[0_u8; 4]);
-    frame.extend_from_slice(payload);
-    with_write_timeout(stream, |stream| stream.write_all(&frame))
+
+    /// The frame's wire bytes, sealed: nothing appends to a frame once it is
+    /// framed.
+    pub fn encode(&self) -> Box<[u8]> {
+        let mut frame = Vec::with_capacity(self.payload.len().saturating_add(14));
+        frame.push(u8::from(self.fin) << 7 | (self.rsv & 0x07) << 4 | self.opcode & 0x0f);
+        let mask_bit = match self.mask {
+            Some(_) => 0x80,
+            None => 0x00,
+        };
+        let length = self.payload.len();
+        match (u8::try_from(length), u16::try_from(length)) {
+            (Ok(short @ 0..=125), _) => frame.push(mask_bit | short),
+            (_, Ok(medium)) => {
+                frame.push(mask_bit | 126);
+                frame.extend_from_slice(&medium.to_be_bytes());
+            }
+            (_, Err(_)) => {
+                frame.push(mask_bit | 127);
+                let long = u64::try_from(length).expect("a frame length fits in 64 bits");
+                frame.extend_from_slice(&long.to_be_bytes());
+            }
+        }
+        match self.mask {
+            Some(key) => {
+                frame.extend_from_slice(&key);
+                frame.extend(
+                    self.payload
+                        .iter()
+                        .zip(key.iter().cycle())
+                        .map(|(byte, key)| byte ^ key),
+                );
+            }
+            None => frame.extend_from_slice(self.payload),
+        }
+        frame.into_boxed_slice()
+    }
+}
+
+/// Write already-encoded frame bytes under the WebSocket send bound.
+///
+/// The error is the caller's to read: a case that expects the server to have
+/// failed the connection accepts a closed peer, and every other case does not.
+pub fn try_write_raw_frame(stream: &mut TcpStream, frame: &[u8]) -> io::Result<()> {
+    with_write_timeout(stream, |stream| stream.write_all(frame))
 }
 
 /// Run one write under the WebSocket send bound.
@@ -351,4 +410,25 @@ fn with_write_timeout<T>(
         Some(WS_IO_TIMEOUT),
         operation,
     )
+}
+
+/// Send each message a WebSocket peer sends straight back, until the peer
+/// leaves or a send fails.
+#[cfg(feature = "ws")]
+pub fn echo_until_closed(conn: &mut camber::http::WsConn) {
+    while let Some(message) = conn.recv() {
+        if conn.send(&message).is_err() {
+            break;
+        }
+    }
+}
+
+/// A WebSocket route that echoes every message until the peer leaves.
+#[cfg(feature = "ws")]
+pub fn echo_ws(
+    _: &camber::http::Request,
+    mut conn: camber::http::WsConn,
+) -> Result<(), camber::RuntimeError> {
+    echo_until_closed(&mut conn);
+    Ok(())
 }

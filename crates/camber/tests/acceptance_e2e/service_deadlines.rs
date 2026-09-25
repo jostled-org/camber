@@ -571,9 +571,10 @@ async fn assert_http2_stalled_response_head_is_stream_local() {
 /// alone would leave the other unbounded.
 #[cfg(feature = "ws")]
 async fn assert_websocket_handoff_spends_the_request_total(path: &str, upgrade: &str) {
+    let backend = echo_ws_backend();
     let port = http_support::reserve_handoff_commitment();
     let controller = port.controller();
-    let (router, log) = counted_mapper(upgrade_routes());
+    let (router, log) = counted_mapper(upgrade_routes(&format!("http://{}", backend.local_addr())));
     let server = port.serve_with_policy(router, upgrade_policy());
     let addr = server.addr();
 
@@ -613,6 +614,9 @@ async fn assert_websocket_handoff_spends_the_request_total(path: &str, upgrade: 
     server
         .shutdown_bounded(SHUTDOWN_BOUND)
         .expect("the upgrade-handoff fixture tore down");
+    backend
+        .shutdown_bounded(SHUTDOWN_BOUND)
+        .expect("the upgrade-handoff backend tore down");
 }
 
 /// The refusal an expired total wrote, read off the wire and off the cell.
@@ -702,32 +706,34 @@ fn upgrade_policy() -> ServerPolicy {
 /// The routes the handoff rows are served through: both upgrade kinds, and the
 /// ordinary route the permit probe reads back.
 ///
-/// The proxied route's upstream is never dialled: the bridge that would reach it
-/// is spawned behind a gate the handoff opens, and no row here opens it. It
-/// exists so the route dispatches as a proxied upgrade rather than a direct one.
+/// The proxied route forwards to a live `backend`. A proxied upgrade negotiates
+/// with its backend before its `101` is offered for registration, so only a
+/// backend that answers a valid handshake takes the proxied row as far as the
+/// held handoff. The refused handoff then drops that negotiated transport, and
+/// the bridge that would frame over it never runs.
 #[cfg(feature = "ws")]
-fn upgrade_routes() -> Router {
+fn upgrade_routes(backend: &str) -> Router {
     let mut router = Router::new();
-    router.ws("/ws", |_req: &Request, mut conn: camber::http::WsConn| {
-        while let Some(message) = conn.recv() {
-            if conn.send(&message).is_err() {
-                break;
-            }
-        }
-        Ok(())
-    });
-    router.proxy("/ws-proxy", UNDIALLED_UPSTREAM);
+    router.ws("/ws", common::echo_ws);
+    router.proxy("/ws-proxy", backend);
     router.get("/quick", |_req: &Request| async {
         Response::text(200, "quick")
     });
     router
 }
 
-/// The upstream the proxied rows name and no row reaches.
+/// The WebSocket backend the proxied handoff row negotiates with.
+#[cfg(feature = "ws")]
+fn echo_ws_backend() -> http_support::ReadyServer {
+    let mut backend = Router::new();
+    backend.ws("/session", common::echo_ws);
+    http_support::spawn_server_ready(backend, CLOSE_BOUND)
+        .expect("the proxied handoff row's backend answered")
+}
+
+/// The upstream the stalled-gate proxy row names and never reaches.
 ///
-/// The proxied upgrade's bridge is spawned behind a gate the handoff opens, and
-/// the stalled-gate proxy row never returns from its chain, so neither leg is
-/// ever dialled.
+/// That row never returns from its chain, so its forward is never dialled.
 const UNDIALLED_UPSTREAM: &str = "http://127.0.0.1:1";
 
 /// A middleware chain is admitted work under the request total, whatever class
@@ -1266,7 +1272,7 @@ async fn assert_streaming_proxy_terminal_keeps_route_authority() {
     let server = port.serve_with_policy(router, deadline_policy());
     let addr = server.addr();
 
-    let admitted = proxied_upload(addr, &ADMITTED_PAYLOAD.to_vec(), "the admitted proxy leg").await;
+    let admitted = proxied_upload(addr, ADMITTED_PAYLOAD, "the admitted proxy leg").await;
     assert_eq!(admitted, 200, "an admitted upload must reach its upstream");
     assert_eq!(
         forwarded.load(Ordering::SeqCst),
@@ -1665,7 +1671,8 @@ fn assert_postcommit_stream(row: PostCommit, label: &str, streamed: Option<&comm
     );
     let cut = match row {
         PostCommit::Shutdown => streamed.end != common::H2BodyEnd::Ended,
-        _ => streamed.end == common::H2BodyEnd::Reset,
+        // The server's reset, not one the client raised on its own stream.
+        _ => matches!(streamed.end, common::H2BodyEnd::Reset(reset) if reset.remote),
     };
     assert!(
         cut,

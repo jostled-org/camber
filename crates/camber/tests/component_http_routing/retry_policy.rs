@@ -1,230 +1,266 @@
+use crate::retry_upstream::{
+    Answer, CLIENT_METHODS, PeerEvent, RunnableDriver, SAFE_METHOD_COUNT, ScriptedUpstream,
+    UNSAFE_METHODS, assert_released, describe, send_method, settled, spawn_get, within_watchdog,
+};
 use crate::runtime_support as common;
 
 use camber::http::{self, Request, Response, Router};
 use camber::{RuntimeError, runtime};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const GENERATED_RETRY_CASES: u64 = 24;
 const RETRY_COUNT_BOUND: NonZeroUsize = NonZeroUsize::new(5).unwrap();
 
-async fn accept_request(listener: &tokio::net::TcpListener) -> tokio::net::TcpStream {
-    let (stream, _) = listener.accept().await.unwrap();
-    read_request(stream).await
+/// The one route every method-eligibility row dispatches against.
+const METHOD_RETRY_PATH: &str = "/method-retry";
+
+/// One counter slot and one answered status per method, in
+/// [`CLIENT_METHODS`] order, so the safe methods occupy the leading slots.
+const METHODS: usize = CLIENT_METHODS.len();
+
+/// The statuses the client's transient-status policy admits for another
+/// attempt.
+const TRANSIENT_STATUSES: [u16; 4] = [429, 502, 503, 504];
+
+/// Statuses no policy may repeat: one is a refusal the server already decided,
+/// the other is the answer itself.
+const SETTLED_STATUSES: [u16; 2] = [400, 200];
+
+/// The failure a replayed ambiguous request reports.
+const AMBIGUOUS_REPLAY: &str = "ambiguous unsafe request was replayed";
+
+/// The counted route family every method-eligibility row shares.
+///
+/// One status is armed for the whole row, and one counter slot records each
+/// method's dispatches, so an attempt arithmetic is read per method rather than
+/// inferred from a total.
+#[derive(Clone)]
+struct MethodRetryProbe {
+    calls: Arc<[AtomicU32; METHODS]>,
+    status: Arc<AtomicU16>,
 }
 
-async fn read_request(mut stream: tokio::net::TcpStream) -> tokio::net::TcpStream {
-    let mut request = Vec::new();
-    let mut byte = [0_u8; 1];
-    while !request.ends_with(b"\r\n\r\n") {
-        stream.read_exact(&mut byte).await.unwrap();
-        request.push(byte[0]);
-    }
-    let request_head = std::str::from_utf8(&request).unwrap();
-    let content_length = request_head
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().unwrap())
-        })
-        .unwrap_or(0);
-    let mut body = vec![0_u8; content_length];
-    stream.read_exact(&mut body).await.unwrap();
-    stream
-}
-
-async fn transport_failure_then_success(
-    listener: tokio::net::TcpListener,
-    completion: tokio::sync::oneshot::Receiver<()>,
-) -> usize {
-    drop(accept_request(&listener).await);
-    tokio::select! {
-        biased;
-        accepted = listener.accept() => {
-            let (stream, _) = accepted.unwrap();
-            let mut stream = read_request(stream).await;
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-                .await
-                .unwrap();
-            2
-        }
-        result = completion => {
-            assert!(matches!(result, Ok(())));
-            1
+impl MethodRetryProbe {
+    fn new() -> Self {
+        Self {
+            calls: Arc::new(std::array::from_fn(|_| AtomicU32::new(0))),
+            status: Arc::new(AtomicU16::new(503)),
         }
     }
+
+    /// Count one dispatch of the method at `index` and report the armed status.
+    fn record(&self, index: usize) -> u16 {
+        self.calls[index].fetch_add(1, Ordering::Relaxed);
+        self.status.load(Ordering::Relaxed)
+    }
+
+    /// Arm every route with `status` and forget the previous row's counts.
+    fn arm(&self, status: u16) {
+        self.status.store(status, Ordering::Relaxed);
+        self.calls
+            .iter()
+            .for_each(|count| count.store(0, Ordering::Relaxed));
+    }
+
+    fn attempts(&self) -> [u32; METHODS] {
+        std::array::from_fn(|index| self.calls[index].load(Ordering::Relaxed))
+    }
 }
 
-fn register_method_retry_routes(router: &mut Router, calls: &Arc<[AtomicU32; 7]>) {
-    let get_calls = Arc::clone(calls);
-    router.get("/method-retry", move |_req: &Request| {
-        get_calls[0].fetch_add(1, Ordering::Relaxed);
-        async { Response::empty(503) }
-    });
+/// Register one counted route per method.
+///
+/// Every route differs only in the `Router` setter it calls and the counter
+/// slot it owns, so the pair is written once and the bodies follow from it.
+macro_rules! method_retry_routes {
+    ($router:expr, $probe:expr, $($index:expr => $method:ident),+ $(,)?) => {
+        $({
+            let probe = $probe.clone();
+            $router.$method(METHOD_RETRY_PATH, move |_req: &Request| {
+                let status = probe.record($index);
+                async move { Response::empty(status) }
+            });
+        })+
+    };
+}
 
-    let head_calls = Arc::clone(calls);
-    router.head("/method-retry", move |_req: &Request| {
-        head_calls[1].fetch_add(1, Ordering::Relaxed);
-        async { Response::empty(503) }
-    });
+fn register_method_retry_routes(router: &mut Router, probe: &MethodRetryProbe) {
+    method_retry_routes!(
+        router,
+        probe,
+        0 => get,
+        1 => head,
+        2 => options,
+        3 => post,
+        4 => put,
+        5 => patch,
+        6 => delete,
+    );
+}
 
-    let options_calls = Arc::clone(calls);
-    router.options("/method-retry", move |_req: &Request| {
-        options_calls[2].fetch_add(1, Ordering::Relaxed);
-        async { Response::empty(503) }
-    });
+/// Compare observed attempts per method, naming the method that disagreed.
+fn assert_attempts(attempts: [u32; METHODS], expected: [u32; METHODS], context: &str) {
+    let rows = attempts.iter().zip(expected).zip(CLIENT_METHODS);
+    for ((observed, wanted), name) in rows {
+        assert_eq!(
+            *observed, wanted,
+            "{context}: {name} ran {observed} attempts, not {wanted}"
+        );
+    }
+}
 
-    let post_calls = Arc::clone(calls);
-    router.post("/method-retry", move |_req: &Request| {
-        post_calls[3].fetch_add(1, Ordering::Relaxed);
-        async { Response::empty(503) }
-    });
+/// Dispatch every method once through `client` and report the answered
+/// statuses in counter-slot order.
+async fn dispatch_every_method(client: &http::ClientBuilder, url: &str) -> [u16; METHODS] {
+    let mut answered = [0; METHODS];
+    for (status, method) in answered.iter_mut().zip(CLIENT_METHODS) {
+        *status = send_method(client, method, url)
+            .await
+            .unwrap_or_else(|error| panic!("{method} to {url} failed: {error:?}"))
+            .status();
+    }
+    answered
+}
 
-    let put_calls = Arc::clone(calls);
-    router.put("/method-retry", move |_req: &Request| {
-        put_calls[4].fetch_add(1, Ordering::Relaxed);
-        async { Response::empty(503) }
-    });
+fn retry_client(retries: u32, opt_in: bool) -> http::ClientBuilder {
+    http::client()
+        .retries(retries)
+        .backoff(Duration::from_millis(1))
+        .retry_unsafe_methods(opt_in)
+}
 
-    let patch_calls = Arc::clone(calls);
-    router.patch("/method-retry", move |_req: &Request| {
-        patch_calls[5].fetch_add(1, Ordering::Relaxed);
-        async { Response::empty(503) }
-    });
+/// Arm every route with `status`, dispatch every method once through `client`,
+/// and require that status answered and `expected` attempts per method.
+async fn assert_armed_dispatch(
+    probe: &MethodRetryProbe,
+    url: &str,
+    status: u16,
+    client: &http::ClientBuilder,
+    expected: [u32; METHODS],
+    context: &str,
+) {
+    probe.arm(status);
+    let answered = dispatch_every_method(client, url).await;
+    assert_eq!(answered, [status; METHODS], "{context}: answered statuses");
+    assert_attempts(probe.attempts(), expected, context);
+}
 
-    let delete_calls = Arc::clone(calls);
-    router.delete("/method-retry", move |_req: &Request| {
-        delete_calls[6].fetch_add(1, Ordering::Relaxed);
-        async { Response::empty(503) }
-    });
+/// One transient status: safe methods spend their whole budget, unsafe methods
+/// spend it only after the explicit policy admits them.
+async fn assert_transient_row(probe: &MethodRetryProbe, url: &str, status: u16, retries: u32) {
+    let mut safe_only = [retries + 1; METHODS];
+    safe_only[SAFE_METHOD_COUNT..].fill(1);
+
+    assert_armed_dispatch(
+        probe,
+        url,
+        status,
+        &retry_client(retries, false),
+        safe_only,
+        &format!("status {status}, no opt-in"),
+    )
+    .await;
+    assert_armed_dispatch(
+        probe,
+        url,
+        status,
+        &retry_client(retries, true),
+        [retries + 1; METHODS],
+        &format!("status {status}, opted in"),
+    )
+    .await;
+}
+
+/// A status outside the transient set: the server already decided, so no
+/// policy repeats the request.
+async fn assert_settled_row(probe: &MethodRetryProbe, url: &str, status: u16, retries: u32) {
+    assert_armed_dispatch(
+        probe,
+        url,
+        status,
+        &retry_client(retries, true),
+        [1; METHODS],
+        &format!("settled status {status}"),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unsafe_method_retry_requires_explicit_policy() {
     const RETRIES: u32 = 2;
 
-    let calls = Arc::new(std::array::from_fn(|_| AtomicU32::new(0)));
+    let probe = MethodRetryProbe::new();
     let mut router = Router::new();
-    register_method_retry_routes(&mut router, &calls);
+    register_method_retry_routes(&mut router, &probe);
     let server = crate::http::spawn_server_ready(router, Duration::from_secs(2)).unwrap();
-    let url = format!("http://{}/method-retry", server.local_addr());
-    let client = http::client()
-        .retries(RETRIES)
-        .backoff(Duration::from_millis(1));
+    let addr = server.local_addr();
+    let url = format!("http://{addr}{METHOD_RETRY_PATH}");
 
-    assert_eq!(client.get(&url).await.unwrap().status(), 503);
-    assert_eq!(client.head(&url).await.unwrap().status(), 503);
-    assert_eq!(client.options(&url).await.unwrap().status(), 503);
-    assert_eq!(client.post(&url, "post").await.unwrap().status(), 503);
-    assert_eq!(client.put(&url, "put").await.unwrap().status(), 503);
-    assert_eq!(client.patch(&url, "patch").await.unwrap().status(), 503);
-    assert_eq!(client.delete(&url).await.unwrap().status(), 503);
-
-    let attempts: [u32; 7] = std::array::from_fn(|index| calls[index].load(Ordering::Relaxed));
-    assert_eq!(attempts[0], RETRIES + 1, "safe GET may retry");
-    assert_eq!(attempts[1], RETRIES + 1, "safe HEAD may retry");
-    assert_eq!(attempts[2], RETRIES + 1, "safe OPTIONS may retry");
-    assert_eq!(attempts[3], 1, "POST retried without explicit policy");
-    assert_eq!(attempts[4], 1, "PUT retried without explicit policy");
-    assert_eq!(attempts[5], 1, "PATCH retried without explicit policy");
-    assert_eq!(attempts[6], 1, "DELETE retried without explicit policy");
-
-    calls
-        .iter()
-        .for_each(|count| count.store(0, Ordering::Relaxed));
-    let unsafe_retry_client = http::client()
-        .retries(RETRIES)
-        .backoff(Duration::from_millis(1))
-        .retry_unsafe_methods(true);
-
-    assert_eq!(
-        unsafe_retry_client
-            .post(&url, "post")
-            .await
-            .unwrap()
-            .status(),
-        503
-    );
-    assert_eq!(
-        unsafe_retry_client.put(&url, "put").await.unwrap().status(),
-        503
-    );
-    assert_eq!(
-        unsafe_retry_client
-            .patch(&url, "patch")
-            .await
-            .unwrap()
-            .status(),
-        503
-    );
-    assert_eq!(
-        unsafe_retry_client.delete(&url).await.unwrap().status(),
-        503
-    );
-
-    let opted_in_attempts: [u32; 4] =
-        std::array::from_fn(|index| calls[index + 3].load(Ordering::Relaxed));
-    assert_eq!(
-        opted_in_attempts,
-        [RETRIES + 1; 4],
-        "explicit unsafe-method policy must permit retries"
-    );
+    for status in TRANSIENT_STATUSES {
+        assert_transient_row(&probe, &url, status, RETRIES).await;
+    }
+    for status in SETTLED_STATUSES {
+        assert_settled_row(&probe, &url, status, RETRIES).await;
+    }
 
     server.shutdown_bounded(Duration::from_secs(2)).unwrap();
+    crate::http::assert_address_reused(addr, "method retry probe").await;
+}
+
+/// One ambiguous-transport row: an upstream reads the request and then closes
+/// without answering.
+///
+/// The peer's progress is unknowable from the client's side, so the request has
+/// no evidence permitting a replay — with or without the unsafe-method policy.
+async fn assert_ambiguous_transport_is_once(method: &str, opt_in: bool) {
+    const RETRIES: u32 = 2;
+
+    // Every attempt the budget allows reads and closes alike, so a replay is
+    // counted rather than parked.
+    let script = [Answer::Ambiguous; RETRIES as usize + 1];
+    let mut upstream = ScriptedUpstream::bind(&script).await;
+    let client = retry_client(RETRIES, opt_in);
+    let row = format!("{AMBIGUOUS_REPLAY}? {method} (opt_in={opt_in})");
+
+    let result = send_method(&client, method, &upstream.url("/ambiguous-transport")).await;
+    // The first attempt's report is consumed here, so a replay's is the one
+    // `finish` finds unconsumed.
+    let first = upstream.saw(PeerEvent::Started(0)).await;
+    // The row runs on real time, so the driver has no clock to hold still.
+    let starts = upstream.finish(RunnableDriver::start(), &row).await;
+
+    if let Err(observed) = first {
+        panic!("{row}: the upstream never read the request: {observed}");
+    }
+
+    let error = match result {
+        Err(error) => error,
+        Ok(response) => panic!(
+            "{row}: an unanswered request returned {}",
+            response.status()
+        ),
+    };
+    assert!(
+        matches!(error, RuntimeError::Http(_)),
+        "{row}: returned {error} instead of the transport failure"
+    );
+    assert_eq!(starts, 1, "{row}: started {starts} requests");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn unsafe_method_transport_retry_requires_explicit_policy() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/transport-retry", listener.local_addr().unwrap());
-    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    let upstream = tokio::spawn(transport_failure_then_success(listener, completion_rx));
-
-    let result = http::client()
-        .retries(1)
-        .backoff(Duration::from_millis(1))
-        .post(&url, "body")
-        .await;
-    assert!(
-        result.is_err(),
-        "POST transport failure retried without opt-in"
-    );
-    completion_tx.send(()).unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), upstream)
-            .await
-            .unwrap()
-            .unwrap(),
-        1
-    );
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/transport-retry", listener.local_addr().unwrap());
-    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    let upstream = tokio::spawn(transport_failure_then_success(listener, completion_rx));
-    let response = http::client()
-        .retries(1)
-        .backoff(Duration::from_millis(1))
-        .retry_unsafe_methods(true)
-        .post(&url, "body")
-        .await;
-    drop(completion_tx);
-    let attempts = tokio::time::timeout(Duration::from_secs(2), upstream)
-        .await
-        .unwrap()
-        .unwrap();
-    let response = response.unwrap_or_else(|error| {
-        panic!("opted-in POST transport retry failed after {attempts} accepted attempts: {error}")
-    });
-
-    assert_eq!(response.status(), 200);
-    assert_eq!(response.body(), "ok");
-    assert_eq!(attempts, 2);
+async fn unsafe_ambiguous_transport_is_not_replayed() {
+    for &method in UNSAFE_METHODS {
+        for opt_in in [true, false] {
+            let row = assert_ambiguous_transport_is_once(method, opt_in);
+            let settled = within_watchdog(row).await;
+            assert!(
+                settled.is_some(),
+                "{method} (opt_in={opt_in}) did not settle"
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -245,12 +281,7 @@ async fn generated_retry_attempt_arithmetic_is_exact() {
         let retries = case.bounded(RETRY_COUNT_BOUND) as u32;
         calls.store(0, Ordering::Relaxed);
 
-        let response = http::client()
-            .retries(retries)
-            .backoff(Duration::from_millis(1))
-            .get(&url)
-            .await
-            .unwrap();
+        let response = retry_client(retries, false).get(&url).await.unwrap();
 
         assert_eq!(response.status(), 503, "{case}: retries={retries}");
         assert_eq!(
@@ -263,41 +294,24 @@ async fn generated_retry_attempt_arithmetic_is_exact() {
     server.shutdown_bounded(Duration::from_secs(2)).unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread")]
+/// The transient answer's connection closes while the clock is held still, so
+/// the release cannot have waited for the delay to end. The delay is stepped
+/// over only after the peer has seen that release.
+#[tokio::test(start_paused = true)]
 async fn transient_response_is_released_before_retry_backoff() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/retry-release", listener.local_addr().unwrap());
-    let upstream = tokio::spawn(async move {
-        let mut first = accept_request(&listener).await;
-        first
-            .write_all(
-                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 100\r\nConnection: keep-alive\r\n\r\n",
-            )
-            .await
-            .unwrap();
-        let mut byte = [0_u8; 1];
-        let closed = tokio::time::timeout(Duration::from_millis(200), first.read(&mut byte))
-            .await
-            .expect("transient response stayed alive during retry backoff")
-            .unwrap();
-        assert_eq!(closed, 0, "transient response connection remained open");
+    const CONTEXT: &str = "transient release before backoff";
+    const BACKOFF: Duration = Duration::from_millis(500);
 
-        let mut second = accept_request(&listener).await;
-        second
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-            .await
-            .unwrap();
-    });
+    let driver = RunnableDriver::start();
+    let mut upstream = ScriptedUpstream::bind(&[Answer::Transient, Answer::Complete]).await;
+    let client = http::client().retries(1).backoff(BACKOFF);
+    let call = spawn_get(client, upstream.url("/retry-release"));
 
-    let response = http::client()
-        .retries(1)
-        .backoff(Duration::from_millis(500))
-        .get(&url)
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), 200);
-    upstream.await.unwrap();
+    upstream
+        .expect_each(&[PeerEvent::Started(0), PeerEvent::Disposed(0)], CONTEXT)
+        .await;
+    tokio::time::advance(2 * BACKOFF).await;
+    upstream.finish_answered(1, call, driver, CONTEXT).await;
 }
 
 #[camber::test]
@@ -397,34 +411,42 @@ async fn client_free_functions_do_not_retry() {
     runtime::request_shutdown();
 }
 
-#[camber::test]
+/// Each attempt's head is held until the row steps the clock onto that
+/// attempt's own lifetime, and the delay between them is stepped over only
+/// after the peer has seen the timed-out attempt's transport closed.
+#[tokio::test(start_paused = true)]
 async fn client_retries_on_timeout() {
-    let count = Arc::new(AtomicU32::new(0));
-    let c = Arc::clone(&count);
-    let mut backend = Router::new();
-    backend.get("/slow", move |_req: &Request| {
-        c.fetch_add(1, Ordering::Relaxed);
-        async {
-            std::thread::sleep(Duration::from_millis(200));
-            Response::text(200, "slow")
-        }
-    });
-    let addr = common::spawn_server(backend);
+    const CONTEXT: &str = "per-attempt timeout retry";
+    const ATTEMPT: Duration = Duration::from_millis(50);
+    const BACKOFF: Duration = Duration::from_millis(10);
 
-    let result = http::client()
+    let driver = RunnableDriver::start();
+    let mut upstream = ScriptedUpstream::bind(&[Answer::StallHead, Answer::StallHead]).await;
+    let client = http::client()
         .retries(1)
-        .backoff(Duration::from_millis(10))
-        .request_timeout(Duration::from_millis(50))
-        .get(&format!("http://{addr}/slow"))
+        .backoff(BACKOFF)
+        .request_timeout(ATTEMPT);
+    let call = spawn_get(client, upstream.url("/slow"));
+
+    upstream
+        .expect_each(&[PeerEvent::Started(0), PeerEvent::Stalled(0)], CONTEXT)
         .await;
+    tokio::time::advance(ATTEMPT).await;
+    upstream.expect(PeerEvent::Released(0), CONTEXT).await;
+    tokio::time::advance(2 * BACKOFF).await;
+    upstream
+        .expect_each(&[PeerEvent::Started(1), PeerEvent::Stalled(1)], CONTEXT)
+        .await;
+    tokio::time::advance(ATTEMPT).await;
+    let result = settled(call).await;
+    let released = upstream.saw(PeerEvent::Released(1)).await;
+    let starts = upstream.finish(driver, CONTEXT).await;
 
-    match &result {
-        Err(RuntimeError::Timeout) => {}
-        Err(e) => panic!("expected Timeout, got error: {e}"),
-        Ok(resp) => panic!("expected Timeout, got status {}", resp.status()),
-    }
-
-    assert_eq!(count.load(Ordering::Relaxed), 2);
-
-    runtime::request_shutdown();
+    assert!(
+        matches!(result, Some(Err(RuntimeError::Timeout))),
+        "{CONTEXT}: expected Timeout, got {}",
+        describe(&result)
+    );
+    assert_released(released, CONTEXT);
+    assert_eq!(starts, 2, "{CONTEXT}: the call started {starts} requests");
 }

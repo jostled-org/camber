@@ -8,12 +8,17 @@
 //! That word is a parameter here, so the framing, the bounds, and the verdicts
 //! are stated once.
 
-use std::future::Future;
+use std::future::{Future, IntoFuture};
+use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use camber::RuntimeError;
+use camber::http::{Router, ServerHandle};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
+
+pub use super::halt::{HaltableListener, send_report, unless_halted, until_peer_closed};
 
 /// Bounds every async transport observation a harness waits on.
 ///
@@ -120,24 +125,93 @@ async fn frame_async_head<S>(stream: &mut S, context: &str) -> Box<str>
 where
     S: AsyncRead + Unpin,
 {
+    frame_async_head_or_eof(stream, context)
+        .await
+        .unwrap_or_else(|| panic!("{context}: the peer closed mid-HTTP head"))
+}
+
+/// Read every byte through the blank line that ends a head, or `None` if the
+/// peer closed before one arrived.
+///
+/// End of stream is an answer for a row that admits a transport which simply
+/// went away, and a failure for every other row. Both forms read the same
+/// bytes, so they cannot drift on what ends a head or on what a head may
+/// contain.
+async fn frame_async_head_or_eof<S>(stream: &mut S, context: &str) -> Option<Box<str>>
+where
+    S: AsyncRead + Unpin,
+{
+    try_frame_async_head(stream, usize::MAX)
+        .await
+        .unwrap_or_else(|fault| match fault {
+            AsyncHeadFault::Read(error) => {
+                panic!("{context}: failed reading the HTTP head: {error}")
+            }
+            AsyncHeadFault::NotUtf8(error) => {
+                panic!("{context}: the HTTP head was not UTF-8: {error}")
+            }
+            AsyncHeadFault::PastLimit => {
+                panic!("{context}: the HTTP head passed {} bytes", usize::MAX)
+            }
+        })
+}
+
+/// Why [`try_frame_async_head`] produced no head.
+#[derive(Debug)]
+pub enum AsyncHeadFault {
+    /// The transport failed before the blank line arrived.
+    Read(std::io::Error),
+    /// The head grew past the caller's limit before its blank line.
+    PastLimit,
+    /// The head was complete but was not UTF-8.
+    NotUtf8(std::string::FromUtf8Error),
+}
+
+/// Read every byte through the blank line that ends a head, `None` if the
+/// peer closed first, or the fault that stopped the read.
+///
+/// The one framing every head reader shares. A fixture that must report a fault
+/// as an event, rather than panic inside a task, calls this directly; the
+/// panicking readers above turn each fault into their own verdict.
+pub async fn try_frame_async_head<S>(
+    stream: &mut S,
+    limit: usize,
+) -> Result<Option<Box<str>>, AsyncHeadFault>
+where
+    S: AsyncRead + Unpin,
+{
     let mut head = Vec::new();
     let mut byte = [0_u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
-        let count = stream
-            .read(&mut byte)
-            .await
-            .unwrap_or_else(|error| panic!("{context}: failed reading the HTTP head: {error}"));
-        assert_ne!(count, 0, "{context}: the peer closed mid-HTTP head");
-        head.push(byte[0]);
+        match stream.read(&mut byte).await.map_err(AsyncHeadFault::Read)? {
+            0 => return Ok(None),
+            _ => head.push(byte[0]),
+        }
+        if head.len() > limit {
+            return Err(AsyncHeadFault::PastLimit);
+        }
     }
     String::from_utf8(head)
-        .unwrap_or_else(|error| panic!("{context}: the HTTP head was not UTF-8: {error}"))
-        .into_boxed_str()
+        .map(|head| Some(head.into_boxed_str()))
+        .map_err(AsyncHeadFault::NotUtf8)
 }
 
 /// [`read_async_head`] over TCP under the shared bound.
 pub async fn read_async_http_head(stream: &mut TcpStream, context: &str) -> Box<str> {
     read_async_head(stream, context, ASYNC_EVENT_TIMEOUT).await
+}
+
+/// [`read_async_http_head`] for a row whose peer may have closed instead.
+pub async fn read_async_http_head_or_eof(
+    stream: &mut TcpStream,
+    context: &str,
+) -> Option<Box<str>> {
+    within(
+        context,
+        ASYNC_EVENT_TIMEOUT,
+        frame_async_head_or_eof(stream, context),
+    )
+    .await
 }
 
 /// Read one server frame's opcode and payload, or `None` at end of stream.
@@ -151,66 +225,79 @@ pub async fn read_async_ws_frame_or_eof(
     context: &str,
 ) -> Option<(u8, Box<[u8]>)> {
     lifecycle_event(context, async {
-        let mut header = [0_u8; 2];
-        let first = stream
-            .read(&mut header[..1])
+        let mut first = [0_u8; 1];
+        let read = stream
+            .read(&mut first)
             .await
             .unwrap_or_else(|error| panic!("{context}: failed reading a frame header: {error}"));
-        match first {
-            0 => None,
-            _ => Some(read_async_frame_body(stream, context, header).await),
+        if read == 0 {
+            return None;
         }
+        let frame = try_read_async_frame_rest(stream, first[0])
+            .await
+            .unwrap_or_else(|error| panic!("{context}: failed reading a frame: {error}"));
+        assert!(!frame.masked, "{context}: a server frame was masked");
+        Some((frame.opcode, frame.payload))
     })
     .await
 }
 
-/// Read everything after a frame's first byte: the length, the payload, and the
-/// opcode they belong to.
-///
-/// A server frame is never masked, so no mask key is read and one that arrived
-/// would mean the payload offsets are wrong.
-async fn read_async_frame_body(
-    stream: &mut TcpStream,
-    context: &str,
-    mut header: [u8; 2],
-) -> (u8, Box<[u8]>) {
-    stream
-        .read_exact(&mut header[1..])
-        .await
-        .unwrap_or_else(|error| panic!("{context}: failed reading a frame header: {error}"));
-    assert_eq!(header[1] & 0x80, 0, "{context}: a server frame was masked");
-    let length = read_async_frame_length(stream, context, header[1] & 0x7f).await;
-    let mut payload = vec![0_u8; length];
-    stream
-        .read_exact(&mut payload)
-        .await
-        .unwrap_or_else(|error| panic!("{context}: failed reading a frame payload: {error}"));
-    (header[0] & 0x0f, payload.into_boxed_slice())
+/// One frame read off an async transport.
+pub struct AsyncFrame {
+    pub opcode: u8,
+    /// Whether the mask bit was set. The payload is unmasked either way.
+    pub masked: bool,
+    pub payload: Box<[u8]>,
 }
 
-/// Resolve a frame's payload length, reading an extended length when the short
-/// field says one follows.
-async fn read_async_frame_length(stream: &mut TcpStream, context: &str, short: u8) -> usize {
-    match short {
+/// Read everything after a frame's first byte: the length, any mask key, and
+/// the payload.
+///
+/// The one async frame decoder. A server-frame reader and a client-frame reader
+/// differ only in the mask bit they require, so each checks
+/// [`AsyncFrame::masked`] itself. The payload is capped at the sync reader's
+/// limit, so a corrupt length fails the read instead of the allocation.
+pub async fn try_read_async_frame_rest(
+    stream: &mut TcpStream,
+    first: u8,
+) -> io::Result<AsyncFrame> {
+    let mut second = [0_u8; 1];
+    stream.read_exact(&mut second).await?;
+    let masked = second[0] & 0x80 != 0;
+    let length = match second[0] & 0x7f {
         126 => {
             let mut extended = [0_u8; 2];
-            stream
-                .read_exact(&mut extended)
-                .await
-                .unwrap_or_else(|error| panic!("{context}: failed reading a length: {error}"));
+            stream.read_exact(&mut extended).await?;
             usize::from(u16::from_be_bytes(extended))
         }
         127 => {
             let mut extended = [0_u8; 8];
-            stream
-                .read_exact(&mut extended)
-                .await
-                .unwrap_or_else(|error| panic!("{context}: failed reading a length: {error}"));
-            usize::try_from(u64::from_be_bytes(extended))
-                .unwrap_or_else(|_| panic!("{context}: the frame length did not fit a usize"))
+            stream.read_exact(&mut extended).await?;
+            usize::try_from(u64::from_be_bytes(extended)).unwrap_or(usize::MAX)
         }
-        length => usize::from(length),
+        short => usize::from(short),
+    };
+    if length > super::ws::MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a {length}-byte frame exceeded the fixture limit"),
+        ));
     }
+    let mut mask = [0_u8; 4];
+    if masked {
+        stream.read_exact(&mut mask).await?;
+    }
+    let mut payload = vec![0_u8; length];
+    stream.read_exact(&mut payload).await?;
+    payload
+        .iter_mut()
+        .zip(mask.iter().cycle())
+        .for_each(|(byte, key)| *byte ^= key);
+    Ok(AsyncFrame {
+        opcode: first & 0x0f,
+        masked,
+        payload: payload.into_boxed_slice(),
+    })
 }
 
 /// Write one masked client frame.
@@ -224,16 +311,11 @@ pub async fn write_async_ws_frame(
         payload.len() <= MAX_SHORT_PAYLOAD,
         "{context}: a test frame payload must fit one length byte"
     );
-    let length = u8::try_from(payload.len()).expect("a short payload fits one length byte");
-    let mut frame = Vec::with_capacity(payload.len() + 6);
-    frame.extend_from_slice(&[0x80 | opcode, 0x80 | length]);
-    frame.extend_from_slice(&CLIENT_MASK);
-    frame.extend(
-        payload
-            .iter()
-            .enumerate()
-            .map(|(index, byte)| byte ^ CLIENT_MASK[index % CLIENT_MASK.len()]),
-    );
+    let frame = super::ws::RawFrame {
+        mask: Some(CLIENT_MASK),
+        ..super::ws::RawFrame::complete(opcode, payload)
+    }
+    .encode();
     lifecycle_event(context, stream.write_all(&frame))
         .await
         .unwrap_or_else(|error| panic!("{context}: failed writing a frame: {error}"));
@@ -357,4 +439,74 @@ pub async fn assert_http_ok(addr: SocketAddr, path: &str, context: &str) {
         200,
         "{context}: the HTTP probe did not succeed: {response}"
     );
+}
+
+/// One served router on a loopback address, and the owner it is stopped and
+/// joined through.
+pub struct OwnedServer {
+    addr: SocketAddr,
+    handle: ServerHandle,
+}
+
+impl OwnedServer {
+    /// Bind a loopback listener and serve `router` on it.
+    ///
+    /// The listener is bound here rather than inside the server so the address
+    /// is known before anything is served: a proxy route has to name its
+    /// upstream before that upstream can answer.
+    pub async fn bind(router: Router, context: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("{context}: binding the server failed: {error}"));
+        Self::serve_on(listener, router, context)
+    }
+
+    /// Serve `router` on a listener the caller already bound.
+    pub fn serve_on(listener: TcpListener, router: Router, context: &str) -> Self {
+        let addr = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("{context}: the served address is unreadable: {error}"));
+        let handle = camber::http::serve_background(listener, router)
+            .unwrap_or_else(|error| panic!("{context}: serving requires a Tokio runtime: {error}"));
+        Self { addr, handle }
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// The URL a proxy route names this server by.
+    pub fn url(&self) -> Box<str> {
+        format!("http://{}", self.addr).into_boxed_str()
+    }
+
+    /// The owner this server is stopped and joined through.
+    pub fn handle(&self) -> &ServerHandle {
+        &self.handle
+    }
+
+    /// Join the owner, whichever stop the caller asked for.
+    pub async fn join(self) -> Result<(), RuntimeError> {
+        self.handle.into_future().await
+    }
+
+    /// Stop the server gracefully and join its owner.
+    pub async fn stop(self) -> Result<(), RuntimeError> {
+        self.handle.shutdown();
+        self.join().await
+    }
+
+    /// Stop the server gracefully, require a clean join, and prove its address
+    /// is free again.
+    ///
+    /// The join is bounded by [`lifecycle_event`], a Tokio timeout. A paused
+    /// clock auto-advances onto that timeout while the join waits on real I/O,
+    /// so a paused-clock case must bound [`Self::stop`] on a real clock instead.
+    pub async fn stop_cleanly(self, context: &str) {
+        let addr = self.addr;
+        lifecycle_event(context, self.stop())
+            .await
+            .unwrap_or_else(|error| panic!("{context}: the server did not stop cleanly: {error}"));
+        super::http::assert_address_reused(addr, context).await;
+    }
 }

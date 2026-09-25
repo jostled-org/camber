@@ -1,16 +1,20 @@
-//! Whether a request is a WebSocket handshake, and what a valid one earns.
+//! Whether a request is a WebSocket handshake, and what a valid one offers.
 //!
-//! Header validation, subprotocol selection, and the `101` itself. Nothing here
-//! owns a transport or a lifecycle: this file either produces the upgrade both
+//! Header validation, the offer it produces, and the `101` itself. Nothing here
+//! owns a transport or a lifecycle: this file either produces the offer both
 //! bridges start from, or the refusal the peer gets instead. The Origin policy
-//! is a separate question and lives beside this one.
+//! is a separate question and lives beside this one; an offer becomes usable
+//! only once that policy has admitted it.
 
 use super::super::Request;
 use super::super::body::HyperResponseBody;
 use super::super::rejection::Rejected;
+use super::super::util::is_token;
+use super::origin::check_ws_origin;
 
+/// What a request head earned: a validated offer, or the refusal it is owed.
 pub(in crate::http) enum WsUpgrade {
-    Ready(hyper::upgrade::OnUpgrade, Box<str>),
+    Offered(WsHandshakeOffer),
     Rejected(WsHandshakeError),
 }
 
@@ -19,20 +23,162 @@ pub(in crate::http) enum WsHandshakeError {
     UnsupportedVersion,
 }
 
-/// Extract the WebSocket upgrade future and accept key before consuming the request.
+/// One validated client offer.
+///
+/// Owns the Hyper upgrade future, the accept key derived from the client's key,
+/// and the subprotocols the client offered, in the order it offered them. An
+/// offer is not a selection: which protocol, if any, the `101` names is decided
+/// by the bridge that answers it.
+pub(in crate::http) struct WsHandshakeOffer {
+    on_upgrade: hyper::upgrade::OnUpgrade,
+    accept_key: Box<str>,
+    protocols: WsProtocolOffers,
+}
+
+impl WsHandshakeOffer {
+    /// The protocols the client offered.
+    pub(super) const fn protocols(&self) -> &WsProtocolOffers {
+        &self.protocols
+    }
+
+    /// Build the `101` this offer earns, naming `selection` as its protocol.
+    ///
+    /// `Err` is a builder failure — unreachable while the accept key is derived
+    /// base64 and the protocol is token-validated, but a response that is not a
+    /// `101` must never be handed back as one: the caller would register a
+    /// bridge and resolve the handoff for an upgrade Hyper will never perform.
+    ///
+    /// The builder's own error travels with the failure rather than being
+    /// logged here. It is the only account of what could not be represented,
+    /// and it belongs in the refusal record that already names the request, the
+    /// route and the protocol.
+    pub(super) fn switching_protocols(
+        &self,
+        selection: WsSelection,
+    ) -> Result<hyper::Response<HyperResponseBody>, hyper::http::Error> {
+        let builder = hyper::Response::builder()
+            .status(hyper::StatusCode::SWITCHING_PROTOCOLS)
+            .header("Upgrade", "websocket")
+            .header("Connection", "Upgrade")
+            .header("Sec-WebSocket-Accept", self.accept_key.as_ref());
+        let builder = match self.protocols.named(selection) {
+            Some(protocol) => builder.header("Sec-WebSocket-Protocol", protocol),
+            None => builder,
+        };
+        builder.body(HyperResponseBody::Full(http_body_util::Full::new(
+            bytes::Bytes::new(),
+        )))
+    }
+
+    /// Give up the upgrade future, keeping what the client offered.
+    pub(super) fn into_transfer(self) -> (hyper::upgrade::OnUpgrade, WsProtocolOffers) {
+        (self.on_upgrade, self.protocols)
+    }
+}
+
+/// The subprotocols one client offered, in order, each a valid token.
+///
+/// Boxed once at validation and never grown: the offer is what the client said,
+/// and nothing after the head adds to it.
+pub(super) struct WsProtocolOffers(Box<[Box<str>]>);
+
+impl WsProtocolOffers {
+    /// The direct selection policy: the first offer, or none.
+    pub(super) fn first(&self) -> WsSelection {
+        WsSelection((!self.0.is_empty()).then_some(0))
+    }
+
+    /// The offer `token` names exactly, if the client made one.
+    ///
+    /// The proxy selection policy: only the backend selects, and only from what
+    /// the client offered. A list, a malformed token, or a protocol nobody
+    /// offered names no offer, so it selects nothing here.
+    pub(super) fn select(&self, token: &str) -> Option<WsSelection> {
+        self.0
+            .iter()
+            .position(|offered| **offered == *token)
+            .map(|index| WsSelection(Some(index)))
+    }
+
+    /// The protocol one selection names, if it names one.
+    pub(super) fn named(&self, selection: WsSelection) -> Option<&str> {
+        selection
+            .0
+            .and_then(|index| self.0.get(index))
+            .map(AsRef::as_ref)
+    }
+
+    /// Offers stated directly rather than read from a head, each a token.
+    ///
+    /// The test adapter's way in: the same token rule a head's offers pass.
+    pub(super) fn from_tokens(tokens: &[&str]) -> Option<Self> {
+        tokens
+            .iter()
+            .map(|token| offered_token(token))
+            .collect::<Option<_>>()
+            .map(Self)
+    }
+
+    /// Every offer, in the order the client made them, as the one
+    /// comma-separated field a backend is sent; `None` when nothing was offered.
+    ///
+    /// A `String` because that is what a header value is built from.
+    pub(super) fn joined(&self) -> Option<String> {
+        (!self.0.is_empty()).then(|| self.0.join(", "))
+    }
+}
+
+/// Which offered protocol, if any, a `101` names.
+///
+/// An index into the offers rather than a token, so a selection can only ever
+/// name something the client offered: the `101` echoes the client's own
+/// token, and a refusal reports it, without either holding a second copy.
+#[derive(Clone, Copy)]
+pub(super) struct WsSelection(Option<usize>);
+
+impl WsSelection {
+    /// A `101` that names no protocol.
+    pub(super) const NONE: Self = Self(None);
+}
+
+impl WsUpgrade {
+    /// Admit this upgrade under the request's Origin.
+    ///
+    /// The only way to a usable offer. The Origin refusal outranks every head
+    /// refusal, so a cross-origin handshake is told `403` whatever else is
+    /// wrong with it.
+    pub(super) fn admit(self, req: &Request) -> Result<WsHandshakeOffer, Rejected> {
+        match (check_ws_origin(req), self) {
+            (Some(rejected), _) => Err(rejected),
+            (None, Self::Offered(offer)) => Ok(offer),
+            (None, Self::Rejected(error)) => Err(ws_handshake_rejection(error)),
+        }
+    }
+}
+
+/// Validate the handshake head and take its upgrade future before the request
+/// is consumed.
 pub(in crate::http) fn extract_ws_upgrade(
     req: &mut hyper::Request<hyper::body::Incoming>,
 ) -> WsUpgrade {
-    let accept_key = match validate_ws_handshake(req) {
-        Ok(key) => tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes()),
+    let (accept_key, protocols) = match validate_ws_handshake(req) {
+        Ok((key, protocols)) => (
+            tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes()),
+            protocols,
+        ),
         Err(error) => return WsUpgrade::Rejected(error),
     };
-    WsUpgrade::Ready(hyper::upgrade::on(req), accept_key.into())
+    WsUpgrade::Offered(WsHandshakeOffer {
+        on_upgrade: hyper::upgrade::on(req),
+        accept_key: accept_key.into(),
+        protocols,
+    })
 }
 
+/// The key and the ordered offers of a head that passed every field rule.
 fn validate_ws_handshake(
     request: &hyper::Request<hyper::body::Incoming>,
-) -> Result<&hyper::header::HeaderValue, WsHandshakeError> {
+) -> Result<(&hyper::header::HeaderValue, WsProtocolOffers), WsHandshakeError> {
     if request.method() != hyper::Method::GET || request.version() != hyper::Version::HTTP_11 {
         return Err(WsHandshakeError::BadRequest);
     }
@@ -48,13 +194,13 @@ fn validate_ws_handshake(
     }
     validate_bodyless_handshake(headers)?;
     validate_ws_version(headers)?;
-    validate_ws_subprotocols(headers)?;
+    let protocols = ws_protocol_offers(headers)?;
 
     let key = match single_header(headers, "sec-websocket-key") {
         Some(key) if valid_ws_key(key.as_bytes()) => key,
         _ => return Err(WsHandshakeError::BadRequest),
     };
-    Ok(key)
+    Ok((key, protocols))
 }
 
 /// Refuse a handshake that declares a payload.
@@ -82,14 +228,30 @@ fn validate_bodyless_handshake(headers: &hyper::HeaderMap) -> Result<(), WsHands
     }
 }
 
-fn validate_ws_subprotocols(headers: &hyper::HeaderMap) -> Result<(), WsHandshakeError> {
-    for value in headers.get_all("sec-websocket-protocol") {
-        let value = value.to_str().map_err(|_| WsHandshakeError::BadRequest)?;
-        if !value.split(',').map(str::trim).all(is_http_token) {
-            return Err(WsHandshakeError::BadRequest);
-        }
-    }
-    Ok(())
+/// Every offered subprotocol, in field order and then list order.
+///
+/// One invalid element refuses the whole offer: a list the client cannot
+/// state cleanly is not one a bridge may select from.
+fn ws_protocol_offers(headers: &hyper::HeaderMap) -> Result<WsProtocolOffers, WsHandshakeError> {
+    headers
+        .get_all("sec-websocket-protocol")
+        .iter()
+        .try_fold(Vec::new(), |offers, value| {
+            let field = value.to_str().map_err(|_| WsHandshakeError::BadRequest)?;
+            field.split(',').map(str::trim).try_fold(offers, push_offer)
+        })
+        .map(|offers| WsProtocolOffers(offers.into_boxed_slice()))
+}
+
+/// Append one offered element, or refuse the offer it is not a token of.
+fn push_offer(mut offers: Vec<Box<str>>, token: &str) -> Result<Vec<Box<str>>, WsHandshakeError> {
+    offers.push(offered_token(token).ok_or(WsHandshakeError::BadRequest)?);
+    Ok(offers)
+}
+
+/// One offered protocol, owned, if it is a valid token.
+fn offered_token(token: &str) -> Option<Box<str>> {
+    is_token(token.as_bytes()).then(|| Box::from(token))
 }
 
 fn validate_ws_version(headers: &hyper::HeaderMap) -> Result<(), WsHandshakeError> {
@@ -133,7 +295,7 @@ pub(super) fn named_request_headers<'a>(
         .filter_map(move |(candidate, value)| candidate.eq_ignore_ascii_case(name).then_some(value))
 }
 
-fn single_header<'a>(
+pub(super) fn single_header<'a>(
     headers: &'a hyper::HeaderMap,
     name: &'static str,
 ) -> Option<&'a hyper::header::HeaderValue> {
@@ -167,7 +329,11 @@ fn single_value_equals<'a>(mut values: impl Iterator<Item = &'a str>, expected: 
     }
 }
 
-fn header_contains_token(headers: &hyper::HeaderMap, name: &'static str, expected: &str) -> bool {
+pub(super) fn header_contains_token(
+    headers: &hyper::HeaderMap,
+    name: &'static str,
+    expected: &str,
+) -> bool {
     headers
         .get_all(name)
         .iter()
@@ -178,7 +344,8 @@ fn header_contains_token(headers: &hyper::HeaderMap, name: &'static str, expecte
                 .split(',')
                 .try_fold(found, |seen, token| {
                     let token = token.trim_matches([' ', '\t']);
-                    is_http_token(token).then_some(seen || token.eq_ignore_ascii_case(expected))
+                    is_token(token.as_bytes())
+                        .then_some(seen || token.eq_ignore_ascii_case(expected))
                 })
         })
         .is_some_and(|found| found)
@@ -213,72 +380,9 @@ const fn base64_value(byte: u8) -> Option<u8> {
     }
 }
 
-/// Select the first syntactically valid protocol offered by the client.
-pub(super) fn extract_ws_subprotocol(req: &Request) -> Option<&str> {
-    req.headers()
-        .filter(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-protocol"))
-        .flat_map(|(_, value)| value.split(','))
-        .map(str::trim)
-        .find(|protocol| is_http_token(protocol))
-}
-
-pub(super) fn is_http_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
-}
-
-pub(super) fn ws_handshake_rejection(error: WsHandshakeError) -> Rejected {
+fn ws_handshake_rejection(error: WsHandshakeError) -> Rejected {
     match error {
         WsHandshakeError::BadRequest => Rejected::ws_bad_handshake(),
         WsHandshakeError::UnsupportedVersion => Rejected::ws_unsupported_version(),
     }
-}
-
-/// Build the `101` a validated handshake earns.
-///
-/// `Err` is a builder failure — unreachable while the accept key is derived
-/// base64 and the subprotocol is token-validated, but a response that is not a
-/// `101` must never be handed back as one: the caller would register a bridge
-/// and resolve the handoff for an upgrade Hyper will never perform.
-///
-/// The builder's own error travels with the failure rather than being logged
-/// here. It is the only account of what could not be represented, and it
-/// belongs in the refusal record that already names the request, the route and
-/// the subprotocol.
-pub(super) fn ws_switching_protocols(
-    accept_key: &str,
-    subprotocol: Option<&str>,
-) -> Result<hyper::Response<HyperResponseBody>, hyper::http::Error> {
-    let mut builder = hyper::Response::builder()
-        .status(hyper::StatusCode::SWITCHING_PROTOCOLS)
-        .header("Upgrade", "websocket")
-        .header("Connection", "Upgrade")
-        .header("Sec-WebSocket-Accept", accept_key);
-
-    if let Some(proto) = subprotocol {
-        builder = builder.header("Sec-WebSocket-Protocol", proto);
-    }
-
-    builder.body(HyperResponseBody::Full(http_body_util::Full::new(
-        bytes::Bytes::new(),
-    )))
 }

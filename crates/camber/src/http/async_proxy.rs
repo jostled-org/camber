@@ -10,6 +10,7 @@ use super::rejection::{Diagnostic, Rejected, proxy_failure_status};
 use super::response::HeaderPair;
 use super::response_commitment::{OperationCommitment, ResponseCommit, ResponseOrigin};
 use super::transfer::{IncomingSource, Transfer, TransferFailure, TransferOwner};
+use super::util::is_token;
 use crate::RuntimeError;
 use arrayvec::ArrayString;
 use std::borrow::Cow;
@@ -20,10 +21,10 @@ use tokio::sync::oneshot;
 
 /// The one account of the only path [`strip_prefix`] refuses.
 ///
-/// Shared with the proxied-WebSocket target builder, which raises the identical
-/// fault from the identical check: one sentence for one fault, so an operator
-/// reading two proxy classes reads the same reason for the same probe.
-pub(super) const TRAVERSAL_SEGMENT: &str = "the request path contains a traversal segment";
+/// Only [`target_url`] raises it, and every proxy class builds its target
+/// there: one sentence for one fault, so an operator reading any two proxy
+/// classes reads the same reason for the same probe.
+const TRAVERSAL_SEGMENT: &str = "the request path contains a traversal segment";
 
 /// How long an upload gets to confirm it stopped before its answer goes out.
 ///
@@ -46,32 +47,6 @@ fn is_hop_by_hop(name: &str) -> bool {
         || name.eq_ignore_ascii_case("transfer-encoding")
         || name.eq_ignore_ascii_case("upgrade")
         || name.eq_ignore_ascii_case("host")
-}
-
-fn is_rfc_token(value: &[u8]) -> bool {
-    !value.is_empty()
-        && value.iter().copied().all(|byte| {
-            matches!(
-                byte,
-                b'!' | b'#'
-                    | b'$'
-                    | b'%'
-                    | b'&'
-                    | b'\''
-                    | b'*'
-                    | b'+'
-                    | b'-'
-                    | b'.'
-                    | b'^'
-                    | b'_'
-                    | b'`'
-                    | b'|'
-                    | b'~'
-                    | b'0'..=b'9'
-                    | b'A'..=b'Z'
-                    | b'a'..=b'z'
-            )
-        })
 }
 
 /// One header value, in the form the set it came from already holds it.
@@ -112,10 +87,10 @@ impl<'a> HeaderValueRef<'a> {
 
 /// One header on its way between two hops, named and in its own form.
 ///
-/// Materialized rather than iterated twice from its source, because every set
-/// here is read twice — once for the `Connection` tokens it delegates, once to
-/// filter against them — and neither a collected slice's iterator nor hyper's
-/// map iterator is `Clone`.
+/// Every set is read twice — once for the `Connection` tokens it delegates,
+/// once to filter against them — so each source is handed over as a function
+/// that starts a fresh pass. hyper's map iterator is not `Clone`, and
+/// collecting the set first would cost an allocation per hop.
 #[derive(Clone, Copy)]
 struct ForwardedHeader<'a> {
     name: &'a str,
@@ -123,34 +98,63 @@ struct ForwardedHeader<'a> {
 }
 
 /// The `Connection` tokens one header set delegates to other header names.
-fn connection_header_tokens<'a>(headers: &[ForwardedHeader<'a>]) -> Box<[&'a [u8]]> {
+///
+/// Every forwarding face asks this one question, so each hands over the two
+/// parts it already holds — a name and the value's bytes — rather than a shape
+/// only one of them stores. A fragment that is not a token names no header and
+/// is dropped on its own: a peer that buried `invalid token` in a list still
+/// has the valid names beside it honoured.
+pub(super) fn connection_tokens<'a>(
+    headers: impl Iterator<Item = (&'a str, &'a [u8])>,
+) -> Box<[&'a [u8]]> {
     headers
-        .iter()
-        .filter(|header| header.name.eq_ignore_ascii_case("connection"))
-        .flat_map(|header| header.value.as_bytes().split(|byte| *byte == b','))
+        .filter(|(name, _)| name.eq_ignore_ascii_case("connection"))
+        .flat_map(|(_, value)| value.split(|byte| *byte == b','))
         .map(|token| token.trim_ascii())
-        .filter(|token| is_rfc_token(token))
+        .filter(|token| is_token(token))
         .collect()
 }
 
-fn is_connection_named(name: &str, connection_tokens: &[&[u8]]) -> bool {
+/// The same scan, of one pass over a forwarded header set.
+fn connection_header_tokens<'a>(
+    headers: impl Iterator<Item = ForwardedHeader<'a>>,
+) -> Box<[&'a [u8]]> {
+    connection_tokens(headers.map(|header| (header.name, header.value.as_bytes())))
+}
+
+/// Whether `name` is one of the fields a `Connection` scan delegated.
+pub(super) fn is_connection_named(name: &str, connection_tokens: &[&[u8]]) -> bool {
     connection_tokens
         .iter()
         .any(|token| token.eq_ignore_ascii_case(name.as_bytes()))
 }
 
-/// Check whether a header is a forwarded-metadata header that Camber sets itself.
-/// Client-supplied values must be stripped before Camber adds its own to prevent
-/// spoofing (e.g. a client injecting `X-Forwarded-For: 10.0.0.1`).
+/// The prefix every field naming a hop on the way here is spelled under.
+const FORWARDED_PREFIX: &str = "x-forwarded-";
+
+/// Check whether a header is forwarding metadata a peer may not supply.
+///
+/// Client-supplied values must be stripped before Camber adds its own to
+/// prevent spoofing (e.g. a client injecting `X-Forwarded-For: 10.0.0.1`).
+/// `X-Forwarded-` is one family rather than the three suffixes Camber writes:
+/// real intermediaries also send `X-Forwarded-Port`, `X-Forwarded-Prefix` and
+/// more, and an upstream that trusts this proxy reads every one of them as
+/// something this hop vouched for. Camber vouches for none it did not write,
+/// so the whole prefix stops here, beside the two fields the same vocabulary
+/// spells without it.
 pub(super) fn is_forwarded_metadata(name: &str) -> bool {
-    name.eq_ignore_ascii_case("x-forwarded-for")
-        || name.eq_ignore_ascii_case("x-forwarded-host")
-        || name.eq_ignore_ascii_case("x-forwarded-proto")
+    has_name_prefix(name, FORWARDED_PREFIX)
         || name.eq_ignore_ascii_case("x-real-ip")
         || name.eq_ignore_ascii_case("forwarded")
 }
 
-pub(super) fn strip_prefix<'a>(path_and_query: &'a str, prefix: &str) -> Option<Cow<'a, str>> {
+/// Whether a header name starts with `prefix`, ignoring ASCII case.
+pub(super) fn has_name_prefix(name: &str, prefix: &str) -> bool {
+    name.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+fn strip_prefix<'a>(path_and_query: &'a str, prefix: &str) -> Option<Cow<'a, str>> {
     let (path, query) = match path_and_query.split_once('?') {
         Some((p, q)) => (p, Some(q)),
         None => (path_and_query, None),
@@ -228,14 +232,11 @@ pub(super) struct ProxyRequest {
 }
 
 /// Every header one collected request forwards.
-fn collected_headers(req: &ProxyRequest) -> Box<[ForwardedHeader<'_>]> {
-    req.headers
-        .iter()
-        .map(|(name, value)| ForwardedHeader {
-            name: name.as_ref(),
-            value: HeaderValueRef::Text(value.as_ref()),
-        })
-        .collect()
+fn collected_headers(req: &ProxyRequest) -> impl Iterator<Item = ForwardedHeader<'_>> {
+    req.headers.iter().map(|(name, value)| ForwardedHeader {
+        name: name.as_ref(),
+        value: HeaderValueRef::Text(value.as_ref()),
+    })
 }
 
 impl ProxyRequest {
@@ -287,7 +288,7 @@ fn routable_reqwest_method(method: Method) -> reqwest::Method {
 /// Filter request headers onto a reqwest builder, returning the original Host value if present.
 fn filter_request_headers<'a>(
     mut builder: reqwest::RequestBuilder,
-    headers: &[ForwardedHeader<'a>],
+    headers: impl Iterator<Item = ForwardedHeader<'a>>,
     connection_tokens: &[&[u8]],
 ) -> (reqwest::RequestBuilder, Option<&'a str>) {
     let mut original_host = None;
@@ -366,14 +367,17 @@ fn attach_peer_address(
 ///
 /// Values arrive as [`HeaderValueRef`] rather than as bytes or as text, so
 /// neither caller pays for the form the other one stores.
-fn forward_headers(
+fn forward_headers<'a, I>(
     builder: reqwest::RequestBuilder,
-    headers: &[ForwardedHeader<'_>],
+    headers: impl Fn() -> I,
     remote_addr: Option<std::net::IpAddr>,
     scheme: &str,
-) -> reqwest::RequestBuilder {
-    let connection_tokens = connection_header_tokens(headers);
-    let (builder, original_host) = filter_request_headers(builder, headers, &connection_tokens);
+) -> reqwest::RequestBuilder
+where
+    I: Iterator<Item = ForwardedHeader<'a>>,
+{
+    let connection_tokens = connection_header_tokens(headers());
+    let (builder, original_host) = filter_request_headers(builder, headers(), &connection_tokens);
     attach_forwarding_metadata(builder, original_host, remote_addr, scheme)
 }
 
@@ -507,17 +511,17 @@ impl std::error::Error for PhaseFailure {}
 
 impl ProxyFailure {
     /// A fault this proxy raised on itself, in the shape a refusal carries it.
-    fn unsendable(error: RuntimeError) -> Self {
+    pub(super) fn unsendable(error: RuntimeError) -> Self {
         Self::Unsendable(Arc::new(error))
     }
 
     /// One phase's failure, carrying the cause that phase's owner minted.
-    const fn phase(phase: ProxyPhase, cause: RuntimeError) -> Self {
+    pub(super) const fn phase(phase: ProxyPhase, cause: RuntimeError) -> Self {
         Self::Phase(PhaseFailure::new(phase, cause))
     }
 
     /// One phase's failure from a deadline that phase configured.
-    fn expired(phase: ProxyPhase, boundary: DeadlineBoundary) -> Self {
+    pub(super) fn expired(phase: ProxyPhase, boundary: DeadlineBoundary) -> Self {
         Self::phase(phase, RuntimeError::DeadlineExceeded(boundary))
     }
 }
@@ -532,26 +536,37 @@ impl fmt::Display for ProxyFailure {
     }
 }
 
+/// The URL one forward targets: the backend, then the peer's path with the
+/// route prefix removed.
+///
+/// Every proxy class — buffered, streaming, and a proxied WebSocket offer —
+/// builds its target here, so a traversal probe is refused one way across all
+/// three. The target is built per request from the peer's own path, so the
+/// refusal it raises is about peer input and is classified as such — not as an
+/// upstream that failed to answer a request this proxy never sent.
+pub(super) fn target_url(
+    backend: &str,
+    prefix: &str,
+    path_and_query: &str,
+) -> Result<Box<str>, ProxyFailure> {
+    match strip_prefix(path_and_query, prefix) {
+        Some(remainder) => Ok(format!("{backend}{remainder}").into_boxed_str()),
+        None => Err(ProxyFailure::UnbuildableTarget(TRAVERSAL_SEGMENT)),
+    }
+}
+
 /// Create a reqwest builder with URL resolved from path and prefix.
 ///
-/// Shared setup for both buffered and streaming upstream builders:
-/// strip prefix, format URL, acquire client, create builder.
-///
-/// The target is built per request from the peer's own path, so the refusal it
-/// raises is about peer input and is classified as such — not as an upstream
-/// that failed to answer a request this proxy never sent.
+/// Shared setup for both buffered and streaming upstream builders: resolve the
+/// target URL, acquire the client, create the builder.
 fn upstream_builder(
     method: reqwest::Method,
     path_and_query: &str,
     target: &ProxyTarget<'_>,
 ) -> Result<reqwest::RequestBuilder, ProxyFailure> {
-    let remainder = match strip_prefix(path_and_query, target.prefix) {
-        Some(remainder) => remainder,
-        None => return Err(ProxyFailure::UnbuildableTarget(TRAVERSAL_SEGMENT)),
-    };
-    let url = format!("{}{remainder}", target.backend);
+    let url = target_url(target.backend, target.prefix, path_and_query)?;
     let client = target.upstream.client().map_err(ProxyFailure::unsendable)?;
-    Ok(client.request(method, &url))
+    Ok(client.request(method, &*url))
 }
 
 /// Where one forward sends, and the frozen owner it sends through.
@@ -576,7 +591,7 @@ fn build_upstream_request(
     let builder = upstream_builder(method, &req.path, target)?;
     let forwarded = forward_headers(
         builder,
-        &collected_headers(req),
+        || collected_headers(req),
         req.remote_addr,
         req.scheme,
     );
@@ -592,16 +607,12 @@ pub(super) struct IncomingProxyParts {
     pub(super) scheme: &'static str,
 }
 
-/// Every header one incoming request forwards.
-fn incoming_headers(parts: &IncomingProxyParts) -> Box<[ForwardedHeader<'_>]> {
-    parts
-        .headers
-        .iter()
-        .map(|(name, value)| ForwardedHeader {
-            name: name.as_str(),
-            value: HeaderValueRef::Bytes(value.as_bytes()),
-        })
-        .collect()
+/// Every header one hyper map carries, as one forwarding pass reads them.
+fn mapped_headers(headers: &hyper::HeaderMap) -> impl Iterator<Item = ForwardedHeader<'_>> {
+    headers.iter().map(|(name, value)| ForwardedHeader {
+        name: name.as_str(),
+        value: HeaderValueRef::Bytes(value.as_bytes()),
+    })
 }
 
 /// Build a reqwest builder for upstream forwarding with a streaming incoming body.
@@ -617,7 +628,7 @@ fn build_upstream_request_streaming(
     )?;
     let forwarded = forward_headers(
         builder,
-        &incoming_headers(parts),
+        || mapped_headers(&parts.headers),
         parts.remote_addr,
         parts.scheme,
     );
@@ -625,23 +636,10 @@ fn build_upstream_request_streaming(
     Ok(forwarded.body(upload))
 }
 
-/// Every header one upstream answer arrived with.
-fn answered_headers(resp: &reqwest::Response) -> Box<[ForwardedHeader<'_>]> {
-    resp.headers()
-        .iter()
-        .map(|(name, value)| ForwardedHeader {
-            name: name.as_str(),
-            value: HeaderValueRef::Bytes(value.as_bytes()),
-        })
-        .collect()
-}
-
 /// Collect non-hop-by-hop headers from an upstream response.
 fn collect_response_headers(resp: &reqwest::Response) -> Box<[HeaderPair]> {
-    let headers = answered_headers(resp);
-    let connection_tokens = connection_header_tokens(&headers);
-    headers
-        .iter()
+    let connection_tokens = connection_header_tokens(mapped_headers(resp.headers()));
+    mapped_headers(resp.headers())
         .filter(|header| {
             !is_hop_by_hop(header.name) && !is_connection_named(header.name, &connection_tokens)
         })
