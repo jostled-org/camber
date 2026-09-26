@@ -1177,7 +1177,12 @@ where
     fn settle(mut self) -> MultipartTerminal {
         self.slot.terminate();
         self.record_parser();
-        self.terminal.take().unwrap_or(MultipartTerminal::Abandoned)
+        let terminal = self.terminal.take().unwrap_or(MultipartTerminal::Abandoned);
+        let observer = self.observer.clone();
+        drop(self);
+        // The parser has dropped; keep its peak, but retain no current charge.
+        observe(&observer, |metrics| metrics.record_parser(0, 0));
+        terminal
     }
 
     /// Publish what the parser is holding.

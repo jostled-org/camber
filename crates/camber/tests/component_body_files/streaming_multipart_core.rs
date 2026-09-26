@@ -2411,9 +2411,7 @@ fn assert_generated_release(
     );
     assert_eq!(observed.drivers_terminated(), 1, "{context}: driver");
     assert_eq!(observed.reply_retained_bytes(), 0, "{context}: reply");
-    if generated.ending == Ending::Clean {
-        assert_eq!(observed.parser_retained_bytes(), 0, "{context}: parser");
-    }
+    assert_eq!(observed.parser_retained_bytes(), 0, "{context}: parser");
 }
 
 /// Read one generated case under one framing to its terminal, require the
