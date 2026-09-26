@@ -30,6 +30,9 @@ jobs:
   release-pr:
     needs: release
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-pr-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,6 +44,10 @@ jobs:
       - uses: release-plz/git-config@59144859caf016f8b817a2ac9b051578729173c4 # v0.1.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: .github/scripts/release.sh release-pr --git-token "$GITHUB_TOKEN"
+      - run: .github/scripts/release.sh release-pr --git-token "$GITHUB_TOKEN" --output json > "$RUNNER_TEMP/release-pr.json"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Record generated release dependency inputs
+        run: bash .github/scripts/refresh-release-inputs.sh "$RUNNER_TEMP/release-pr.json"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

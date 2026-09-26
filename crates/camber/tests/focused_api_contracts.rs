@@ -42,6 +42,8 @@ mod published_compatibility;
 mod query_identity;
 #[path = "focused_api_contracts/release_features.rs"]
 mod release_features;
+#[path = "focused_api_contracts/release_inputs.rs"]
+mod release_inputs;
 #[path = "focused_api_contracts/request_validation.rs"]
 mod request_validation;
 #[path = "focused_api_contracts/response_validation.rs"]

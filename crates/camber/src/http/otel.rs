@@ -136,10 +136,11 @@ pub fn tracing() -> MiddlewareFn {
 /// Initialize the OTLP span exporter. Called from `RuntimeBuilder::run()`
 /// when `otel_endpoint()` was configured.
 pub(crate) fn init_exporter(endpoint: &str) -> Result<(), crate::RuntimeError> {
-    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_otlp::{RetryPolicy, WithExportConfig, WithTonicConfig};
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
+        .with_retry_policy(RetryPolicy::disabled())
         .with_endpoint(endpoint)
         .build()
         .map_err(|e: opentelemetry_otlp::ExporterBuildError| {

@@ -697,7 +697,7 @@ where
     // teardown at the bottom.
     #[cfg(feature = "otel")]
     if let Some(endpoint) = otel_endpoint {
-        crate::http::otel::init_exporter(&endpoint)?;
+        tokio_rt.block_on(async { crate::http::otel::init_exporter(&endpoint) })?;
     }
 
     let (inner, context) = establish_runtime(
