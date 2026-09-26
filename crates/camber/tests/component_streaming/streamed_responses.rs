@@ -647,9 +647,9 @@ const DECLARED_TRUNCATION_ROWS: [(&str, &str, &[u8]); 2] = [
 /// 9.T1 — invariant 14
 ///
 /// A local streaming source declares a length, and closes cleanly after the
-/// peer has read the head. The source reports no error, so only the declared
-/// length says the body is short. The committed status stays, the wire framing
-/// stays incomplete, and the completion account records the source failure as
+/// peer has received the head and source prefix. The source reports no error;
+/// only the declared length says the body is short. The committed status stays.
+/// The wire framing stays incomplete, and the completion account records the source failure as
 /// its download boundary. No upstream proxy takes part. Each row runs even
 /// after the other fails, so both report their own diagnostic.
 #[test]

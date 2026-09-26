@@ -285,6 +285,23 @@ Install `release-plz 0.3.169` and `cargo-semver-checks 0.50.0` before running th
 Release API checks use Camber's CI features without either allocator.
 The compiler still rejects builds that enable both `jemalloc` and `mimalloc`.
 
+### External compatibility and measurements
+
+Normal CI includes benchmark parsers, reports, phase ordering, and local server tests.
+It does not enforce performance thresholds on shared runners.
+
+The External Evidence workflow runs NATS, Docker build, Go server, and load-tool checks when code or their workflow changes.
+It has no scheduled runs. Its load checks exercise the production adapters for pinned wrk and oha versions.
+They check tool compatibility, not comparative framework performance.
+
+Run the DNS lane manually after setting repository secrets `ACME_TEST_DOMAIN` and `CF_TOKEN`.
+It uses ACME staging and creates temporary DNS records. Missing secrets fail before compilation.
+Each external test must release its resources and write a separate cleanup witness.
+
+Run performance benchmarks and the ignored `incremental_compile_under_5_seconds` test on a controlled host.
+For that test, set a unique `CAMBER_EXTERNAL_RUN_ID` and an unused absolute `CAMBER_EXTERNAL_CLEANUP_WITNESS` path.
+Record the host, toolchain, and cache state with the result. Shared-runner timings are not release evidence.
+
 ## License
 
 Dual-licensed under MIT and Apache 2.0.

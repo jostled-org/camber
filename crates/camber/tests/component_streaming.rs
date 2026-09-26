@@ -13,6 +13,8 @@ pub mod trace_capture;
 
 #[path = "component_streaming/server_sent_events.rs"]
 mod server_sent_events;
+#[path = "component_streaming/source_failure_fixture.rs"]
+mod source_failure_fixture;
 #[path = "component_streaming/streamed_responses.rs"]
 mod streamed_responses;
 #[path = "component_streaming/transfer_budgets.rs"]

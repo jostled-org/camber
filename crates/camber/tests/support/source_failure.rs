@@ -118,6 +118,20 @@ pub fn exchange_after_head(
     row: &str,
     release: impl FnOnce(),
 ) -> PeerExchange {
+    exchange_after_prefix(addr, path, row, 0, release)
+}
+
+/// Read the head and `prefix_len` body bytes before releasing the source.
+///
+/// A source error can discard buffered transport bytes. Observing the prefix
+/// at the peer orders its delivery before the source can fail.
+pub fn exchange_after_prefix(
+    addr: SocketAddr,
+    path: &str,
+    row: &str,
+    prefix_len: usize,
+    release: impl FnOnce(),
+) -> PeerExchange {
     let mut stream = super::http::connect(addr)
         .unwrap_or_else(|error| panic!("{row}: the peer could not connect: {error}"));
     super::http::write_request(&mut stream, "GET", path, &[], &[])
@@ -125,8 +139,20 @@ pub fn exchange_after_head(
     let head = super::http::read_head(&mut stream, SOURCE_FAILURE_BOUND)
         .unwrap_or_else(|error| panic!("{row}: no whole head arrived: {error}"));
     let (status, declared, chunked) = parse_head(&head, row);
+    let mut body = Vec::new();
+    super::http::with_read_deadline(&mut stream, SOURCE_FAILURE_BOUND, |stream, deadline| {
+        super::http::read_to_length(
+            stream,
+            &mut body,
+            prefix_len,
+            PEER_READ_LIMIT,
+            "held source prefix",
+            Some(deadline),
+        )
+    })
+    .unwrap_or_else(|error| panic!("{row}: the prefix did not arrive before release: {error}"));
     release();
-    let (body, reset) = read_to_end(&mut stream, row);
+    let (body, reset) = read_to_end(&mut stream, body, row);
     PeerExchange {
         status,
         declared,
@@ -166,8 +192,7 @@ pub fn declared_length(value: &str, row: &str) -> usize {
 /// A read deadline is not an end. It means the server never ended the body,
 /// which no row here accepts. Only a gone peer counts as a reset; any other
 /// transport fault fails the row rather than reading as one.
-fn read_to_end(stream: &mut TcpStream, row: &str) -> (Box<[u8]>, bool) {
-    let mut body = Vec::new();
+fn read_to_end(stream: &mut TcpStream, mut body: Vec<u8>, row: &str) -> (Box<[u8]>, bool) {
     let ended =
         super::http::with_read_deadline(stream, SOURCE_FAILURE_BOUND, |stream, deadline| {
             super::http::read_to_eof(stream, &mut body, PEER_READ_LIMIT, Some(deadline))
@@ -232,7 +257,7 @@ pub fn assert_complete_framing(exchange: &PeerExchange, expected: &[u8], row: &s
 }
 
 /// One local row whose source declares `declared` bytes, produces `produced`,
-/// and closes cleanly after the peer has read the head.
+/// and closes cleanly after the peer has read the head and produced bytes.
 ///
 /// The peer keeps the committed status, the wire stays incomplete, and the
 /// completion account records the source failure.
@@ -245,7 +270,7 @@ pub fn declared_short_row(
     release: &Release,
     row: &str,
 ) {
-    let exchange = exchange_after_head(addr, path, row, || release.release(row));
+    let exchange = exchange_after_prefix(addr, path, row, produced.len(), || release.release(row));
     assert_eq!(exchange.status, 200, "{row}: the committed status");
     assert_eq!(
         exchange.declared,

@@ -60,9 +60,7 @@ jobs:
         run: >-
           cargo --config 'build.rustdocflags=["-D","warnings"]' doc
           --workspace --lib --features "${CAMBER_CI_FEATURES}" --no-deps
-      # camber-bench measurements have no place on a shared runner, so its tests
-      # stay out of this lane. Static source and test policy still covers it in
-      # the Pedant matrices below.
+      # Bench correctness tests run here; external measurements remain ignored.
       #
       # `timeout` enforces the deadline from a plain OS process. A step-level
       # timeout-minutes is enforced by the runner agent itself, so a test that
@@ -72,7 +70,7 @@ jobs:
       - name: Run workspace tests
         run: >-
           timeout --signal=KILL 900
-          cargo test --workspace --exclude camber-bench
+          cargo test --workspace
           --features "${CAMBER_CI_FEATURES}"
         timeout-minutes: 20
 

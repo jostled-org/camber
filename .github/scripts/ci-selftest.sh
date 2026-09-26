@@ -70,7 +70,7 @@ check_workflow_entries() {
         'workspace lint check' || return $?
     assert_workflow_entry 'cargo --config '\''build.rustdocflags=["-D","warnings"]'\'' doc' \
         'warning-denying API documentation check' || return $?
-    assert_workflow_entry 'cargo test --workspace --exclude camber-bench' \
+    assert_workflow_entry 'cargo test --workspace' \
         'workspace test run' || return $?
     assert_workflow_entry 'run: cargo deny --workspace check' \
         'dependency policy check' || return $?
@@ -297,6 +297,7 @@ ci_selftest_main() {
     check_dependency_input_inventory || return $?
     check_workflow_contract "${ROOT}/.github/workflows/ci.yml" || return $?
     bash "${ROOT}/.github/scripts/tests/ci-prerequisites.sh" || return $?
+    bash "${ROOT}/.github/scripts/tests/external-evidence.sh" || return $?
     printf 'CI self-test: PASS\n'
 }
 

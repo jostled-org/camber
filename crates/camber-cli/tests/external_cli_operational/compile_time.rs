@@ -83,7 +83,7 @@ fn measure_incremental_build(root: &Path, project_name: &str) -> Result<(), Fixt
 }
 
 #[test]
-#[ignore = "external lane compile_time; owner: Camber CLI maintainers; run: gh workflow run external-evidence.yml -f lane=compile_time"]
+#[ignore = "controlled-host measurement; owner: Camber CLI maintainers; run: cargo test -p camber-cli --test external_cli_operational external_compile_time::incremental_compile_under_5_seconds -- --exact --ignored"]
 fn incremental_compile_under_5_seconds() -> Result<(), FixtureError> {
     let run = ExternalRun::from_environment()?;
     let witness = CleanupWitness::from_environment()?;

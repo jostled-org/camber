@@ -18,6 +18,37 @@ pub enum LoadGenerator {
     Oha,
 }
 
+/// Build the command shared by benchmark runs and external compatibility checks.
+pub fn load_command(
+    generator: LoadGenerator,
+    url: &str,
+    connections: u32,
+    duration: Duration,
+) -> Command {
+    let seconds = format!("{}s", duration.as_secs().max(1));
+    let connections = connections.to_string();
+    let mut command = match generator {
+        LoadGenerator::Wrk => Command::new("wrk"),
+        LoadGenerator::Oha => Command::new("oha"),
+    };
+    match generator {
+        LoadGenerator::Wrk => {
+            command.args(["-t2", "-d", &seconds, "-c", &connections, "--latency", url])
+        }
+        LoadGenerator::Oha => command.args([
+            "--output-format",
+            "json",
+            "-z",
+            &seconds,
+            "-c",
+            &connections,
+            "--no-tui",
+            url,
+        ]),
+    };
+    command
+}
+
 /// Detect which load generator is available. Prefers wrk (TechEmpower standard),
 /// falls back to oha.
 pub fn detect_load_generator() -> Option<LoadGenerator> {
@@ -49,19 +80,7 @@ pub fn oha_available() -> bool {
 
 /// Run wrk against a URL and parse the output into a `BenchResult`.
 pub fn run_wrk(url: &str, connections: u32, duration: Duration) -> Result<BenchResult, BenchError> {
-    let duration_secs = format!("{}s", duration.as_secs().max(1));
-    let connections_str = connections.to_string();
-
-    let output = Command::new("wrk")
-        .args([
-            "-t2",
-            "-d",
-            &duration_secs,
-            "-c",
-            &connections_str,
-            "--latency",
-            url,
-        ])
+    let output = load_command(LoadGenerator::Wrk, url, connections, duration)
         .output()
         .map_err(|e| {
             BenchError::LoadGenerator(format!("wrk failed to start: {e}").into_boxed_str())
@@ -203,19 +222,7 @@ fn parse_wrk_error_part(part: &str) -> Option<u64> {
 
 /// Run oha against a URL and parse JSON output into a `BenchResult`.
 pub fn run_oha(url: &str, connections: u32, duration: Duration) -> Result<BenchResult, BenchError> {
-    let duration_secs = duration.as_secs().max(1).to_string();
-    let connections_str = connections.to_string();
-
-    let output = Command::new("oha")
-        .args([
-            "--json",
-            "-z",
-            &duration_secs,
-            "-c",
-            &connections_str,
-            "--no-tui",
-            url,
-        ])
+    let output = load_command(LoadGenerator::Oha, url, connections, duration)
         .output()
         .map_err(|e| {
             BenchError::LoadGenerator(format!("oha failed to start: {e}").into_boxed_str())
@@ -243,9 +250,9 @@ pub fn parse_oha_json(stdout: &[u8]) -> Result<BenchResult, BenchError> {
     let latency_avg_ms = required_oha_number(&summary["average"], "summary.average")? * 1000.0;
 
     let percentiles = &json["latencyPercentiles"];
-    let latency_p50_ms = oha_percentile(percentiles, 50.0)?;
-    let latency_p90_ms = oha_percentile(percentiles, 90.0)?;
-    let latency_p99_ms = oha_percentile(percentiles, 99.0)?;
+    let latency_p50_ms = oha_percentile(percentiles, "p50")?;
+    let latency_p90_ms = oha_percentile(percentiles, "p90")?;
+    let latency_p99_ms = oha_percentile(percentiles, "p99")?;
 
     let status_codes = json["statusCodeDistribution"]
         .as_object()
@@ -274,14 +281,9 @@ fn required_oha_number(value: &serde_json::Value, field: &str) -> Result<f64, Be
     value.as_f64().ok_or_else(|| oha_schema_error(field))
 }
 
-fn oha_percentile(percentiles: &serde_json::Value, percentile: f64) -> Result<f64, BenchError> {
-    percentiles
-        .as_array()
-        .and_then(|arr| {
-            arr.iter()
-                .find(|value| value["percentile"].as_f64() == Some(percentile))
-                .and_then(|v| v["latency"].as_f64())
-        })
+fn oha_percentile(percentiles: &serde_json::Value, percentile: &str) -> Result<f64, BenchError> {
+    percentiles[percentile]
+        .as_f64()
         .map(|latency| latency * 1000.0)
         .ok_or_else(|| oha_schema_error(&format!("latencyPercentiles[{percentile}]")))
 }
@@ -317,20 +319,35 @@ pub fn three_phase_bench(
     concurrency_levels: &[u32],
     duration: Duration,
 ) -> Result<Box<[(u32, BenchResult)]>, BenchError> {
+    three_phase_bench_with(
+        concurrency_levels,
+        duration,
+        |connections, duration| dispatch_load(generator, url, connections, duration),
+        std::thread::sleep,
+    )
+}
+
+/// Execute the benchmark phases with a load runner and a phase delay.
+pub fn three_phase_bench_with(
+    concurrency_levels: &[u32],
+    duration: Duration,
+    mut run: impl FnMut(u32, Duration) -> Result<BenchResult, BenchError>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<Box<[(u32, BenchResult)]>, BenchError> {
     let max_concurrency = concurrency_levels.iter().copied().max().unwrap_or(8);
 
     // Phase 1: Primer — 5s at 8 connections, discard
-    dispatch_load(generator, url, 8, Duration::from_secs(5))?;
-    std::thread::sleep(Duration::from_secs(2));
+    run(8, Duration::from_secs(5))?;
+    sleep(Duration::from_secs(2));
 
     // Phase 2: Warmup — full duration at max concurrency, discard
-    dispatch_load(generator, url, max_concurrency, duration)?;
-    std::thread::sleep(Duration::from_secs(2));
+    run(max_concurrency, duration)?;
+    sleep(Duration::from_secs(2));
 
     // Phase 3: Measured — full duration at each concurrency level
     let mut results = Vec::with_capacity(concurrency_levels.len());
     for &conns in concurrency_levels {
-        let result = dispatch_load(generator, url, conns, duration)?;
+        let result = run(conns, duration)?;
         results.push((conns, result));
     }
 

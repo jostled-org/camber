@@ -202,7 +202,7 @@ run_workflow_phase() {
                 --features "${CAMBER_WORKFLOW_FEATURES}" --no-deps
             ;;
         test)
-            cargo test --workspace --exclude camber-bench \
+            cargo test --workspace \
                 --features "${CAMBER_WORKFLOW_FEATURES}"
             ;;
         deny) cargo deny --workspace check ;;

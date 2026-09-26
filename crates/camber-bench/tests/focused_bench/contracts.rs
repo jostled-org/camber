@@ -135,12 +135,8 @@ Transfer/sec:      2.21MB";
 fn oha_json_parsed_correctly() -> Result<(), FixtureError> {
     let json = br#"{
         "summary": {"successRate": 1.0, "total": 50000.0, "slowest": 0.005, "fastest": 0.0001, "average": 0.00053, "requestsPerSec": 18500.0},
-        "latencyPercentiles": [
-            {"percentile": 50.0, "latency": 0.00052},
-            {"percentile": 75.0, "latency": 0.00058},
-            {"percentile": 90.0, "latency": 0.00065},
-            {"percentile": 99.0, "latency": 0.00082}
-        ],
+        "latencyPercentiles": {"p50": 0.00052, "p90": 0.00065, "p99": 0.00082},
+        "errorDistribution": {},
         "statusCodeDistribution": {"200": 50000}
     }"#;
     let result = camber_bench::load::parse_oha_json(json)?;
@@ -177,11 +173,8 @@ fn oha_json_parsed_correctly() -> Result<(), FixtureError> {
 fn oha_json_rejects_missing_summary_measurements() {
     let json = br#"{
         "summary": {"average": 0.00053},
-        "latencyPercentiles": [
-            {"percentile": 50.0, "latency": 0.00052},
-            {"percentile": 90.0, "latency": 0.00065},
-            {"percentile": 99.0, "latency": 0.00082}
-        ],
+        "latencyPercentiles": {"p50": 0.00052, "p90": 0.00065, "p99": 0.00082},
+        "errorDistribution": {},
         "statusCodeDistribution": {"200": 1}
     }"#;
 
@@ -192,10 +185,8 @@ fn oha_json_rejects_missing_summary_measurements() {
 fn oha_json_rejects_missing_required_percentile() {
     let json = br#"{
         "summary": {"average": 0.00053, "requestsPerSec": 10.0},
-        "latencyPercentiles": [
-            {"percentile": 50.0, "latency": 0.00052},
-            {"percentile": 90.0, "latency": 0.00065}
-        ],
+        "latencyPercentiles": {"p50": 0.00052, "p90": 0.00065},
+        "errorDistribution": {},
         "statusCodeDistribution": {"200": 1}
     }"#;
 
