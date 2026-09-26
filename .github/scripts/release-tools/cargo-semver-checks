@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Release-plz does not expose feature selection for its semver subprocess.
+# Keep its package, baseline, release type, output, and exit status intact.
+REAL_CHECKER=${CAMBER_SEMVER_CHECKS_BIN:-}
+case "${REAL_CHECKER}" in
+    /*) ;;
+    *) printf 'INFRASTRUCTURE: set CAMBER_SEMVER_CHECKS_BIN to the real checker path\n' >&2; exit 75 ;;
+esac
+[ -x "${REAL_CHECKER}" ] && [ ! "${REAL_CHECKER}" -ef "$0" ] || {
+    printf 'INFRASTRUCTURE: CAMBER_SEMVER_CHECKS_BIN must name a separate executable\n' >&2
+    exit 75
+}
+
+package='' previous=''
+for argument in "$@"; do
+    case "${previous}:${argument}" in
+        --package:*) package="${argument}" ;;
+        *:--package=*) package="${argument#--package=}" ;;
+    esac
+    previous="${argument}"
+done
+
+case "${package}" in
+    camber)
+        ROOT=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+        CAMBER_HOOK_LIBRARY_MODE=1 source "${ROOT}/.github/scripts/reproduce-ci.sh"
+        # Allocators change private process state, not the public API.
+        # Disable heuristic feature selection for both current and baseline.
+        exec "${REAL_CHECKER}" "$@" --default-features --features "${CAMBER_WORKFLOW_FEATURES}"
+        ;;
+    *) exec "${REAL_CHECKER}" "$@" ;;
+esac

@@ -34,9 +34,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: MarcoIeni/release-plz-action@v0.5
+      - run: rustup show active-toolchain
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
-          command: release-pr
+          tool: release-plz@0.3.169,cargo-semver-checks@0.50.0
+      - uses: release-plz/git-config@59144859caf016f8b817a2ac9b051578729173c4 # v0.1.2
+      - run: .github/scripts/release.sh release-pr --git-token "$GITHUB_TOKEN"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

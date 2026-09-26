@@ -300,7 +300,12 @@ reproduce_ci_main() {
     git -C "${source_root}" worktree add --detach "${checkout}" HEAD >/dev/null \
         || { rm -rf -- "${temporary_root}"; return 75; }
     export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${source_root}/target/workflow-reproduction}"
-    run_workflow_checkout "${checkout}" || status=$?
+    case "${1:-ci}" in
+        ci) run_workflow_checkout "${checkout}" || status=$? ;;
+        release)
+            (cd "${checkout}" && .github/scripts/release.sh update) || status=$?
+            ;;
+    esac
     remove_workflow_checkout \
         "${source_root}" "${temporary_root}" "${checkout}" || cleanup_status=$?
     workflow_result "${status}" "${cleanup_status}"
@@ -312,6 +317,7 @@ reproduce_ci_entry() {
     local root
     case "${1:-}" in
         '') reproduce_ci_main ;;
+        release) reproduce_ci_main release ;;
         install-tools)
             shift
             root=$(repository_root) || return $?
@@ -323,7 +329,7 @@ reproduce_ci_entry() {
             require_workflow_tools "${root}" "$@"
             ;;
         *)
-            printf 'Usage: %s [install-tools <tool>... | require-tools <tool>...]\n' \
+            printf 'Usage: %s [release | install-tools <tool>... | require-tools <tool>...]\n' \
                 "$0" >&2
             return 64
             ;;

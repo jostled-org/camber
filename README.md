@@ -268,6 +268,23 @@ let protected = circuit_breaker::wrap(pool)
     .build();
 ```
 
+## Repository Verification
+
+From a clean committed checkout, run both workflow checks:
+
+```bash
+.github/scripts/reproduce-ci.sh
+.github/scripts/reproduce-ci.sh release
+```
+
+The first command checks the CI build, tests, documentation, and dependency policy.
+The second checks release version calculation against published crates in a disposable checkout.
+It does not publish packages or create a pull request.
+Install `release-plz 0.3.169` and `cargo-semver-checks 0.50.0` before running the release check.
+
+Release API checks use Camber's CI features without either allocator.
+The compiler still rejects builds that enable both `jemalloc` and `mimalloc`.
+
 ## License
 
 Dual-licensed under MIT and Apache 2.0.
