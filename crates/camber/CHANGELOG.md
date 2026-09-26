@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/jostled-org/camber/compare/camber-v0.9.1...camber-v0.10.0) - 2026-09-26
+
+### Fixed
+
+- stabilize compatibility checks and streaming failure tests
+- *(multipart)* clear retained-byte observations after cleanup
+- [**breaking**] implement adversarial-protocol-correctness
+
+### Other
+
+- *(release)* pass github token to git setup
+- *(release)* constrain semver checks to supported features
+
 ## [0.9.1](https://github.com/jostled-org/camber/compare/camber-v0.9.0...camber-v0.9.1) - 2026-08-29
 
 ### Other
