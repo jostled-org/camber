@@ -10,6 +10,27 @@ use crate::delivery_fixture::{
 const ADAPTER: &str = ".github/scripts/release-tools/cargo-semver-checks";
 const API_FEATURES: &str = "profiling,ws,grpc,acme,dns01,nats,sqs,otel";
 
+#[test]
+fn release_workflow_supplies_token_to_git_setup_and_pr_creation() {
+    let workflow =
+        String::from_utf8(repository_file(".github/workflows/release-plz.yml").into_vec()).unwrap();
+    for header in [
+        "      - uses: release-plz/git-config@",
+        "      - run: .github/scripts/release.sh release-pr",
+    ] {
+        let step = workflow
+            .split_once(header)
+            .unwrap()
+            .1
+            .split("\n      - ")
+            .next()
+            .unwrap();
+        assert!(
+            step.contains("\n        env:\n          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}")
+        );
+    }
+}
+
 fn check_adapter(arguments: &[&str], status: i32, configured: bool) -> (i32, Box<str>) {
     let repo = FixtureRepo::new();
     repo.write_executable(

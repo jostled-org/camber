@@ -39,6 +39,8 @@ jobs:
         with:
           tool: release-plz@0.3.169,cargo-semver-checks@0.50.0
       - uses: release-plz/git-config@59144859caf016f8b817a2ac9b051578729173c4 # v0.1.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: .github/scripts/release.sh release-pr --git-token "$GITHUB_TOKEN"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
