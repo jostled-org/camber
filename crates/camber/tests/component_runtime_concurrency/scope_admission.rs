@@ -231,6 +231,63 @@ fn gated_admission_registers_before_run_and_removes_on_completion() {
     );
 }
 
+/// A child's settlement is published by the same release that lowers the
+/// scope's count, so no drain can read the lower count while the child still
+/// reads as held.
+///
+/// The drain decides its holder-only window from the count alone. A release
+/// that lowered the count first and published second let that window open on
+/// a child that had already exited but did not yet read as settled, and the
+/// owned-subsystem rows failed on it now and then. The pause holds the scope's
+/// own release edge, so the reading here is exact rather than a lost race.
+#[test]
+fn child_release_publishes_settlement_with_the_lower_count() {
+    let released = RuntimeCheckpoint::ScopeChildReleased;
+
+    let named = NamedSubject::new();
+    let closure_named = named.clone();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let (result, observed) = observe_armed_sequence(
+        |builder| builder.shutdown_timeout(BOUND),
+        move |gate| {
+            closure_named.name_next(gate.controller());
+            let subject = camber::spawn_async(async move {
+                drop(finish_rx.await);
+            });
+            // Armed only after the subject is running: every other child this
+            // runtime holds lives until `ScopeClosing`, so the one release
+            // that can reach the pause is the subject's.
+            gate.arm(released);
+            finish_tx
+                .send(())
+                .expect("the subject stopped waiting for its finish");
+            // Bounded: the drain has not started, so `shutdown_timeout`
+            // bounds nothing here.
+            runtime::block_on(join_bounded(subject, BOUND)).unwrap();
+            runtime::request_shutdown();
+        },
+        move |watch| {
+            watch.wait_armed();
+            watch.probe(released, |_| {
+                let subject = named.get("the child-release probe");
+                (
+                    reached(subject, AdmittedScope::admitted),
+                    reached(subject, AdmittedScope::settled),
+                )
+            })
+        },
+    );
+
+    result.expect("the child-release runtime failed");
+    let (admitted, settled) = observed.expect("the subject's release never paused");
+    assert!(admitted, "the paused release was not the named subject's");
+    assert!(
+        settled,
+        "the scope released the subject before publishing that it left"
+    );
+}
+
 /// The two windows [`gated_admission_registers_before_run_and_removes_on_completion`]
 /// reads its subject at.
 struct GatedAdmissionWindows {

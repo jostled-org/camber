@@ -1,11 +1,29 @@
 use crate::RuntimeError;
+use crate::secret::SecretRef;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::path::Path;
 
+#[cfg(any(feature = "acme", feature = "dns01"))]
+mod acme_domains;
+mod dns_name;
+
+pub use dns_name::canonical_dns_name;
+#[cfg(feature = "dns01")]
+pub(crate) use dns_name::{WILDCARD_PREFIX, without_root};
+
+#[cfg(any(feature = "acme", feature = "dns01"))]
+pub(crate) use acme_domains::Challenge;
+
+/// The only built-in DNS-01 provider name.
+const CLOUDFLARE_PROVIDER: &str = "cloudflare";
+
 /// Shared TLS configuration parsed from TOML.
 /// Used by all suspension-stack tools (Camber, Kingpin, Damper).
+///
+/// Unknown input fields are refused at parse time.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     /// Path to a PEM-encoded certificate file for manual TLS.
     pub cert: Option<Box<str>>,
@@ -27,60 +45,160 @@ pub struct TlsConfig {
     pub dns_api_token_file: Option<Box<str>>,
 }
 
+/// The TLS mode a valid [`TlsConfig`] selects, holding only the fields that
+/// mode reads.
+///
+/// [`TlsConfig::mode`] is the only parser. A caller matches on the mode
+/// instead of checking field combinations again.
+#[derive(Debug, Clone)]
+pub enum TlsMode {
+    /// Serve a PEM certificate and private key from files.
+    Manual {
+        /// Path to the PEM-encoded certificate file.
+        cert: Box<str>,
+        /// Path to the PEM-encoded private key file.
+        key: Box<str>,
+    },
+    /// Obtain certificates through ACME TLS-ALPN-01.
+    TlsAlpn(AcmeSettings),
+    /// Obtain certificates through ACME DNS-01 with the built-in Cloudflare
+    /// provider.
+    Dns01 {
+        /// The ACME account inputs.
+        acme: AcmeSettings,
+        /// Where the Cloudflare API token is read from. Nothing is read
+        /// until the caller loads it.
+        token: SecretRef,
+    },
+}
+
+/// The ACME inputs both automatic TLS modes share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcmeSettings {
+    /// Contact email for ACME registration.
+    pub email: Box<str>,
+    /// Use the ACME staging environment instead of production.
+    pub staging: bool,
+    /// Directory used to cache ACME account and certificate data. `None`
+    /// selects the tool's default cache directory.
+    pub cache_dir: Option<Box<str>>,
+}
+
 impl TlsConfig {
     /// Validate that the configured TLS mode is internally consistent.
+    ///
+    /// Every field must apply to the selected mode, and `dns_provider` must
+    /// name the built-in `"cloudflare"` provider exactly. Nothing is read or
+    /// loaded: a caller validates before it resolves any secret.
     pub fn validate(&self) -> Result<(), RuntimeError> {
-        let is_auto = self.auto.unwrap_or(false);
-        let has_cert = self.cert.is_some();
-        let has_key = self.key.is_some();
-        let has_email = self.email.is_some();
-        let has_dns = self.dns_provider.is_some()
-            || self.dns_api_token_env.is_some()
-            || self.dns_api_token_file.is_some();
+        self.mode().map(|_| ())
+    }
 
+    /// Parse the configuration into the TLS mode it selects.
+    ///
+    /// Refuses exactly what [`TlsConfig::validate`] refuses, with the same
+    /// diagnostics. Nothing is read or loaded: the DNS token stays a
+    /// [`SecretRef`].
+    pub fn mode(&self) -> Result<TlsMode, RuntimeError> {
+        match self.auto() {
+            true => self.automatic_mode(),
+            false => self.manual_mode(),
+        }
+    }
+
+    fn automatic_mode(&self) -> Result<TlsMode, RuntimeError> {
         match (
-            is_auto,
-            has_cert || has_key,
-            has_email,
-            has_cert,
-            has_key,
-            has_dns,
+            self.cert.is_some() || self.key.is_some(),
+            self.email.as_deref(),
         ) {
-            (true, true, _, _, _, _) => Err(RuntimeError::Config(
+            (true, _) => Err(RuntimeError::Config(
                 "tls: auto and cert/key are mutually exclusive".into(),
             )),
-            (true, false, false, _, _, _) => Err(RuntimeError::Config(
+            (false, None) => Err(RuntimeError::Config(
                 "tls: auto = true requires email".into(),
             )),
-            (true, false, true, _, _, _) => self.validate_dns(),
-            (false, _, _, _, _, true) => Err(RuntimeError::Config(
-                "tls: DNS settings require auto = true".into(),
+            (false, Some(email)) => self.acme_mode(email),
+        }
+    }
+
+    /// Select DNS-01 when a token source is named, TLS-ALPN-01 otherwise.
+    fn acme_mode(&self, email: &str) -> Result<TlsMode, RuntimeError> {
+        let token = self.dns_token()?;
+        let acme = AcmeSettings {
+            email: email.into(),
+            staging: self.staging(),
+            cache_dir: self.cache_dir.clone(),
+        };
+        Ok(match token {
+            Some(token) => TlsMode::Dns01 { acme, token },
+            None => TlsMode::TlsAlpn(acme),
+        })
+    }
+
+    fn manual_mode(&self) -> Result<TlsMode, RuntimeError> {
+        match self.first_automatic_field() {
+            Some(field) => Err(RuntimeError::Config(
+                format!("tls: {field} requires auto = true").into(),
             )),
-            (false, true, _, true, true, false) => Ok(()),
-            (false, true, _, _, _, false) => Err(RuntimeError::Config(
+            None => self.cert_pair(),
+        }
+    }
+
+    fn cert_pair(&self) -> Result<TlsMode, RuntimeError> {
+        match (self.cert.as_deref(), self.key.as_deref()) {
+            (Some(cert), Some(key)) => Ok(TlsMode::Manual {
+                cert: cert.into(),
+                key: key.into(),
+            }),
+            (Some(_), None) | (None, Some(_)) => Err(RuntimeError::Config(
                 "tls: both cert and key must be provided".into(),
             )),
-            (false, false, _, _, _, false) => Err(RuntimeError::Config(
+            (None, None) => Err(RuntimeError::Config(
                 "tls: must specify either auto = true or cert/key paths".into(),
             )),
         }
     }
 
-    fn validate_dns(&self) -> Result<(), RuntimeError> {
-        let has_env = self.dns_api_token_env.is_some();
-        let has_file = self.dns_api_token_file.is_some();
+    /// The first set field that only automatic TLS reads.
+    fn first_automatic_field(&self) -> Option<&'static str> {
+        [
+            ("email", self.email.is_some()),
+            ("staging", self.staging.is_some()),
+            ("cache_dir", self.cache_dir.is_some()),
+            ("dns_provider", self.dns_provider.is_some()),
+            ("dns_api_token_env", self.dns_api_token_env.is_some()),
+            ("dns_api_token_file", self.dns_api_token_file.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(field, set)| set.then_some(field))
+    }
 
-        match (self.dns_provider.is_some(), has_env, has_file) {
-            (false, true, _) | (false, _, true) => Err(RuntimeError::Config(
+    /// The DNS-01 token source, or `None` when no DNS field is set.
+    fn dns_token(&self) -> Result<Option<SecretRef>, RuntimeError> {
+        match (
+            self.dns_provider.as_deref(),
+            self.dns_api_token_env.as_deref(),
+            self.dns_api_token_file.as_deref(),
+        ) {
+            (None, None, None) => Ok(None),
+            (None, _, _) => Err(RuntimeError::Config(
                 "tls: dns_api_token_env/dns_api_token_file requires dns_provider".into(),
             )),
-            (true, true, true) => Err(RuntimeError::Config(
+            (Some(CLOUDFLARE_PROVIDER), Some(env), None) => Ok(Some(SecretRef::Env(env.into()))),
+            (Some(CLOUDFLARE_PROVIDER), None, Some(file)) => Ok(Some(SecretRef::File(file.into()))),
+            (Some(CLOUDFLARE_PROVIDER), Some(_), Some(_)) => Err(RuntimeError::Config(
                 "tls: dns_api_token_env and dns_api_token_file are mutually exclusive".into(),
             )),
-            (true, false, false) => Err(RuntimeError::Config(
+            (Some(CLOUDFLARE_PROVIDER), None, None) => Err(RuntimeError::Config(
                 "tls: dns_provider requires dns_api_token_env or dns_api_token_file".into(),
             )),
-            _ => Ok(()),
+            (Some(other), _, _) => Err(RuntimeError::Config(
+                format!(
+                    "tls: dns_provider {other:?} is not supported; \
+                     the only built-in provider is {CLOUDFLARE_PROVIDER:?}"
+                )
+                .into(),
+            )),
         }
     }
 
@@ -143,7 +261,7 @@ pub(crate) fn home_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-/// Shared ACME configuration fields used by both HTTP-01 and DNS-01 flows.
+/// Shared ACME configuration fields used by both TLS-ALPN-01 and DNS-01 flows.
 #[cfg(any(feature = "acme", feature = "dns01"))]
 #[derive(Debug, Clone)]
 pub struct AcmeBase {
@@ -188,6 +306,15 @@ impl AcmeBase {
     /// Return the configured cache directory path.
     pub fn cache_path(&self) -> &std::path::Path {
         &self.cache_dir
+    }
+
+    /// Validate the configured domains for `challenge` and return them in
+    /// canonical form. Performs no I/O.
+    pub(crate) fn validated_domains(
+        &self,
+        challenge: Challenge,
+    ) -> Result<std::sync::Arc<[std::sync::Arc<str>]>, RuntimeError> {
+        acme_domains::validate_domains(&self.domains, challenge)
     }
 }
 

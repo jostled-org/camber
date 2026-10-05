@@ -6,8 +6,7 @@ use crate::lifecycle::{
     FORCED_JOIN_GRACE, LifecycleFailureKind, LifecycleParticipant, LifecyclePhase, ShutdownOwner,
 };
 use crate::runtime_test_support::{ParticipantDisposition, RuntimeCheckpoint, RuntimeSchedule};
-use crate::tls::CertStore;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,7 +61,6 @@ pub(crate) struct RuntimeConfig {
     /// take, which is the bound the runtime's aggregate shutdown then narrows.
     pub(crate) resource_budget: crate::ResourceBudget,
     pub(crate) tls_config: Option<TlsConfig>,
-    pub(crate) cert_store: Option<CertStore>,
 }
 
 impl Default for RuntimeConfig {
@@ -77,7 +75,6 @@ impl Default for RuntimeConfig {
             health_interval: DEFAULT_HEALTH_INTERVAL,
             resource_budget: crate::ResourceBudget::default(),
             tls_config: None,
-            cert_store: None,
         }
     }
 }
@@ -94,6 +91,13 @@ pub(crate) struct RuntimeInner {
     /// of the same grace.
     shutdown_deadline: Arc<crate::lifecycle::AggregateShutdown>,
     scope: TaskScope,
+    /// The live integration instances this runtime admitted, and their report
+    /// accounts. Stopped by root closure, settled before resources.
+    integrations: crate::integration_lifecycle::IntegrationRegistry,
+    /// The DNS-01 caches a renewal owner of this runtime holds, so the public
+    /// and the runtime-managed path never renew one cache at once.
+    #[cfg(feature = "dns01")]
+    dns01_renewals: crate::dns01::RenewalClaims,
     test_schedule: Option<Arc<RuntimeSchedule>>,
     cancel_task: Mutex<CancelWatcherState>,
     pub(crate) config: RuntimeConfig,
@@ -125,7 +129,7 @@ pub(crate) struct LatchSignal {
 pub(crate) type ShutdownSignal = LatchSignal;
 
 impl LatchSignal {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             fired: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(tokio::sync::Notify::new()),
@@ -240,14 +244,10 @@ impl LifecycleSignals {
     /// that ordering. Every perpetual Camber-owned loop that wakes on a fixed
     /// interval breaks through here, so the rule is written once.
     pub(crate) async fn tick(&self, interval: Duration) -> ControlFlow<()> {
-        tokio::select! {
-            () = tokio::time::sleep(interval) => {}
-            () = self.wait() => return ControlFlow::Break(()),
-        }
-        match self.is_fired() {
-            true => ControlFlow::Break(()),
-            false => ControlFlow::Continue(()),
-        }
+        tick_until(tokio::time::sleep(interval), self.wait(), || {
+            self.is_fired()
+        })
+        .await
     }
 
     /// Run `work` to completion, or break as soon as either signal fires.
@@ -273,6 +273,29 @@ impl LifecycleSignals {
     }
 }
 
+/// Wait for `elapsed`, or break as soon as `stop` resolves; then break anyway
+/// when `stopped` holds.
+///
+/// The one form of the sleep-or-stop rule [`LifecycleSignals::tick`] states:
+/// `select!` is unbiased, so the re-check is what keeps an interval that
+/// completes in the same poll as a stop from running one more loop body. A
+/// loop whose stop includes more than the runtime's two signals waits here
+/// too, so none of them omits the re-check.
+pub(crate) async fn tick_until(
+    elapsed: impl Future<Output = ()>,
+    stop: impl Future<Output = ()>,
+    stopped: impl FnOnce() -> bool,
+) -> ControlFlow<()> {
+    tokio::select! {
+        () = elapsed => {}
+        () = stop => return ControlFlow::Break(()),
+    }
+    match stopped() {
+        true => ControlFlow::Break(()),
+        false => ControlFlow::Continue(()),
+    }
+}
+
 impl RuntimeInner {
     pub(crate) fn with_config_and_schedule(
         config: RuntimeConfig,
@@ -286,6 +309,9 @@ impl RuntimeInner {
             shutdown: LatchSignal::new(),
             shutdown_deadline,
             scope: TaskScope::new(),
+            integrations: crate::integration_lifecycle::IntegrationRegistry::new(),
+            #[cfg(feature = "dns01")]
+            dns01_renewals: crate::dns01::RenewalClaims::default(),
             test_schedule,
             cancel_task: Mutex::new(CancelWatcherState { current: None }),
             config,
@@ -322,10 +348,11 @@ impl RuntimeInner {
     /// shutdown stops on whichever of them it observes first.
     /// The transition is also where the one aggregate deadline is minted. A
     /// second request reads the first one's expiry back rather than extending
-    /// it.
+    /// it. The mint precedes both latches: an owner the closing latch wakes
+    /// reads the expiry at once, and must find it fixed.
     pub(crate) fn request_shutdown(&self) {
-        self.close_scope();
         self.shutdown_deadline.mint_at(tokio::time::Instant::now());
+        self.close_scope();
         self.shutdown.fire();
     }
 
@@ -337,13 +364,46 @@ impl RuntimeInner {
         self.shutdown.is_fired()
     }
 
-    /// Close root-scope admission and fire `ScopeClosing`. Idempotent — the
-    /// first of the two triggers (closure return, shutdown request) wins.
+    /// Close root-scope admission, fire `ScopeClosing`, and start the
+    /// integration registry's stop. Idempotent — the first of the two triggers
+    /// (closure return, shutdown request) wins.
+    ///
+    /// The registry stops here, not after the root drain: its entries' work
+    /// runs as root-scope children, and the drain waits for that work to end.
     pub(crate) fn close_scope(&self) {
         self.pause_test_schedule(RuntimeCheckpoint::ScopeCloseTransition);
         if self.scope.close() {
             self.observe_scope(RuntimeSchedule::record_scope_drained);
         }
+        self.pause_test_schedule(RuntimeCheckpoint::RegistryStopTransition);
+        self.integrations.stop();
+    }
+
+    /// Whether root-scope admission is still open.
+    pub(crate) fn admits_children(&self) -> bool {
+        self.scope.is_open()
+    }
+
+    /// This runtime's integration registry.
+    pub(crate) fn integrations(&self) -> &crate::integration_lifecycle::IntegrationRegistry {
+        &self.integrations
+    }
+
+    /// Admit one integration instance of `kind` to this runtime through its
+    /// `admission` operation, running at most `operation_limit` operations at
+    /// once.
+    ///
+    /// # Errors
+    ///
+    /// The registry's refusal: `ScopeClosed`, `Busy`, or `LimitExceeded`.
+    pub(crate) fn admit_integration(
+        self: &Arc<Self>,
+        kind: crate::IntegrationKind,
+        admission: crate::IntegrationOperation,
+        operation_limit: usize,
+    ) -> Result<crate::integration_lifecycle::IntegrationAccess, crate::RuntimeError> {
+        self.integrations
+            .admit(self, kind, admission, operation_limit)
     }
 
     pub(crate) fn scope_closing(&self) -> LatchSignal {
@@ -517,6 +577,19 @@ impl RuntimeInner {
         }
     }
 
+    /// The renewal claims of this runtime's DNS-01 owners.
+    #[cfg(feature = "dns01")]
+    pub(crate) const fn dns01_renewals(&self) -> &crate::dns01::RenewalClaims {
+        &self.dns01_renewals
+    }
+
+    /// The test schedule whose clock this runtime's DNS-01 renewal intervals
+    /// elapse on, when one is attached.
+    #[cfg(feature = "dns01")]
+    pub(crate) fn renewal_schedule(&self) -> Option<Arc<RuntimeSchedule>> {
+        self.test_schedule.clone()
+    }
+
     pub(crate) fn pause_test_schedule(&self, checkpoint: RuntimeCheckpoint) {
         if let Some(schedule) = self.test_schedule.as_ref() {
             schedule.pause(checkpoint);
@@ -683,8 +756,8 @@ struct ScopeState {
     /// existence, not its handle: keyed to admission and removed by the same
     /// `ScopeSlot::drop` every other exit runs through, so a child dropped
     /// before it could register leaves nothing behind.
-    async_children: HashMap<TaskId, Option<tokio::task::JoinHandle<()>>>,
-    blocking_children: HashSet<TaskId>,
+    async_children: BTreeMap<TaskId, Option<tokio::task::JoinHandle<()>>>,
+    blocking_children: BTreeSet<TaskId>,
     /// Set once the escalation has swept the registry, so a handle registered
     /// after that sweep is stopped by its registrar rather than retained by an
     /// owner that will never look again.
@@ -767,8 +840,8 @@ impl TaskScope {
                 admission: Admission::Open,
                 count: 0,
                 next_id: 0,
-                async_children: HashMap::new(),
-                blocking_children: HashSet::new(),
+                async_children: BTreeMap::new(),
+                blocking_children: BTreeSet::new(),
                 stopped: false,
             }),
             idle: Condvar::new(),
@@ -855,6 +928,11 @@ impl TaskScope {
         self.lock().count
     }
 
+    /// Whether admission is still open.
+    fn is_open(&self) -> bool {
+        matches!(self.lock().admission, Admission::Open)
+    }
+
     /// Take every retained async handle out of the registry, so the owner can
     /// stop children it alone still holds a way to join.
     ///
@@ -869,9 +947,8 @@ impl TaskScope {
     fn take_async_children(&self) -> Box<[(TaskId, tokio::task::JoinHandle<()>)]> {
         let mut state = self.lock();
         state.stopped = true;
-        state
-            .async_children
-            .drain()
+        std::mem::take(&mut state.async_children)
+            .into_iter()
             .filter_map(|(id, handle)| handle.map(|handle| (id, handle)))
             .collect()
     }
@@ -931,15 +1008,21 @@ impl TaskScope {
         }
     }
 
-    /// Release one child's slot, answering whether that release drained the
-    /// scope.
-    fn finish(&self, id: TaskId, kind: ChildKind) -> bool {
+    /// Release one child's slot, handing `publish` whether that release
+    /// drained the scope.
+    ///
+    /// `publish` runs under the lock that makes the lower count visible. The
+    /// drain reads the count under the same lock, so whatever `publish`
+    /// records is already true when any drain reading can see this child
+    /// gone. Published after the lock, a holder-only window could open on a
+    /// child that had exited but did not yet read as settled.
+    fn finish(&self, id: TaskId, kind: ChildKind, publish: impl FnOnce(bool)) {
         let mut state = self.lock();
         state.remove_child(id, kind);
         let drained = match state.count {
             0 => {
                 tracing::error!("runtime task scope completed an unadmitted child");
-                return false;
+                false
             }
             1 => {
                 state.count = 0;
@@ -951,10 +1034,10 @@ impl TaskScope {
                 false
             }
         };
+        publish(drained);
         // Every exit wakes the drain, so its `ScopeWaitObserved` checkpoint
         // reports each count it passes through, not only the last one.
         self.idle.notify_all();
-        drained
     }
 
     /// Take the close transition, answering whether it left the scope drained.
@@ -1041,14 +1124,16 @@ pub(crate) struct ScopeSlot {
 
 impl Drop for ScopeSlot {
     fn drop(&mut self) {
-        let drained = self.runtime.scope.finish(self.id, self.kind);
-        let id = self.id;
-        self.runtime.observe_scope(|schedule| {
-            schedule.record_scope_settlement(id);
-            if drained {
-                schedule.record_scope_drained();
-            }
+        let (runtime, id) = (&self.runtime, self.id);
+        runtime.scope.finish(id, self.kind, |drained| {
+            runtime.observe_scope(|schedule| {
+                schedule.record_scope_settlement(id);
+                if drained {
+                    schedule.record_scope_drained();
+                }
+            });
         });
+        runtime.pause_test_schedule(RuntimeCheckpoint::ScopeChildReleased);
     }
 }
 

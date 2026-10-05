@@ -45,6 +45,20 @@ fn cpu_load_drop_joins_after_assertion_unwind() {
 
 #[test]
 fn profiling_endpoint_returns_flamegraph() {
+    common::run_in_child(
+        "cpu_profiling::profiling_endpoint_returns_flamegraph",
+        "profiling-endpoint-flamegraph",
+        "PROFILING_ENDPOINT_RETURNED_FLAMEGRAPH",
+        Duration::from_secs(60),
+        assert_profiling_endpoint_returns_flamegraph,
+    );
+}
+
+/// A CPU profile samples every thread of its process through a `SIGPROF`
+/// handler that unwinds whatever each thread is running. A sibling test can be
+/// inside platform code that handler cannot unwind, so the profile runs in a
+/// private child that holds only this test.
+fn assert_profiling_endpoint_returns_flamegraph() {
     // Every load thread reports entry before the capture; no scheduler delay is
     // inferred, and the load is stopped and joined however this row ends.
     let load = common::CpuLoad::start(LOAD_THREADS);

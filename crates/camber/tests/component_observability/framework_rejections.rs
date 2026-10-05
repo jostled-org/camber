@@ -8,23 +8,26 @@
 //! identifier, a path, a route, a peer, or an error string.
 
 use crate::common;
+use crate::leaky_source::LeakySource;
 
-use camber::RuntimeError;
 use camber::http::{Next, Rejection, RejectionContext, Request, Response, Router};
 use camber::runtime;
+use camber::runtime_test_support::IntegrationErrorDriver;
+use camber::{
+    IntegrationError, IntegrationFailure, IntegrationKind, IntegrationOperation, Retryability,
+    RuntimeError,
+};
 use common::{
     COMPLETION_MESSAGE, CountedOutcome, DECLARED_MESSAGE, MIDDLE_CAUSE, REJECTION_MESSAGE,
     ROOT_CAUSE, UNREPRESENTABLE_HEADER, WIRE_TIMEOUT, assert_counted, assert_field_value,
     assert_fields, assert_message_is_fixed, assert_no_private_text, counted_rows, forbidden_values,
     one_level_failure, only_event, two_level_failure,
 };
-use std::future::Future;
+use futures_util::future::Either;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[test]
 fn built_in_internal_error_wire_response_is_redacted() {
@@ -193,6 +196,238 @@ fn rejection_event_fields_preserve_private_source_chain() {
                 rows += 1;
             }
             assert_eq!(rows, CHAIN_ROWS.len(), "every declared chain row ran");
+
+            runtime::request_shutdown();
+        })
+        .expect("the fixture runtime ran to completion");
+}
+
+// ── Where the operator's chain stops ───────────────────────────────
+
+/// A secret the integration's third-party source echoes.
+const SDK_SECRET: &str = "sdk-sentinel-token-3e9d";
+
+/// A third-party failure whose text carries a secret.
+fn sdk_failure() -> LeakySource {
+    LeakySource::echoing(format!("sdk request failed: authorization={SDK_SECRET}"))
+}
+
+/// An application error that carries an integration error as its cause.
+#[derive(Debug)]
+struct AppFailure(IntegrationError);
+
+impl std::fmt::Display for AppFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("order submission failed")
+    }
+}
+
+impl std::error::Error for AppFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+/// An integration error over the secret-carrying source.
+fn sdk_integration_error() -> IntegrationError {
+    IntegrationErrorDriver::new(
+        IntegrationKind::Nats,
+        IntegrationOperation::Publish,
+        IntegrationFailure::OutcomeUnknown,
+        Retryability::OutcomeUnknown,
+    )
+    .source(Arc::new(sdk_failure()))
+    .build()
+}
+
+/// The runtime arm, returned directly.
+fn direct_integration_failure() -> RuntimeError {
+    RuntimeError::Integration(Arc::new(sdk_integration_error()))
+}
+
+/// The integration error, carried inside an application's own error.
+fn nested_integration_failure() -> RuntimeError {
+    RuntimeError::Io(std::io::Error::other(AppFailure(sdk_integration_error())))
+}
+
+/// One integration failure a handler returns, and the chain text it must keep.
+struct SealedRow {
+    label: &'static str,
+    path: &'static str,
+    failure: fn() -> RuntimeError,
+    kept: &'static [&'static str],
+}
+
+const SEALED_ROWS: [SealedRow; 2] = [
+    SealedRow {
+        label: "direct integration failure",
+        path: "/rejection-integration-direct",
+        failure: direct_integration_failure,
+        kept: &["integration nats publish failed"],
+    },
+    SealedRow {
+        label: "nested integration failure",
+        path: "/rejection-integration-nested",
+        failure: nested_integration_failure,
+        kept: &["order submission failed", "integration nats publish failed"],
+    },
+];
+
+const _: () = assert!(!SEALED_ROWS.is_empty());
+
+#[test]
+fn rejection_event_chain_stops_at_the_integration_error() {
+    let captures: Box<[common::TraceCapture]> = SEALED_ROWS
+        .iter()
+        .map(|row| common::capture_events(row.path))
+        .collect();
+
+    common::test_runtime()
+        .with_tracing()
+        .run(|| {
+            let mut router = Router::new();
+            for row in &SEALED_ROWS {
+                let failure = row.failure;
+                router.get(row.path, move |_req: &Request| {
+                    std::future::ready(Err::<Response, RuntimeError>(failure()))
+                });
+            }
+            let addr = common::spawn_server(router);
+
+            let mut rows = 0_usize;
+            for (row, capture) in SEALED_ROWS.iter().zip(captures.iter()) {
+                let response = common::request(addr, "GET", row.path, &[], &[], WIRE_TIMEOUT)
+                    .unwrap_or_else(|error| {
+                        panic!("{}: the request did not complete: {error}", row.label)
+                    });
+                assert_eq!(response.status, 500, "{}: wire status", row.label);
+                assert_no_private_text(&response, &[SDK_SECRET], row.label);
+
+                let events = capture.events();
+                let event = only_event(&events, REJECTION_MESSAGE, row.label);
+                assert_field_value(event, "kind", "internal_service", row.label);
+                assert_causes_in_field(event, row.kept, row.label);
+                assert!(
+                    !event.contains(SDK_SECRET),
+                    "{}: the chain walked into the integration's source: {event}",
+                    row.label
+                );
+                rows += 1;
+            }
+            assert_eq!(rows, SEALED_ROWS.len(), "every declared sealed row ran");
+
+            runtime::request_shutdown();
+        })
+        .expect("the fixture runtime ran to completion");
+}
+
+// ── An integration failure a middleware frame returns ──────────────
+
+/// The route whose guarding frame refuses with an integration failure.
+const FRAME_INTEGRATION_PATH: &str = "/rejection-integration-frame";
+
+/// The origin the recording mapper files the frame's refusal under.
+const FRAME_POLICY: &str = "integration frame";
+
+/// Refuse the one route with an integration failure, before the terminal runs.
+///
+/// A middleware frame's own failures classify under the middleware category.
+/// An integration failure does not: it is Camber's internal-service refusal
+/// from every producer, and this frame is the producer whose default differs.
+fn integration_refusing_frame(router: &mut Router) {
+    router.use_middleware(
+        |req: &Request, next: Next| match req.path() == FRAME_INTEGRATION_PATH {
+            true => Either::Left(std::future::ready(Err::<Response, RuntimeError>(
+                direct_integration_failure(),
+            ))),
+            false => {
+                let entered = next.call(req);
+                Either::Right(async move { Ok(entered.await) })
+            }
+        },
+    );
+}
+
+/// Everything private the frame's failure carried, as a peer or mapper could see it.
+///
+/// The integration error's own operator rendering is private here too: the
+/// peer and the mapper read only the fixed internal-service text.
+fn frame_private_text() -> [String; 3] {
+    [
+        SDK_SECRET.to_owned(),
+        sdk_failure().to_string(),
+        sdk_integration_error().to_string(),
+    ]
+}
+
+/// Assert the operator saw one internal-service refusal and one completion.
+fn assert_frame_events(capture: &common::TraceCapture, request_id: &str) {
+    let label = "integration frame outcome";
+    let events = capture.events();
+    let rejected = only_event(&events, REJECTION_MESSAGE, label);
+    assert_field_value(rejected, "status", "500", label);
+    assert_field_value(rejected, "kind", "internal_service", label);
+    assert_field_value(rejected, "request_id", request_id, label);
+    assert_causes_in_field(rejected, &["integration nats publish failed"], label);
+    assert!(
+        !rejected.contains(SDK_SECRET),
+        "{label}: the chain walked into the integration's source: {rejected}"
+    );
+    let completed = only_event(&events, COMPLETION_MESSAGE, label);
+    assert_field_value(completed, "status", "500", label);
+    assert_field_value(completed, "request_id", request_id, label);
+}
+
+#[test]
+fn middleware_integration_failure_is_an_internal_service_refusal() {
+    let capture = common::capture_events(FRAME_INTEGRATION_PATH);
+
+    common::test_runtime()
+        .with_tracing()
+        .run(|| {
+            let journal = common::journal();
+            let handled = Arc::new(AtomicUsize::new(0));
+            let mut router = Router::new();
+            integration_refusing_frame(&mut router);
+            let calls = Arc::clone(&handled);
+            router.get(FRAME_INTEGRATION_PATH, move |_req: &Request| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Response::text(200, "the frame let this through"))
+            });
+            let recorder = common::recording_mapper(&journal, FRAME_POLICY);
+            let router = router.rejection_mapper(
+                move |rejection: &Rejection, context: &RejectionContext| {
+                    common::naming(recorder(rejection, context), context)
+                },
+            );
+            let addr = common::spawn_server(router);
+
+            let label = "integration frame peer";
+            let response =
+                common::request(addr, "GET", FRAME_INTEGRATION_PATH, &[], &[], WIRE_TIMEOUT)
+                    .expect("the frame's refused request completed");
+            assert_eq!(response.status, 500, "{label}: wire status");
+            assert_eq!(
+                response.text().as_ref(),
+                common::REDACTED_BODY,
+                "{label}: wire body"
+            );
+            let private = frame_private_text();
+            assert_no_private_text(&response, &private, label);
+            assert_eq!(
+                handled.load(Ordering::SeqCst),
+                0,
+                "{label}: the frame refused before the terminal ran"
+            );
+
+            common::assert_mapped_internal_refusal(
+                &journal,
+                FRAME_POLICY,
+                &private,
+                "integration frame mapper",
+            );
+            let request_id = common::request_id_of(&response, label);
+            assert_frame_events(&capture, &request_id);
 
             runtime::request_shutdown();
         })
@@ -744,18 +979,14 @@ const _: () = assert!(!METRIC_ROWS.is_empty());
 /// response the terminal produced, and answers with its own.
 fn guarding_middleware(router: &mut Router) {
     router.use_middleware(
-        |req: &Request,
-         next: Next|
-         -> Pin<Box<dyn Future<Output = Result<Response, RuntimeError>> + Send>> {
-            match req.path() == METRIC_MIDDLEWARE_PATH {
-                true => Box::pin(async {
-                    Err(RuntimeError::Http("this frame refused the request".into()))
-                }),
-                false => {
-                    let replaced = req.path() == METRIC_REPLACED_PATH;
-                    let entered = next.call(req);
-                    Box::pin(async move { replace_or_pass(entered.await, replaced) })
-                }
+        |req: &Request, next: Next| match req.path() == METRIC_MIDDLEWARE_PATH {
+            true => Either::Left(std::future::ready(Err::<Response, RuntimeError>(
+                RuntimeError::Http("this frame refused the request".into()),
+            ))),
+            false => {
+                let replaced = req.path() == METRIC_REPLACED_PATH;
+                let entered = next.call(req);
+                Either::Right(async move { replace_or_pass(entered.await, replaced) })
             }
         },
     );
@@ -1025,17 +1256,13 @@ const DISCARDED_MESSAGE: &str = "message=rejection response was not sent";
 /// error-flattening frame has, and the one that used to leave the refusal
 /// unrecorded.
 fn replacing_middleware(router: &mut Router) {
-    router.use_middleware(
-        |req: &Request,
-         next: Next|
-         -> Pin<Box<dyn Future<Output = Result<Response, RuntimeError>> + Send>> {
-            let entered = next.call(req);
-            Box::pin(async move {
-                drop(entered.await);
-                Response::text(REPLACED_STATUS, REPLACED_BODY)
-            })
-        },
-    );
+    router.use_middleware(|req: &Request, next: Next| {
+        let entered = next.call(req);
+        async move {
+            drop(entered.await);
+            Response::text(REPLACED_STATUS, REPLACED_BODY)
+        }
+    });
 }
 
 /// Assert the discarded refusal reached the operator, and named no sent status.
@@ -1124,22 +1351,19 @@ fn replaced_rejection_response_reaches_the_operator_record() {
 /// The route whose body never finishes arriving.
 const DEADLINE_PATH: &str = "/deadline-upload";
 
-/// The outer bound the stalled peer's read and this fixture's join run under.
+/// The outer bound this fixture's teardown runs under.
 ///
-/// Well past the 30-second collection deadline the read is waiting on, so it
-/// never displaces the refusal this test exists to observe.
-const ANSWER_BOUND: Duration = Duration::from_secs(300);
+/// Well past anything a shutdown of one closed connection waits on, so it never
+/// displaces a join that was going to arrive.
+const TEARDOWN_BOUND: Duration = Duration::from_secs(300);
 
-/// How many times that bound is armed before an unsettled wait is a failure.
+/// How many times that bound is armed before an unjoined server is a failure.
 ///
-/// More than one, because a paused clock advances to the nearest timer whenever
-/// the runtime idles: an arming made before the request has reached body
-/// collection is the only timer in the process, so the clock jumps straight to
-/// it and it elapses having proved nothing about the deadline. Every idle park
-/// before collection begins — the accept, the head read, the dispatch between
-/// them — can consume one arming that way. Four is well past what those need,
-/// and an arming spent on virtual time costs no real time at all.
-const ANSWER_ARMINGS: usize = 4;
+/// More than one, for the reason [`common::bounded_under_pause`] states: a
+/// paused clock advances to the nearest armed timer whenever the runtime idles,
+/// so an arming made before the shutdown has a deadline of its own is the only
+/// timer in the process and elapses having proved nothing.
+const TEARDOWN_ARMINGS: usize = 4;
 
 /// Assert the record one stalled body left behind.
 fn assert_deadline_event(capture: &common::TraceCapture) {
@@ -1168,7 +1392,9 @@ fn assert_deadline_event(capture: &common::TraceCapture) {
 ///
 /// The peer sends a head promising a body and then one byte of it. Nothing
 /// waits on a wall clock: the runtime is paused, so the deadline is reached by
-/// the scheduler running out of work rather than by elapsed real time. That is
+/// the scheduler running out of work rather than by elapsed real time. The
+/// peer's own bounds are real, and only a failure ever reaches them — see
+/// [`common::spawn_stalled_peer`] for why they cannot be Tokio's. That is
 /// also why this category cannot join the counted matrix above — the deadline
 /// is a fixed 30 seconds, and a live-clock fixture could only reach it by
 /// waiting, which is the race the hygiene command forbids.
@@ -1199,42 +1425,33 @@ async fn body_deadline_refusal_reaches_the_operator_record() {
         .await
         .expect("the deadline fixture bound a listener");
     let addr = listener.local_addr().expect("the listener named its port");
-    let server = camber::http::serve_background(listener, router)
-        .expect("owned server requires a Tokio runtime");
-
-    let mut peer = tokio::net::TcpStream::connect(addr)
-        .await
-        .expect("the stalled peer connected");
     // No `Connection` value: this case reads back the disposition the framework
     // decided, and a preference the peer stated is one the server could echo.
-    let head = common::stalled_request_head(None, "POST", DEADLINE_PATH);
-    peer.write_all(head.as_bytes())
-        .await
+    let (peer, (sent, answered)) = common::spawn_stalled_peer(addr, None, DEADLINE_PATH, |peer| {
+        common::read_until_closed(peer, common::WIRE_TIMEOUT)
+    });
+    sent.await
+        .expect("the stalled peer reported its head")
         .expect("the stalled head was sent");
-    peer.flush().await.expect("the stalled head flushed");
 
-    let mut answer = Vec::new();
-    common::bounded_under_pause(
-        peer.read_to_end(&mut answer),
-        ANSWER_BOUND,
-        ANSWER_ARMINGS,
-        "the stalled body's answer",
-    )
-    .await
-    .expect("the stalled peer read its answer");
-    drop(peer);
+    let server = camber::http::serve_background(listener, router)
+        .expect("owned server requires a Tokio runtime");
+    let answer = answered
+        .await
+        .expect("the stalled peer reported what it was answered");
+    peer.join().expect("the stalled peer ran to completion");
 
     // Teardown runs before anything is asserted, so it runs whatever the
     // answer turned out to be: a failed assertion between here and the join
     // would otherwise leave this fixture's listener and supervisor task alive
-    // for the rest of the binary. The join is bounded for the reason the read
-    // above is: the clock is paused, so a supervisor that never returns would
-    // park this whole binary instead of failing here.
+    // for the rest of the binary. The join is bounded because the clock is
+    // paused: a supervisor that never returns would park this whole binary
+    // instead of failing here.
     server.shutdown();
     let joined = common::bounded_under_pause(
         server.join(),
-        ANSWER_BOUND,
-        ANSWER_ARMINGS,
+        TEARDOWN_BOUND,
+        TEARDOWN_ARMINGS,
         "the deadline fixture's server",
     )
     .await;
@@ -1243,6 +1460,7 @@ async fn body_deadline_refusal_reaches_the_operator_record() {
     // the outcome itself — and a server that ended because it was told to is a
     // completed join, which `Cancelled` is one spelling of.
     common::assert_server_joined(Ok(joined));
+    let answer = answer.expect("the stalled peer read its answer");
     let text = String::from_utf8_lossy(&answer);
     assert!(
         text.starts_with("HTTP/1.1 408 "),

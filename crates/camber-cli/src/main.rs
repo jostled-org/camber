@@ -25,8 +25,23 @@ enum Commands {
         template: String,
     },
     /// Run a config-driven reverse proxy
+    ///
+    /// The whole config is validated first. An invalid file exits nonzero
+    /// before any secret load, cache write, upstream probe, or listener bind.
     Serve {
-        /// Path to config file
+        /// Path to the TOML config file
+        #[arg(
+            long_help = "Path to the TOML config file. Unknown fields are refused.\n\n\
+                           Top level: listen and connection_limit.\n\n\
+                           [tls]: cert and key for manual TLS, or auto = true \
+                           with email, staging, and cache_dir. DNS-01 adds \
+                           dns_provider, which accepts only \"cloudflare\", and \
+                           one of dns_api_token_env or dns_api_token_file.\n\n\
+                           [[site]], one or more: host, proxy, root, health_check, \
+                           and health_interval. proxy is an http or https URL \
+                           with an optional path prefix. It must not carry \
+                           credentials, a query, or a fragment."
+        )]
         config: PathBuf,
     },
     /// Generate llms.txt API context for LLM code generation

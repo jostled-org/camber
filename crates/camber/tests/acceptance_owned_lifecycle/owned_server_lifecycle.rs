@@ -390,6 +390,7 @@ fn peek_with_socket_deadline(stream: std::net::TcpStream) -> std::io::Result<usi
 
 // The same independent observation, for a peer whose answer has a body: the
 // remaining bytes through the close, rather than the first one.
+#[cfg(feature = "ws")]
 fn read_rest_with_socket_deadline(stream: std::net::TcpStream) -> std::io::Result<Vec<u8>> {
     observe_with_socket_deadline(stream, read_rest_blocking)
 }
@@ -438,6 +439,7 @@ fn peek_blocking(stream: &std::net::TcpStream) -> std::io::Result<usize> {
 }
 
 // Everything the peer still owes, through its close.
+#[cfg(feature = "ws")]
 fn read_rest_blocking(stream: &std::net::TcpStream) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
 
@@ -3662,9 +3664,28 @@ fn configured_background_captures_request_tracing() {
 }
 
 // 1.T13
+///
+/// A CPU profile samples every thread of its process through a `SIGPROF`
+/// handler that unwinds whatever each thread is running. A sibling test in
+/// the same process can be inside platform code that handler cannot unwind,
+/// such as a macOS keychain read, so the profile runs in a private child that
+/// holds only this test.
 #[cfg(feature = "profiling")]
 #[test]
 fn configured_background_captures_profiling_route() {
+    common::run_in_child(
+        "configured_background_captures_profiling_route",
+        "configured-profiling-route",
+        "CONFIGURED_PROFILING_ROUTE_CAPTURED",
+        Duration::from_secs(30),
+        capture_profiling_route,
+    );
+}
+
+/// Serve a configured background server and capture a one-second profile
+/// through its profiling route.
+#[cfg(feature = "profiling")]
+fn capture_profiling_route() {
     runtime::builder()
         .with_profiling()
         .shutdown_timeout(Duration::from_secs(1))

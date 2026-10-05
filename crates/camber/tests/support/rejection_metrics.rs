@@ -19,7 +19,7 @@ use super::rejection_kinds::{KINDS, label_of};
 const REJECTION_METRIC: &str = "http_rejections_total";
 
 /// The counter one completed request is counted under.
-const COMPLETION_METRIC: &str = "http_requests_total";
+pub const COMPLETION_METRIC: &str = "http_requests_total";
 
 /// The two counters one rejection journey reads, scraped together.
 pub struct RejectionCounters {

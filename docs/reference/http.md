@@ -1265,9 +1265,11 @@ fixed, the request total, the server's shutdown or cancellation, and tonic's hea
 They are not ranked against each other. Each reaches the operation's one set-once
 response commitment, and the first one there owns the answer — tonic takes it as
 it crosses the handoff, a cause takes it where it is read. A cause that took the
-commitment cancels the tonic future and answers through the route's rejection
-mapper, exactly once; a cause that finds it taken maps nothing. Application work
-inside tonic may already have run; cancellation makes no rollback claim.
+commitment cancels the tonic future. A body bound or the request total answers
+through the route's rejection mapper, exactly once. A cancellation or an expired
+shutdown deadline answers an unmapped `503`. A cause that finds the commitment
+taken maps nothing. Application work inside tonic may already have run;
+cancellation makes no rollback claim.
 
 A head that took the commitment is committed as tonic produced it, and the RPC is
 tonic's from there:
@@ -1291,17 +1293,105 @@ streams outlive either needs a wider `RequestBudget` on the runtime, server, hos
 or router that serves it, and a download `TransferBudget` wide enough for the
 answers it streams.
 
+### gRPC transfer bounds
+
+All four native forms use the same bounds. Each bound acts in one phase.
+
+Before tonic's head is committed:
+
+- An upload that crosses its byte maximum, quiet interval, or lifetime takes
+  the commitment. This is true also when tonic has produced a head that is not
+  committed yet. The route's mapper answers once: `413` (`BodyLimit`) for bytes,
+  `408` (`BodyTimeout`) for the quiet interval or the lifetime.
+- A request total that expires answers `408` (`RequestTimeout`) once. An upload
+  that completed earlier does not restart it.
+
+After tonic's head is committed:
+
+- **Bidirectional.** An upload that is still open and crosses its byte
+  maximum, quiet interval, or lifetime ends tonic's request stream with the
+  typed error. Tonic changes that error to a status and writes it in the
+  trailers. Camber maps nothing.
+- **Client-streaming.** A method can answer before the request stream ends and
+  continue to read it. While its one reply has not been delivered, the upload
+  keeps its bounds. An upload that crosses its byte maximum, quiet interval, or
+  lifetime ends the method's request stream with the typed error. The reply
+  that follows keeps the status that tonic committed, and Camber maps nothing.
+  When the reply is delivered first, the answer ends the upload: the method
+  receives `ChannelClosed`.
+- **Unary and server-streaming.** Tonic reads the whole request before the
+  method runs. No upload stays open, and the request total cannot end a
+  committed answer.
+- **Download, all forms.** A reply that crosses the byte maximum, a stream that
+  stays quiet past its interval, or a stream that outlives its lifetime resets
+  that one HTTP/2 stream. The head stays, Camber writes no `grpc-status`, and no
+  mapper runs. The other streams on the connection continue.
+- A unary or client-streaming answer is ready when its head commits, so its
+  download quiet interval cannot expire. Its download lifetime can.
+- The two directions have separate timers. Progress in one direction does not
+  renew the quiet interval of the other. Progress does not renew a lifetime.
+
+A status that a streaming method returns while it keeps its response stream
+open goes to the peer immediately: the trailers end tonic's body.
+
+### gRPC cancellation and shutdown
+
+All four native forms settle a peer reset and a server stop the same way. Each
+stop acts in one phase.
+
+Before tonic's head is committed:
+
+- A peer that resets the stream ends the call. No head commits, no mapper runs,
+  and the other streams on the connection continue.
+- `cancel()` takes the commitment. The peer gets `503` with no `grpc-status`,
+  and no mapper runs.
+- `shutdown()` does not end an accepted call. New connections are refused, and
+  tonic's head commits when it is ready.
+- An expired aggregate deadline takes the commitment. The peer gets `503` with
+  no `grpc-status`, and no mapper runs.
+
+After tonic's head is committed:
+
+- A peer reset ends only that stream's answer. The other streams continue.
+- `cancel()` resets that one stream. Camber writes no `grpc-status`, and no
+  mapper runs.
+- `shutdown()` lets the answer finish inside the grace, with tonic's trailers.
+- An answer that cannot move when the aggregate deadline expires is ended by
+  the forced abort, which closes the connection.
+
+A unary answer is held at the same body boundary as a streamed one. Camber owns
+each call until its last frame and trailers, not until tonic returns its
+response. Every call records one completion, releases each direction owner, and
+returns its connection permit. The join returns `Ok(())` after a graceful drain,
+`Cancelled` after `cancel()`, and `Timeout` after an expired deadline. No stop
+restarts the aggregate deadline, and `cancel()` mints none. A reset and a
+`cancel()` that arrive together settle on the first one to commit, with the
+same cleanup.
+
 ### Streaming RPCs
 
 Camber's `GrpcRouter` supports all tonic RPC types — unary, server-streaming,
 client-streaming, and bidirectional. The tonic service trait handles streaming internally.
 No additional Camber configuration is needed.
 
+All four forms take the same path through Camber:
+
+- The middleware gate runs before tonic. A gate that refuses the call answers it,
+  and no service method is entered.
+- Request metadata reaches the service. Response head metadata and trailers reach
+  the peer as tonic wrote them. This includes a status that a streaming method
+  returns after it has sent messages; that status travels in the trailers.
+- A path that matches no registered service gets `200` with `grpc-status: 12`
+  (`UNIMPLEMENTED`) and `content-type: application/grpc`. Camber records this
+  answer once, under `protocol="grpc"` and `origin="grpc"`, and does not call the
+  rejection mapper.
+
 `camber-build`'s `{service}_service` async wrapper covers unary services only. A
 service carrying a streaming method gets an empty `{service}_service` module whose
-documentation names the streaming method and the tonic trait to implement instead.
+documentation names each streaming method and the tonic trait to implement instead.
 Implement `{service}_server::{Service}` directly for those, as the example below
-does. Every other service in the same `.proto` file keeps its wrapper.
+does. Every other service in the same `.proto` file keeps its wrapper, so a unary
+wrapper and a service with all four forms compile side by side.
 
 For server-streaming responses that push from a background task, use `tokio_stream::wrappers::ReceiverStream`
 to adapt a `tokio::sync::mpsc::Receiver` into a `Stream`. The return type is the stream alias

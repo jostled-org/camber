@@ -48,6 +48,11 @@ Behavior:
 - one resource never has two callbacks running at once
 - every callback runs on its own worker under the deadline `ResourceBudget`
   configures for its phase
+- shutdown starts after every managed integration has settled or been named
+  outstanding in the lifecycle aggregate
+
+Managed integrations are not resources. They have their own runtime owner and
+never use this callback registry.
 
 ## Budgets And Ownership
 

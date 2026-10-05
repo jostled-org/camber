@@ -1,60 +1,81 @@
 #![cfg(feature = "sqs")]
+//! SQS input validation and runtime capture, through the owned async API.
+//!
+//! Invalid receive parameters are refused before submission, a send answered
+//! without a message ID is an error, and connect outside a Camber runtime is
+//! `NoRuntime` on any executor, the current-thread one included. The receive
+//! and message-ID claims run the 6.T1 rows that own them.
 
+use crate::integration_rows::run_rows;
+use crate::sqs_operations::{
+    INVALID_BATCH_SIZES, INVALID_WAITS, missing_message_id_is_an_unknown_outcome,
+    receive_refused_before_submission,
+};
+use crate::sqs_peer::SqsPeer;
 use camber::RuntimeError;
-use camber::mq::sqs;
+use std::future::Future;
+use std::pin::pin;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
+
+const BOUND: Duration = Duration::from_secs(10);
+
+/// Finish `peer` and return the connections it accepted.
+fn accepted_after_finish(peer: SqsPeer) -> usize {
+    let accepted = peer.control().log().accepted;
+    peer.finish(BOUND).expect("finish the peer");
+    accepted
+}
 
 #[test]
 fn sqs_rejects_invalid_max_messages() {
-    [0, -1, 11].into_iter().for_each(|max_messages| {
-        let err = camber::__private::validate_sqs_receive(max_messages, Duration::from_secs(1))
-            .unwrap_err();
-        assert!(
-            matches!(err, RuntimeError::MessageQueue(_)),
-            "expected MessageQueue, got: {err:?}"
-        );
-    });
+    run_rows(&[("batch sizes outside 1–10", || {
+        receive_refused_before_submission(INVALID_BATCH_SIZES)
+    })]);
 }
 
 #[test]
 fn sqs_rejects_wait_times_above_service_limit() {
-    [Duration::from_secs(21), Duration::MAX]
-        .into_iter()
-        .for_each(|wait_time| {
-            let error = camber::__private::validate_sqs_receive(1, wait_time)
-                .expect_err("wait times above twenty seconds must be rejected");
-            assert!(matches!(error, RuntimeError::MessageQueue(_)));
-        });
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn sqs_sync_facade_rejects_current_thread_runtime() {
-    let error = match sqs::connect() {
-        Ok(_) => panic!("sync SQS unexpectedly accepted a current-thread runtime"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(error, RuntimeError::MessageQueue(_)));
-    assert!(error.to_string().contains("multi-thread"));
-}
-
-#[test]
-fn sqs_sync_facade_rejects_missing_tokio_runtime() {
-    let error = match sqs::connect() {
-        Ok(_) => panic!("sync SQS unexpectedly accepted a missing Tokio runtime"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(error, RuntimeError::MessageQueue(_)));
-    assert!(error.to_string().contains("multi-thread"));
+    run_rows(&[("waits over twenty seconds", || {
+        receive_refused_before_submission(INVALID_WAITS)
+    })]);
 }
 
 #[test]
 fn sqs_missing_send_message_id_is_an_error() {
-    [None, Some("")].into_iter().for_each(|message_id| {
-        let error = camber::__private::sqs_message_id(message_id)
-            .expect_err("a successful response without a message ID is malformed");
+    run_rows(&[(
+        "a send without a message ID",
+        missing_message_id_is_an_unknown_outcome,
+    )]);
+}
 
-        assert!(matches!(error, RuntimeError::MessageQueue(_)));
-    });
+#[tokio::test(flavor = "current_thread")]
+async fn sqs_connect_on_a_current_thread_runtime_is_no_runtime() {
+    let peer = SqsPeer::start();
+    let outcome = peer.builder().connect().await;
+    let accepted = accepted_after_finish(peer);
+
+    assert!(
+        matches!(outcome, Err(RuntimeError::NoRuntime)),
+        "a bare current-thread runtime is not a Camber runtime: {:?}",
+        outcome.map(drop)
+    );
+    assert_eq!(accepted, 0, "a refused connect performs no I/O");
+}
+
+#[test]
+fn sqs_connect_without_any_runtime_is_no_runtime() {
+    let peer = SqsPeer::start();
+    let mut connect = pin!(peer.builder().connect());
+    let polled = connect
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()));
+    let accepted = accepted_after_finish(peer);
+
+    match polled {
+        Poll::Ready(Err(RuntimeError::NoRuntime)) => {}
+        Poll::Ready(other) => panic!("connect without a runtime answered {:?}", other.map(drop)),
+        Poll::Pending => panic!("connect without a runtime waited instead of refusing"),
+    }
+    assert_eq!(accepted, 0, "a refused connect performs no I/O");
 }

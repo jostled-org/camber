@@ -1,34 +1,55 @@
 //! One Prometheus scrape, read as the samples it declares.
 //!
-//! Two roots assert on the same live counters — the component observability
-//! root and the core-acceptance operator journeys — so the text format is
-//! parsed once here. A second copy is a second thing that can disagree about
-//! what a label set means.
+//! Three readers assert on the same rendered text — the component
+//! observability root, the core-acceptance operator journeys, and the
+//! integration terminal rows — so the text format is parsed once here. A
+//! second copy is a second thing that can disagree about what a label set
+//! means.
 
-/// One counter line: the labels it carries and the value it reports.
-///
-/// Counters only, so the value is whole: a scrape that reports a fractional
-/// value for a counter is a scrape this reader has no meaning for, and it fails
-/// rather than rounding one in.
+type Labels = Box<[(Box<str>, Box<str>)]>;
+
+/// One sample line: the metric it reports under, the labels it carries, and
+/// the value it reports.
 ///
 /// `Debug` is what every rule this sample can break reports it under: a
 /// vocabulary check that failed without naming the sample tells an operator a
 /// rule was broken and leaves them to find which line broke it.
 #[derive(Debug)]
 pub struct Sample {
-    labels: Box<[(Box<str>, Box<str>)]>,
-    value: u64,
+    name: Box<str>,
+    labels: Labels,
+    value: f64,
 }
 
+/// The largest whole number an `f64` holds exactly: a counter past it could
+/// no longer be told apart from its neighbour.
+const MAX_EXACT_COUNT: f64 = 9_007_199_254_740_992.0;
+
 impl Sample {
-    /// The value this sample reports.
+    /// The metric name this sample reports under.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The value this sample reports, read as a counter.
     ///
     /// Private: [`value_where`] is the only reader, and every delta this module
     /// hands out is a sum over a selection. A caller holding one sample's value
     /// would be reading a counter one label set at a time, which is the reading
     /// [`delta_by`] exists so that nobody has to do.
-    fn value(&self) -> u64 {
-        self.value
+    ///
+    /// A counter is whole: a scrape that reports a fractional or negative
+    /// value for one is a scrape this reader has no meaning for, and it fails
+    /// rather than rounding one in. The cast below reads only a value that
+    /// check admitted.
+    fn count(&self) -> u64 {
+        let value = self.value;
+        assert!(
+            (0.0..=MAX_EXACT_COUNT).contains(&value) && value.fract() == 0.0,
+            "a {} sample reports {value}, which no counter can hold",
+            self.name
+        );
+        value as u64
     }
 
     /// The value one label carries, when the sample carries that label.
@@ -80,60 +101,97 @@ pub fn scraped_samples(response: &super::http::HttpResponse, metric: &str) -> Bo
 /// body nothing checked the status of report an empty counter for an endpoint
 /// that answered `404`. A caller reaching the parse on its own would be able to
 /// skip that check, which is the one thing pairing them was for.
+///
+/// Two questions, kept apart because conflating them is what lets a sample
+/// vanish. Whether the line is this metric's at all is decided first, by its
+/// whole name: a line for another metric that merely begins with the same
+/// name — the histogram's `_sum` beside its counter — names another metric, so
+/// it is skipped. Once the line IS this metric's, it must read; a line that
+/// will not parse is a scrape this reader has no meaning for, and it fails
+/// rather than dropping a sample the caller asked for and reporting zero.
 fn samples(scrape: &str, metric: &str) -> Box<[Sample]> {
     scrape
         .lines()
-        .filter_map(|line| parse_sample(line, metric))
+        .filter(|line| sample_name(line) == Some(metric))
+        .map(|line| {
+            parse_sample(line)
+                .unwrap_or_else(|| panic!("a {metric} sample is unreadable: {line:?}"))
+        })
         .collect()
 }
 
-/// Read one scrape line as a sample of `metric`, or skip it.
+/// The metric name a sample line opens with: everything before its label set
+/// or its value.
+fn sample_name(line: &str) -> Option<&str> {
+    line.find(|character: char| character == '{' || character.is_whitespace())
+        .map(|end| &line[..end])
+}
+
+/// Read one `name{label="value",...} value` line, or `None` when it is no
+/// sample line.
 ///
-/// Two questions, kept apart because conflating them is what lets a sample
-/// vanish. Whether the line is this metric's at all is decided first, by the
-/// name and by what follows it: a line for another metric that merely begins
-/// with the same name — the histogram's `_sum` beside its counter — continues
-/// into a suffix where this reader requires a label set or a value, so it is
-/// skipped. Once the line IS this metric's, its value must read; a value that
-/// will not parse is a scrape this reader has no meaning for, and it fails
-/// rather than dropping a sample the caller asked for and reporting zero.
-fn parse_sample(line: &str, metric: &str) -> Option<Sample> {
-    let rest = line.strip_prefix(metric)?;
-    let (labels, value) = match rest.strip_prefix('{') {
-        Some(labelled) => labelled.split_once('}')?,
-        None if rest.starts_with(char::is_whitespace) => ("", rest),
-        None => return None,
+/// A timestamp after the value is allowed and ignored.
+pub fn parse_sample(line: &str) -> Option<Sample> {
+    let name = sample_name(line)?;
+    let rest = &line[name.len()..];
+    let (labels, rest) = match rest.strip_prefix('{') {
+        Some(block) => parse_labels(block)?,
+        None => (Box::default(), rest),
     };
-    let value = value.trim();
+    let value = rest
+        .strip_prefix(char::is_whitespace)?
+        .split_whitespace()
+        .next()?;
     Some(Sample {
-        labels: parse_labels(labels),
-        value: value
-            .parse()
-            .unwrap_or_else(|_| panic!("a {metric} sample reports the unreadable value {value:?}")),
+        name: name.into(),
+        labels,
+        value: value.parse().ok()?,
     })
 }
 
-/// Read the `name="value"` pairs one sample declares between its braces.
+/// Read the quoted `name="value"` pairs one label set declares, through its
+/// closing brace, and return them with the text after it.
 ///
-/// The comma is read as a separator wherever it appears, so a label value
-/// carrying one is split into two pairs and fails here rather than parsing. That
-/// restriction is stated rather than lifted: the counters this reader exists for
-/// carry the closed rejection vocabulary — a category name and a status, both
-/// static text with no comma in any of them — so a quote-aware scanner would add
-/// a branch to test support that no scrape can reach and no test can drive. A
-/// reader that needs one is reading a different metric and should say so here
-/// first.
-fn parse_labels(labels: &str) -> Box<[(Box<str>, Box<str>)]> {
-    labels
-        .split(',')
-        .filter(|pair| !pair.is_empty())
-        .map(|pair| {
-            let (name, value) = pair.split_once('=').unwrap_or_else(|| {
-                panic!("a scraped label is not a name=value pair: {pair:?} in {labels:?}")
-            });
-            (Box::from(name), Box::from(value.trim_matches('"')))
-        })
-        .collect()
+/// Quote-aware: a comma, a brace, or an escaped quote inside a value belongs
+/// to the value. The value is kept as the scrape escaped it.
+fn parse_labels(mut rest: &str) -> Option<(Labels, &str)> {
+    let mut labels = Vec::new();
+    loop {
+        if let Some(after) = rest.strip_prefix('}') {
+            return Some((labels.into_boxed_slice(), after));
+        }
+        let (name, quoted) = rest.split_once("=\"")?;
+        let named = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !named {
+            return None;
+        }
+        let mut escaped = false;
+        let end = quoted.char_indices().find_map(|(at, character)| {
+            let closes = character == '"' && !escaped;
+            escaped = character == '\\' && !escaped;
+            closes.then_some(at)
+        })?;
+        labels.push((name.into(), quoted[..end].into()));
+        let after = &quoted[end + 1..];
+        rest = after.strip_prefix(',').unwrap_or(after);
+    }
+}
+
+/// The total one scrape reports over every sample the predicate selects, and
+/// zero for none.
+///
+/// The reading for a family whose samples are not all counters, such as a
+/// duration's `_sum`: a sum over a selection, never one sample's value.
+pub fn total_where(samples: &[Sample], matching: impl Fn(&Sample) -> bool) -> f64 {
+    selected(samples, matching).map(|sample| sample.value).sum()
+}
+
+/// The samples the predicate selects, for every sum this module takes.
+fn selected(
+    samples: &[Sample],
+    matching: impl Fn(&Sample) -> bool,
+) -> impl Iterator<Item = &Sample> {
+    samples.iter().filter(move |sample| matching(sample))
 }
 
 /// The value one scrape reports for every sample the predicate selects, and
@@ -143,11 +201,7 @@ fn parse_labels(labels: &str) -> Box<[(Box<str>, Box<str>)]> {
 /// printed at all: a reader that failed on absence could not state a delta
 /// against a label set the fixture is about to create.
 fn value_where(samples: &[Sample], matching: impl Fn(&Sample) -> bool) -> u64 {
-    samples
-        .iter()
-        .filter(|sample| matching(sample))
-        .map(Sample::value)
-        .sum()
+    selected(samples, matching).map(Sample::count).sum()
 }
 
 /// How far the samples one predicate selects moved between two scrapes.
@@ -156,11 +210,11 @@ fn value_where(samples: &[Sample], matching: impl Fn(&Sample) -> bool) -> u64 {
 /// reading this cannot be a delta of, and it fails rather than wrapping. Stated
 /// once for every way of selecting samples, because the monotonicity rule
 /// belongs to the counter and not to the labels a caller picked it out by.
-/// `subject` names that selection in the failure.
+/// `subject` names that selection in the failure, and is rendered only there.
 fn delta_where(
     before: &[Sample],
     after: &[Sample],
-    subject: &str,
+    subject: std::fmt::Arguments<'_>,
     matching: impl Fn(&Sample) -> bool,
 ) -> u64 {
     let (start, end) = (
@@ -176,14 +230,14 @@ fn delta_where(
 
 /// How far one counter moved between two scrapes.
 pub fn delta(before: &[Sample], after: &[Sample], labels: &[(&str, &str)]) -> u64 {
-    delta_where(before, after, &format!("{labels:?}"), |sample| {
+    delta_where(before, after, format_args!("{labels:?}"), |sample| {
         sample.matches(labels)
     })
 }
 
 /// How far every sample carrying `name = value` moved between two scrapes.
 pub fn delta_by(before: &[Sample], after: &[Sample], name: &str, value: &str) -> u64 {
-    delta_where(before, after, &format!("{name}={value}"), |sample| {
+    delta_where(before, after, format_args!("{name}={value}"), |sample| {
         sample.label(name) == Some(value)
     })
 }

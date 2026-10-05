@@ -464,6 +464,51 @@ fn child_guard_reaps_after_child_timeout() {
     );
 }
 
+/// A child's output closes when that child exits, not when a sibling does.
+///
+/// Sibling threads keep spawning children that outlive the bound while this
+/// thread runs short children. A sibling that inherits a short child's pipe
+/// holds the reader open past the short child's exit, and its join expires.
+#[test]
+fn concurrent_spawns_keep_each_child_output_private() {
+    const SIBLINGS: usize = 4;
+    const HELD_PER_SIBLING: usize = 96;
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(1);
+    let spawning = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(SIBLINGS));
+    let siblings: Vec<_> = (0..SIBLINGS)
+        .map(|_| {
+            let spawning = std::sync::Arc::clone(&spawning);
+            std::thread::spawn(move || {
+                let held: Vec<_> = (0..HELD_PER_SIBLING)
+                    .map(|_| {
+                        let mut command = std::process::Command::new("sleep");
+                        command.arg("30").stdin(std::process::Stdio::null());
+                        super::ChildGuard::spawn(command, BOUND).unwrap()
+                    })
+                    .collect();
+                spawning.fetch_sub(1, Ordering::SeqCst);
+                held
+            })
+        })
+        .collect();
+    let mut short_runs = 0_usize;
+    while spawning.load(Ordering::SeqCst) > 0 {
+        let mut command = std::process::Command::new("true");
+        command.stdin(std::process::Stdio::null());
+        let mut child = super::ChildGuard::spawn(command, BOUND).unwrap();
+        let status = child.wait_bounded(BOUND);
+        assert!(
+            status.as_ref().is_ok_and(std::process::ExitStatus::success),
+            "short child {short_runs} did not finish privately: {status:?}"
+        );
+        short_runs += 1;
+    }
+    siblings
+        .into_iter()
+        .for_each(|sibling| drop(sibling.join().unwrap()));
+    assert!(short_runs > 0, "no short child overlapped the siblings");
+}
+
 #[test]
 fn temp_root_cleans_up_during_assertion_unwind() {
     let root = super::TempRoot::new().unwrap();

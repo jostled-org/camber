@@ -1,6 +1,7 @@
 #![cfg(feature = "dns01")]
 
-use crate::resources::{CleanupWitness, ExternalRun};
+use crate::dns_cleanup_peers::{BUNDLE, challenge_name};
+use crate::resources::selected_run;
 use camber::dns01::AcmeDns01;
 use reqwest::{Client, Response};
 use serde::Deserialize;
@@ -171,24 +172,28 @@ async fn remove_challenge_records(probe: &CloudflareCleanupProbe, fqdn: &str) ->
     provider_cleanup_completed
 }
 
-#[tokio::test]
-#[ignore = "external lane dns; owner: Camber ACME and DNS integrations; run: gh workflow run external-evidence.yml -f lane=dns"]
-async fn acme_dns01_provisions_cert() {
-    let run = ExternalRun::from_environment().expect("valid CAMBER_EXTERNAL_RUN_ID");
-    let witness =
-        CleanupWitness::from_environment().expect("valid CAMBER_EXTERNAL_CLEANUP_WITNESS path");
+#[test]
+#[ignore = "external lane dns_public; owner: Camber ACME and DNS integrations; run: gh workflow run external-evidence.yml -f lane=dns_public"]
+fn acme_dns01_provisions_cert() {
+    camber::runtime::builder()
+        .run(|| camber::runtime::block_on(provision_and_clean_up()))
+        .expect("Camber runtime");
+}
+
+/// Provision through the owned API inside the Camber runtime it admits to.
+async fn provision_and_clean_up() {
+    let (run, witness) = selected_run().expect("a valid external run ID and witness path");
     let base_domain = std::env::var("ACME_TEST_DOMAIN").expect("ACME_TEST_DOMAIN must be set");
     let domain = run
         .dns_subdomain(&base_domain)
         .expect("unique ACME test subdomain");
-    let challenge_fqdn = format!("_acme-challenge.{domain}").into_boxed_str();
+    let challenge_fqdn = challenge_name(&domain).into_boxed_str();
     let token: Arc<str> = std::env::var("CF_TOKEN")
         .expect("CF_TOKEN must be set")
         .into();
 
-    let provider = camber::dns01::CloudflareProvider::new((&*token).into(), &domain)
-        .await
-        .expect("cloudflare provider");
+    let provider =
+        camber::dns01::CloudflareProvider::new((&*token).into()).expect("cloudflare provider");
     let probe = CloudflareCleanupProbe::new(token, &domain)
         .await
         .expect("Cloudflare cleanup probe");
@@ -207,11 +212,10 @@ async fn acme_dns01_provisions_cert() {
         .cache_dir(cache_dir.path())
         .staging(true);
 
-    let provision_result = config.provision_cert(&provider).await;
+    let provision_result = config.provision_cert(provider).await;
     let provider_cleanup_completed = remove_challenge_records(&probe, &challenge_fqdn).await;
 
-    let cert_cached = cache_dir.path().join("cert.pem").exists();
-    let key_cached = cache_dir.path().join("key.pem").exists();
+    let bundle_cached = cache_dir.path().join(BUNDLE).exists();
     let (cert_chain_present, provision_error) = match provision_result {
         Ok(cert) => {
             let present = !cert.cert.is_empty();
@@ -222,7 +226,6 @@ async fn acme_dns01_provisions_cert() {
     };
 
     drop(config);
-    drop(provider);
     drop(probe);
     cache_dir.close().expect("remove certificate cache");
 
@@ -239,6 +242,5 @@ async fn acme_dns01_provisions_cert() {
         "certificate provisioning failed after cleanup: {provision_error:?}"
     );
     assert!(cert_chain_present, "cert chain should not be empty");
-    assert!(cert_cached, "cert cached to disk");
-    assert!(key_cached, "key cached to disk");
+    assert!(bundle_cached, "cert and key cached to disk as one bundle");
 }

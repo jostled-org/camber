@@ -342,21 +342,38 @@ enum AsyncJoinSource<T> {
 /// carries no cancel half at all.
 pub struct AsyncJoinHandle<T> {
     source: AsyncJoinSource<T>,
-    cancel: Option<Arc<tokio::sync::Notify>>,
+    cancel: Option<CancelRequest>,
+}
+
+/// How a handle's `cancel` reaches its task.
+enum CancelRequest {
+    /// Drop the spawned future.
+    Drop(Arc<tokio::sync::Notify>),
+    /// Ask a Camber-owned task to stop; it settles what it owns first.
+    #[cfg(feature = "dns01")]
+    Stop(crate::runtime_state::LatchSignal),
 }
 
 impl<T> AsyncJoinHandle<T> {
-    /// Request cancellation. The spawned future is dropped and `.await`
-    /// returns `Err(Cancelled)`.
+    /// Request cancellation, and `.await` returns `Err(Cancelled)`.
+    ///
+    /// A future from [`spawn_async`] is dropped. A Camber-owned operation
+    /// that holds external state, such as [`AcmeDns01::spawn_renewal`]'s,
+    /// stops instead: it settles that state, then resolves.
+    ///
+    /// [`AcmeDns01::spawn_renewal`]: crate::dns01::AcmeDns01::spawn_renewal
     pub fn cancel(&self) {
-        if let Some(cancel) = &self.cancel {
-            cancel.notify_one();
+        match &self.cancel {
+            Some(CancelRequest::Drop(cancel)) => cancel.notify_one(),
+            #[cfg(feature = "dns01")]
+            Some(CancelRequest::Stop(stop)) => stop.fire(),
+            None => {}
         }
     }
 
     /// A handle for a spawn the scope refused: no future ran, and the caller
     /// observes the refusal through the handle's existing result channel.
-    fn refused(error: RuntimeError) -> Self {
+    pub(crate) fn refused(error: RuntimeError) -> Self {
         Self {
             source: AsyncJoinSource::Refused(Some(error)),
             cancel: None,
@@ -486,13 +503,55 @@ where
     // runs and the refusal arrives on the handle. The caller holds that handle,
     // so this child's panic is delivered there and leaves the runtime result
     // untouched.
-    match rt.admit_async(None, body) {
+    admit_user_child(&rt, body, rx, CancelRequest::Drop(cancel))
+}
+
+/// Admit one user-owned child's `body` to `runtime`'s root scope, and hand
+/// back the handle that reads `result` and reaches the task through `cancel`.
+///
+/// A refused admission drops `body` unpolled, and the refusal arrives on the
+/// handle.
+fn admit_user_child<F, T>(
+    runtime: &Arc<RuntimeInner>,
+    body: F,
+    result: tokio::sync::oneshot::Receiver<Result<T, RuntimeError>>,
+    cancel: CancelRequest,
+) -> AsyncJoinHandle<T>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    match runtime.admit_async(None, body) {
         Ok(()) => AsyncJoinHandle {
-            source: AsyncJoinSource::Task(rx),
+            source: AsyncJoinSource::Task(result),
             cancel: Some(cancel),
         },
         Err(error) => AsyncJoinHandle::refused(error),
     }
+}
+
+/// Spawn the future `build` makes as a user-owned child of `runtime`, whose
+/// handle's `cancel` fires the latch `build` receives instead of dropping it.
+///
+/// For a task that owns external state it must settle before it ends: the
+/// future reads the latch as a stop request and answers through the handle on
+/// its own terms. A refused admission drops the future unpolled.
+#[cfg(feature = "dns01")]
+pub(crate) fn spawn_async_stoppable_on<B, Fut, T>(
+    runtime: &Arc<RuntimeInner>,
+    build: B,
+) -> AsyncJoinHandle<T>
+where
+    B: FnOnce(crate::runtime_state::LatchSignal) -> Fut,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let stop = crate::runtime_state::LatchSignal::new();
+    let future = build(stop.clone());
+    let body = async move {
+        report_dropped_result(tx.send(catch_panic_async(future).await), "async");
+    };
+    admit_user_child(runtime, body, rx, CancelRequest::Stop(stop))
 }
 
 /// Admit one Camber-owned perpetual loop to a NAMED runtime's root scope,

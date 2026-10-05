@@ -51,6 +51,7 @@ const FIXTURE_BOUND: Duration = Duration::from_secs(5);
 const HELD_ROUTE: &str = "/held";
 
 /// The route a registered upgrade bridge is served on.
+#[cfg(feature = "ws")]
 const BRIDGE_ROUTE: &str = "/bridge";
 
 /// The route a streamed response is produced on.
@@ -846,7 +847,7 @@ fn resource_deadline_row() {
         .shutdown_timeout(AGGREGATE_GRACE)
         .resource_budget(common::short_resource_budget())
         .resource(parked)
-        .run(|| runtime::request_shutdown());
+        .run(runtime::request_shutdown);
 
     let outcome = RowOutcome {
         settlements: controller.participant_settlements(),

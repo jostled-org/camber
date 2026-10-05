@@ -117,6 +117,23 @@ pub fn resolve_tls(
 pub fn build_tls_config_from_resolver(
     store: CertStore,
 ) -> Result<Arc<rustls::ServerConfig>, RuntimeError> {
+    build_tls_config(Arc::new(store))
+}
+
+/// Build a rustls ServerConfig that delegates cert resolution to `resolver`.
+pub(crate) fn build_tls_config(
+    resolver: Arc<dyn ResolvesServerCert>,
+) -> Result<Arc<rustls::ServerConfig>, RuntimeError> {
+    // ALPN negotiation: prefer h2, fall back to http/1.1
+    server_config(resolver, vec![H2_ALPN.to_vec(), HTTP1_ALPN.to_vec()])
+}
+
+/// Build a rustls ServerConfig on Camber's crypto provider and protocol
+/// versions that resolves through `resolver` and offers `alpn_protocols`.
+pub(crate) fn server_config(
+    resolver: Arc<dyn ResolvesServerCert>,
+    alpn_protocols: Vec<Vec<u8>>,
+) -> Result<Arc<rustls::ServerConfig>, RuntimeError> {
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
@@ -125,11 +142,8 @@ pub fn build_tls_config_from_resolver(
         RuntimeError::Tls(format!("failed to configure TLS protocol versions: {e}").into())
     })?
     .with_no_client_auth()
-    .with_cert_resolver(Arc::new(store));
-
-    // ALPN negotiation: prefer h2, fall back to http/1.1
-    config.alpn_protocols = vec![b"h2".to_vec(), HTTP1_ALPN.to_vec()];
-
+    .with_cert_resolver(resolver);
+    config.alpn_protocols = alpn_protocols;
     Ok(Arc::new(config))
 }
 
@@ -212,7 +226,9 @@ pub(crate) fn backend_client_config(
 }
 
 /// The ALPN identifier of HTTP/1.1.
-const HTTP1_ALPN: &[u8] = b"http/1.1";
+pub(crate) const HTTP1_ALPN: &[u8] = b"http/1.1";
+/// The ALPN identifier of HTTP/2.
+pub(crate) const H2_ALPN: &[u8] = b"h2";
 
 /// Build one cached config from the public WebPKI roots on first use.
 fn webpki_client_config(

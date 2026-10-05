@@ -120,6 +120,13 @@ struct ScriptedDnsProvider;
 
 #[cfg(feature = "dns01")]
 impl camber::dns01::DnsProvider for ScriptedDnsProvider {
+    fn prepare(
+        &mut self,
+        _: &[std::sync::Arc<str>],
+    ) -> impl std::future::Future<Output = Result<(), RuntimeError>> + Send {
+        std::future::ready(Ok(()))
+    }
+
     fn create_txt_record(
         &self,
         _: &str,

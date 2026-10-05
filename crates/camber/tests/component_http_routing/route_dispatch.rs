@@ -60,9 +60,18 @@ fn unmatched_route_is_answered_without_waiting_for_its_declared_body() {
         .unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+/// Virtual time moves only while the server is provably parked on its body
+/// deadline. `100 Continue` is Hyper's answer to the first body poll, and the
+/// request's idle and total guards are armed before that poll, so the interim
+/// head on the wire is the edge. Every wait on real socket delivery runs on the
+/// real clock: a paused clock auto-advances to the next timer whenever loopback
+/// delivery lags, which under load reads as a missing deadline.
+#[tokio::test]
 async fn buffered_request_body_has_a_finite_read_deadline() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+    const PAST_DEFAULT_BODY_DEADLINE: Duration = Duration::from_secs(31);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -75,15 +84,33 @@ async fn buffered_request_body_has_a_finite_read_deadline() {
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     stream
         .write_all(
-            b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nConnection: close\r\n\r\n",
+            b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
         )
         .await
         .unwrap();
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
+
+    let mut interim = Vec::new();
+    tokio::time::timeout(DELIVERY_BOUND, async {
+        while !interim.ends_with(b"\r\n\r\n") {
+            let mut byte = [0_u8; 1];
+            stream.read_exact(&mut byte).await.unwrap();
+            interim.push(byte[0]);
+        }
+    })
+    .await
+    .expect("server never started reading the request body");
+    assert!(
+        interim.starts_with(b"HTTP/1.1 100"),
+        "unexpected interim response: {}",
+        String::from_utf8_lossy(&interim)
+    );
+
+    tokio::time::pause();
+    tokio::time::advance(PAST_DEFAULT_BODY_DEADLINE).await;
+    tokio::time::resume();
 
     let mut response = Vec::new();
-    tokio::time::timeout(Duration::from_secs(60), stream.read_to_end(&mut response))
+    tokio::time::timeout(DELIVERY_BOUND, stream.read_to_end(&mut response))
         .await
         .expect("request body read had no finite deadline")
         .unwrap();

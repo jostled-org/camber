@@ -8,8 +8,8 @@ use camber::http::WsCloseCause;
 use camber::http::mock::{InboundTerminal, ResponseOrigin, completion_vocabulary};
 use camber::http::{ByteBoundary, DeadlineBoundary};
 use camber::{
-    LifecycleFailureKind, LifecycleFailures, LifecycleParticipant, LifecyclePhase, ResourceFailure,
-    ResourceFailureKind, ResourcePhase, RuntimeError,
+    IntegrationKind, LifecycleFailureKind, LifecycleFailures, LifecycleParticipant, LifecyclePhase,
+    ResourceFailure, ResourceFailureKind, ResourcePhase, RuntimeError,
 };
 
 use crate::lifecycle_kinds::{kind_name, participant_name};
@@ -173,13 +173,21 @@ const WEBSOCKET_CAUSES: [(WsCloseCause, &str); 6] = [
 /// The order is reproducible output, not precedence. It is asserted because two
 /// identical runs must render identically; nothing reads the first entry as the
 /// one to act on.
-fn aggregate_owners() -> [(LifecycleParticipant, &'static str, &'static str); 4] {
+fn aggregate_owners() -> [(LifecycleParticipant, &'static str, &'static str); 5] {
     [
         (LifecycleParticipant::RootScope, "root-scope", "root-scope"),
         (
             LifecycleParticipant::BackgroundTask,
             "background-task",
             "background-task",
+        ),
+        (
+            LifecycleParticipant::Integration {
+                kind: IntegrationKind::Nats,
+                id: 7,
+            },
+            "integration:nats:7",
+            "integration nats 7",
         ),
         (
             LifecycleParticipant::Resource(Arc::from("cache")),
@@ -338,13 +346,18 @@ fn assert_direct_aggregate_names_every_owner() {
         recorded, published,
         "the aggregate no longer renders its owners in the published order"
     );
-    assert_eq!(failures.len(), 4, "the aggregate dropped a recorded owner");
+    let owners = published.len();
+    assert_eq!(
+        failures.len(),
+        owners,
+        "the aggregate dropped a recorded owner"
+    );
 
     // Every entry is rendered, led by the count. An account that rendered one
     // chosen entry would be electing an owner for the operator to act on.
     let line = failures.to_string();
     assert!(
-        line.starts_with("[4 recorded]"),
+        line.starts_with(&format!("[{owners} recorded]")),
         "the aggregate's operator line no longer leads with its count: {line}"
     );
     for (_, _, displayed) in aggregate_owners() {

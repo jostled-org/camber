@@ -9,7 +9,9 @@ on:
         type: choice
         options:
           - nats
+          - sqs
           - dns
+          - dns_public
           - docker
           - go
           - load_generators
@@ -22,6 +24,9 @@ on:
       - 'Dockerfile'
       - '.dockerignore'
       - '.github/workflows/external-evidence.yml'
+      - '.github/workflow-tools.toml'
+      - '.github/scripts/check-local-integrations.sh'
+      - '.github/scripts/reproduce-ci.sh'
   push:
     branches: [main]
     paths: *compatibility_paths
@@ -33,11 +38,16 @@ env:
   CARGO_TERM_COLOR: always
   CAMBER_EXTERNAL_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}
 
-# Lane orchestration lives here directly — there is no repository runner.
-# Every selected test runs as an exact single-test cargo invocation with a
-# distinct CAMBER_EXTERNAL_CLEANUP_WITNESS path; a missing witness after a
-# passing test fails the lane (cleanup evidence is part of the contract).
-# Unselected lanes record a not_selected marker — never a pass.
+# The local service lanes (nats, sqs, dns) run through the shared
+# `.github/scripts/check-local-integrations.sh` runner. It starts digest-pinned
+# images from `.github/workflow-tools.toml` and writes every local lane's
+# evidence. The other lanes run here directly. Every selected test runs as an
+# exact single-test cargo invocation with a distinct
+# CAMBER_EXTERNAL_CLEANUP_WITNESS path; a missing witness after a passing test
+# fails the lane (cleanup evidence is part of the contract). Unselected lanes
+# record a not_selected marker — never a pass — through the same runner's
+# `--not-selected` mode, so one writer owns every marker. The public DNS lane
+# (dns_public) is manual and is not local evidence.
 
 jobs:
   not-selected:
@@ -47,37 +57,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [dns, docker, go, load_generators, nats]
+        lane: [dns, dns_public, docker, go, load_generators, nats, sqs]
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: matrix.lane != inputs.lane
       - name: Record unselected lane
         if: matrix.lane != inputs.lane
-        run: |
-          mkdir -p logs/external
-          printf '{"lane":"%s","status":"not_selected","run_id":"%s"}\n' \
-            "${{ matrix.lane }}" "${CAMBER_EXTERNAL_RUN_ID}" \
-            > "logs/external/${{ matrix.lane }}.json"
+        run: .github/scripts/check-local-integrations.sh --not-selected "${{ matrix.lane }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: matrix.lane != inputs.lane
         with:
           name: external-${{ matrix.lane }}-not-selected
           path: logs/external/${{ matrix.lane }}.json
 
+  # The local lanes share one step list. Each job id is its lane, so
+  # `github.job` selects the runner lane and names the lane's evidence.
   nats:
     if: github.event_name != 'workflow_dispatch' || inputs.lane == 'nats'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    services:
-      nats:
-        image: nats:2.15.0-alpine
-        ports:
-          - 4222:4222
-        options: >-
-          --health-cmd "pidof nats-server"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 12
-          --health-start-period 5s
-    steps:
+    steps: &local_lane_steps
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install
       - name: Install protoc
@@ -85,24 +84,33 @@ jobs:
           sudo apt-get -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-" -o Acquire::Retries=3 update
           sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Run nats lane
-        run: |
-          set -euo pipefail
-          mkdir -p logs/external
-          for t in nats_publish_and_subscribe nats_queue_group nats_async_subscribe nats_async_connect_does_not_block_worker; do
-            CAMBER_EXTERNAL_CLEANUP_WITNESS="$PWD/logs/external/nats-$t.json" \
-              cargo test -p camber --features nats --test external_feature_services -- \
-              "external_nats::$t" --exact --ignored --test-threads=1 2>&1 | tee -a logs/external/nats.log
-            [ -f "logs/external/nats-$t.json" ] || { echo "missing cleanup witness for $t" >&2; exit 1; }
-          done
+      - name: Run ${{ github.job }} lane
+        run: .github/scripts/check-local-integrations.sh ${{ github.job }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: external-nats-evidence
-          path: logs/external
+          name: external-${{ github.job }}-evidence
+          # Only this lane's files: the runner also marks the lanes it did
+          # not run as not_selected, and those lanes run in their own jobs.
+          path: |
+            logs/external/${{ github.job }}.json
+            logs/external/${{ github.job }}.log
+            logs/external/${{ github.job }}-*
+
+  sqs:
+    if: github.event_name != 'workflow_dispatch' || inputs.lane == 'sqs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps: *local_lane_steps
 
   dns:
-    if: github.event_name == 'workflow_dispatch' && inputs.lane == 'dns'
+    if: github.event_name != 'workflow_dispatch' || inputs.lane == 'dns'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps: *local_lane_steps
+
+  dns-public:
+    if: github.event_name == 'workflow_dispatch' && inputs.lane == 'dns_public'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -112,8 +120,8 @@ jobs:
       - name: Validate DNS prerequisites
         shell: bash
         run: |
-          test -n "$ACME_TEST_DOMAIN" || { echo '::error::Set ACME_TEST_DOMAIN before selecting the DNS lane'; exit 1; }
-          test -n "$CF_TOKEN" || { echo '::error::Set CF_TOKEN before selecting the DNS lane'; exit 1; }
+          test -n "$ACME_TEST_DOMAIN" || { echo '::error::Set ACME_TEST_DOMAIN before selecting the public DNS lane'; exit 1; }
+          test -n "$CF_TOKEN" || { echo '::error::Set CF_TOKEN before selecting the public DNS lane'; exit 1; }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install
       - name: Install protoc
@@ -121,19 +129,19 @@ jobs:
           sudo apt-get -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-" -o Acquire::Retries=3 update
           sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Run dns lane
+      - name: Run public dns lane
         run: |
           set -euo pipefail
           mkdir -p logs/external
           t=acme_dns01_provisions_cert
-          CAMBER_EXTERNAL_CLEANUP_WITNESS="$PWD/logs/external/dns-$t.json" \
+          CAMBER_EXTERNAL_CLEANUP_WITNESS="$PWD/logs/external/dns_public-$t.json" \
             cargo test -p camber --features dns01 --test external_feature_services -- \
-            "external_dns01::$t" --exact --ignored --test-threads=1 2>&1 | tee logs/external/dns.log
-          [ -f "logs/external/dns-$t.json" ] || { echo "missing cleanup witness for $t" >&2; exit 1; }
+            "external_dns01::$t" --exact --ignored --test-threads=1 2>&1 | tee logs/external/dns_public.log
+          [ -f "logs/external/dns_public-$t.json" ] || { echo "missing cleanup witness for $t" >&2; exit 1; }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: external-dns-evidence
+          name: external-dns-public-evidence
           path: logs/external
 
   docker:

@@ -856,6 +856,21 @@ fn assert_internal_failure(row: &InternalFailureRow, seen: &observed::Observed) 
 #[cfg(feature = "profiling")]
 #[test]
 fn internal_route_execution_failure_keeps_internal_service_classification() {
+    crate::process::run_in_child(
+        "framework_rejections::internal_route_execution_failure_keeps_internal_service_classification",
+        "internal-route-execution-failure",
+        "INTERNAL_ROUTE_EXECUTION_FAILURE_CLASSIFIED",
+        std::time::Duration::from_secs(60),
+        assert_internal_route_execution_failure,
+    );
+}
+
+/// A CPU profile samples every thread of its process through a `SIGPROF`
+/// handler that unwinds whatever each thread is running. A sibling test can be
+/// inside platform code that handler cannot unwind, so the profile runs in a
+/// private child that holds only this test.
+#[cfg(feature = "profiling")]
+fn assert_internal_route_execution_failure() {
     let profiler = pprof::ProfilerGuardBuilder::default()
         .frequency(1000)
         .build()

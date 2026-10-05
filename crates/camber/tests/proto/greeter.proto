@@ -15,6 +15,18 @@ service Streamer {
   rpc Echo (stream HelloRequest) returns (stream HelloReply);
 }
 
+// Every native tonic RPC form, one method each, for the proofs that drive all
+// four through Camber's serving path.
+//
+// Held apart from Greeter for the same reason as Streamer, and apart from
+// Streamer so its full-duplex fixtures keep implementing exactly one method.
+service NativeForms {
+  rpc Unary (HelloRequest) returns (HelloReply);
+  rpc ClientStreaming (stream HelloRequest) returns (HelloReply);
+  rpc ServerStreaming (HelloRequest) returns (stream HelloReply);
+  rpc Bidirectional (stream HelloRequest) returns (stream HelloReply);
+}
+
 message HelloRequest {
   string name = 1;
 }

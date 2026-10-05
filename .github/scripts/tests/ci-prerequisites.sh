@@ -70,7 +70,7 @@ expect_message 'workflow search failed (rg exit 2)'
 reject_message 'CI omits hook self-test'
 
 mkdir -p "${FIXTURE}/workflow/.github/scripts"
-for hook in ci-selftest check-pedant check-supply-chain; do
+for hook in ci-selftest check-feature-builds check-pedant check-supply-chain; do
     ln -s /usr/bin/true "${FIXTURE}/workflow/.github/scripts/${hook}.sh"
 done
 
@@ -104,6 +104,7 @@ BASH
 done
 
 # The versions the tracked records pin; an absent pin fails the run.
+# shellcheck source=.github/scripts/reproduce-ci.sh
 CAMBER_HOOK_LIBRARY_MODE=1 source "${ROOT}/.github/scripts/reproduce-ci.sh"
 CARGO_DENY_PIN=$(require_pinned_version "${ROOT}" cargo-deny)
 PEDANT_PIN=$(require_pinned_version "${ROOT}" pedant)
@@ -150,6 +151,39 @@ expect_exit 75 'tool install without cargo' "${BASH_EXE}" -s -- \
 BASH
 expect_message 'required workflow tool is unavailable: cargo'
 
+expect_exit 64 'install of a local service image' \
+    "${BASH_EXE}" -s -- "${REPRODUCE}" "${ROOT}" <<'BASH'
+    CAMBER_HOOK_LIBRARY_MODE=1 source "$1"
+    cargo() { printf 'cargo %s\n' "$*"; }
+    install_workflow_tools "$2" nats
+BASH
+expect_message 'workflow tool is not installed through Cargo: nats'
+reject_message 'cargo install'
+
+expect_exit 0 'pinned service image' \
+    "${BASH_EXE}" -s -- "${REPRODUCE}" "${ROOT}" <<'BASH'
+    CAMBER_HOOK_LIBRARY_MODE=1 source "$1"
+    pinned_service_image "$2" nats
+BASH
+expect_message 'docker.io/library/nats:'
+
+mkdir -p "${FIXTURE}/floating/.github"
+sed 's|^image\.nats = .*$|image.nats = "docker.io/library/nats:2-alpine"|' \
+    "${ROOT}/${WORKFLOW_TOOL_RECORD}" >"${FIXTURE}/floating/${WORKFLOW_TOOL_RECORD}"
+expect_exit 1 'floating service image' \
+    "${BASH_EXE}" -s -- "${REPRODUCE}" "${FIXTURE}/floating" <<'BASH'
+    CAMBER_HOOK_LIBRARY_MODE=1 source "$1"
+    pinned_service_image "$2" nats
+BASH
+expect_message 'local service image nats is not pinned by version and digest'
+
+expect_exit 64 'unknown service image' \
+    "${BASH_EXE}" -s -- "${REPRODUCE}" "${ROOT}" <<'BASH'
+    CAMBER_HOOK_LIBRARY_MODE=1 source "$1"
+    pinned_service_image "$2" kafka
+BASH
+expect_message 'unknown local service image: kafka'
+
 expect_exit 1 'reviewed dependency base is not a commit' \
     "${BASH_EXE}" -s -- "${ROOT}/.github/scripts/check-supply-chain.sh" <<'BASH'
     CAMBER_HOOK_LIBRARY_MODE=1 source "$1"
@@ -176,6 +210,8 @@ BASH
 cat "${ROOT}/${WORKFLOW_TOOL_RECORD}" - >"${FIXTURE}/workflow-tools.toml" <<'TOML'
 cargo-nextest = "0.9.0"
 pedant 0.30.1
+image.kafka = "docker.io/library/kafka:3.9.0@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+image.nats = "docker.io/library/nats:latest"
 TOML
 expect_exit 0 'unconsumed tool record' "${BASH_EXE}" -s -- \
     "${SELFTEST}" "${FIXTURE}/workflow-tools.toml" <<'BASH'
@@ -184,6 +220,8 @@ expect_exit 0 'unconsumed tool record' "${BASH_EXE}" -s -- \
 BASH
 expect_message 'no pinned workflow tool consumes record entry: cargo-nextest'
 expect_message 'malformed workflow tool record line: pedant 0.30.1'
+expect_message 'no local service consumes image record entry: image.kafka'
+expect_message 'image record entry is not pinned by version and digest: image.nats'
 
 expect_exit 0 'pinned workflow contract' "${BASH_EXE}" -s -- \
     "${SELFTEST}" "${ROOT}/.github/workflows/ci.yml" <<'BASH'

@@ -72,6 +72,15 @@ pub(super) struct GuardedBody {
     /// of stream and polls nothing, so no second failure and no late
     /// completion follows the first.
     failed: bool,
+    /// The one failure this body owes its transport, held for one turn.
+    ///
+    /// Hyper's HTTP/1 writer buffers every frame a body yields and flushes only
+    /// once its write loop yields. A failure returned in that same loop closes
+    /// the connection with the buffered head and data unwritten, so a peer
+    /// whose source failed right behind its last bytes would receive none of
+    /// them. Returning `Pending` first lets the writer flush what it holds;
+    /// the self-wake makes the next poll hand the failure over.
+    held: Option<BodyError>,
 }
 
 impl GuardedBody {
@@ -96,6 +105,7 @@ impl GuardedBody {
             guard,
             remaining,
             failed: false,
+            held: None,
         };
         // Both halves of "Hyper will not poll this body". The report is asked
         // of the wrapper, which forwards it, so it is the exact report Hyper
@@ -164,17 +174,25 @@ impl GuardedBody {
     ///
     /// The committed status is never replaced. The head is already on the
     /// wire, so the error reaches only the transport.
-    fn end_of_stream(&mut self) -> BodyFramePoll {
+    fn end_of_stream(&mut self, cx: &std::task::Context<'_>) -> BodyFramePoll {
         match self.owed() {
             None => {
                 self.guard.complete();
                 std::task::Poll::Ready(None)
             }
-            Some(owed) => {
-                let error = self.ended_on(BodyError::declared_truncation(owed));
-                std::task::Poll::Ready(Some(Err(error)))
-            }
+            Some(owed) => self.fail(BodyError::declared_truncation(owed), cx),
         }
+    }
+
+    /// Fix this body's one failure now, and hand it to the transport next turn.
+    ///
+    /// The account records the cause at once, so the failure belongs to the
+    /// poll that found it. Only its delivery waits one turn, for the flush
+    /// [`GuardedBody::held`] describes.
+    fn fail(&mut self, error: BodyError, cx: &std::task::Context<'_>) -> BodyFramePoll {
+        self.held = Some(self.ended_on(error));
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
     }
 
     /// Hand the transport one failure, and name its cause in the account.
@@ -209,19 +227,20 @@ impl hyper::body::Body for GuardedBody {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
         let this = self.get_mut();
+        if let Some(error) = this.held.take() {
+            return std::task::Poll::Ready(Some(Err(error)));
+        }
         if this.failed {
             return std::task::Poll::Ready(None);
         }
         match std::pin::Pin::new(&mut this.inner).poll_frame(cx) {
-            std::task::Poll::Ready(None) => this.end_of_stream(),
+            std::task::Poll::Ready(None) => this.end_of_stream(cx),
             std::task::Poll::Ready(Some(Ok(frame))) => {
                 this.produced(&frame);
                 this.last_frame();
                 std::task::Poll::Ready(Some(Ok(frame)))
             }
-            std::task::Poll::Ready(Some(Err(error))) => {
-                std::task::Poll::Ready(Some(Err(this.ended_on(error))))
-            }
+            std::task::Poll::Ready(Some(Err(error))) => this.fail(error, cx),
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }

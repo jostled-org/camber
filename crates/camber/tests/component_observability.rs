@@ -1,4 +1,6 @@
 pub mod common;
+#[path = "support/leaky_source.rs"]
+pub mod leaky_source;
 
 #[path = "component_observability/completion_facts.rs"]
 mod completion_facts;

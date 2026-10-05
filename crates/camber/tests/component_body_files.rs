@@ -1,7 +1,12 @@
 #[path = "support/deterministic.rs"]
 pub mod deterministic;
+#[cfg(feature = "dns01")]
+#[path = "support/dns_cache_files.rs"]
+pub mod dns_cache_files;
 #[path = "support/http.rs"]
 pub mod http;
+#[path = "support/integration_rows.rs"]
+pub mod integration_rows;
 #[path = "support/rejection.rs"]
 pub mod rejection_support;
 #[path = "support/runtime.rs"]
@@ -21,6 +26,8 @@ mod body_limits;
 mod bounded_collections;
 #[path = "component_body_files/cookie_handling.rs"]
 mod cookie_handling;
+#[path = "component_body_files/dns_cache_publication.rs"]
+mod dns_cache_publication;
 #[path = "component_body_files/framework_rejections.rs"]
 mod framework_rejections;
 #[path = "component_body_files/json_bodies.rs"]

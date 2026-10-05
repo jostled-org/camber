@@ -77,16 +77,18 @@ runtime, so it is either returned as `Ok(T)` or displaced whole by a
 runtime-level failure. One value carries every such failure:
 `RuntimeError::Lifecycle`, the immutable account of each direct runtime-owned
 participant that could not finish — a panicking Camber-owned background child,
-a scope drain that expired with children still outstanding, a resource, the
-exporter. Nothing weighs those against each other: the account keeps them all
-and elects none of them. A caller reads the whole collection. See
+a scope drain that expired with children still outstanding, a managed
+integration, a resource, the exporter. Nothing weighs those against each
+other: the account keeps them all and elects none of them. A caller reads the
+whole collection. See
 [One aggregate shutdown deadline](#one-aggregate-shutdown-deadline) and
 [Errors](error.md#lifecycle-aggregates).
 
-The participant vocabulary is closed and direct:
-root scope, background task, resource, and exporter.
-These are the owners the runtime itself waits for and
-authoritatively settles. A server, one of its connections, and an upgrade past
+The participant vocabulary is closed and direct. The runtime's own owners are
+the root scope, background task, resource, and exporter. Each managed
+integration instance is one more participant, named by its closed kind and the
+identity admission gave it, for example `integration nats 7`. These are the
+owners the runtime itself waits for and authoritatively settles. A server, one of its connections, and an upgrade past
 its response head settle inside the flat server tree that owns them and never
 appear as runtime aggregate participants — a server's outcome reaches you
 through its own `ServerHandleFuture`, not through this account. The Tokio
@@ -100,8 +102,8 @@ failure from. It names the owner the settlement inventory visited, and it is
 never reached as an aggregate failure entry.
 
 Entries are frozen in a stable rendering order — root scope, background
-children, resources, then the exporter — with recording order deciding the
-sequence inside one class. That order is reproducible output and nothing else.
+children, integrations, resources, then the exporter — with recording order
+deciding the sequence inside one class. That order is reproducible output and nothing else.
 It is not causal precedence, and the first entry is not more responsible than
 the last.
 
@@ -320,7 +322,8 @@ Camber-owned background work observes two distinct events:
 ### Teardown Order and `shutdown_timeout`
 
 Teardown runs in one order: the closure returns, admission closes and scope
-closing fires, the root scope drains, resources shut down, Tokio shuts down.
+closing fires, the root scope drains, integrations settle, resources shut down,
+Tokio shuts down.
 
 `shutdown_timeout` bounds the **scope drain**, not total return. Children get
 that long to exit cooperatively. At the boundary Camber aborts every remaining
@@ -351,6 +354,37 @@ is never a drain outcome. It is delivered only by explicit cancellation:
 on a `camber::spawn` blocking task, which the task observes at its next Camber IO
 boundary; or `ServerHandle::cancel()`, which the server owner returns as its
 terminal outcome.
+
+### Managed Integrations
+
+A managed integration captures the runtime that admitted it. A handle used on
+another thread or inside another runtime still belongs to that first runtime.
+This section covers the runtime's side. For each integration's operations and
+bounds, see [Integrations](integrations.md).
+
+- Admission refuses with `NoRuntime` outside a runtime and `ScopeClosed` once
+  root admission has closed. It happens before any I/O.
+- One runtime holds at most 64 live integration instances. The next admission
+  fails with `Busy` until an instance settles. Admission identities are
+  finite. When they run out, admission fails with `LimitExceeded`.
+- An instance moves through admitted, ready, closing, and settled. Close
+  commits before any waiter wakes, and from then on every handle clone refuses
+  new work. Close is idempotent: every caller reads the same result.
+- Dropping the last handle requests close. Dropping an operation's waiter
+  cancels that operation. In both cases the runtime keeps the instance until it
+  settles.
+- An instance keeps its live slot until its admitted work has ended.
+
+Each operation runs as a root-scope child of the runtime that admitted its
+instance. The integration stop starts when root admission closes, not after the
+root drain. Accepted work can then finish during the drain, under the one
+aggregate expiry. A forced stop takes no integration grace of its own. It drops
+the work at the drain boundary, and an instance whose work does not come back is
+named in `RuntimeError::Lifecycle`.
+
+Integrations settle before any resource shuts down. Their retained report
+accounts then move into the aggregate once, each under its own instance. See
+[Report Budget and `Busy`](error.md#report-budget-and-busy).
 
 ### Outside a Runtime
 
@@ -423,5 +457,6 @@ Common variants include:
 - `NoRuntime` — a runtime-requiring entry point was called with no runtime context
 - `ScopeClosed` — admission was attempted at or after the root scope's close transition
 - `ScopeDrainTimeout(usize)` — the bounded scope drain expired, carrying how many children the boundary found outstanding (only the async subset of that count is then aborted and joined)
+- `Integration` — a managed integration operation failed; `Busy` means the runtime's report budget or an admission bound was full (see [Report Budget and `Busy`](error.md#report-budget-and-busy))
 
 Use normal Rust error propagation with `?`.

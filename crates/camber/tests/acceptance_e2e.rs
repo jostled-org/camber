@@ -1,9 +1,18 @@
+#[cfg(feature = "grpc")]
+#[path = "support/grpc_forms.rs"]
+pub mod grpc_forms;
 #[path = "support/h2_client.rs"]
 pub mod h2_client;
 #[path = "support/http.rs"]
 pub mod http;
+#[path = "support/integration_rows.rs"]
+pub mod integration_rows;
+#[path = "support/leaky_source.rs"]
+pub mod leaky_source;
 #[path = "support/metrics_scrape.rs"]
 pub mod metrics_scrape;
+#[path = "support/operation_completion.rs"]
+pub mod operation_completion;
 #[path = "support/process.rs"]
 pub mod process;
 // Mounted under a name of its own here, because this root's own multipart cases
@@ -58,10 +67,17 @@ pub mod body_admission;
 pub mod concurrent_routes_and_keepalive;
 #[path = "acceptance_e2e/cross_protocol_service_operation.rs"]
 pub mod cross_protocol_service_operation;
+#[path = "acceptance_e2e/dns_certificate_cache.rs"]
+pub mod dns_certificate_cache;
 #[path = "acceptance_e2e/framework_rejections.rs"]
 pub mod framework_rejections;
+#[cfg(feature = "grpc")]
+#[path = "acceptance_e2e/grpc_integrations.rs"]
+pub mod grpc_integrations;
 #[path = "acceptance_e2e/host_routing_and_outbound_proxy.rs"]
 pub mod host_routing_and_outbound_proxy;
+#[path = "acceptance_e2e/integration_rejections.rs"]
+pub mod integration_rejections;
 #[path = "acceptance_e2e/mixed_content_and_websocket_proxy.rs"]
 pub mod mixed_content_and_websocket_proxy;
 #[path = "acceptance_e2e/operation_commitment.rs"]

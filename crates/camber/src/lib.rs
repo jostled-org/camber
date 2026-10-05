@@ -94,11 +94,20 @@
 //! Optional capabilities are feature-gated:
 //!
 //! - `ws`: WebSocket routes
-//! - `grpc`: gRPC serving support
+//! - `grpc`: native tonic services in the unary, client-streaming,
+//!   server-streaming, and bidirectional forms
 //! - `otel`: OpenTelemetry tracing and export
 //! - `acme`: automatic TLS via ACME
-//! - `dns01`: ACME DNS-01 support
-//! - `nats`, `sqs`: message queue integrations
+//! - `dns01`: ACME DNS-01 through the built-in Cloudflare provider or a
+//!   custom `DnsProvider`
+//! - `nats`: async Core NATS connections, with opt-in publishing
+//!   acknowledged by an existing JetStream stream
+//! - `sqs`: async Amazon SQS clients for Standard queues; no FIFO
+//!
+//! NATS connections, SQS clients, and DNS-01 orders belong to the runtime
+//! that admitted them. Their unread failures stay in a bounded runtime report.
+//! `docs/reference/integrations.md` in the repository states what each
+//! operation's success means.
 //!
 //! # Choosing Camber
 //!
@@ -113,6 +122,10 @@
 //! lower-level transport stack, use Tokio and its surrounding ecosystem
 //! directly.
 //!
+// Lets a self-contained source file name public items as `camber::…` both
+// here and where a focused test includes it by path.
+extern crate self as camber;
+
 #[cfg(all(feature = "jemalloc", feature = "mimalloc"))]
 compile_error!("Features \"jemalloc\" and \"mimalloc\" are mutually exclusive. Enable only one.");
 
@@ -139,11 +152,12 @@ pub mod dns01;
 /// Common runtime error type.
 pub mod error;
 pub mod http;
+pub(crate) mod integration_lifecycle;
 pub(crate) mod lifecycle;
 /// Tracing subscriber setup helpers.
 pub mod logging;
 #[cfg(any(feature = "nats", feature = "sqs"))]
-/// Message queue integrations.
+/// Async message queue integrations: NATS and Amazon SQS Standard queues.
 pub mod mq;
 /// Low-level networking APIs.
 pub mod net;
@@ -174,7 +188,10 @@ pub mod tls;
 #[cfg(feature = "acme")]
 pub use acme::AcmeConfig;
 pub use camber_macros::test;
-pub use error::RuntimeError;
+pub use error::{
+    CleanupItem, IntegrationError, IntegrationFailure, IntegrationKind, IntegrationOperation,
+    Retryability, RuntimeError,
+};
 pub use lifecycle::{
     LifecycleFailure, LifecycleFailureKind, LifecycleFailures, LifecycleParticipant,
     LifecyclePhase, ResourceBudget, ResourceFailure, ResourceFailureKind, ResourcePhase,

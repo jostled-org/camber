@@ -2,6 +2,7 @@ use std::io::{self, Read};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -10,6 +11,8 @@ const CHILD_NONCE_ENV: &str = "CAMBER_FIXTURE_PRIVATE_CHILD_NONCE";
 const CHILD_PARENT_ID_ENV: &str = "CAMBER_FIXTURE_PRIVATE_PARENT_ID";
 const OUTPUT_CAPTURE_LIMIT: usize = 64 * 1024;
 static CHILD_NONCE: AtomicU64 = AtomicU64::new(0);
+
+type OutputReader = JoinHandle<Result<Box<[u8]>, ProcessError>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
@@ -86,8 +89,8 @@ impl ReapProbe {
 pub struct ChildGuard {
     child: Option<Child>,
     lines: Receiver<Box<str>>,
-    stdout_reader: Option<JoinHandle<Result<Box<[u8]>, ProcessError>>>,
-    stderr_reader: Option<JoinHandle<Result<Box<[u8]>, ProcessError>>>,
+    stdout_reader: Option<OutputReader>,
+    stderr_reader: Option<OutputReader>,
     stdout: Box<[u8]>,
     stderr: Box<[u8]>,
     reap_sender: Option<Sender<Result<ReapedChild, Box<str>>>>,
@@ -123,7 +126,7 @@ impl ChildGuard {
     pub fn spawn(mut command: Command, cleanup_timeout: Duration) -> Result<Self, ProcessError> {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
-        let mut child = command.spawn()?;
+        let mut child = spawn_alone(&mut command)?;
         let stdout = child
             .stdout
             .take()
@@ -176,7 +179,7 @@ impl ChildGuard {
         let deadline = Instant::now() + timeout;
         loop {
             match self.lines.recv_timeout(super::http::remaining(deadline)) {
-                Ok(line) if line.contains(expected) => return Ok(line.into()),
+                Ok(line) if line.contains(expected) => return Ok(line),
                 Ok(_) => {}
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     return Err(ProcessError::ReadinessTimeout { timeout });
@@ -339,6 +342,19 @@ impl Drop for ChildGuard {
     }
 }
 
+/// Spawn `command` while no other guarded spawn is in flight.
+///
+/// On macOS, std opens a spawn's pipes first and marks them close-on-exec
+/// after. A sibling thread that spawns inside that gap hands its child the
+/// write end, and the reader then waits for that sibling to exit, not this
+/// child. One spawn at a time closes the gap for every guarded child.
+fn spawn_alone(command: &mut Command) -> io::Result<Child> {
+    static SPAWN: Mutex<()> = Mutex::new(());
+    // The lock guards no data, so a poisoned lock still serializes correctly.
+    let _alone = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
+    command.spawn()
+}
+
 fn capture_output<R: Read>(
     mut reader: R,
     line_sender: Option<Sender<Box<str>>>,
@@ -395,9 +411,7 @@ fn send_line(sender: Option<&Sender<Box<str>>>, line: &[u8]) {
     }
 }
 
-fn join_output_reader(
-    reader: &mut Option<JoinHandle<Result<Box<[u8]>, ProcessError>>>,
-) -> Result<Box<[u8]>, ProcessError> {
+fn join_output_reader(reader: &mut Option<OutputReader>) -> Result<Box<[u8]>, ProcessError> {
     match reader.take() {
         Some(reader) => reader.join().map_err(|_| ProcessError::ReaderPanicked)?,
         None => Ok(Box::new([])),

@@ -165,12 +165,12 @@ impl DisconnectSignal {
 
     /// Establish `Completed` from a handoff Camber cannot observe the body of.
     ///
-    /// Two handoffs are that case. tonic owns a gRPC response body, so its
-    /// frames never pass through a Camber body that could complete the signal.
-    /// A successful `101` has an empty body that says nothing about the
+    /// A successful `101` is that case. Its empty body says nothing about the
     /// response lifetime, which ends when the upgraded transport passes to the
-    /// WebSocket subsystem — so `ws_proxy` resolves it at that handoff instead.
-    #[cfg(any(feature = "grpc", feature = "ws"))]
+    /// WebSocket subsystem, so `ws_proxy` resolves it at that handoff instead.
+    /// A gRPC response body needs no such call: its frames pass through a
+    /// Camber body, whose guard completes the signal.
+    #[cfg(feature = "ws")]
     pub(super) fn complete(&self) {
         self.state.resolve(DisconnectCause::Completed);
     }

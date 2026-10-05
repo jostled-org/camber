@@ -63,8 +63,7 @@ async fn read_response(stream: &mut tokio::net::TcpStream, bound: Duration) -> O
     match tokio::time::timeout(bound, stream.read_to_end(&mut buffer)).await {
         Ok(Ok(_)) if buffer.is_empty() => None,
         Ok(Ok(_)) => Some(String::from_utf8_lossy(&buffer).into_owned()),
-        Ok(Err(_)) => None,
-        Err(_) => None,
+        Ok(Err(_)) | Err(_) => None,
     }
 }
 

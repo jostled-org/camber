@@ -11,7 +11,9 @@
 #![cfg(feature = "grpc")]
 
 use crate::common;
+use crate::grpc_forms::{GRPC_HEADERS, grpc_frame, hello_frame};
 use crate::http as http_support;
+use crate::operation_completion::{COMPLETION_EVENT, COMPLETION_METRIC};
 
 use camber::http::mock::{
     ConnectionOwnerController, ConnectionOwnerEdge, InboundTerminal, ResponseCommit,
@@ -226,32 +228,6 @@ fn answer_for(plan: EchoPlan, name: &str) -> EchoItem {
 // gRPC wire framing
 // ---------------------------------------------------------------------------
 
-/// One length-prefixed gRPC message carrying a `HelloRequest` named `name`.
-///
-/// Hand-framed rather than driven through a tonic client, because these rows
-/// turn on when a request frame reaches the wire and when the body after it
-/// does not. A generated client sends the whole call and reads the whole
-/// answer, which no row that holds a head uncommitted can use.
-fn grpc_message(name: &str) -> Box<[u8]> {
-    assert!(
-        name.len() < 128,
-        "the fixture encoder writes one length byte"
-    );
-    let mut message = Vec::with_capacity(name.len() + 7);
-    message.push(0x0A);
-    message.push(u8::try_from(name.len()).expect("the fixture name is short"));
-    message.extend_from_slice(name.as_bytes());
-    let mut framed = Vec::with_capacity(message.len() + 5);
-    framed.push(0);
-    framed.extend_from_slice(
-        &u32::try_from(message.len())
-            .expect("one short message")
-            .to_be_bytes(),
-    );
-    framed.extend_from_slice(&message);
-    framed.into_boxed_slice()
-}
-
 /// One length-prefixed gRPC message whose payload is not a `HelloRequest`.
 ///
 /// The frame itself is well formed — a five-byte prefix declaring exactly the
@@ -260,21 +236,7 @@ fn grpc_message(name: &str) -> Box<[u8]> {
 /// bytes that never arrive, which prost refuses outright rather than skipping
 /// the way it skips a field it does not know.
 fn grpc_undecodable_message() -> Box<[u8]> {
-    let message = [0x0A_u8, 0x05];
-    let mut framed = Vec::with_capacity(message.len() + 5);
-    framed.push(0);
-    framed.extend_from_slice(
-        &u32::try_from(message.len())
-            .expect("one short message")
-            .to_be_bytes(),
-    );
-    framed.extend_from_slice(&message);
-    framed.into_boxed_slice()
-}
-
-/// The head every gRPC row opens its stream with.
-fn grpc_headers() -> [(&'static str, &'static str); 2] {
-    [("content-type", "application/grpc"), ("te", "trailers")]
+    grpc_frame(&[0x0A, 0x05])
 }
 
 // ---------------------------------------------------------------------------
@@ -471,9 +433,9 @@ impl OpenedRpc {
     async fn start(addr: std::net::SocketAddr, name: &str) -> Self {
         let mut client = common::PersistentH2Client::connect(addr, BOUND).await;
         let mut stream = client
-            .open_paced("POST", ECHO_PATH, "localhost", &grpc_headers())
+            .open_paced("POST", ECHO_PATH, "localhost", &GRPC_HEADERS)
             .await;
-        let offered = stream.offer(&grpc_message(name), BOUND).await;
+        let offered = stream.offer(&hello_frame(name), BOUND).await;
         assert_eq!(
             offered,
             common::H2Offer::Sent,
@@ -1775,6 +1737,7 @@ struct MatrixWork {
     /// driven past a threshold by an earlier row is a predicate that cannot
     /// fail. Each row baselines the counter it reads, and reads the one whose
     /// owner it is actually asking about.
+    #[cfg(feature = "ws")]
     upgrades_ended: std::sync::atomic::AtomicUsize,
 }
 
@@ -1787,6 +1750,7 @@ impl MatrixWork {
         self.ended.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    #[cfg(feature = "ws")]
     fn upgrades_ended(&self) -> usize {
         self.upgrades_ended
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -1801,6 +1765,7 @@ impl MatrixWork {
         self.ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
+    #[cfg(feature = "ws")]
     fn end_upgrade(&self) {
         self.upgrades_ended
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2558,7 +2523,8 @@ async fn assert_disconnect_ends_the_producer_it_was_read_by(fixture: &MatrixFixt
              {CREDENTIAL}\r\n\r\n"
         );
         std::io::Write::write_all(&mut peer, head.as_bytes()).expect("the SSE request was sent");
-        let answered = common::read_until_double_crlf(&mut peer);
+        let answered =
+            http_support::read_head_text(&mut peer, BOUND).expect("the response head arrived");
         // Dropped here, inside the blocking owner: the peer is gone from this
         // point, and everything after it is what the service did about that.
         drop(peer);
@@ -2692,11 +2658,11 @@ async fn assert_permit_returns_after_the_grpc_transport() {
             "POST",
             ECHO_PATH,
             MATRIX_HOST,
-            &grpc_headers()
+            &GRPC_HEADERS
                 .into_iter()
                 .chain(std::iter::once((CREDENTIAL_HEADER, CREDENTIAL)))
                 .collect::<Box<[(&str, &str)]>>(),
-            &grpc_message("permit"),
+            &hello_frame("permit"),
         )
         .await;
     assert_eq!(
@@ -2735,7 +2701,8 @@ async fn hold_transport(
                 ),
             ),
         };
-        let head = common::read_until_double_crlf(&mut peer);
+        let head =
+            http_support::read_head_text(&mut peer, BOUND).expect("the response head arrived");
         assert!(
             head.starts_with(held.committed()),
             "{class}: the transport that must hold the permit never committed its head: {head}",
@@ -2796,7 +2763,7 @@ async fn assert_still_waiting(
 async fn assert_admitted_on_the_returned_permit(parked: std::net::TcpStream, class: &'static str) {
     let head = tokio::task::spawn_blocking(move || {
         let mut parked = parked;
-        common::read_until_double_crlf(&mut parked)
+        http_support::read_head_text(&mut parked, BOUND).expect("the response head arrived")
     })
     .await
     .expect("the admitted peer settled");
@@ -2950,7 +2917,7 @@ async fn matrix_handshake(
 
 /// Drive one matrix gRPC call and read the head it answered with.
 async fn matrix_rpc(addr: std::net::SocketAddr, credentialed: bool) -> http_support::HttpResponse {
-    let headers: Box<[(&str, &str)]> = grpc_headers()
+    let headers: Box<[(&str, &str)]> = GRPC_HEADERS
         .into_iter()
         .chain(credentialed.then_some((CREDENTIAL_HEADER, CREDENTIAL)))
         .collect();
@@ -2961,7 +2928,7 @@ async fn matrix_rpc(addr: std::net::SocketAddr, credentialed: bool) -> http_supp
             ECHO_PATH,
             MATRIX_HOST,
             &headers,
-            &grpc_message("matrix"),
+            &hello_frame("matrix"),
         )
         .await;
     client.close().await;
@@ -2971,12 +2938,6 @@ async fn matrix_rpc(addr: std::net::SocketAddr, credentialed: bool) -> http_supp
 // ---------------------------------------------------------------------------
 // 15.T3: one envelope, one chain, one account, per admitted row
 // ---------------------------------------------------------------------------
-
-/// The counter one completed operation is recorded under.
-const COMPLETION_METRIC: &str = "http_requests_total";
-
-/// The sentence one completed operation is recorded under.
-const COMPLETION_EVENT: &str = "message=request completed";
 
 /// The method this row scrapes the live endpoint with.
 ///
@@ -3001,9 +2962,11 @@ const SHORT_CIRCUIT_PERMITS: usize = 1;
 ///
 /// None: an upgrade is dispatched head-only, so no body plan resolves and no
 /// permit is ever handed out to be returned.
+#[cfg(feature = "ws")]
 const FAILED_UPGRADE_PERMITS: usize = 0;
 
 /// The answer a handshake Camber cannot complete is refused with.
+#[cfg(feature = "ws")]
 const REFUSED_HANDSHAKE: u16 = 400;
 
 /// What this listener's download owner has released so far.
@@ -3311,24 +3274,21 @@ const OWNED_EXCHANGE_CLASSES: [Admitted; 4] = [
     },
 ];
 
-/// The event stream, whose producer runs until the peer reading it is gone.
+/// The event stream, whose producer stops after the peer sends EOF.
 ///
 /// Driven as a row of its own rather than folded into the exchange loop above,
-/// because its terminal is the peer's departure rather than a body that ended.
+/// because its terminal is peer EOF rather than a body that ended.
 const OWNED_SSE_CLASS: Admitted = Admitted {
     class: "sse",
     method: "GET",
     path: MATRIX_SSE,
     status: 200,
     protocol: "server_sent_events",
-    // The feed's own handoff still produced this head; the transport failing
-    // under it is a separate fact, and neither erases the other. This peer is
-    // dropped while the feed is actively writing, so the write that fails is
-    // what ends the connection — a peer that leaves an idle body behind reaches
-    // read EOF instead, which is the other row of that vocabulary.
+    // The peer half-closes its write side and keeps receiving until completion.
+    // Production therefore observes EOF, not a reset racing the next SSE write.
     origin: "sse",
     delivery: "interrupted",
-    connection_end: "transport-failed",
+    connection_end: "peer-disconnected",
     permits: 0,
     records: 1,
 };
@@ -3473,12 +3433,12 @@ async fn assert_each_admitted_class_owns_one_account(fixture: &MatrixFixture) {
     }
 }
 
-/// The event stream owns one account, written when its peer goes away.
+/// The event stream owns one account, written after its peer sends EOF.
 ///
-/// The producer runs until the peer reading it is gone, so this row's terminal
-/// is that departure rather than a body that ended. It is read here rather than
-/// left to 14.T2's disconnect row: that row asserts what the producer did, and
-/// nothing there says the operation was accounted for exactly once.
+/// Keep the read side open until both the event and metric have been recorded.
+/// Dropping it earlier could race EOF with a write error and change the cause.
+/// The disconnect row tests producer termination; this row also tests once-only
+/// operation accounting.
 async fn assert_event_stream_owns_one_account(fixture: &MatrixFixture) {
     let row = &OWNED_SSE_CLASS;
     let baseline = Baseline::take(fixture.addr(), &fixture.controller).await;
@@ -3486,7 +3446,7 @@ async fn assert_event_stream_owns_one_account(fixture: &MatrixFixture) {
     let ended_before = fixture.work.ended();
     let addr = fixture.addr();
 
-    let head = tokio::task::spawn_blocking(move || {
+    let (peer, head) = tokio::task::spawn_blocking(move || {
         let mut peer = http_support::connect(addr).expect("the event-stream peer connected");
         let head = format!(
             "GET {MATRIX_SSE} HTTP/1.1\r\nHost: {MATRIX_HOST}\r\n{CREDENTIAL_HEADER}: \
@@ -3494,11 +3454,11 @@ async fn assert_event_stream_owns_one_account(fixture: &MatrixFixture) {
         );
         std::io::Write::write_all(&mut peer, head.as_bytes())
             .expect("the event-stream request was sent");
-        let answered = common::read_until_double_crlf(&mut peer);
-        // Dropped inside the blocking owner: the peer is gone from here, and
-        // the account that follows is what the service made of that.
-        drop(peer);
-        answered
+        let answered =
+            http_support::read_head_text(&mut peer, BOUND).expect("the response head arrived");
+        peer.shutdown(std::net::Shutdown::Write)
+            .expect("the event-stream peer sent EOF");
+        (peer, answered)
     })
     .await
     .expect("the event-stream peer settled");
@@ -3517,6 +3477,7 @@ async fn assert_event_stream_owns_one_account(fixture: &MatrixFixture) {
     let owned = owned_once(&baseline, &fixture.controller, row.permits, row.class);
     assert_owned_once(&owned, row.permits, row.class);
     assert_recorded_for_the_operator(addr, &baseline, &capture, row).await;
+    drop(peer);
 }
 
 /// Both upgrade classes own one account, written at the handoff they committed.

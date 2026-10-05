@@ -4,9 +4,16 @@ use std::path::{Path, PathBuf};
 
 /// Compile `.proto` files and generate async service traits.
 ///
-/// Runs `tonic-build` to produce standard async gRPC server code, then
-/// generates an additional async trait and bridge struct per service.
-/// The trait has async methods. The bridge delegates directly via `.await`.
+/// Runs `tonic-build` to produce standard async gRPC server and client code
+/// for every service, in all four RPC forms. It then generates a
+/// `{service}_service` wrapper module for each unary-only service: an async
+/// trait, a bridge struct, and a `serve` constructor. The bridge delegates
+/// directly via `.await`.
+///
+/// A service with a client-streaming, server-streaming, or bidirectional
+/// method gets an empty `{service}_service` module instead. Its documentation
+/// names each streaming method and the tonic trait to implement directly.
+/// Unary wrappers for other services in the same file are still generated.
 ///
 /// Call this from your crate's `build.rs`.
 pub fn compile_protos(

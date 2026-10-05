@@ -310,8 +310,8 @@ impl ScriptedUpstream {
     /// row's driver, prove the address is free, require every report consumed,
     /// and report the request starts the upstream saw.
     ///
-    /// The driver stops before the address check because that check waits on
-    /// the Tokio clock, which the paused runtime must be free to advance.
+    /// The driver holds the virtual clock until every peer has joined. The
+    /// address check then waits on real time, independently of that clock.
     pub async fn finish(self, driver: RunnableDriver, context: &str) -> u32 {
         let Self { listener, starts } = self;
         listener

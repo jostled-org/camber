@@ -1,3 +1,61 @@
+#[cfg(feature = "dns01")]
+mod dns_cache_publication;
+mod integration_accounts;
+mod integration_errors;
+mod integration_lifecycle;
+#[cfg(feature = "nats")]
+mod nats_ack;
+#[cfg(feature = "nats")]
+mod nats_events;
+#[cfg(feature = "nats")]
+mod nats_publish;
+#[cfg(feature = "nats")]
+mod nats_queue;
+#[cfg(feature = "sqs")]
+mod sqs_bounds;
+#[cfg(feature = "sqs")]
+mod sqs_credentials;
+
+#[doc(hidden)]
+pub use crate::integration_lifecycle::{
+    InstanceAccount, IntegrationEntryObserver, IntegrationEntryState, OperationAccount,
+    OperationWaiter, PublishedFailure,
+};
+#[cfg(feature = "dns01")]
+#[doc(hidden)]
+pub use dns_cache_publication::{DnsCachePublicationProbe, DnsCachePublicationStage};
+#[doc(hidden)]
+pub use integration_accounts::IntegrationAccountProbe;
+#[doc(hidden)]
+pub use integration_errors::IntegrationErrorDriver;
+#[cfg(feature = "dns01")]
+#[doc(hidden)]
+pub use integration_lifecycle::ProbeCleanup;
+#[doc(hidden)]
+pub use integration_lifecycle::{IntegrationLifecycleProbe, IntegrationProbeHandle};
+#[cfg(feature = "nats")]
+#[doc(hidden)]
+pub use nats_ack::{NatsAckProbe, NatsAckReceiver, NatsAckSnapshot};
+#[cfg(feature = "nats")]
+#[doc(hidden)]
+pub use nats_events::NatsEventProbe;
+#[cfg(feature = "nats")]
+#[doc(hidden)]
+pub use nats_publish::NatsPublishProbe;
+#[cfg(feature = "nats")]
+pub(crate) use nats_publish::PublishCheckpoint;
+#[cfg(feature = "nats")]
+#[doc(hidden)]
+pub use nats_queue::NatsQueueProbe;
+#[cfg(feature = "nats")]
+pub(crate) use nats_queue::QueueCheckpoint;
+#[cfg(feature = "sqs")]
+#[doc(hidden)]
+pub use sqs_bounds::{SqsBounds, SqsBoundsProbe};
+#[cfg(feature = "sqs")]
+#[doc(hidden)]
+pub use sqs_credentials::{SqsCredentialLoads, SqsCredentialProbe};
+
 use crate::RuntimeError;
 use crate::lifecycle::ShutdownOwner;
 use crate::runtime_state::{RuntimeConfig, RuntimeInner, recover_poisoned};
@@ -18,8 +76,14 @@ pub enum RuntimeCheckpoint {
     AdmissionRegistered,
     /// The root scope is about to perform its atomic `Open -> Closing` step.
     ScopeCloseTransition,
+    /// The root scope is closed and `ScopeClosing` has fired, before the
+    /// integration registry's stop commits closing on its entries.
+    RegistryStopTransition,
     /// The drain observed this child count before waiting for it to change.
     ScopeWaitObserved(usize),
+    /// The root scope released one child's slot, and the drain can now see
+    /// the lower count.
+    ScopeChildReleased,
 }
 
 /// The one aggregate shutdown deadline production minted, as the transition
@@ -144,7 +208,7 @@ struct ScopeSettlementObservations {
     /// that claims and then starts a child names that child and no other.
     claims: std::collections::VecDeque<ScopeClaim>,
     /// Which admitted child each bound claim named.
-    named: std::collections::HashMap<ScopeClaim, ScopeChildId>,
+    named: std::collections::BTreeMap<ScopeClaim, ScopeChildId>,
     /// Which admitted child production admitted under each subsystem name.
     ///
     /// The other half of naming, for the Camber-owned loops the runtime starts
@@ -152,13 +216,13 @@ struct ScopeSettlementObservations {
     /// runs, so no claim could have been taken ahead of them — but production
     /// already carries the name it admitted each one under, and that name binds
     /// to the child rather than to a position in the admission order.
-    subsystems: std::collections::HashMap<Box<str>, ScopeChildId>,
+    subsystems: std::collections::BTreeMap<Box<str>, ScopeChildId>,
     /// Children the scope owner retains a way to stop.
-    retained: std::collections::HashSet<ScopeChildId>,
+    retained: std::collections::BTreeSet<ScopeChildId>,
     /// Children whose Tokio handle the scope owner awaited to completion.
-    joined: std::collections::HashSet<ScopeChildId>,
+    joined: std::collections::BTreeSet<ScopeChildId>,
     /// Children that have left the scope.
-    settled: std::collections::HashSet<ScopeChildId>,
+    settled: std::collections::BTreeSet<ScopeChildId>,
     /// Whether the root scope itself has drained.
     drained: bool,
     /// The claim minted next.
@@ -217,7 +281,7 @@ pub(crate) struct RuntimeSchedule {
     /// A scheduling decision, not a result: the seam declines to start a
     /// worker, exactly as the operating system can, and production decides what
     /// a callback with no worker is called.
-    refused_workers: Mutex<std::collections::HashSet<Box<str>>>,
+    refused_workers: Mutex<std::collections::BTreeSet<Box<str>>>,
     /// What the aggregate shutdown coordinator published this run.
     ///
     /// Observations only. Nothing here alters a deadline, a disposition, or an
@@ -229,6 +293,39 @@ pub(crate) struct RuntimeSchedule {
     /// Observations only, on the same terms as `shutdown`: production admits,
     /// retains, joins, and releases exactly as it would with nothing attached.
     scope: Mutex<ScopeSettlementObservations>,
+    /// The clock DNS-01 renewal intervals elapse on while this schedule is
+    /// attached: an interval ends when the test lets it, not after its length.
+    ///
+    /// The owner still names the interval it waits, so a test reads the
+    /// production cadence instead of choosing one.
+    #[cfg(feature = "dns01")]
+    renewal: tokio::sync::watch::Sender<RenewalClock>,
+}
+
+/// The renewal intervals owners waited, oldest first, and which of them are
+/// still running or have elapsed, by their one-based turn.
+#[cfg(feature = "dns01")]
+#[derive(Default)]
+struct RenewalClock {
+    waited: Vec<Duration>,
+    running: std::collections::BTreeSet<usize>,
+    elapsed: std::collections::BTreeSet<usize>,
+}
+
+/// One running renewal wait. Dropped before it elapses — its owner stopped —
+/// it leaves the running set, so no later elapse is spent on it.
+#[cfg(feature = "dns01")]
+struct RunningRenewal<'a> {
+    clock: &'a tokio::sync::watch::Sender<RenewalClock>,
+    turn: usize,
+}
+
+#[cfg(feature = "dns01")]
+impl Drop for RunningRenewal<'_> {
+    fn drop(&mut self) {
+        self.clock
+            .send_if_modified(|clock| clock.running.remove(&self.turn));
+    }
 }
 
 impl RuntimeSchedule {
@@ -241,10 +338,33 @@ impl RuntimeSchedule {
             changed: Condvar::new(),
             runtime: OnceLock::new(),
             conflicted: AtomicBool::new(false),
-            refused_workers: Mutex::new(std::collections::HashSet::new()),
+            refused_workers: Mutex::new(std::collections::BTreeSet::new()),
             shutdown: Mutex::new(ShutdownObservations::default()),
             scope: Mutex::new(ScopeSettlementObservations::default()),
+            #[cfg(feature = "dns01")]
+            renewal: tokio::sync::watch::Sender::new(RenewalClock::default()),
         }
+    }
+
+    /// Wait out one renewal `interval` on the test's clock: record it, then
+    /// resolve once the test lets it elapse.
+    #[cfg(feature = "dns01")]
+    pub(crate) async fn renewal_interval(&self, interval: Duration) {
+        let mut turn = 0;
+        self.renewal.send_modify(|clock| {
+            clock.waited.push(interval);
+            turn = clock.waited.len();
+            clock.running.insert(turn);
+        });
+        let running = RunningRenewal {
+            clock: &self.renewal,
+            turn,
+        };
+        let mut clock = self.renewal.subscribe();
+        // The schedule owns the sender and outlives this borrow, so the
+        // channel cannot close under this wait.
+        drop(clock.wait_for(|clock| clock.elapsed.contains(&turn)).await);
+        drop(running);
     }
 
     fn shutdown_observations(&self) -> MutexGuard<'_, ShutdownObservations> {
@@ -684,6 +804,55 @@ impl RuntimeController {
             .into_boxed_slice()
     }
 
+    /// Every DNS-01 renewal interval an owner of this runtime has waited, in
+    /// the order the waits began. Read-only.
+    #[cfg(feature = "dns01")]
+    pub fn renewal_waits(&self) -> Box<[Duration]> {
+        self.schedule
+            .renewal
+            .borrow()
+            .waited
+            .clone()
+            .into_boxed_slice()
+    }
+
+    /// Resolve once DNS-01 renewal owners have begun `count` interval waits.
+    #[cfg(feature = "dns01")]
+    pub fn until_renewal_waits(
+        &self,
+        count: usize,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut clock = self.schedule.renewal.subscribe();
+        async move {
+            drop(clock.wait_for(|clock| clock.waited.len() >= count).await);
+        }
+    }
+
+    /// Let the oldest renewal interval still running elapse.
+    ///
+    /// Elapses only an interval an owner is waiting now: no elapse is banked
+    /// for a wait that has not begun, or spent on one its owner abandoned.
+    ///
+    /// # Errors
+    ///
+    /// `Config` when no renewal interval is waiting.
+    #[cfg(feature = "dns01")]
+    pub fn elapse_renewal_interval(&self) -> Result<(), RuntimeError> {
+        let elapsed =
+            self.schedule
+                .renewal
+                .send_if_modified(|clock| match clock.running.pop_first() {
+                    Some(turn) => clock.elapsed.insert(turn),
+                    None => false,
+                });
+        match elapsed {
+            true => Ok(()),
+            false => Err(RuntimeError::Config(
+                "no DNS-01 renewal interval is waiting".into(),
+            )),
+        }
+    }
+
     pub(crate) fn schedule(&self) -> Arc<RuntimeSchedule> {
         Arc::clone(&self.schedule)
     }
@@ -965,15 +1134,17 @@ pub fn admit_acme_renewal_for_test(
 /// Admit the DNS-01 renewal loop the runtime uses, against a test-supplied
 /// cert store and DNS provider.
 ///
-/// The renewal check interval is measured in hours, so the provider is never
-/// reached: only a lifecycle signal ends the loop. Admitted through the same
+/// The renewal check interval is 12 hours, and with a controller attached it
+/// elapses only when the test lets it, so the provider is never reached:
+/// only a lifecycle signal ends the loop. Admitted through the same
 /// named-subsystem wrapper the runtime's own setup uses, so the seam proves
 /// production's admission path and not one of its own.
 ///
 /// # Errors
 ///
 /// Propagates the admission outcome: `NoRuntime` with no runtime context,
-/// `ScopeClosed` once admission has closed.
+/// `ScopeClosed` once admission has closed, and `Busy` while another renewal
+/// owner of the runtime holds the seam's cache.
 #[cfg(feature = "dns01")]
 #[doc(hidden)]
 pub fn admit_dns01_renewal_for_test<P>(
@@ -984,9 +1155,5 @@ where
     P: crate::dns01::DnsProvider + 'static,
 {
     let acme = crate::dns01::AcmeDns01::new("camber-dns01-renewal-test", ["localhost"]);
-    crate::task::admit_signalled_subsystem_on(
-        &crate::runtime::runtime_context()?,
-        "dns01 renewal",
-        move |signals| crate::dns01::dns01_renewal_loop(acme, provider, store, signals),
-    )
+    crate::dns01::admit_renewal(&crate::runtime::runtime_context()?, &acme, provider, store)
 }

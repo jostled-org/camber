@@ -1,11 +1,6 @@
-#[cfg(any(feature = "nats", feature = "sqs"))]
-mod blocking;
-mod error;
+mod connect;
+mod limits;
 #[cfg(feature = "nats")]
 pub mod nats;
 #[cfg(feature = "sqs")]
 pub mod sqs;
-
-#[cfg(any(feature = "nats", feature = "sqs"))]
-pub(crate) use blocking::block_on;
-pub(crate) use error::mq_error;

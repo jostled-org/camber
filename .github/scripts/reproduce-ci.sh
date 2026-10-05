@@ -15,7 +15,8 @@ export RUSTUP_AUTO_INSTALL=0
 
 camber_workflow_checks() {
     printf '%s\n' \
-        hook-contract fmt clippy doc test deny pedant-source pedant-tests supply-chain
+        hook-contract fmt clippy features doc test deny pedant-source pedant-tests \
+        supply-chain
 }
 
 # Workflow tools admitted by presence alone.
@@ -33,18 +34,99 @@ camber_installed_workflow_tools() {
     printf '%s\n' cargo-deny pedant
 }
 
+# Local service images the lane runner starts. Each is pinned by digest as
+# `image.<service>` in the tool record and never installed through Cargo.
+camber_service_images() {
+    printf '%s\n' nats elasticmq pebble challtestsrv
+}
+
 # Every tool a full workflow run admits, in the order it is checked.
 camber_workflow_tools() {
     camber_present_workflow_tools
     camber_pinned_workflow_tools
 }
 
-# Succeed when the inventory function `producer` lists `expected`.
+# The status a runner returns when its infrastructure is unavailable.
+readonly STATUS_INFRASTRUCTURE=75
+
+# The evidence name of a runner's exit status.
+evidence_status_name() {
+    case "$1" in
+        0) printf 'passed\n' ;;
+        "${STATUS_INFRASTRUCTURE}") printf 'infrastructure_unavailable\n' ;;
+        *) printf 'failed\n' ;;
+    esac
+}
+
+# Print `value` as a JSON string. Quotes and backslashes are escaped; control
+# characters are dropped.
+json_string() {
+    local value="$1" escaped='' character index
+    for ((index = 0; index < ${#value}; index++)); do
+        character=${value:index:1}
+        case "${character}" in
+            \" | \\) escaped="${escaped}\\${character}" ;;
+            [[:cntrl:]]) ;;
+            *) escaped="${escaped}${character}" ;;
+        esac
+    done
+    printf '"%s"' "${escaped}"
+}
+
+# Print the KiB `directory` holds, or 0 when it does not exist. A concurrent
+# build can remove a file while du walks the tree. du then exits nonzero but
+# still prints the total, so the printed total decides.
+directory_kib() {
+    local kib=''
+    [ -d "$1" ] || { printf '0\n'; return 0; }
+    kib=$(du -sk "$1" 2>/dev/null) || true
+    kib=${kib%%[[:space:]]*}
+    case "${kib}" in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    printf '%s\n' "${kib}"
+}
+
+# Succeed when libtest `--list` output names exactly one test, `name`.
+lists_only_test() {
+    local name="$1" listing="$2" line count=0 only=''
+    while IFS= read -r line; do
+        case "${line}" in
+            *': test') count=$((count + 1)) only=${line%: test} ;;
+        esac
+    done <<<"${listing}"
+    [ "${count}" -eq 1 ] && [ "${only}" = "${name}" ]
+}
+
+# Run the libtest `--list` call `command...` and print why it does not name
+# exactly the test `name`, under `label`. Print nothing when it does.
+listing_problem() {
+    local label="$1" name="$2" listing status=0
+    shift 2
+    listing=$("$@") || status=$?
+    if [ "${status}" -ne 0 ]; then
+        printf 'listing %s failed with status %s\n' "${label}" "${status}"
+    elif ! lists_only_test "${name}" "${listing}"; then
+        printf '%s does not list exactly itself: %s\n' "${label}" "${listing}"
+    fi
+}
+
+# Succeed when libtest output reports exactly one passing test.
+ran_one_passing_test() {
+    case "$1" in
+        *'test result: ok. 1 passed;'*) ;;
+        *) return 1 ;;
+    esac
+}
+
+# Succeed when the inventory function `producer`, called with any further
+# arguments, lists `expected`.
 listed() {
     local expected="$1" producer="$2" item
+    shift 2
     while IFS= read -r item; do
         [ "${item}" = "${expected}" ] && return 0
-    done < <("${producer}")
+    done < <("${producer}" "$@")
     return 1
 }
 
@@ -89,6 +171,34 @@ pinned_tool_version() {
         rustc|cargo) record_string "${root}/${RUST_TOOLCHAIN_RECORD}" channel ;;
         *) record_string "${root}/${WORKFLOW_TOOL_RECORD}" "${tool}" ;;
     esac
+}
+
+# Succeed when `reference` names a registry repository, an exact version tag,
+# and a SHA-256 digest. A floating tag such as `latest` or `2-alpine` fails.
+pinned_image_reference() {
+    local pattern='^[a-z0-9-]+(\.[a-z0-9-]+)+(/[a-z0-9._-]+)+:v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?@sha256:[0-9a-f]{64}$'
+    [[ $1 =~ ${pattern} ]]
+}
+
+# Print the digest-pinned image reference of `service` under `root`, or
+# report that none exists or that its reference floats.
+pinned_service_image() {
+    local root="$1" service="$2" reference
+    listed "${service}" camber_service_images || {
+        printf 'ERROR: unknown local service image: %s\n' "${service}" >&2
+        return 64
+    }
+    reference=$(record_string "${root}/${WORKFLOW_TOOL_RECORD}" "image.${service}") || {
+        printf 'ERROR: no pinned image for local service %s under %s\n' \
+            "${service}" "${root}" >&2
+        return 1
+    }
+    pinned_image_reference "${reference}" || {
+        printf 'ERROR: local service image %s is not pinned by version and digest: %s\n' \
+            "${service}" "${reference}" >&2
+        return 1
+    }
+    printf '%s\n' "${reference}"
 }
 
 # Print the pinned version of `tool` under `root`, or report that none exists.
@@ -197,6 +307,7 @@ run_workflow_phase() {
             cargo clippy --workspace \
                 --features "${CAMBER_WORKFLOW_FEATURES}" -- -D warnings
             ;;
+        features) "${checkout}/.github/scripts/check-feature-builds.sh" ;;
         doc)
             cargo --config 'build.rustdocflags=["-D","warnings"]' doc --workspace --lib \
                 --features "${CAMBER_WORKFLOW_FEATURES}" --no-deps

@@ -123,6 +123,8 @@ fn fan_out(event: &camber::tracing::Event<'_>, subscriptions: &[Subscription]) {
     let mut fields = FieldText(String::new());
     named(&mut fields, event.metadata().name());
     event.record(&mut fields);
+    write!(fields.0, " metadata_level={}", event.metadata().level())
+        .expect("writing event metadata to a string cannot fail");
     let text = fields.0;
     for subscription in subscriptions
         .iter()
@@ -281,7 +283,7 @@ impl Drop for TraceCapture {
 }
 
 /// The captured events carrying one fixed sentence.
-fn events_saying<'a>(events: &'a [Box<str>], sentence: &str) -> Box<[&'a str]> {
+pub fn events_saying<'a>(events: &'a [Box<str>], sentence: &str) -> Box<[&'a str]> {
     events
         .iter()
         .map(Box::as_ref)
@@ -348,9 +350,7 @@ pub fn assert_field_value(event: &str, name: &str, value: &str, label: &str) {
 /// chose — a request identifier no wire response carried, so no row can state
 /// it as a literal.
 pub fn field_value<'a>(event: &'a str, name: &str) -> Option<&'a str> {
-    let needle = format!("{name}=");
-    let at = field_starts(event, needle.as_str()).next()?;
-    let rest = &event[at + needle.len()..];
+    let rest = &event[field_value_starts(event, name).next()?..];
     Some(rest.split_once(' ').map_or(rest, |(value, _)| value))
 }
 
@@ -360,20 +360,22 @@ pub fn field_value<'a>(event: &'a str, name: &str) -> Option<&'a str> {
 /// carries one of something: an event that named a field twice and an event
 /// that named it once read the same to [`field_value`], which takes the first.
 pub fn field_occurrences(event: &str, name: &str) -> usize {
-    field_starts(event, &format!("{name}=")).count()
+    field_value_starts(event, name).count()
 }
 
-/// Where `event` opens a field spelled `needle`, at a field boundary.
+/// Where each value of a field called `name` begins in `event`, read at a
+/// field boundary.
 ///
 /// The boundary is the whole of it. `name=` also appears inside
 /// `request_name=`, so a scan that matched anywhere would read a longer field's
 /// value as a shorter field's. A field starts the record or follows a space,
-/// and that rule is stated once here for the reader and the counter alike.
-fn field_starts<'a>(event: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
-    event
-        .match_indices(needle)
-        .filter(|(at, _)| *at == 0 || event.as_bytes()[at - 1] == b' ')
-        .map(|(at, _)| at)
+/// and that rule is stated once here for every reader and counter alike.
+pub fn field_value_starts<'a>(event: &'a str, name: &'a str) -> impl Iterator<Item = usize> + 'a {
+    event.match_indices(name).filter_map(move |(at, _)| {
+        let opens = at == 0 || event.as_bytes()[at - 1] == b' ';
+        let value = at + name.len();
+        (opens && event[value..].starts_with('=')).then_some(value + 1)
+    })
 }
 
 /// Assert the fixed sentence is the whole message, with nothing spliced into it.
@@ -400,7 +402,7 @@ pub fn assert_message_is_fixed(event: &str, sentence: &str, label: &str) {
 /// separator and its first token has to carry a `=` with a name in front of it.
 /// Interpolated text carries the second of those at best, whichever character it
 /// starts with.
-fn opens_a_field(tail: &str) -> bool {
+pub fn opens_a_field(tail: &str) -> bool {
     tail.starts_with(' ')
         && tail
             .split_whitespace()

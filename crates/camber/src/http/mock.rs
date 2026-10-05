@@ -3598,6 +3598,43 @@ pub fn admitted_operation(
     })
 }
 
+/// One admitted operation read end to end, and the stop that can end it.
+///
+/// [`AdmittedOperation`] without the request-body owner, plus the stop owner.
+/// A streamed payload is a transfer, so no collected body is read. A shutdown
+/// row needs the stop: the operation's owners say how the call settled, and
+/// the stop owner holds the supervisor's forced abort until the peer has read
+/// what the operation committed.
+#[doc(hidden)]
+pub struct StoppedOperation {
+    /// The connections whose permits admitted these operations.
+    pub connections: ConnectionOwnerController,
+    /// The producers whose attempt at each operation's head the row reads.
+    pub commitment: ResponseCommitmentController,
+    /// The directions that carried those payloads in and out.
+    pub transfers: TransferOwnerController,
+    /// The supervisor's own passes over the stop the operations end under.
+    pub stop: ServerStopController,
+}
+
+/// One listener scope watched through its connection, commitment, transfer,
+/// and stop owners.
+#[doc(hidden)]
+pub type ScopedStoppedOperation = ScopedOwner<StoppedOperation>;
+
+/// Watch the connection, commitment, transfer, and stop owners of `addr`.
+#[doc(hidden)]
+pub fn stopped_operation(
+    addr: std::net::SocketAddr,
+) -> Result<ScopedStoppedOperation, RuntimeError> {
+    scoped_listener(addr, |registered| StoppedOperation {
+        connections: registered.connection_owner(),
+        commitment: registered.response_commitment(),
+        transfers: registered.transfer_owner(),
+        stop: registered.server_stop(),
+    })
+}
+
 /// One upgrade child held at its handoff, and the commitment that refused it.
 ///
 /// Two families because a refused-handoff row is exactly the pair: the upgrade

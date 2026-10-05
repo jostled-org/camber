@@ -18,14 +18,15 @@ use camber::http::mock::{
     ResponseCommitmentEdge, ScopedAdmittedCommitment, ScopedAdmittedOperation,
     ScopedCommittedAnswer, ScopedCommittedTransfer, ScopedMultipartBody, ScopedMultipartOwner,
     ScopedOwner, ScopedRequestBodyOwner, ScopedResponseCommitment, ScopedStagedCommitment,
-    ScopedStagedTransfer, ScopedStoppedCommitment, ScopedStoppedMultipart, ScopedStoppedTransfer,
-    ScopedSupervisorSelection, ScopedTransferOwner, ScopedUnwatched, ServerStopController,
-    ServerStopEdge, ServerTaskController, ServerTaskFault, StagedCommitment, StagedTransfer,
-    StoppedCommitment, StoppedMultipart, StoppedTransfer, SupervisorSelection,
-    TransferOwnerController, TransferOwnerEdge, admitted_commitment, admitted_operation,
-    committed_answer, committed_transfer, multipart_body, multipart_owner, request_body_owner,
-    response_commitment, staged_commitment, staged_transfer, stopped_commitment, stopped_multipart,
-    stopped_transfer, supervisor_selection, transfer_owner, unwatched,
+    ScopedStagedTransfer, ScopedStoppedCommitment, ScopedStoppedMultipart, ScopedStoppedOperation,
+    ScopedStoppedTransfer, ScopedSupervisorSelection, ScopedTransferOwner, ScopedUnwatched,
+    ServerStopController, ServerStopEdge, ServerTaskController, ServerTaskFault, StagedCommitment,
+    StagedTransfer, StoppedCommitment, StoppedMultipart, StoppedOperation, StoppedTransfer,
+    SupervisorSelection, TransferOwnerController, TransferOwnerEdge, admitted_commitment,
+    admitted_operation, committed_answer, committed_transfer, multipart_body, multipart_owner,
+    request_body_owner, response_commitment, staged_commitment, staged_transfer,
+    stopped_commitment, stopped_multipart, stopped_operation, stopped_transfer,
+    supervisor_selection, transfer_owner, unwatched,
 };
 #[cfg(feature = "ws")]
 use camber::http::mock::{
@@ -524,7 +525,8 @@ pub const SETTLE_BOUND: Duration = Duration::from_secs(5);
 /// bindable, so the bound keeps the claim and drops only the window.
 ///
 /// The refusal that expires the bound is the one returned, because it is the
-/// state the address was actually left in.
+/// state the address was actually left in. Both the bound and retry delay use
+/// real time: advancing a paused runtime cannot speed up kernel teardown.
 pub async fn rebind_within(
     addr: SocketAddr,
     bound: Duration,
@@ -533,16 +535,18 @@ pub async fn rebind_within(
     /// closing transport is gone by the next ask, short enough that the usual
     /// answer costs one of them.
     const RETRY: Duration = Duration::from_millis(10);
-    let deadline = tokio::time::Instant::now() + bound;
+    let deadline = std::time::Instant::now() + bound;
     loop {
         let refusal = match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => return Ok(listener),
             Err(refusal) => refusal,
         };
-        if tokio::time::Instant::now() >= deadline {
+        if std::time::Instant::now() >= deadline {
             return Err(refusal);
         }
-        tokio::time::sleep(RETRY).await;
+        tokio::task::spawn_blocking(|| std::thread::sleep(RETRY))
+            .await
+            .map_err(io::Error::other)?;
     }
 }
 
@@ -858,6 +862,17 @@ pub fn reserve_admitted_operation() -> ObservedPort<ScopedAdmittedOperation> {
     reserve_registered(admitted_operation)
 }
 
+/// Reserve an ephemeral port watched through an operation's owners and the stop
+/// that can end it.
+///
+/// [`reserve_admitted_operation`] for a shutdown matrix case: the stop owner
+/// holds the supervisor's forced abort until the peer has read what the
+/// operation committed, and a streamed payload is read through its transfer
+/// owners rather than a collected body.
+pub fn reserve_stopped_operation() -> ObservedPort<ScopedStoppedOperation> {
+    reserve_registered(stopped_operation)
+}
+
 /// Reserve an ephemeral port watched only through its request-body owners.
 ///
 /// [`reserve_admitted_commitment`] for a case whose whole claim is what an
@@ -1022,6 +1037,15 @@ impl<Owner> ObservedServer<Owner> {
     /// happened before it reads its counters.
     pub fn shutdown_bounded(self, timeout: Duration) -> Result<(), FixtureError> {
         self.server.shutdown_bounded(timeout)
+    }
+
+    /// Give up the guard and keep the server handle.
+    ///
+    /// For a case whose stimulus IS a stop command: it issues `shutdown` or
+    /// `cancel` at its own moment and reads the flat result the join returns,
+    /// so the guard that would stop and join on its behalf steps aside.
+    pub fn into_handle(self) -> ServerHandle {
+        self.server.into_handle()
     }
 }
 
@@ -1945,7 +1969,7 @@ pub const STALLED_CONTENT_LENGTH: usize = 64;
 /// disposition cannot send a preference for it to echo, and a case proving
 /// reuse after the refusal has to offer keep-alive. Absence is a third request,
 /// not a default either root can stand in for.
-pub fn stalled_request_head(connection: Option<&str>, method: &str, path: &str) -> String {
+fn stalled_request_head(connection: Option<&str>, method: &str, path: &str) -> String {
     // Formatting into the head rather than through a second `format!`, because
     // a formatted write to a `String` cannot fail and the intermediate would be
     // one allocation per stalled request for nothing.
@@ -1957,11 +1981,6 @@ pub fn stalled_request_head(connection: Option<&str>, method: &str, path: &str) 
 }
 
 /// Send [`stalled_request_head`] onto a connection the caller owns.
-///
-/// The blocking half of the same fixture. A root driving the stall from an async
-/// peer writes the head itself, because its socket is Tokio's and this one is
-/// the standard library's; both send the same bytes because both build them
-/// here.
 pub fn write_stalled_body(
     stream: &mut TcpStream,
     connection: Option<&str>,
@@ -1970,6 +1989,68 @@ pub fn write_stalled_body(
 ) -> io::Result<()> {
     stream.write_all(stalled_request_head(connection, method, path).as_bytes())?;
     stream.flush()
+}
+
+/// What a stalled peer reports: that its head is sent, then what it was
+/// answered.
+pub type StalledReports<T> = (
+    tokio::sync::oneshot::Receiver<io::Result<()>>,
+    tokio::sync::oneshot::Receiver<io::Result<T>>,
+);
+
+/// Stall one `POST` body on a thread of its own, reporting each half as it
+/// settles.
+///
+/// For a row whose runtime clock is paused. The peer is the suite's own blocking
+/// socket, bounded by the real-time deadline [`connect`] arms on it. Nothing
+/// here arms a Tokio timer: with the clock paused the runtime advances to the
+/// earliest armed timer whenever it has nothing left to run, and it has nothing
+/// left to run each time it waits on socket I/O. A Tokio bound armed by the test
+/// is the earliest timer for as long as the server has none of its own, so it
+/// expires while the server is still waiting for bytes rather than failing to
+/// answer — and how many such waits a row makes depends on load, not on the
+/// row. `spawn_blocking` cannot host the peer either: a Tokio blocking task
+/// inhibits that advance for as long as it runs, and the advance is what
+/// reaches the collection deadline these rows are about. A thread outside the
+/// runtime leaves the clock free and still carries a real bound.
+///
+/// The caller starts serving only once the head is sent, so no accepted
+/// connection ever waits for a request head: such a connection waits on Hyper's
+/// own header deadline, and a paused clock would reach that deadline instead of
+/// the collection one.
+///
+/// `exchange` reads whatever the row's claim is built on, once the head is out.
+pub fn spawn_stalled_peer<T: Send + 'static>(
+    addr: SocketAddr,
+    connection: Option<&'static str>,
+    path: &'static str,
+    exchange: impl FnOnce(&mut TcpStream) -> io::Result<T> + Send + 'static,
+) -> (std::thread::JoinHandle<()>, StalledReports<T>) {
+    let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
+    let (answered_tx, answered_rx) = tokio::sync::oneshot::channel();
+    let open = move || -> io::Result<TcpStream> {
+        let mut peer = connect(addr)?;
+        write_stalled_body(&mut peer, connection, "POST", path)?;
+        Ok(peer)
+    };
+    let peer = std::thread::spawn(move || match open() {
+        Ok(mut peer) => {
+            // A oneshot send fails only when its receiver is gone, which here
+            // means the test has already failed and is unwinding past both
+            // reports. Nothing is left to tell, so the report is discarded.
+            let _ = sent_tx.send(Ok(()));
+            // Discarded for the same reason, and with more at stake: the peer
+            // must still finish so its socket closes rather than holding the
+            // unwinding test's connection open.
+            let _ = answered_tx.send(exchange(&mut peer));
+        }
+        // Nothing was sent, so nothing can be answered: the exchange sender
+        // drops here, and the caller's first report is the failure itself.
+        Err(error) => {
+            let _ = sent_tx.send(Err(error));
+        }
+    });
+    (peer, (sent_rx, answered_rx))
 }
 
 /// Send one request with a body to a named authority, on its own connection.
@@ -2071,6 +2152,12 @@ pub fn assert_connection_closed(peer: &mut TcpStream, label: &str) {
 /// TCP is free to split anywhere inside that head.
 pub fn read_head(stream: &mut TcpStream, timeout: Duration) -> io::Result<Box<[u8]>> {
     read_delimited(stream, b"\r\n\r\n", MAX_HEADER_BYTES, timeout)
+}
+
+/// Read the response head as text, decoding any invalid UTF-8 lossily.
+pub fn read_head_text(stream: &mut TcpStream, timeout: Duration) -> io::Result<Box<str>> {
+    let head = read_head(stream, timeout)?;
+    Ok(String::from_utf8_lossy(&head).into())
 }
 
 /// Read through `delimiter`, returning every byte up to and including it.
@@ -2357,6 +2444,17 @@ view_lender!(
     bodies,
     TransferOwnerController,
     transfers,
+);
+view_lender!(
+    StoppedOperation,
+    ConnectionOwnerController,
+    connections,
+    ResponseCommitmentController,
+    commitment,
+    TransferOwnerController,
+    transfers,
+    ServerStopController,
+    stop,
 );
 view_lender!(
     StoppedMultipart,

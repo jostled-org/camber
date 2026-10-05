@@ -56,6 +56,8 @@ jobs:
       - run: .github/scripts/ci-selftest.sh
       - run: cargo fmt --check
       - run: cargo clippy --workspace --features "${CAMBER_CI_FEATURES}" -- -D warnings
+      - name: Check each optional feature alone
+        run: .github/scripts/check-feature-builds.sh
       - name: Check API documentation
         run: >-
           cargo --config 'build.rustdocflags=["-D","warnings"]' doc

@@ -126,6 +126,8 @@ Each site needs at least one of:
 - `proxy`
 - `root`
 
+`camber serve` checks the whole file before it starts. A misspelled field, a duplicate `host`, a `proxy` URL with credentials or a query, a `health_check` without `proxy`, or a `root` that does not exist stops it with a diagnostic. Nothing is bound, probed, or loaded first.
+
 Use the reference docs for the complete field list and validation rules:
 
 - [CLI Reference](../reference/cli.md)
@@ -161,11 +163,15 @@ root = "/var/www/app/dist"
 2. `GET /api/users` — no local file, forward to `http://localhost:3000/api/users`
 3. `POST /api/users` — always forward to the backend
 
+`root` must name a directory that exists and that Camber can read.
+
 This is a deterministic local-file overlay: existing local assets win, everything else proxies. It matches the common deployment shape where static assets and SPA shells are served locally while API traffic is proxied.
 
 ## Health Checks
 
-When `health_check` is configured, Camber polls `{proxy}{health_check}` at the given interval. If the backend returns a non-2xx status or is unreachable, Camber responds with 503 until the backend recovers.
+When `health_check` is configured, Camber probes `{proxy}{health_check}` once before it binds the listener, then at the given interval. If the backend returns a non-2xx status or is unreachable, Camber responds with 503 until a later probe succeeds.
+
+One health state covers the whole site. On an overlay site, a `GET` or `HEAD` that misses the local root answers 503 while the backend is unhealthy, the same as every other method. A local file still serves, because it never reaches the backend.
 
 ```toml
 [[site]]
@@ -174,6 +180,8 @@ proxy = "http://192.168.1.10:3000"
 health_check = "/api/health"
 health_interval = 5
 ```
+
+`health_check` requires `proxy` and must be an absolute path such as `/api/health`. `health_interval` requires `health_check`. It defaults to 10 seconds.
 
 ## TLS Modes
 
@@ -225,7 +233,7 @@ key = "/etc/tls/key.pem"
 
 Omit the `[tls]` block entirely. Useful behind a load balancer that terminates TLS upstream.
 
-For full TLS field semantics and validation rules, see [TLS Reference](../reference/tls.md).
+For the `[tls]` fields and their validation rules, see [Config Reference](../reference/config.md) and [CLI Reference](../reference/cli.md). For ACME domain names, the DNS-01 cache, and cleanup, see [TLS Reference](../reference/tls.md).
 
 ## Systemd Deployment
 

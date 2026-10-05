@@ -16,7 +16,7 @@
 use crate::backend_negotiation::{assert_bridged, offer, offers_backend_path};
 use crate::buffered_forwarding::{
     FORWARDING_METADATA_LEAK, generated_connection_value, generated_forwarded_field,
-    generated_header_case, generated_padding,
+    generated_header_case, generated_padding, run_generated_row,
 };
 use crate::common::{
     CLOSE_AFTER_RESPONSE, DeterministicCase, DeterministicGenerator, OwnedServer, append_headers,
@@ -905,9 +905,14 @@ async fn websocket_connection_named_credentials_are_not_forwarded() {
 /// ingress rather than sanitized. Answers carry the metadata question in
 /// reverse: an answer never acquires forwarding fields the upstream did not
 /// send.
-#[camber::test]
-async fn generated_proxy_header_perimeter() {
+#[test]
+fn generated_proxy_header_perimeter() {
     let label = "the generated proxy header perimeter";
+    run_generated_row(label, || generated_perimeter_cases(label));
+}
+
+/// The cases [`generated_proxy_header_perimeter`] drives, in one runtime.
+async fn generated_perimeter_cases(label: &str) {
     let mut perimeter = Perimeter::start(label).await;
 
     let requests = DeterministicGenerator::new(ORDINARY_REQUEST_SEED);
@@ -1025,9 +1030,15 @@ async fn assert_handshake_refused_at_ingress(proxy: &OwnedServer, connection: &s
 /// turns on metadata classification alone. Every one stops at this hop, the
 /// unrelated `X-*` control travels, and Camber's own metadata is what the
 /// ordinary upstreams read.
-#[camber::test]
-async fn forwarding_metadata_prefix_is_stripped_on_every_request_path() {
+#[test]
+fn forwarding_metadata_prefix_is_stripped_on_every_request_path() {
     let label = "the peer-supplied forwarding-metadata prefix";
+    run_generated_row(label, || metadata_prefix_cases(label));
+}
+
+/// The cases [`forwarding_metadata_prefix_is_stripped_on_every_request_path`]
+/// drives, in one runtime.
+async fn metadata_prefix_cases(label: &str) {
     let mut perimeter = Perimeter::start(label).await;
 
     let generator = DeterministicGenerator::new(METADATA_PREFIX_SEED);

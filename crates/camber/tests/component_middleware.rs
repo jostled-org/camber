@@ -1,5 +1,7 @@
 #[path = "support/http.rs"]
 pub mod http;
+#[path = "support/process.rs"]
+pub mod process;
 #[path = "support/rejection.rs"]
 pub mod rejection_support;
 #[path = "support/runtime.rs"]

@@ -17,6 +17,7 @@ Use the guides for migrations, workflows, and end-to-end setup.
 - [TLS](tls.md) — certificate loading, server config, and outbound TLS connections
 - [Net](net.md) — listeners, TCP, UDP, TLS streams, and byte forwarding
 - [Resources](resource.md) — runtime lifecycle integration for external dependencies
+- [Integrations](integrations.md) — Core NATS, Standard SQS, ACME DNS-01 providers, and native gRPC: their bounds and what success means
 - [Scheduling](schedule.md) — interval and cron-style background work
 - [Secrets](secret.md) — loading secrets from environment variables or files
 - [Signals and Shutdown](signals.md) — cancellation, shutdown observation, and OS signal wiring

@@ -14,11 +14,13 @@
 
 use super::async_proxy::ProxyFailure;
 use super::boundary::{ByteBoundary, CrossedBound, DeadlineBoundary};
+use super::crossed_deadline::CrossedDeadline;
 use super::method::RequestMethod;
 use super::request::Request;
 use super::response::{
     HeaderPair, Response, ResponseProvenance, UnrepresentableResponse, validate_status,
 };
+use super::source_chain::SourceChain;
 use crate::RuntimeError;
 use arrayvec::ArrayString;
 use bytes::Bytes;
@@ -717,40 +719,6 @@ impl RefusalDetail {
     }
 }
 
-/// The operator's account of one crossed service deadline.
-///
-/// It names the closed boundary the policy configured and the value configured
-/// for it, so an operator reads which bound to widen rather than that
-/// "something timed out". Its source is the typed
-/// [`RuntimeError::DeadlineExceeded`] naming the same boundary, so a caller
-/// walking the chain reaches the vocabulary rather than the sentence.
-#[derive(Debug)]
-struct CrossedDeadline {
-    cause: RuntimeError,
-    configured: std::time::Duration,
-}
-
-impl CrossedDeadline {
-    fn new(boundary: DeadlineBoundary, configured: std::time::Duration) -> Self {
-        Self {
-            cause: RuntimeError::DeadlineExceeded(boundary),
-            configured,
-        }
-    }
-}
-
-impl fmt::Display for CrossedDeadline {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} after {:?}", self.cause, self.configured)
-    }
-}
-
-impl Error for CrossedDeadline {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.cause)
-    }
-}
-
 impl fmt::Display for RefusalDetail {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -1014,8 +982,8 @@ impl Rejected {
     /// Forces close for the same reason the limit does: what the peer still
     /// owed is unread, so nothing establishes where the next request would
     /// begin.
-    pub(super) fn body_unreadable(error: Box<dyn Error + Send + Sync>) -> Self {
-        Self::plain_closing(Rejection::body_unreadable(), Arc::from(error))
+    pub(super) fn body_unreadable(error: hyper::Error) -> Self {
+        Self::plain_closing(Rejection::body_unreadable(), Arc::new(error))
     }
 
     /// One streaming direction carried more payload than its maximum allows.
@@ -1423,6 +1391,12 @@ fn classify(error: RuntimeError, kinds: ProducerKinds) -> Rejected {
         // framework's measurement, not declaring a failure of its own.
         crossed @ RuntimeError::RequestBodyLimit(_) => Rejected::body_limit_crossed(crossed),
         unread @ RuntimeError::RequestBodyUnreadable(_) => Rejected::body_read_failed(unread),
+        // The shared error itself is the diagnostic, so the operator line reads
+        // its redacted account and stops there rather than walking into the
+        // third-party source.
+        RuntimeError::Integration(failure) => {
+            Rejected::faulted(RejectionKind::InternalService, failure)
+        }
         other => Rejected::faulted(kinds.faulted, Arc::new(other)),
     }
 }
@@ -2239,29 +2213,4 @@ fn sent(response: hyper::Response<Full<Bytes>>, provenance: ResponseProvenance) 
 /// already holding: the identity it holds names the same request it was given.
 fn own_identity(identity: Arc<RequestIdentity>) -> RequestIdentity {
     Arc::try_unwrap(identity).unwrap_or_else(|shared| (*shared).clone())
-}
-
-/// One error and everything it was caused by, written as a single line.
-///
-/// A borrowed view rather than a built string: the chain is walked while the
-/// subscriber writes it, so a refusal nobody is recording pays nothing to
-/// format one.
-///
-/// Visible to the rest of the HTTP module because it is the one spelling of
-/// this walk. A second copy renders `error: cause: cause` the same way until
-/// one of them is corrected, and then two callers disagree about what a cause
-/// chain reads as. A caller that needs the text owned calls `to_string` on it;
-/// the walk itself is still written once.
-pub(super) struct SourceChain<'a>(pub(super) &'a (dyn Error + 'static));
-
-impl fmt::Display for SourceChain<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)?;
-        let mut source = self.0.source();
-        while let Some(cause) = source {
-            write!(f, ": {cause}")?;
-            source = cause.source();
-        }
-        Ok(())
-    }
 }

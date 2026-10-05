@@ -76,7 +76,7 @@ async fn http_get(
     addr: std::net::SocketAddr,
     host: Option<&str>,
     path: &str,
-) -> Result<(u16, String), reqwest::Error> {
+) -> Result<(u16, Box<str>), reqwest::Error> {
     let request = reqwest::Client::new().get(format!("http://{addr}{path}"));
     let request = match host {
         Some(host) => request.header("host", host),
@@ -85,7 +85,7 @@ async fn http_get(
     let response = request.send().await?;
     let status = response.status().as_u16();
     let body = response.text().await?;
-    Ok((status, body))
+    Ok((status, body.into_boxed_str()))
 }
 
 async fn wait_for_checkpoint(stop: &ScopedServerStop, edge: ServerStopEdge) {
@@ -97,62 +97,6 @@ async fn wait_for_checkpoint(stop: &ScopedServerStop, edge: ServerStopEdge) {
 
 fn assert_flat_ok(result: Result<(), RuntimeError>, variant: &str) {
     assert!(result.is_ok(), "{variant} returned {result:?}");
-}
-
-/// Make an HTTPS GET request using hyper over TLS, returning (status, body).
-async fn https_get(
-    connector: &tokio_rustls::TlsConnector,
-    addr: std::net::SocketAddr,
-    path: &str,
-) -> Result<(u16, String), Box<str>> {
-    let req = hyper::Request::get(format!("http://localhost{path}"))
-        .header("host", "localhost")
-        .header("connection", "close")
-        .body(http_body_util::Empty::<bytes::Bytes>::new())
-        .map_err(|error| format!("HTTP request build failed: {error}").into_boxed_str())?;
-    let tcp = tokio::net::TcpStream::connect(addr)
-        .await
-        .map_err(|error| format!("TLS TCP connect failed: {error}").into_boxed_str())?;
-    let server_name = rustls::pki_types::ServerName::try_from("localhost")
-        .map_err(|error| format!("invalid TLS server name: {error}").into_boxed_str())?;
-    let tls_stream = connector
-        .connect(server_name, tcp)
-        .await
-        .map_err(|error| format!("TLS handshake failed: {error}").into_boxed_str())?;
-
-    let io = hyper_util::rt::TokioIo::new(tls_stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-        .await
-        .map_err(|error| format!("HTTP handshake failed: {error}").into_boxed_str())?;
-    let connection = tokio::spawn(conn);
-    let exchange = async {
-        let resp = sender
-            .send_request(req)
-            .await
-            .map_err(|error| format!("HTTPS request failed: {error}").into_boxed_str())?;
-        let status = resp.status().as_u16();
-        use http_body_util::BodyExt;
-        let body = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|error| format!("HTTPS body failed: {error}").into_boxed_str())?
-            .to_bytes();
-        let body = String::from_utf8(body.to_vec())
-            .map_err(|error| format!("HTTPS body was not UTF-8: {error}").into_boxed_str())?;
-        Ok::<_, Box<str>>((status, body))
-    }
-    .await;
-    drop(sender);
-    let driver = tokio::time::timeout(EVENT_TIMEOUT, connection)
-        .await
-        .map_err(|error| format!("HTTP connection join timed out: {error}").into_boxed_str())?
-        .map_err(|error| format!("HTTP connection task failed: {error}").into_boxed_str())?
-        .map_err(|error| format!("HTTP connection failed: {error}").into_boxed_str());
-    match (exchange, driver) {
-        (Ok(response), Ok(())) => Ok(response),
-        (Err(error), _) | (_, Err(error)) => Err(error),
-    }
 }
 
 /// A header timeout wider than the built-in sixty-second default.
@@ -328,7 +272,7 @@ async fn serve_async_tls_accepts_https_connection() {
             .expect("owned server requires a Tokio runtime"),
     );
 
-    let response = https_get(&connector, addr, "/tls-hello").await;
+    let response = common::https_get(&connector, addr, "/tls-hello").await;
 
     server.abort();
     let join = tokio::time::timeout(EVENT_TIMEOUT, server).await.unwrap();
@@ -336,7 +280,7 @@ async fn serve_async_tls_accepts_https_connection() {
 
     let (status, body) = response.unwrap();
     assert_eq!(status, 200);
-    assert_eq!(body, "tls works");
+    assert_eq!(&*body, "tls works");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -372,8 +316,8 @@ async fn serve_async_hosts_dispatches_by_host() {
     let join = tokio::time::timeout(EVENT_TIMEOUT, server).await.unwrap();
     assert!(join.unwrap_err().is_cancelled());
 
-    assert_eq!(response_a.unwrap(), (200, "host-a".to_owned()));
-    assert_eq!(response_b.unwrap(), (200, "host-b".to_owned()));
+    assert_eq!(response_a.unwrap(), (200, Box::from("host-a")));
+    assert_eq!(response_b.unwrap(), (200, Box::from("host-b")));
 }
 
 #[camber::test]
@@ -390,7 +334,7 @@ async fn serve_background_tls_runs_in_background() {
     let handle = camber::http::serve_background_tls(listener, router, tls_config)
         .expect("owned server requires a Tokio runtime");
 
-    let response = https_get(&connector, addr, "/bg-tls").await;
+    let response = common::https_get(&connector, addr, "/bg-tls").await;
 
     handle.cancel();
     let server_result = tokio::time::timeout(EVENT_TIMEOUT, handle).await.unwrap();
@@ -398,7 +342,7 @@ async fn serve_background_tls_runs_in_background() {
 
     let (status, body) = response.unwrap();
     assert_eq!(status, 200);
-    assert_eq!(body, "background tls");
+    assert_eq!(&*body, "background tls");
 
     // After cancellation, new connections should fail
     let tcp_result = tokio::time::timeout(
@@ -445,7 +389,7 @@ async fn serve_background_handle_exposes_flat_error() {
     );
 }
 
-type VariantClient = tokio::task::JoinHandle<Result<(u16, String), Box<str>>>;
+type VariantClient = tokio::task::JoinHandle<Result<(u16, Box<str>), Box<str>>>;
 type VariantJoin = Pin<Box<ServerHandleFuture>>;
 
 /// Identity and observation points for one background variant. Every consuming
@@ -508,7 +452,7 @@ where
 async fn boxed_http_get(
     addr: std::net::SocketAddr,
     host: Option<&str>,
-) -> Result<(u16, String), Box<str>> {
+) -> Result<(u16, Box<str>), Box<str>> {
     http_get(addr, host, "/retained")
         .await
         .map_err(|error| format!("plain HTTP GET failed: {error:?}").into_boxed_str())
@@ -522,9 +466,11 @@ fn spawn_variant_clients(
     let tls_connector = connector.clone();
     [
         tokio::spawn(boxed_http_get(plain_addr, None)),
-        tokio::spawn(async move { https_get(&tls_connector, tls_addr, "/retained").await }),
+        tokio::spawn(async move { common::https_get(&tls_connector, tls_addr, "/retained").await }),
         tokio::spawn(boxed_http_get(host_addr, Some("localhost"))),
-        tokio::spawn(async move { https_get(&connector, host_tls_addr, "/retained").await }),
+        tokio::spawn(
+            async move { common::https_get(&connector, host_tls_addr, "/retained").await },
+        ),
     ]
 }
 
@@ -712,7 +658,7 @@ async fn assert_responses(proofs: &VariantProofs, clients: [VariantClient; 4]) {
     {
         assert_eq!(
             response.unwrap().unwrap(),
-            (200, proof.expected_body.to_owned())
+            (200, Box::from(proof.expected_body))
         );
     }
 }

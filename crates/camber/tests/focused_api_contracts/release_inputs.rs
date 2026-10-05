@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use crate::delivery_fixture::{
-    FixtureRepo, HookRun, ambient_executable, repository_file, repository_root, run_bounded,
+    FixtureRepo, HookRun, ambient_executable, repository_file, repository_root, repository_text,
+    run_bounded,
 };
 
 const REFRESH: &str = ".github/scripts/refresh-release-inputs.sh";
@@ -196,8 +197,7 @@ fn release_record_refuses_untrusted_targets_and_preserves_api_failure() {
 
 #[test]
 fn release_workflow_refreshes_the_generated_pr_record() {
-    let workflow =
-        String::from_utf8(repository_file(".github/workflows/release-plz.yml").into()).unwrap();
+    let workflow = repository_text(".github/workflows/release-plz.yml");
     assert!(workflow.contains("--output json > \"$RUNNER_TEMP/release-pr.json\""));
     assert!(workflow.contains(
         "bash .github/scripts/refresh-release-inputs.sh \"$RUNNER_TEMP/release-pr.json\""

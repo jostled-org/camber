@@ -415,18 +415,54 @@ pub fn naming(
 /// empty scrape: this is a leak assertion, and one that was handed nothing to
 /// look for passes over every response there is. A vacuous pass here is a leak
 /// nobody looked for.
-pub fn assert_no_private_text(response: &HttpResponse, private: &[&str], label: &str) {
+pub fn assert_no_private_text(response: &HttpResponse, private: &[impl AsRef<str>], label: &str) {
+    let raw = String::from_utf8_lossy(response.raw());
+    assert_private_absent(&raw, private, "the peer", label);
+}
+
+/// Assert none of `private` appears in `searched`, which `reached` names.
+///
+/// Shared by the peer and mapper leak checks, so both refuse an empty list for
+/// the same reason.
+fn assert_private_absent(searched: &str, private: &[impl AsRef<str>], reached: &str, label: &str) {
     assert!(
         !private.is_empty(),
         "{label}: no private text was declared, so no leak can be found"
     );
-    let raw = String::from_utf8_lossy(response.raw());
-    for text in private {
+    for text in private.iter().map(AsRef::as_ref) {
         assert!(
-            !raw.contains(text),
-            "{label}: the private text {text:?} reached the peer: {raw}"
+            !searched.contains(text),
+            "{label}: the private text {text:?} reached {reached}: {searched}"
         );
     }
+}
+
+/// The one redacted internal-service refusal a mapper was handed, read back.
+///
+/// The mapper sees the category, the status, and the fixed safe message, and
+/// none of the private text. Two roots wrote this block out. The record is
+/// returned so a row can go on to read the fields its own claim names.
+pub fn assert_mapped_internal_refusal(
+    journal: &Journal,
+    origin: &str,
+    private: &[impl AsRef<str>],
+    label: &str,
+) -> Observed {
+    let mapped = only(journal, label);
+    assert_eq!(mapped.origin, origin, "{label}: origin");
+    assert_eq!(
+        mapped.kind,
+        RejectionKind::InternalService,
+        "{label}: an integration failure keeps the internal-service category"
+    );
+    assert_eq!(mapped.status, 500, "{label}: status");
+    assert_eq!(
+        mapped.message.as_ref(),
+        REDACTED_BODY,
+        "{label}: the mapper is handed the fixed safe message"
+    );
+    assert_private_absent(&format!("{mapped:?}"), private, "the mapper context", label);
+    mapped
 }
 
 /// What one request's participants recorded, in the order they ran.

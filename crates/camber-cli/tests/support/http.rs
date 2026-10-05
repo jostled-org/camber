@@ -174,10 +174,15 @@ fn verify_response_end<R: Read>(stream: &mut R) -> io::Result<()> {
     }
 }
 
-fn header_end(bytes: &[u8]) -> io::Result<Option<usize>> {
+/// Returns the start of the first `needle` in `bytes`.
+pub fn find(bytes: &[u8], needle: &[u8]) -> Option<usize> {
     bytes
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn header_end(bytes: &[u8]) -> io::Result<Option<usize>> {
+    find(bytes, b"\r\n\r\n")
         .map(|position| {
             position
                 .checked_add(4)
@@ -189,16 +194,34 @@ fn header_end(bytes: &[u8]) -> io::Result<Option<usize>> {
 fn response_content_length(headers: &[u8]) -> io::Result<Option<usize>> {
     let headers = std::str::from_utf8(headers)
         .map_err(|error| invalid_data(format!("response headers were not UTF-8: {error}")))?;
-    headers
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then_some(value.trim())
-        })
+    content_length(headers)
+}
+
+fn content_length(head: &str) -> io::Result<Option<usize>> {
+    header_value(head, "content-length")
         .map(str::parse::<usize>)
         .transpose()
         .map_err(|error| invalid_data(format!("invalid response content length: {error}")))
+}
+
+/// The status code on the start line of a response `head`.
+pub fn status_code(head: &str) -> Option<u16> {
+    head.lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+}
+
+/// The trimmed value of the first `name` header in `head`, matched without
+/// case. The start line is skipped.
+pub fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|line| {
+        let (field, value) = line.split_once(':')?;
+        field
+            .trim()
+            .eq_ignore_ascii_case(name)
+            .then_some(value.trim())
+    })
 }
 
 fn parse_response(bytes: &[u8]) -> io::Result<HttpResponse> {
@@ -206,18 +229,9 @@ fn parse_response(bytes: &[u8]) -> io::Result<HttpResponse> {
         .ok_or_else(|| invalid_data("response did not contain complete headers"))?;
     let headers = std::str::from_utf8(&bytes[..header_end])
         .map_err(|error| invalid_data(format!("response headers were not UTF-8: {error}")))?;
-    let status = headers
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|value| value.parse::<u16>().ok())
+    let status = status_code(headers)
         .ok_or_else(|| invalid_data("response did not contain a valid status"))?;
-    let content_length = headers.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.eq_ignore_ascii_case("content-length")
-            .then(|| value.trim().parse::<usize>().ok())
-            .flatten()
-    });
+    let content_length = content_length(headers)?;
     let body_bytes = &bytes[header_end..];
     match content_length {
         Some(expected) if body_bytes.len() != expected => {
@@ -230,12 +244,8 @@ fn parse_response(bytes: &[u8]) -> io::Result<HttpResponse> {
     }
     let body = std::str::from_utf8(body_bytes)
         .map_err(|error| invalid_data(format!("response body was not UTF-8: {error}")))?;
-    let connection_close = headers.lines().any(|line| match line.split_once(':') {
-        Some((name, value)) => {
-            name.eq_ignore_ascii_case("connection") && value.trim().eq_ignore_ascii_case("close")
-        }
-        None => false,
-    });
+    let connection_close = header_value(headers, "connection")
+        .is_some_and(|value| value.eq_ignore_ascii_case("close"));
     Ok(HttpResponse {
         status,
         body: body.into(),
@@ -243,7 +253,7 @@ fn parse_response(bytes: &[u8]) -> io::Result<HttpResponse> {
     })
 }
 
-fn invalid_data(message: impl Into<String>) -> io::Error {
+pub fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
@@ -532,7 +542,9 @@ fn serve_one(
     respond(&mut stream, status, body, stop)
 }
 
-fn accept(listener: &TcpListener, stop: &Receiver<()>) -> io::Result<Option<TcpStream>> {
+/// Accept the next connection on a non-blocking listener, or `None` once
+/// `stop` fires or its sender is gone.
+pub fn accept(listener: &TcpListener, stop: &Receiver<()>) -> io::Result<Option<TcpStream>> {
     loop {
         let accept_result = listener.accept();
         match handle_accept_result(accept_result, stop)? {
@@ -572,11 +584,7 @@ fn respond(
         Some(path) => path,
         None => return Ok(ResponseOutcome::Stopped),
     };
-    let reason = match status {
-        200 => "OK",
-        500 => "Internal Server Error",
-        _ => "Response",
-    };
+    let reason = reason_phrase(status);
     let response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -584,6 +592,15 @@ fn respond(
     match write_all_cooperatively(stream, response.as_bytes(), stop)? {
         true => Ok(ResponseOutcome::Completed(request_path)),
         false => Ok(ResponseOutcome::Stopped),
+    }
+}
+
+/// The reason phrase a fixture upstream sends with `status`.
+pub fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        500 => "Internal Server Error",
+        _ => "Response",
     }
 }
 

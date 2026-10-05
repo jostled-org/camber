@@ -1,10 +1,25 @@
 mod acme;
+mod acme_progress;
+mod acme_transport;
+mod cache;
+mod certificate;
+mod claim;
+mod cleanup;
 mod cloudflare;
+mod cloudflare_wire;
+mod failure;
+mod intention;
+mod order;
+mod owner;
 mod provider;
+mod publication;
 mod setup;
+mod transport;
 
 pub use acme::AcmeDns01;
-pub(crate) use acme::{dns01_renewal_loop, write_credentials_file};
+pub(crate) use claim::RenewalClaims;
 pub use cloudflare::CloudflareProvider;
+pub(crate) use order::write_account_credentials;
 pub use provider::{DnsProvider, RecordId};
-pub(crate) use setup::{Dns01Setup, init_dns01};
+pub(crate) use publication::PublicationStage;
+pub(crate) use setup::{Dns01Setup, Dns01Startup, admit_renewal, start_dns01};

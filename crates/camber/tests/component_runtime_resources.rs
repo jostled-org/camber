@@ -6,6 +6,9 @@ pub mod common;
 #[path = "support/lifecycle_kinds.rs"]
 pub mod lifecycle_kinds;
 
+#[path = "support/integration_rows.rs"]
+pub mod integration_rows;
+
 // The runtime-scope builder, mounted from the root that owns it. One edit to
 // the worker count it names has to reach the cases in both binaries, so the
 // file is shared rather than restated here.
@@ -20,6 +23,10 @@ mod circuit_breaker;
 mod health_closing;
 #[path = "component_runtime_resources/health_resources.rs"]
 mod health_resources;
+#[path = "component_runtime_resources/integration_accounts.rs"]
+mod integration_accounts;
+#[path = "component_runtime_resources/integration_lifecycle.rs"]
+mod integration_lifecycle;
 #[path = "component_runtime_resources/lifecycle_aggregate.rs"]
 mod lifecycle_aggregate;
 #[path = "component_runtime_resources/resource_lifecycle.rs"]

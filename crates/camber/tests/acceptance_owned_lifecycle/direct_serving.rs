@@ -360,11 +360,11 @@ fn plain_creation_keeps_standalone_context_under_camber_poll() {
                 let addr = listener.local_addr().unwrap();
 
                 // The raw task builds the owner with no Camber context.
-                let server = tokio::time::timeout(
+                let (server,) = tokio::time::timeout(
                     EVENT_TIMEOUT,
                     tokio::spawn(async move {
-                        camber::http::serve_async(listener, router)
-                            .expect("owned server requires a Tokio runtime")
+                        (camber::http::serve_async(listener, router)
+                            .expect("owned server requires a Tokio runtime"),)
                     }),
                 )
                 .await

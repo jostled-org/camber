@@ -19,6 +19,10 @@
 
 use crate::common;
 use crate::http as http_support;
+use crate::operation_completion::{
+    ABSENT, COMPLETION_EVENT, Expected, Recorded, assert_event_matches, assert_not_recorded_yet,
+    assert_recorded_once, moved, only_completion, recorded_latency,
+};
 
 #[cfg(feature = "profiling")]
 use camber::__private::DEFAULT_PROFILING_RESPONSE_LIMIT;
@@ -391,6 +395,21 @@ fn profiling_runtime(containing: ServerPolicy) -> camber::runtime::RuntimeBuilde
 #[cfg(feature = "profiling")]
 #[test]
 fn profiling_sampling_and_rendering_are_bounded_off_workers() {
+    common::run_in_child(
+        "service_operation_observability::profiling_sampling_and_rendering_are_bounded_off_workers",
+        "profiling-sampling-bounded",
+        "PROFILING_SAMPLING_BOUNDED",
+        std::time::Duration::from_secs(120),
+        assert_profiling_sampling_and_rendering_are_bounded_off_workers,
+    );
+}
+
+/// A CPU profile samples every thread of its process through a `SIGPROF`
+/// handler that unwinds whatever each thread is running. A sibling test can be
+/// inside platform code that handler cannot unwind, so the profile runs in a
+/// private child that holds only this test.
+#[cfg(feature = "profiling")]
+fn assert_profiling_sampling_and_rendering_are_bounded_off_workers() {
     // The load is owned here, outside both runtimes, so it is running before the
     // first sampling window opens and is stopped and joined after the last one
     // closes — including when a row unwinds.
@@ -442,18 +461,6 @@ fn profiling_sampling_and_rendering_are_bounded_off_workers() {
 // ---------------------------------------------------------------------------
 // 15.T1 / 15.T2: one record, at the terminal the operation actually reached
 // ---------------------------------------------------------------------------
-
-/// The counter one completed operation is recorded under.
-const COMPLETION_METRIC: &str = "http_requests_total";
-
-/// The duration family's own count series, read beside the counter.
-///
-/// Both instruments carry one label set, so a row that moved one and not the
-/// other would be describing two different requests.
-const DURATION_COUNT_METRIC: &str = "http_request_duration_seconds_count";
-
-/// The sentence one completed operation is recorded under.
-const COMPLETION_EVENT: &str = "message=request completed";
 
 /// The sentence one refused operation is recorded under.
 const REJECTION_EVENT: &str = "message=request rejected";
@@ -546,185 +553,6 @@ const UNANSWERED_METHOD: &str = "POST";
 /// row is answered on the proxy class under a refusal status, so its whole
 /// label set is shared with nothing else this process records.
 const DEAD_METHOD: &str = "GET";
-
-/// What one row must have been recorded as, once.
-///
-/// Seven dimensions and no eighth that ranks them. A row states each one it
-/// expects, including the ones it expects to be absent, because "absent" is what
-/// this record replaced a fold with: an application response interrupted by a
-/// departing peer and a peer that left before any answer existed differ in
-/// exactly the fields a strongest terminal used to collapse.
-struct Expected<'a> {
-    label: &'a str,
-    method: &'a str,
-    /// The status the peer was given, or `None` when no head committed.
-    status: Option<u16>,
-    protocol: &'a str,
-    origin: &'a str,
-    rejection: &'a str,
-    delivery: &'a str,
-    connection_end: &'a str,
-    boundary: &'a str,
-    shutdown: &'a str,
-}
-
-/// The name every absent completion dimension is published under.
-const ABSENT: &str = "none";
-
-impl Expected<'_> {
-    /// One row's dimensions, with everything this row does not name absent.
-    ///
-    /// A row states what it is about and inherits the absences, so adding a
-    /// dimension is one edit here rather than one per row — and a row that meant
-    /// to name a dimension and did not says `none` rather than saying nothing.
-    const fn of(label: &'static str, method: &'static str, protocol: &'static str) -> Self {
-        Self {
-            label,
-            method,
-            status: Some(200),
-            protocol,
-            origin: ABSENT,
-            rejection: ABSENT,
-            delivery: "produced",
-            connection_end: ABSENT,
-            boundary: ABSENT,
-            shutdown: ABSENT,
-        }
-    }
-
-    /// The same row, produced by a named origin.
-    const fn from(self, origin: &'static str) -> Self {
-        Self { origin, ..self }
-    }
-
-    /// The same row, answered with `status`.
-    const fn answering(self, status: u16) -> Self {
-        Self {
-            status: Some(status),
-            ..self
-        }
-    }
-
-    /// The whole label set this row's record carries.
-    ///
-    /// Built as one value because it is one claim: a delta taken over a subset
-    /// of the labels would count a record another class produced.
-    fn labels<'a>(&'a self, status: &'a str) -> [(&'a str, &'a str); 9] {
-        [
-            ("method", self.method),
-            ("status", status),
-            ("protocol", self.protocol),
-            ("origin", self.origin),
-            ("rejection", self.rejection),
-            ("delivery", self.delivery),
-            ("connection_end", self.connection_end),
-            ("boundary", self.boundary),
-            ("shutdown", self.shutdown),
-        ]
-    }
-
-    /// The status label this row's record carries, as production spells it.
-    fn status_label(&self) -> Box<str> {
-        match self.status {
-            Some(status) => status.to_string().into(),
-            None => ABSENT.into(),
-        }
-    }
-}
-
-/// What one scrape reports about completed operations.
-///
-/// The counter and the duration family are read out of one body, so the two are
-/// one moment rather than two: a second send would itself be a completed
-/// operation between them.
-struct Recorded {
-    completions: Box<[common::Sample]>,
-    durations: Box<[common::Sample]>,
-}
-
-impl Recorded {
-    fn scraped(addr: std::net::SocketAddr) -> Self {
-        let scrape = http_support::send(addr, "GET", "/metrics", &[], b"");
-        Self {
-            completions: common::scraped_samples(&scrape, COMPLETION_METRIC),
-            durations: common::scraped_samples(&scrape, DURATION_COUNT_METRIC),
-        }
-    }
-}
-
-/// How far both instruments moved for one row's whole label set.
-///
-/// Stated as one number because the two have to agree: a counter that moved
-/// while the duration family did not is a completion recorded under a label set
-/// no operator can read a latency for.
-fn moved(before: &Recorded, after: &Recorded, expected: &Expected<'_>) -> u64 {
-    let status = expected.status_label();
-    let labels = expected.labels(&status);
-    let counted = common::delta(&before.completions, &after.completions, &labels);
-    let timed = common::delta(&before.durations, &after.durations, &labels);
-    assert_eq!(
-        counted, timed,
-        "{}: the counter and the duration family disagree about {labels:?}",
-        expected.label,
-    );
-    counted
-}
-
-/// Assert one row was recorded exactly once, under everything it declared.
-fn assert_recorded_once(before: &Recorded, after: &Recorded, expected: &Expected<'_>) {
-    assert_eq!(
-        moved(before, after, expected),
-        1,
-        "{}: exactly one record was expected under {:?}, and the scrape holds {:?}",
-        expected.label,
-        expected.labels(&expected.status_label()),
-        after.completions,
-    );
-}
-
-/// Assert nothing was recorded for this row yet.
-fn assert_not_recorded_yet(before: &Recorded, held: &Recorded, expected: &Expected<'_>) {
-    assert_eq!(
-        moved(before, held, expected),
-        0,
-        "{}: a record was written before this operation reached its terminal",
-        expected.label,
-    );
-}
-
-/// The one completion event this row's path produced.
-fn only_completion(capture: &common::TraceCapture, label: &str) -> Box<str> {
-    let events = capture.events();
-    common::only_event(&events, COMPLETION_EVENT, label).into()
-}
-
-/// Assert one completion event states every dimension this row expects.
-///
-/// All seven, not a chosen few: the whole claim is that the dimensions are
-/// orthogonal, and a check that read only the ones a row varies could not tell a
-/// record that left the rest absent from one that folded them away.
-fn assert_event_matches(event: &str, expected: &Expected<'_>) {
-    let stated = [
-        format!("status={}", expected.status_label()),
-        format!("protocol={}", expected.protocol),
-        format!("origin={}", expected.origin),
-        format!("rejection={}", expected.rejection),
-        format!("delivery={}", expected.delivery),
-        format!("connection_end={}", expected.connection_end),
-        format!("boundary={}", expected.boundary),
-        format!("shutdown={}", expected.shutdown),
-    ];
-    let stated: Box<[&str]> = stated.iter().map(String::as_str).collect();
-    common::assert_fields(event, &stated, expected.label);
-}
-
-/// How long one recorded operation reports having taken.
-fn recorded_latency(event: &str, label: &str) -> u128 {
-    common::field_value(event, "latency_ms")
-        .unwrap_or_else(|| panic!("{label}: the completion event reports no latency"))
-        .parse()
-        .unwrap_or_else(|error| panic!("{label}: the recorded latency is unreadable: {error}"))
-}
 
 /// A producer the fixture releases, and the release the row holds.
 ///
@@ -1112,9 +940,8 @@ fn peer_reading_head(addr: std::net::SocketAddr, path: &str, label: &str) -> std
         .unwrap_or_else(|error| panic!("{label}: the peer could not connect: {error}"));
     http_support::write_request(&mut peer, "GET", path, &[], b"")
         .unwrap_or_else(|error| panic!("{label}: the peer could not send: {error}"));
-    let head = http_support::read_head(&mut peer, COMPLETION_BOUND)
+    let head = http_support::read_head_text(&mut peer, COMPLETION_BOUND)
         .unwrap_or_else(|error| panic!("{label}: no head arrived: {error}"));
-    let head = String::from_utf8_lossy(&head).into_owned();
     assert!(
         head.starts_with("HTTP/1.1 200"),
         "{label}: the held class never committed its head: {head}",
@@ -1512,30 +1339,12 @@ async fn completion_rpc(addr: std::net::SocketAddr) -> http_support::HttpRespons
             "POST",
             "/greeter.Greeter/SayHello",
             "localhost",
-            &[("content-type", "application/grpc"), ("te", "trailers")],
-            &completion_grpc_message("completion"),
+            &crate::grpc_forms::GRPC_HEADERS,
+            &crate::grpc_forms::hello_frame("completion"),
         )
         .await;
     client.close().await;
     answered
-}
-
-/// One length-prefixed gRPC message carrying a `HelloRequest` named `name`.
-#[cfg(feature = "grpc")]
-fn completion_grpc_message(name: &str) -> Box<[u8]> {
-    let mut message = Vec::with_capacity(name.len() + 2);
-    message.push(0x0A);
-    message.push(u8::try_from(name.len()).expect("the fixture name is short"));
-    message.extend_from_slice(name.as_bytes());
-    let mut framed = Vec::with_capacity(message.len() + 5);
-    framed.push(0);
-    framed.extend_from_slice(
-        &u32::try_from(message.len())
-            .expect("one short message")
-            .to_be_bytes(),
-    );
-    framed.extend_from_slice(&message);
-    framed.into_boxed_slice()
 }
 
 /// 10.T2 — invariant 16

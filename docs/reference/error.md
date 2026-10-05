@@ -9,14 +9,15 @@ propagation without converting between framework-specific error types.
 
 The variants cluster into a few stable buckets:
 
-- runtime and coordination: `Io`, `Timeout`, `Cancelled`, `TaskPanicked`, `ChannelClosed`, `ChannelFull`
+- runtime and coordination: `Io`, `Timeout`, `Cancelled`, `TaskPanicked`, `ChannelClosed`, `ChannelFull`, `BlockingInAsyncContext`
 - configured service deadlines: `DeadlineExceeded(DeadlineBoundary)`
 - configured byte maximums: `LimitExceeded(ByteBoundary)`
-- runtime context and task lifecycle: `NoRuntime`, `ScopeClosed`, `ScopeDrainTimeout`
+- runtime context and task lifecycle: `NoRuntime`, `ScopeClosed`, `ScopeDrainTimeout`, `Lifecycle`
 - request and API misuse: `BadRequest`, `InvalidArgument`
 - unparseable request payloads: `MalformedBody`, `Multipart`
 - request payloads Camber refused to keep reading: `RequestBodyLimit`, `RequestBodyUnreadable`
-- transport and integration failures: `Http`, `Tls`, `MessageQueue`
+- transport failures: `Http`, `Tls`
+- managed integration failures: `Integration(Arc<IntegrationError>)`
 - direct WebSocket termination: `WebSocketClosed` (behind the `ws` feature)
 - application-supplied: `Database`
 - startup and infrastructure configuration: `Config`, `Secret`, `Dns`, `Acme`, `Schedule`
@@ -52,7 +53,7 @@ fn report(error: &RuntimeError) {
 }
 ```
 
-- `iter()` lists every entry in rendering order: root scope, background children, resources, then the exporter. There is no accessor for a chosen entry. The runtime reports what failed and leaves the decision of what to act on with you.
+- `iter()` lists every entry in rendering order: root scope, background children, integrations, resources, then the exporter. There is no accessor for a chosen entry. The runtime reports what failed and leaves the decision of what to act on with you.
 - Rendering order is reproducible output and nothing else. It is not causal precedence: the first entry is no more responsible than the last, and nothing ranks the failure kinds against each other.
 - `len()` counts the entries. There is no `is_empty` — an aggregate exists only because at least one owner failed.
 - `Display` renders the count followed by every entry, so an operator line elects no owner either.
@@ -69,6 +70,46 @@ A blocked upgrade callback is the one child a flat server result does not speak 
 What the aggregate cannot claim: Camber's deadlines bound Camber's own waiting and escalation. Cooperative cancellation cannot preempt an async task that never yields, cannot stop application code running on a blocking or OS thread, and cannot prove that an abandoned synchronous callback has returned. A participant Camber could not prove finished is named rather than reported as stopped.
 
 If the user closure panics, the panic is the answer and nothing replaces it. Teardown still runs in full, the aggregate it produced is emitted as one `lifecycle failures displaced by an unwinding closure` event carrying the recorded count and the rendering of every entry, and the original payload then resumes.
+
+## Integration Failures
+
+`Integration` carries one typed account of a failed integration operation. The `Arc` lets the caller and the runtime's settlement hold the same error.
+
+```rust
+use camber::{Retryability, RuntimeError};
+
+fn report(error: &RuntimeError) {
+    let RuntimeError::Integration(failure) = error else { return };
+    println!("{} {} failed: {}", failure.kind(), failure.operation(), failure.failure());
+    if failure.retryability() == Retryability::OutcomeUnknown {
+        // The write was submitted. It may have taken effect.
+    }
+    for item in failure.cleanup() {
+        println!("unresolved record for {}: {:?}", item.domain(), item.record_id());
+    }
+}
+```
+
+- `kind()` is the closed `IntegrationKind`: `Nats`, `Sqs`, or `Dns01`.
+- `operation()` is the closed `IntegrationOperation`: `Connect`, `Ready`, `Publish`, `Subscribe`, `Receive`, `Delete`, `Close`, `ZoneLookup`, `CreateTxt`, `DeleteTxt`, `Provision`, `CacheRead`, `CacheWrite`, or `Renew`. `Publish` covers a NATS publish and an SQS send. `Delete` is an SQS message deletion. A DNS record deletion is `DeleteTxt`.
+- `failure()` is the closed `IntegrationFailure`: `InvalidConfig`, `Unavailable`, `PermissionDenied`, `Rejected`, `Busy`, `LimitExceeded`, `Timeout`, `Cancelled`, `Closed`, `OutcomeUnknown`, `CleanupIncomplete`, or `InvalidCertificate`.
+- `retryability()` is `Never`, `Safe`, or `OutcomeUnknown`. `Safe` means a repeat cannot apply the operation twice: nothing was submitted, the service refused the request before it took effect, or the operation only reads. `OutcomeUnknown` means a write was submitted and its result was lost, so the write is neither safe to repeat nor proven absent.
+- `instance_id()` is the runtime-local identity admission assigned. It is `None` when the failure came before admission.
+- `cleanup()` lists each record a DNS cleanup left unresolved, as a `CleanupItem` with `domain()`, `record_id()`, and `failure()`. `record_id()` is `None` for a create whose outcome was lost. The list is empty outside cleanup failures.
+
+### Report Budget and `Busy`
+
+A runtime keeps at most 256 integration report accounts. One account holds one operation's failure, or reserves room for it. Reserved and retained accounts count together.
+
+- Instance admission reserves one account for a construction failure or the eventual close. Each operation reserves one more before it submits anything.
+- Success releases its account. An ordinary failure releases its account when the waiter receives it. A failure sent to a waiter that is gone is retained.
+- A cleanup failure is retained, even after the caller receives it. A later successful renewal does not remove the records it names. Each account keeps at most 100 cleanup records.
+- A failed close is retained after its instance retires. A successful close releases its account.
+- Close, cancellation, and cleanup use the account they already hold. A full budget stops new work, not the settlement of accepted work.
+
+When the budget is full, admission and new operations fail with `Busy` and `Retryability::Safe`, before any effect. A refusal is not retained. Retained failures are never evicted, so if they fill the budget, new integration work stays `Busy` until the runtime ends. At shutdown the runtime moves the retained accounts into its lifecycle failures once, before any resource shuts down. Each entry names `LifecycleParticipant::Integration { kind, id }` and carries the typed error with its cleanup records. An instance whose work the forced stop could not get back is retained as a failed close with `Timeout`.
+
+Adapters choose these values from SDK error kinds, service error codes, and protocol status codes, never from diagnostic text. The third-party failure stays reachable through `std::error::Error::source`. `Display` and `Debug` never render it, because an SDK error can echo a token, credentials, a payload, a receipt handle, or a URL's userinfo and query. Each value also has one fixed lowercase name, which is the only form it takes in operator events and metric labels.
 
 ## Application-Supplied Variants
 
@@ -96,7 +137,7 @@ A handler error is not converted where it is raised. `IntoResponse` carries it t
 - `RuntimeError::ScopeClosed` with `503` and `service unavailable`
 - every other `RuntimeError` with `500` and exactly `internal server error`
 
-The `500` body is fixed, and so is each parse refusal's. Your error's text and its whole source chain go to the operator log, never to the peer. A parser names which part of the grammar failed; that account is operator detail, so the peer reads fixed text instead.
+The `500` body is fixed, and so is each parse refusal's. Your error's text and its whole source chain go to the operator log, never to the peer. The chain stops at an `IntegrationError`: the log records its redacted account and not the third-party source below it. `Integration` always answers `500` as an internal-service refusal, including from a middleware frame, and the rejection mapper never receives its source. A parser names which part of the grammar failed; that account is operator detail, so the peer reads fixed text instead.
 
 The same boundary answers a middleware frame that fails. `use_middleware` accepts a frame resolving to `Response` or to `Result<Response, RuntimeError>`, and the failing frame is classified where it failed rather than becoming a response nothing can classify.
 

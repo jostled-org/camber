@@ -308,9 +308,11 @@ impl<S> Transfer<S> {
     ///
     /// For the one consumer whose source carries something a transfer never
     /// does: tonic's response body ends with a trailer set, which carries no
-    /// payload byte and so never crosses this owner as a frame.
-    pub(super) const fn source(&self) -> &S {
-        &self.source
+    /// payload byte and so never crosses this owner as a frame. Mutable so that
+    /// consumer can take the set once the transfer has ended, rather than copy
+    /// it.
+    pub(super) const fn source_mut(&mut self) -> &mut S {
+        &mut self.source
     }
 }
 

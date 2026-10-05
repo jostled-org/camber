@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- *(serve)* `camber serve` validates the whole config before it has any
+  effect. A file that ran before can now be refused:
+  - Unknown fields fail, at the top level, in `[tls]`, and in each `[[site]]`.
+  - Two sites with the same canonical host fail, even when their ports differ.
+  - `proxy` must be an `http` or `https` URL without credentials, a query, or
+    a fragment.
+  - `health_check` requires `proxy`. `health_interval` requires
+    `health_check`.
+  - `dns_provider` accepts only `"cloudflare"`. `[tls]` refuses fields that
+    its mode does not use.
+  - The file must declare at least one `[[site]]`.
+  - `host` must be a canonical DNS name or an IP address, with an optional
+    port.
+  - `root` must be a readable directory.
+  - Under `auto = true`, a site whose host is an IP address fails.
+- *(serve)* `camber serve --help` lists every accepted field and the proxy URL
+  constraints.
+- *(config)* `Config` and `SiteConfig` no longer implement `Deserialize`. Call
+  `Config::load` to get a validated configuration.
+- *(config)* `Config::tls` returns the parsed `camber::config::TlsMode`, not
+  `TlsConfig`. Match on the mode. The `camber_cli::config::TlsConfig`
+  re-export is removed.
+
+### Fixed
+
+- *(serve)* DNS-01 prepares the zone of every site host, not only the first.
+- *(serve)* A site host with a port routes by its hostname.
+- *(serve)* An overlay site's local-file miss answers 503 while its upstream
+  health check fails, the same as its proxy routes.
+
 ## [0.8.5](https://github.com/jostled-org/camber/compare/camber-cli-v0.8.4...camber-cli-v0.8.5) - 2026-09-26
 
 ### Other

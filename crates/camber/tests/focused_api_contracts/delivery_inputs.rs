@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::delivery_fixture::{
-    FixtureRepo, HookRun, Identity, PedantVerify, Tool, ToolBin, ambient_executable,
-    assert_absent_from_system_path, isolated_command, logged_text, phase_hook, repository_file,
-    repository_root, run_bounded,
+    FixtureRepo, HookRun, INFRASTRUCTURE_STATUS, Identity, PedantVerify, Tool, ToolBin,
+    ambient_executable, assert_absent_from_system_path, isolated_command, logged_text, phase_hook,
+    repository_file, repository_root, run_bounded,
 };
 
 const SUPPLY_CHAIN_HOOK: &str = ".github/scripts/check-supply-chain.sh";
@@ -24,15 +24,13 @@ const FIXTURE_MANIFEST: &str = "crates/demo/fixtures/probe/Cargo.toml";
 const UNRECORDED_MANIFEST: &str = "crates/extra/Cargo.toml";
 const RECORDED_INPUTS: [&str; 4] = [LOCKFILE, ROOT_MANIFEST, MEMBER_MANIFEST, FIXTURE_MANIFEST];
 const REVIEWED_DEPENDENCY: &str = "\n[dependencies]\nhttpdate = \"1\"\n";
-/// The status every hook reserves for unavailable infrastructure, never for a
-/// policy answer about the tree.
-const INFRASTRUCTURE_STATUS: i32 = 75;
 const WEBPKI_EXCEPTION: &str = "error: rustls-webpki: target webpki has no complete source closure: [src/lib.rs declares mod test_utils] src/lib.rs declares mod test_utils: no source exists for the declared module (attempted src/test_utils.rs)";
 
-const WORKFLOW_PHASES: [&str; 9] = [
+const WORKFLOW_PHASES: [&str; 10] = [
     "hook-contract",
     "fmt",
     "clippy",
+    "features",
     "doc",
     "test",
     "deny",
@@ -504,6 +502,10 @@ impl WorkflowRepo {
         repo.write_executable(
             ".github/scripts/ci-selftest.sh",
             phase_hook("hook-contract"),
+        );
+        repo.write_executable(
+            ".github/scripts/check-feature-builds.sh",
+            phase_hook("features"),
         );
         repo.write_executable(
             ".github/scripts/check-pedant.sh",

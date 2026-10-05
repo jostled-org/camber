@@ -21,23 +21,29 @@ assert_output() {
     [ "${actual}" = "${expected}" ] || fail "${label}"
 }
 
-assert_workflow_entry() {
-    local pattern="$1" label="$2" status=0
-    rg -qF -- "${pattern}" "${ROOT}/.github/workflows/ci.yml" || status=$?
+assert_file_entry() {
+    local file="$1" pattern="$2" message="$3" status=0
+    rg -qF -- "${pattern}" "${ROOT}/${file}" || status=$?
     case "${status}" in
         0) return 0 ;;
-        1) fail "CI omits ${label}" ;;
+        1) fail "${message}" ;;
         *)
-            printf 'CI self-test: workflow search failed (rg exit %s)\n' \
-                "${status}" >&2
+            printf 'CI self-test: workflow search failed (rg exit %s) in %s\n' \
+                "${status}" "${file}" >&2
             return "${status}"
             ;;
     esac
+}
+assert_workflow_entry() {
+    assert_file_entry .github/workflows/ci.yml "$1" "CI omits $2"
 }
 
 check_hook_inventories() {
     local script
     for script in \
+        .github/scripts/check-feature-builds.sh \
+        .github/scripts/check-integration-test-budget.sh \
+        .github/scripts/check-local-integrations.sh \
         .github/scripts/check-pedant.sh \
         .github/scripts/check-supply-chain.sh \
         .github/scripts/reproduce-ci.sh \
@@ -55,9 +61,13 @@ check_hook_inventories() {
         $'camber-build\ncamber-macros\ncamber\ncamber-cli' \
         "$(camber_publishable_packages)" \
         'publishable package inventory drifted'
+    assert_output \
+        'package --locked -p camber-build -p camber-macros -p camber -p camber-cli' \
+        "$(camber_package_arguments)" \
+        'package channel does not verify the publishable set together'
 
     assert_output \
-        $'hook-contract\nfmt\nclippy\ndoc\ntest\ndeny\npedant-source\npedant-tests\nsupply-chain' \
+        $'hook-contract\nfmt\nclippy\nfeatures\ndoc\ntest\ndeny\npedant-source\npedant-tests\nsupply-chain' \
         "$(camber_workflow_checks)" \
         'workflow check inventory drifted'
 }
@@ -68,6 +78,8 @@ check_workflow_entries() {
     assert_workflow_entry \
         "run: cargo clippy --workspace --features \"\${CAMBER_CI_FEATURES}\" -- -D warnings" \
         'workspace lint check' || return $?
+    assert_workflow_entry 'run: .github/scripts/check-feature-builds.sh' \
+        'isolated optional feature builds' || return $?
     assert_workflow_entry 'cargo --config '\''build.rustdocflags=["-D","warnings"]'\'' doc' \
         'warning-denying API documentation check' || return $?
     assert_workflow_entry 'cargo test --workspace' \
@@ -76,6 +88,9 @@ check_workflow_entries() {
         'dependency policy check' || return $?
     assert_workflow_entry "CAMBER_CI_FEATURES: ${CAMBER_WORKFLOW_FEATURES}" \
         'the feature set reproduce-ci.sh builds' || return $?
+    assert_file_entry .github/scripts/verify-step.sh \
+        "CAMBER_FEATURES=\"${CAMBER_WORKFLOW_FEATURES}\"" \
+        'verify-step.sh drifted from the feature set reproduce-ci.sh builds' || return $?
     assert_workflow_entry "RUSTFLAGS: ${CAMBER_WORKFLOW_RUSTFLAGS}" \
         'the compiler flags reproduce-ci.sh builds with' || return $?
     assert_workflow_entry "'**/*.md'" 'Markdown change trigger' || return $?
@@ -131,16 +146,25 @@ check_dependency_input_inventory() {
     assert_output "${expected}" "${recorded}" 'dependency input record inventory drifted'
 }
 
-# Print every entry in the tool `record` that no pinned workflow tool reads.
+# Print every entry in the tool `record` that no pinned workflow tool or local
+# service reads, and every service image that is not pinned by digest.
 unconsumed_tool_records() {
-    local record="$1" line
+    local record="$1" line key value
     while IFS= read -r line || [ -n "${line}" ]; do
+        key=${line%% = *}
         case "${line}" in
             ''|'#'*) ;;
+            'image.'*' = "'*\")
+                value=${line#*' = "'}
+                listed "${key#image.}" camber_service_images \
+                    || printf 'no local service consumes image record entry: %s\n' "${key}"
+                pinned_image_reference "${value%\"}" \
+                    || printf 'image record entry is not pinned by version and digest: %s\n' \
+                        "${key}"
+                ;;
             *' = "'*\")
-                listed "${line%% = *}" camber_pinned_workflow_tools \
-                    || printf 'no pinned workflow tool consumes record entry: %s\n' \
-                        "${line%% = *}"
+                listed "${key}" camber_pinned_workflow_tools \
+                    || printf 'no pinned workflow tool consumes record entry: %s\n' "${key}"
                 ;;
             *) printf 'malformed workflow tool record line: %s\n' "${line}" ;;
         esac
@@ -148,7 +172,7 @@ unconsumed_tool_records() {
 }
 
 check_tool_records() {
-    local tool violations
+    local tool service violations
     violations=$(unconsumed_tool_records "${ROOT}/${WORKFLOW_TOOL_RECORD}") \
         || return $?
     [ -z "${violations}" ] || fail "workflow tool record drifted:"$'\n'"${violations}"
@@ -159,6 +183,12 @@ check_tool_records() {
     for tool in $(camber_installed_workflow_tools); do
         listed "${tool}" camber_pinned_workflow_tools \
             || fail "Cargo-installed workflow tool ${tool} is not a pinned tool"
+    done
+    for service in $(camber_service_images); do
+        pinned_service_image "${ROOT}" "${service}" >/dev/null \
+            || fail "no pinned image for local service ${service}"
+        ! listed "${service}" camber_installed_workflow_tools \
+            || fail "local service image ${service} is installed through Cargo"
     done
 }
 
@@ -204,6 +234,7 @@ command_tools() {
         *'cargo clippy'*) used='rustc cargo clippy' ;;
         *'cargo deny'*) used='rustc cargo cargo-deny' ;;
         *'cargo '*) used='rustc cargo' ;;
+        *check-feature-builds.sh*) used='rustc cargo' ;;
         *check-pedant.sh*|*check-supply-chain.sh*) used='pedant' ;;
         *ci-selftest.sh*) used='git rg' ;;
         *) used='' ;;
@@ -298,6 +329,7 @@ ci_selftest_main() {
     check_workflow_contract "${ROOT}/.github/workflows/ci.yml" || return $?
     bash "${ROOT}/.github/scripts/tests/ci-prerequisites.sh" || return $?
     bash "${ROOT}/.github/scripts/tests/external-evidence.sh" || return $?
+    bash "${ROOT}/.github/scripts/tests/verify-step.sh" || return $?
     printf 'CI self-test: PASS\n'
 }
 

@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use super::http::{HttpResponse, bounded, remaining};
+use super::http::{HttpResponse, POLL_INTERVAL, bounded, remaining};
 
 /// Build one HTTP/2 request head.
 ///
@@ -321,6 +321,49 @@ impl PersistentH2Client {
         read_answer(response, deadline).await
     }
 
+    /// Wait for the peer's `GOAWAY`, then require one more stream on this
+    /// connection to be refused.
+    ///
+    /// A draining server tells each open connection that it takes no new
+    /// streams. h2 records that and refuses every later stream locally, before
+    /// a frame is written, so the refusal read here is the server's own
+    /// `GOAWAY`. A connection that never hears one keeps opening streams, and
+    /// the bound reports it.
+    ///
+    /// # Errors
+    ///
+    /// When no `GOAWAY` arrived within the bound, the connection failed
+    /// another way, or the stream opened anyway.
+    pub async fn refused_after_goaway(
+        &mut self,
+        method: &str,
+        path: &str,
+        host: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<(), Box<str>> {
+        let announced = tokio::time::timeout(self.bound, async {
+            loop {
+                match self.sender.clone().ready().await {
+                    Ok(_open) => tokio::time::sleep(POLL_INTERVAL).await,
+                    Err(error) => return error,
+                }
+            }
+        })
+        .await
+        .map_err(|_| "no GOAWAY reached a connection its server is draining")?;
+        if !announced.is_go_away() {
+            return Err(format!("the connection failed before any GOAWAY: {announced}").into());
+        }
+        match self
+            .sender
+            .send_request(h2_request_head(method, path, host, headers), true)
+        {
+            Err(error) if error.is_go_away() => Ok(()),
+            Err(error) => Err(format!("the new stream failed without a GOAWAY: {error}").into()),
+            Ok(_opened) => Err("a new stream opened on a connection its server is draining".into()),
+        }
+    }
+
     /// Drop the sender, then join the driver exactly once.
     ///
     /// The driver is taken before the sender goes, so the `Drop` that runs on
@@ -352,19 +395,54 @@ impl PersistentH2Client {
     ///
     /// Bounded, because a case that still owes a stream would otherwise hang the
     /// whole binary here rather than say which claim it got wrong.
-    pub async fn close_settled(mut self) {
+    pub async fn close_settled(self) {
+        match self.join_ended().await {
+            DriverEnd::Absent => {}
+            DriverEnd::Joined(joined) => report_driver(joined),
+            DriverEnd::Outlived => {
+                panic!("the HTTP/2 connection did not end after its last stream was released")
+            }
+        }
+    }
+
+    /// Drop the sender, and read how a connection its server stopped ended.
+    ///
+    /// [`Self::close_settled`] for a case whose server stop is the stimulus.
+    /// A graceful stop sends `GOAWAY` and ends the connection cleanly. A forced
+    /// stop may close the transport without one, so a driver that ended on a
+    /// connection error has read the server's own disposition. A driver that
+    /// panicked, or a connection still open after the bound, is a fault.
+    ///
+    /// # Errors
+    ///
+    /// When the driver panicked or outlived the bound.
+    pub async fn close_stopped(self) -> Result<(), Box<str>> {
+        match self.join_ended().await {
+            DriverEnd::Absent | DriverEnd::Joined(Ok(_)) => Ok(()),
+            DriverEnd::Joined(Err(error)) => {
+                Err(format!("the HTTP/2 client driver did not end cleanly: {error}").into())
+            }
+            DriverEnd::Outlived => Err("the HTTP/2 connection outlived its stopped server".into()),
+        }
+    }
+
+    /// Drop the sender, and let the driver end itself within the bound.
+    ///
+    /// The driver is taken before the sender goes, so the `Drop` on the way out
+    /// has nothing to abort. A driver that outlives the bound is aborted here.
+    async fn join_ended(mut self) -> DriverEnd {
         let driver = self.driver.take();
         let bound = self.bound;
         drop(self);
         let Some(driver) = driver else {
-            return;
+            return DriverEnd::Absent;
         };
         let abort = driver.abort_handle();
         match tokio::time::timeout(bound, driver).await {
-            Ok(joined) => report_driver(joined),
+            Ok(joined) => DriverEnd::Joined(joined),
             Err(_) => {
                 abort.abort();
-                panic!("the HTTP/2 connection did not end after its last stream was released")
+                DriverEnd::Outlived
             }
         }
     }
@@ -429,6 +507,33 @@ impl H2RequestStream {
         }
     }
 
+    /// Offer one frame on a stream the peer may reset for any reason.
+    ///
+    /// [`Self::offer`] reads only a `NO_ERROR` reset as the peer's disposition,
+    /// because its rows prove refusals. A row that keeps one direction moving
+    /// while the other direction's owner resets the stream cannot know which
+    /// frame the reset meets. Here any reset of this one stream is the peer
+    /// stopping it. A connection failure is still a fault.
+    pub async fn offer_until_reset(&mut self, frame: &[u8], bound: Duration) -> H2Offer {
+        if stream_was_reset(&mut self.stream).await {
+            return H2Offer::PeerStopped;
+        }
+        let pushed = match await_credit(&mut self.stream, frame.len(), bound).await {
+            Credit::Granted => send_frame(&mut self.stream, frame, false).await,
+            Credit::Withheld => return H2Offer::Withheld,
+            Credit::Closed => return H2Offer::PeerStopped,
+            Credit::Failed(error) => FramePush::Failed(error),
+        };
+        match pushed {
+            FramePush::Failed(error)
+                if error.is_reset() || stream_was_reset(&mut self.stream).await =>
+            {
+                H2Offer::PeerStopped
+            }
+            pushed => offered(pushed),
+        }
+    }
+
     /// End this request body.
     ///
     /// Best effort: a peer that already refused has reset this stream, and the
@@ -444,11 +549,24 @@ impl H2RequestStream {
 
     /// Read this stream's answer.
     pub async fn answer(&mut self) -> HttpResponse {
-        let response = self
-            .response
+        self.try_answer().await.expect("no HTTP/2 response head")
+    }
+
+    /// Read this stream's answer, or report why the stream ended without one.
+    ///
+    /// [`Self::answer`] for a case whose claim is that this stream outlived a
+    /// fault elsewhere on its connection: a stream that fault took is the
+    /// case's failure to report, not a panic that skips its cleanup.
+    pub async fn try_answer(&mut self) -> Result<HttpResponse, h2::Error> {
+        let response = self.take_response();
+        try_read_answer(response, Instant::now() + self.bound).await
+    }
+
+    /// Take this stream's pending answer, which only one reader may read.
+    fn take_response(&mut self) -> h2::client::ResponseFuture {
+        self.response
             .take()
-            .expect("this HTTP/2 stream's answer was already read");
-        read_answer(response, Instant::now() + self.bound).await
+            .expect("this HTTP/2 stream's answer was already read")
     }
 
     /// Read this stream's committed head, leaving its body unread.
@@ -459,11 +577,7 @@ impl H2RequestStream {
     /// wire. This hands the read half back instead, so a case can commit the
     /// head, send more payload, and settle the download afterwards.
     pub async fn commit(&mut self) -> H2ReadHalf {
-        let response = self
-            .response
-            .take()
-            .expect("this HTTP/2 stream's answer was already read");
-        let response = bounded(response, self.bound, "HTTP/2 response head")
+        let response = bounded(self.take_response(), self.bound, "HTTP/2 response head")
             .await
             .expect("no HTTP/2 response head");
         let status = response.status().as_u16();
@@ -476,6 +590,9 @@ impl H2RequestStream {
         }
     }
 }
+
+/// What a settled download's failure names the body it was reading.
+const ANSWER_BODY: &str = "HTTP/2 answer body";
 
 /// The read half of one committed exchange, and what it ended on.
 ///
@@ -530,29 +647,61 @@ impl H2ReadHalf {
     /// fault: the status is already on the wire and no later owner can replace
     /// it. Trailers are read only for a stream that ended, because a reset
     /// stream has none to carry.
-    pub async fn settle(mut self) -> H2Settled {
+    pub async fn settle(self) -> H2Settled {
+        let (settled, ended) = self.settle_ending().await;
+        let reset = ended_in_reset(ended, ANSWER_BODY, settled.bytes);
+        H2Settled { reset, ..settled }
+    }
+
+    /// Read what is left of this download, where the server may take the
+    /// connection away under it.
+    ///
+    /// [`Self::settle`] for a case whose server is forced to stop: its abort
+    /// closes the transport, and that collapse is the case's outcome rather
+    /// than a fault. `Err` carries what the transport reported.
+    pub async fn settle_or_collapse(self) -> Result<H2Settled, Box<str>> {
+        let (settled, ended) = self.settle_ending().await;
+        match body_end(ended) {
+            H2BodyEnd::Ended => Ok(settled),
+            H2BodyEnd::Reset(_) => Ok(H2Settled {
+                reset: true,
+                ..settled
+            }),
+            H2BodyEnd::Collapsed(failure) => Err(failure),
+        }
+    }
+
+    /// Drain this download, and hand back what arrived beside how it ended.
+    ///
+    /// Trailers are read only for a stream that ended, because a reset or a
+    /// collapsed stream has none to carry. A trailer read that fails is how the
+    /// stream ended. The ending is the caller's to judge.
+    async fn settle_ending(mut self) -> (H2Settled, Result<(), h2::Error>) {
         let deadline = Instant::now() + self.bound;
         let mut bytes = 0;
-        let ended = drain_body(&mut self.body, deadline, "HTTP/2 answer body", |chunk| {
+        let drained = drain_body(&mut self.body, deadline, ANSWER_BODY, |chunk| {
             bytes += chunk.len();
         })
         .await;
-        let reset = ended_in_reset(ended, "HTTP/2 answer body", bytes);
-        let trailers = match reset {
-            true => Box::default(),
-            false => bounded(self.body.trailers(), remaining(deadline), "HTTP/2 trailers")
-                .await
-                .ok()
-                .flatten()
-                .map_or_else(Box::default, |trailers| header_pairs(&trailers)),
+        let read = match drained {
+            Ok(()) => bounded(self.body.trailers(), remaining(deadline), "HTTP/2 trailers").await,
+            Err(error) => Err(error),
         };
-        H2Settled {
+        let (ended, trailers) = match read {
+            Ok(trailers) => (
+                Ok(()),
+                trailers.map_or_else(Box::default, |trailers| header_pairs(&trailers)),
+            ),
+            Err(error) => (Err(error), Box::default()),
+        };
+        let settled = H2Settled {
             status: self.status,
             headers: self.headers,
             bytes,
-            reset,
+            reset: false,
             trailers,
-        }
+        };
+        (settled, ended)
     }
 }
 
@@ -733,13 +882,25 @@ async fn push_failure(stream: &mut h2::SendStream<Bytes>, error: h2::Error) -> F
 }
 
 /// Whether the peer has already ended this stream gracefully.
+async fn peer_ended_the_stream(stream: &mut h2::SendStream<Bytes>) -> bool {
+    reset_reason(stream).await == Some(h2::Reason::NO_ERROR)
+}
+
+/// Whether the peer has reset this stream, for any reason.
+async fn stream_was_reset(stream: &mut h2::SendStream<Bytes>) -> bool {
+    reset_reason(stream).await.is_some()
+}
+
+/// The reason the peer reset this stream with, if it has.
 ///
 /// Polled once rather than awaited: what this asks is the disposition the
 /// stream carries now, and awaiting would park the caller on a stream that is
 /// still open until the peer got around to resetting it.
-async fn peer_ended_the_stream(stream: &mut h2::SendStream<Bytes>) -> bool {
-    let reset = std::future::poll_fn(|cx| Poll::Ready(stream.poll_reset(cx))).await;
-    matches!(reset, Poll::Ready(Ok(reason)) if reason == h2::Reason::NO_ERROR)
+async fn reset_reason(stream: &mut h2::SendStream<Bytes>) -> Option<h2::Reason> {
+    match std::future::poll_fn(|cx| Poll::Ready(stream.poll_reset(cx))).await {
+        Poll::Ready(Ok(reason)) => Some(reason),
+        Poll::Ready(Err(_)) | Poll::Pending => None,
+    }
 }
 
 /// Read one HTTP/2 response body frame by frame, and report what it ended on.
@@ -861,6 +1022,19 @@ async fn join_driver(driver: tokio::task::JoinHandle<Result<(), h2::Error>>) {
     report_driver(driver.await);
 }
 
+/// What one joined connection driver returned.
+type DriverJoin = Result<Result<(), h2::Error>, tokio::task::JoinError>;
+
+/// How a driver left to end its own connection finished.
+enum DriverEnd {
+    /// The connection had no driver left to join.
+    Absent,
+    /// The driver ended inside the bound with this result.
+    Joined(DriverJoin),
+    /// The driver outlived the bound and was aborted.
+    Outlived,
+}
+
 /// Report the four outcomes one joined driver can have.
 ///
 /// Shared by the aborted close and the settled one, so the two teardown paths
@@ -868,7 +1042,7 @@ async fn join_driver(driver: tokio::task::JoinHandle<Result<(), h2::Error>>) {
 /// driver's own cancellation are accepted: a protocol failure or a panic inside
 /// it is a fault, and a join that only checked for cancellation would discard
 /// both.
-fn report_driver(joined: Result<Result<(), h2::Error>, tokio::task::JoinError>) {
+fn report_driver(joined: DriverJoin) {
     match joined {
         Ok(Ok(())) => {}
         Err(error) if error.is_cancelled() => {}

@@ -63,6 +63,7 @@ Use `http::serve(...)` by itself for the default case. Wrap it in `runtime::buil
 - [Error Reference](docs/reference/error.md)
 - [Config Reference](docs/reference/config.md)
 - [TLS Reference](docs/reference/tls.md)
+- [Integrations Reference](docs/reference/integrations.md)
 - [Net Reference](docs/reference/net.md)
 - [Resource Reference](docs/reference/resource.md)
 - [Scheduling Reference](docs/reference/schedule.md)
@@ -74,6 +75,17 @@ Use `http::serve(...)` by itself for the default case. Wrap it in `runtime::buil
 If you're evaluating Camber as a library, start with [Tokio/Axum to Camber](docs/guides/tokio-to-camber.md) or the [Reference](docs/reference/README.md).
 
 The README is the overview. `docs/reference/` and docs.rs are the exhaustive public surface.
+
+## Integrations
+
+Optional features add async integrations that the runtime owns:
+
+- `nats` — Core NATS publish, subscribe, and queue groups, with opt-in
+  publishing acknowledged by an existing JetStream stream.
+- `sqs` — Amazon SQS Standard queues: send, receive, delete. No FIFO.
+- `dns01` — ACME DNS-01 certificates through the built-in Cloudflare provider or your own `DnsProvider`.
+
+The `grpc` feature serves native tonic services in all four RPC forms beside your HTTP routes. See the [Integrations Reference](docs/reference/integrations.md) for what each operation's success means.
 
 ## Reverse Proxy (Homelab / WIP)
 
@@ -290,11 +302,12 @@ The compiler still rejects builds that enable both `jemalloc` and `mimalloc`.
 Normal CI includes benchmark parsers, reports, phase ordering, and local server tests.
 It does not enforce performance thresholds on shared runners.
 
-The External Evidence workflow runs NATS, Docker build, Go server, and load-tool checks when code or their workflow changes.
+The External Evidence workflow runs NATS, SQS, local DNS, Docker build, Go server, and load-tool checks when code or their workflow changes.
 It has no scheduled runs. Its load checks exercise the production adapters for pinned wrk and oha versions.
 They check tool compatibility, not comparative framework performance.
 
-Run the DNS lane manually after setting repository secrets `ACME_TEST_DOMAIN` and `CF_TOKEN`.
+The `dns` lane runs on affected pushes and pull requests, or by manual dispatch. It proves the DNS-01 path against local Pebble and challtestsrv, with no cloud account.
+Run the `dns_public` lane manually after setting repository secrets `ACME_TEST_DOMAIN` and `CF_TOKEN`.
 It uses ACME staging and creates temporary DNS records. Missing secrets fail before compilation.
 Each external test must release its resources and write a separate cleanup witness.
 

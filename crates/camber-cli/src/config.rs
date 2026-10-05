@@ -1,65 +1,101 @@
-/// Re-export of the shared TLS config block used by the proxy config.
-pub use camber::config::TlsConfig;
+use camber::config::{TlsConfig, TlsMode};
 use serde::Deserialize;
 use std::path::Path;
 
-/// Top-level proxy configuration loaded from TOML.
-#[derive(Debug, Deserialize)]
-pub struct Config {
+mod authority;
+mod site;
+mod upstream;
+
+pub use site::SiteConfig;
+
+/// The proxy configuration file exactly as it spells itself.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfig {
     listen: Option<Box<str>>,
     connection_limit: Option<usize>,
     tls: Option<TlsConfig>,
     #[serde(rename = "site")]
-    sites: Vec<SiteConfig>,
+    sites: Box<[site::RawSite]>,
 }
 
-/// Per-site virtual host configuration.
-#[derive(Debug, Deserialize)]
-pub struct SiteConfig {
-    host: Box<str>,
-    proxy: Option<Box<str>>,
-    root: Option<Box<str>>,
-    health_check: Option<Box<str>>,
-    health_interval: Option<u64>,
+/// Top-level proxy configuration loaded from TOML.
+///
+/// Only [`Config::load`] builds one, and it validates the whole file first.
+#[derive(Debug)]
+pub struct Config {
+    listen: Option<Box<str>>,
+    connection_limit: Option<usize>,
+    tls: Option<TlsMode>,
+    sites: Box<[SiteConfig]>,
 }
 
 impl Config {
     /// Load, parse, and validate a proxy config file.
+    ///
+    /// Reads the file and lists each site root. Nothing else: no secret is
+    /// loaded, no upstream is probed, no certificate is requested, and no
+    /// listener is bound. Unknown fields, invalid or duplicate site hosts,
+    /// malformed proxy URLs and health checks, unreadable roots, an
+    /// inconsistent TLS block, and certificate names the TLS mode cannot
+    /// prove are all refused here.
     pub fn load(path: &Path) -> Result<Self, String> {
-        let config: Config = camber::config::load_config(path).map_err(|e| e.to_string())?;
-        config.validate()?;
+        let raw: RawConfig = camber::config::load_config(path).map_err(|e| e.to_string())?;
+        Self::admit(raw)
+    }
+
+    fn admit(raw: RawConfig) -> Result<Self, String> {
+        if raw.connection_limit == Some(0) {
+            return Err("connection_limit must be at least 1".to_owned());
+        }
+        let sites = site::admit_sites(raw.sites)?;
+        let tls = raw
+            .tls
+            .as_ref()
+            .map(TlsConfig::mode)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let config = Self {
+            sites,
+            listen: raw.listen,
+            connection_limit: raw.connection_limit,
+            tls,
+        };
+        config.check_certificate_names()?;
         Ok(config)
     }
 
-    fn validate(&self) -> Result<(), String> {
-        if self.connection_limit == Some(0) {
-            return Err("connection_limit must be at least 1".to_owned());
-        }
-
-        for site in &self.sites {
-            if site.health_interval == Some(0) {
-                return Err(format!(
-                    "site \"{}\" health_interval must be at least 1",
-                    site.host
-                ));
+    /// Hand the certificate names an automatic mode needs to the ACME owner
+    /// for its challenge.
+    fn check_certificate_names(&self) -> Result<(), String> {
+        let checked = match &self.tls {
+            None | Some(TlsMode::Manual { .. }) => return Ok(()),
+            Some(TlsMode::TlsAlpn(_)) => {
+                let names = self.dns_certificate_names()?;
+                camber::acme::AcmeConfig::new("camber", names.iter().copied()).validate()
             }
-
-            match (&site.proxy, &site.root) {
-                (None, None) => {
-                    return Err(format!(
-                        "site \"{}\" must have at least \"proxy\" or \"root\"",
-                        site.host
-                    ));
-                }
-                _ => {}
+            Some(TlsMode::Dns01 { .. }) => {
+                let names = self.dns_certificate_names()?;
+                camber::dns01::AcmeDns01::new("camber", names.iter().copied()).validate()
             }
-        }
+        };
+        checked.map_err(|e| e.to_string())
+    }
 
-        if let Some(tls) = &self.tls {
-            tls.validate().map_err(|e| e.to_string())?;
+    /// The automatic TLS certificate names. Refuses an IP site, which no
+    /// ACME challenge certifies.
+    fn dns_certificate_names(&self) -> Result<Box<[&str]>, String> {
+        match self
+            .sites
+            .iter()
+            .find(|site| site.certificate_name().is_none())
+        {
+            Some(site) => Err(format!(
+                "site \"{}\" is an IP address; automatic TLS certifies DNS names only",
+                site.host()
+            )),
+            None => Ok(self.auto_tls_domains()),
         }
-
-        Ok(())
     }
 
     /// Return the bind address for the proxy.
@@ -74,8 +110,8 @@ impl Config {
         self.connection_limit
     }
 
-    /// Return the configured TLS block, if any.
-    pub fn tls(&self) -> Option<&TlsConfig> {
+    /// Return the TLS mode the validated `[tls]` block selects, if any.
+    pub fn tls(&self) -> Option<&TlsMode> {
         self.tls.as_ref()
     }
 
@@ -84,40 +120,13 @@ impl Config {
         &self.sites
     }
 
-    /// Collect domain names from all site host fields.
-    /// Used when auto-TLS is enabled to pass domains to the ACME provider.
+    /// Collect the certificate names automatic TLS requests: each DNS site
+    /// host without its port, in site order. Site admission refuses a
+    /// repeated host, so each name appears once.
     pub fn auto_tls_domains(&self) -> Box<[&str]> {
         self.sites
             .iter()
-            .map(|s| s.host())
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-    }
-}
-
-impl SiteConfig {
-    /// Return the host name matched by this site.
-    pub fn host(&self) -> &str {
-        &self.host
-    }
-
-    /// Return the proxy upstream URL, if configured.
-    pub fn proxy(&self) -> Option<&str> {
-        self.proxy.as_deref()
-    }
-
-    /// Return the local static file root, if configured.
-    pub fn root(&self) -> Option<&str> {
-        self.root.as_deref()
-    }
-
-    /// Return the health check path, if configured.
-    pub fn health_check(&self) -> Option<&str> {
-        self.health_check.as_deref()
-    }
-
-    /// Return the health check interval in seconds, if configured.
-    pub fn health_interval(&self) -> Option<u64> {
-        self.health_interval
+            .filter_map(SiteConfig::certificate_name)
+            .collect()
     }
 }

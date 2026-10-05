@@ -77,6 +77,11 @@ impl ShutdownOwner {
     pub(crate) fn resource(name: &Arc<str>) -> Self {
         Self::Runtime(LifecycleParticipant::Resource(Arc::clone(name)))
     }
+
+    /// The shared-clock owner one admitted integration settles under.
+    pub(crate) const fn integration(kind: crate::IntegrationKind, id: u64) -> Self {
+        Self::Runtime(LifecycleParticipant::Integration { kind, id })
+    }
 }
 
 /// The bounded name each shared-clock owner is reported under.

@@ -101,11 +101,10 @@ fn final_send_race_yields_exactly_one_cause_and_no_leak() {
     // channel refused means the body was already gone, which is the peer's
     // close and nothing else.
     match (observed.send_landed, first) {
-        (false, DisconnectCause::PeerDisconnect) => {}
+        (_, DisconnectCause::PeerDisconnect) | (true, DisconnectCause::Completed) => {}
         (false, cause) => panic!(
             "the final send lost the race to the peer's close, but the signal resolved {cause:?}"
         ),
-        (true, DisconnectCause::PeerDisconnect | DisconnectCause::Completed) => {}
         (true, cause) => panic!(
             "an accepted final send resolved outside the two causes the race orders between: {cause:?}"
         ),

@@ -1,5 +1,8 @@
+use camber::config::{AcmeSettings, TlsMode};
 use camber_cli::config::Config;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::CliError;
 
@@ -21,161 +24,123 @@ pub fn run(config_path: &Path) -> Result<(), CliError> {
 
 fn apply_tls(
     builder: camber::RuntimeBuilder,
-    tls: &camber_cli::config::TlsConfig,
+    tls: &TlsMode,
     config: &Config,
 ) -> Result<camber::RuntimeBuilder, CliError> {
-    match (
-        tls.auto(),
-        tls.email(),
-        tls.dns_provider(),
-        tls.cert(),
-        tls.key(),
-    ) {
-        (true, Some(email), Some(_), _, _) => apply_dns01_tls(builder, tls, config, email),
-        (true, Some(email), None, _, _) => apply_http01_tls(builder, tls, config, email),
-        (true, None, _, _, _) => Err(CliError::Config("tls: auto = true requires email".into())),
-        (false, _, _, Some(cert), Some(key)) => {
-            Ok(builder.tls_cert(Path::new(cert)).tls_key(Path::new(key)))
+    match tls {
+        TlsMode::Manual { cert, key } => Ok(builder
+            .tls_cert(Path::new(&**cert))
+            .tls_key(Path::new(&**key))),
+        TlsMode::TlsAlpn(acme) => Ok(builder.tls_auto(apply_acme_settings(
+            camber::acme::AcmeConfig::new("camber", config.auto_tls_domains()),
+            acme,
+            |cfg, e| cfg.email(e),
+            |cfg, s| cfg.staging(s),
+            |cfg, d| cfg.cache_dir(d),
+        ))),
+        TlsMode::Dns01 { acme, token } => {
+            // Every site's name is certified, and each prepares its own zone.
+            // `Config::load` already validated these names, so a refused
+            // configuration never reaches the secret source.
+            let acme = apply_acme_settings(
+                camber::dns01::AcmeDns01::new("camber", config.auto_tls_domains()),
+                acme,
+                |cfg, e| cfg.email(e),
+                |cfg, s| cfg.staging(s),
+                |cfg, d| cfg.cache_dir(d),
+            );
+            let token = camber::secret::load_secret(token)
+                .map_err(|e| CliError::Config(e.to_string().into()))?;
+            Ok(builder.tls_auto_dns01(acme, token))
         }
-        _ => Err(CliError::Config(
-            "tls: both cert and key must be provided".into(),
-        )),
     }
 }
 
-fn apply_http01_tls(
-    builder: camber::RuntimeBuilder,
-    tls: &camber_cli::config::TlsConfig,
-    config: &Config,
-    email: &str,
-) -> Result<camber::RuntimeBuilder, CliError> {
-    let domains = config.auto_tls_domains();
-    let acme_config = build_acme_http01(domains, email, tls.staging(), tls.cache_dir());
-    Ok(builder.tls_auto(acme_config))
-}
-
-fn build_acme_http01(
-    domains: impl IntoIterator<Item = impl Into<Box<str>>>,
-    email: &str,
-    staging: bool,
-    cache_dir: Option<&str>,
-) -> camber::acme::AcmeConfig {
-    apply_acme_base(
-        camber::acme::AcmeConfig::new("camber", domains),
-        email,
-        staging,
-        cache_dir,
-        |cfg, e| cfg.email(e),
-        |cfg, s| cfg.staging(s),
-        |cfg, d| cfg.cache_dir(d),
-    )
-}
-
-fn apply_dns01_tls(
-    builder: camber::RuntimeBuilder,
-    tls: &camber_cli::config::TlsConfig,
-    config: &Config,
-    email: &str,
-) -> Result<camber::RuntimeBuilder, CliError> {
-    let domains = config.auto_tls_domains();
-    let first_host: Box<str> = (*domains
-        .first()
-        .ok_or_else(|| CliError::Config("tls: no site hosts for DNS-01".into()))?)
-    .into();
-
-    let token = load_dns_token(tls)?;
-
-    let acme = build_acme_dns01(domains, email, tls.staging(), tls.cache_dir());
-
-    Ok(builder.tls_auto_dns01(acme, token, first_host))
-}
-
-fn build_acme_dns01(
-    domains: impl IntoIterator<Item = impl Into<Box<str>>>,
-    email: &str,
-    staging: bool,
-    cache_dir: Option<&str>,
-) -> camber::dns01::AcmeDns01 {
-    apply_acme_base(
-        camber::dns01::AcmeDns01::new("camber", domains),
-        email,
-        staging,
-        cache_dir,
-        |cfg, e| cfg.email(e),
-        |cfg, s| cfg.staging(s),
-        |cfg, d| cfg.cache_dir(d),
-    )
-}
-
-fn apply_acme_base<T>(
+/// Apply the shared ACME settings to either challenge's configuration.
+fn apply_acme_settings<T>(
     base: T,
-    email: &str,
-    staging: bool,
-    cache_dir: Option<&str>,
+    acme: &AcmeSettings,
     set_email: fn(T, &str) -> T,
     set_staging: fn(T, bool) -> T,
     set_cache_dir: fn(T, &str) -> T,
 ) -> T {
-    let configured = set_staging(set_email(base, email), staging);
-    match cache_dir {
+    let configured = set_staging(set_email(base, &acme.email), acme.staging);
+    match acme.cache_dir.as_deref() {
         Some(dir) => set_cache_dir(configured, dir),
         None => configured,
     }
 }
 
-/// Build an overlay handler that serves local files first, then falls back to proxy.
-fn overlay_handler(
-    base_dir: std::sync::Arc<std::path::Path>,
-    backend: std::sync::Arc<str>,
-) -> impl Fn(
-    &camber::http::Request,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = camber::http::Response> + Send>>
-+ Send
-+ Sync
-+ 'static {
-    move |req: &camber::http::Request| {
-        let raw_path = req.param("proxy_path").unwrap_or("");
-        let file_path: Box<str> = match raw_path.is_empty() {
-            true => "index.html".into(),
-            false => raw_path.into(),
-        };
-        let base = std::sync::Arc::clone(&base_dir);
-        let proxy_fut = camber::http::proxy_forward(req, &backend, "");
-        // No `spawn_blocking` here: the static-file entry point offloads its own
-        // filesystem work, so wrapping it would only put one blocking thread in
-        // front of another.
-        Box::pin(async move {
-            match camber::http::serve_file(&base, &file_path).await {
-                Ok(file_resp) if file_resp.status() != 404 => file_resp,
-                Ok(_) => proxy_fut.await,
-                // The overlay still falls back, but a refused file is a
-                // configuration answer — a crossed `ByteBoundary::StaticFile`
-                // or an unreadable root — and it reaches the operator rather
-                // than vanishing behind an upstream response.
-                Err(error) => {
-                    camber::tracing::warn!(
-                        %file_path,
-                        %error,
-                        "overlay file refused; falling back to the proxy"
-                    );
-                    proxy_fut.await
-                }
+/// One overlay site's shared state: its local root, its upstream, and the
+/// health authority its streaming proxy routes also read.
+struct OverlaySite {
+    base_dir: Arc<Path>,
+    backend: Arc<str>,
+    health: Option<Arc<AtomicBool>>,
+}
+
+/// What an overlay fallback answers while the site's upstream is unhealthy.
+///
+/// The same status and body the routed proxy refusal answers. The routed
+/// refusal also carries `X-Request-Id`; this one does not, because a handler
+/// cannot raise that refusal itself.
+const UNHEALTHY_BODY: &str = "service unavailable";
+
+/// Serve one overlay request: local file first, then fall back to proxy.
+fn overlay(
+    site: &Arc<OverlaySite>,
+    req: &camber::http::Request,
+) -> impl std::future::Future<Output = camber::http::HandlerOutcome> + Send + use<> {
+    let raw_path = req.param("proxy_path").unwrap_or("");
+    let file_path: Box<str> = match raw_path.is_empty() {
+        true => "index.html".into(),
+        false => raw_path.into(),
+    };
+    let site = Arc::clone(site);
+    let proxy_fut = camber::http::proxy_forward(req, &site.backend, "");
+    // No `spawn_blocking` here: the static-file entry point offloads its own
+    // filesystem work, so wrapping it would only put one blocking thread in
+    // front of another.
+    async move {
+        match camber::http::serve_file(&site.base_dir, &file_path).await {
+            Ok(file_resp) if file_resp.status() != 404 => Ok(file_resp),
+            Ok(_) => overlay_fallback(&site, proxy_fut).await,
+            // The overlay still falls back, but a refused file is a
+            // configuration answer — a crossed `ByteBoundary::StaticFile`
+            // or an unreadable root — and it reaches the operator rather
+            // than vanishing behind an upstream response.
+            Err(error) => {
+                camber::tracing::warn!(
+                    %file_path,
+                    %error,
+                    "overlay file refused; falling back to the proxy"
+                );
+                overlay_fallback(&site, proxy_fut).await
             }
-        })
+        }
     }
 }
 
-fn load_dns_token(tls: &camber_cli::config::TlsConfig) -> Result<Box<str>, CliError> {
-    let secret_ref = match (tls.dns_api_token_env(), tls.dns_api_token_file()) {
-        (Some(env), None) => camber::secret::SecretRef::Env(env.into()),
-        (None, Some(file)) => camber::secret::SecretRef::File(file.into()),
-        _ => {
-            return Err(CliError::Config(
-                "tls: dns_provider requires exactly one token source".into(),
-            ));
-        }
-    };
-    camber::secret::load_secret(&secret_ref).map_err(|e| CliError::Config(e.to_string().into()))
+/// Forward a local miss, or refuse it while the site's upstream is unhealthy.
+///
+/// The health authority is read here, at the fallback, so a local hit never
+/// depends on the upstream's state.
+async fn overlay_fallback(
+    site: &OverlaySite,
+    proxy_fut: impl std::future::Future<Output = camber::http::Response>,
+) -> camber::http::HandlerOutcome {
+    match upstream_unhealthy(site.health.as_deref()) {
+        true => camber::http::Response::text(503, UNHEALTHY_BODY),
+        false => Ok(proxy_fut.await),
+    }
+}
+
+/// Whether a site's health authority holds its upstream unhealthy.
+///
+/// `None` is a site with no health check, which is never unhealthy. The load
+/// matches the routed proxy's own read of the same flag.
+fn upstream_unhealthy(health: Option<&AtomicBool>) -> bool {
+    health.is_some_and(|flag| !flag.load(Ordering::Relaxed))
 }
 
 fn serve_from_config(config: &Config) -> Result<(), CliError> {
@@ -186,10 +151,12 @@ fn serve_from_config(config: &Config) -> Result<(), CliError> {
 
         match (site.proxy(), site.root()) {
             (Some(backend), Some(root)) => {
-                register_overlay_site(&mut router, site, backend, root)?;
+                let health = spawn_site_health(site, backend)?;
+                register_overlay_site(&mut router, backend, root, health);
             }
             (Some(backend), None) => {
-                register_proxy_site(&mut router, site, backend)?;
+                let health = spawn_site_health(site, backend)?;
+                register_streaming_proxy(&mut router, backend, health);
             }
             (None, Some(root)) => {
                 router.static_files("", root);
@@ -197,7 +164,7 @@ fn serve_from_config(config: &Config) -> Result<(), CliError> {
             (None, None) => {}
         }
 
-        host_router.add(site.host(), router);
+        host_router.add(site.routing_host(), router);
     }
 
     let listener = camber::net::listen(config.listen())?;
@@ -207,73 +174,67 @@ fn serve_from_config(config: &Config) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Register streaming proxy routes with optional health checking.
-fn register_streaming_proxy(
-    router: &mut camber::http::Router,
+/// Start the site's health authority, if it declares a health check.
+///
+/// The returned flag is the site's one authority: every route that reaches
+/// the upstream reads it, so no path forwards a request another path refuses.
+fn spawn_site_health(
     site: &camber_cli::config::SiteConfig,
     backend: &str,
-) -> Result<(), CliError> {
+) -> Result<Option<Arc<AtomicBool>>, CliError> {
     match site.health_check() {
         Some(path) => {
             let interval = std::time::Duration::from_secs(site.health_interval().unwrap_or(10));
             let healthy = camber::runtime::block_on(camber::http::spawn_health_checker(
                 backend, path, interval,
             ))?;
-            router.proxy_checked_stream("", backend, healthy);
+            Ok(Some(healthy))
         }
-        None => {
-            router.proxy_stream("", backend);
-        }
+        None => Ok(None),
     }
-    Ok(())
 }
 
-/// Register a proxy-only site using streaming proxy.
-fn register_proxy_site(
+/// Register streaming proxy routes under the site's health authority, if any.
+fn register_streaming_proxy(
     router: &mut camber::http::Router,
-    site: &camber_cli::config::SiteConfig,
     backend: &str,
-) -> Result<(), CliError> {
-    register_streaming_proxy(router, site, backend)
+    health: Option<Arc<AtomicBool>>,
+) {
+    match health {
+        Some(healthy) => router.proxy_checked_stream("", backend, healthy),
+        None => router.proxy_stream("", backend),
+    }
 }
 
 /// Register a site with both proxy and root using the local-file overlay.
 ///
 /// GET/HEAD requests try the local file first; if the file does not exist,
 /// the request falls back to the proxy backend. Non-GET/HEAD requests
-/// always go to the backend via the streaming proxy path.
+/// always go to the backend via the streaming proxy path. Both paths read
+/// the same health authority.
 fn register_overlay_site(
     router: &mut camber::http::Router,
-    site: &camber_cli::config::SiteConfig,
     backend: &str,
     root: &str,
-) -> Result<(), CliError> {
+    health: Option<Arc<AtomicBool>>,
+) {
     // Register streaming proxy for all methods first.
     // The GET/HEAD handlers will be overridden below.
-    register_streaming_proxy(router, site, backend)?;
+    register_streaming_proxy(router, backend, health.as_ref().map(Arc::clone));
+
+    let site = Arc::new(OverlaySite {
+        base_dir: Arc::from(Path::new(root)),
+        backend: backend.into(),
+        health,
+    });
 
     // Override GET and HEAD with the overlay handler: local file first, proxy fallback.
     // The wildcard name must match the proxy_stream registration (proxy_path).
-    let base_dir: std::sync::Arc<std::path::Path> =
-        std::sync::Arc::from(std::path::PathBuf::from(root).into_boxed_path());
-    let backend_arc: std::sync::Arc<str> = backend.into();
-
-    // Override both wildcard and exact root for GET and HEAD.
-    // insert_proxy_routes registers "/*proxy_path" and "/", so we must
-    // override both to ensure "/" serves index.html from the local root.
-    let get_base = std::sync::Arc::clone(&base_dir);
-    let get_backend = std::sync::Arc::clone(&backend_arc);
-    router.get("/*proxy_path", overlay_handler(get_base, get_backend));
-
-    let root_base = std::sync::Arc::clone(&base_dir);
-    let root_backend = std::sync::Arc::clone(&backend_arc);
-    router.get("/", overlay_handler(root_base, root_backend));
-
-    let head_base = std::sync::Arc::clone(&base_dir);
-    let head_backend = std::sync::Arc::clone(&backend_arc);
-    router.head("/*proxy_path", overlay_handler(head_base, head_backend));
-
-    router.head("/", overlay_handler(base_dir, backend_arc));
-
-    Ok(())
+    // insert_proxy_routes registers "/*proxy_path" and "/", so both are
+    // overridden to ensure "/" serves index.html from the local root.
+    let handler = move |req: &camber::http::Request| overlay(&site, req);
+    router.get("/*proxy_path", handler.clone());
+    router.get("/", handler.clone());
+    router.head("/*proxy_path", handler.clone());
+    router.head("/", handler);
 }

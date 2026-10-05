@@ -1,10 +1,24 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use crate::scripted_upstream::{ForwardedRequest, ScriptedUpstream};
 use crate::support::FixtureError;
 use crate::support::http::{
-    Backend, HttpResponse, connect_unix, read_response, request_unix, write_request,
+    Backend, HttpResponse, connect_unix, read_response, request_unix, status_code, write_request,
 };
 use crate::support::process::{ChildGuard, ReadinessTarget, ReapProbe};
+
+/// The declared Step 16 red diagnostic: an overlay fallback forwarded while
+/// the site's health authority held the upstream unhealthy.
+const OVERLAY_BYPASS: &str = "M9 unhealthy overlay reached the upstream";
+/// How long a scripted upstream may take to answer the next probe. The CLI's
+/// shortest interval is one second, so this bounds a hang, not a cadence.
+const PROBE_BOUND: Duration = Duration::from_secs(10);
+/// How long the serve child may take to publish a state its probe already read.
+const COMMIT_BOUND: Duration = Duration::from_secs(10);
+const COMMIT_POLL: Duration = Duration::from_millis(20);
+const HEAD_RESPONSE_LIMIT: u64 = 64 * 1024;
 
 struct ServeFixture {
     child: ChildGuard,
@@ -48,6 +62,20 @@ impl ServeFixture {
         Ok(request_unix(&self.socket_path, method, host, path)?)
     }
 
+    /// Send a HEAD request and return its status. A HEAD response declares a
+    /// length it never sends, so this reads to the server's close instead of
+    /// to the declared length.
+    fn head_status(&self, host: &str, path: &str) -> Result<u16, FixtureError> {
+        let mut stream = self.connect()?;
+        write_request(&mut stream, "HEAD", host, path, true)?;
+        let mut response = Vec::new();
+        stream
+            .take(HEAD_RESPONSE_LIMIT)
+            .read_to_end(&mut response)?;
+        status_code(&String::from_utf8(response)?)
+            .ok_or_else(|| FixtureError::new(format!("HEAD {path} had no status line")))
+    }
+
     fn connect(&self) -> Result<std::os::unix::net::UnixStream, FixtureError> {
         Ok(connect_unix(&self.socket_path)?)
     }
@@ -77,6 +105,7 @@ impl ServeFixture {
             self.root.path().exists(),
             "fixture root ended before shutdown"
         );
+        self.root.close()?;
         Ok(())
     }
 }
@@ -119,6 +148,53 @@ root = "{root}"
     assert_eq!(root_response.status, 200);
     assert_eq!(&*root_response.body, "<h1>hello</h1>");
     server.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn configured_site_ports_preserve_hostname_routing() -> Result<(), FixtureError> {
+    for (configured, requests) in [
+        (
+            "APP.TEST.:8080",
+            ["app.test:8080", "app.test", "APP.TEST:9090"],
+        ),
+        (
+            "127.0.0.1:8080",
+            ["127.0.0.1:8080", "127.0.0.1", "127.0.0.1:9090"],
+        ),
+        (
+            "[0:0:0:0:0:0:0:1]:8443",
+            ["[::1]:8443", "[::1]", "[::1]:9090"],
+        ),
+    ] {
+        serve_port_bearing_site(configured, requests)?;
+    }
+    Ok(())
+}
+
+fn serve_port_bearing_site(configured: &str, requests: [&str; 3]) -> Result<(), FixtureError> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("index.html"), configured)?;
+    let server = ServeFixture::start(&format!(
+        "[[site]]\nhost = \"{configured}\"\nroot = \"{}\"\n",
+        root.path().display()
+    ))?;
+    let responses = requests.map(|host| server.request(host, "/index.html"));
+    let unknown = server.request("unknown.test:8080", "/index.html");
+    server.shutdown()?;
+    root.close()?;
+    for (host, response) in requests.into_iter().zip(responses) {
+        let response = response?;
+        assert_eq!(
+            response.status, 200,
+            "configured {configured}, request {host}"
+        );
+        assert_eq!(
+            &*response.body, configured,
+            "the configured site must serve"
+        );
+    }
+    assert_eq!(unknown?.status, 404, "the site must not become a fallback");
     Ok(())
 }
 
@@ -356,6 +432,8 @@ fn finish_failed_connection_limit_case(
 fn cli_proxy_health_check_returns_503_before_first_interval_when_upstream_starts_unhealthy()
 -> Result<(), FixtureError> {
     let backend = Backend::unhealthy();
+    let overlay_backend = Backend::unhealthy();
+    let overlay_root = tempfile::tempdir()?;
     let server = ServeFixture::start(&format!(
         r#"
 [[site]]
@@ -363,13 +441,372 @@ host = "sick.test"
 proxy = "http://{}"
 health_check = "/health"
 health_interval = 300
+[[site]]
+host = "sick-overlay.test"
+proxy = "http://{}"
+root = "{}"
+health_check = "/health"
+health_interval = 300
 "#,
-        backend.addr()
+        backend.addr(),
+        overlay_backend.addr(),
+        overlay_root.path().display()
     ))?;
+    // Each backend answers exactly its site's initial probe, so finishing it
+    // is the acknowledgement that the probe was answered unhealthy.
     backend.finish()?;
-    assert_eq!(server.request("sick.test", "/anything")?.status, 503);
+    overlay_backend.finish()?;
+    let proxy_only = server.request("sick.test", "/anything");
+    let overlay = server.request("sick-overlay.test", "/anything");
     server.shutdown()?;
+    overlay_root.close()?;
+    assert_eq!(proxy_only?.status, 503);
+    let overlay = overlay?;
+    assert_eq!(
+        overlay.status, 503,
+        "{OVERLAY_BYPASS}: a missing GET before the first interval answered {} with {:?}",
+        overlay.status, overlay.body
+    );
     Ok(())
+}
+
+/// One overlay site and one proxy-only site, each with its own scripted
+/// upstream behind a path prefix. Both upstreams start unhealthy, recover, and
+/// fall again. Each phase begins only once the serve child has published the
+/// new state: a proxy-only GET and an overlay POST both answer from the
+/// site's health authority, so their refusal or forwarding is the committed
+/// state, not the probe the upstream answered.
+#[test]
+fn overlay_and_proxy_only_share_health_refusal_and_recovery() -> Result<(), FixtureError> {
+    let mut proxy_upstream = ScriptedUpstream::start("/proxy-only/health", false)?;
+    let mut overlay_upstream = ScriptedUpstream::start("/overlay/health", false)?;
+    let site_root = tempfile::tempdir()?;
+    std::fs::write(site_root.path().join("style.css"), "body{color:red}")?;
+    std::fs::write(site_root.path().join("submit"), "local-file")?;
+    let server = ServeFixture::start(&format!(
+        r#"
+[[site]]
+host = "proxy.test"
+proxy = "http://{}/proxy-only"
+health_check = "/health"
+health_interval = 1
+[[site]]
+host = "overlay.test"
+proxy = "http://{}/overlay"
+root = "{}"
+health_check = "/health"
+health_interval = 1
+"#,
+        proxy_upstream.addr(),
+        overlay_upstream.addr(),
+        site_root.path().display()
+    ))?;
+
+    let mut rows = HealthRows::default();
+    let exercised = exercise_shared_health(
+        &server,
+        &mut proxy_upstream,
+        &mut overlay_upstream,
+        &mut rows,
+    );
+    let server_cleanup = server.shutdown();
+    let proxy_log = proxy_upstream.finish();
+    let overlay_log = overlay_upstream.finish();
+    let root_cleanup = site_root.close().map_err(FixtureError::from);
+
+    let mut errors: Vec<String> = Vec::new();
+    for (stage, result) in [
+        ("exercise", exercised),
+        ("serve child teardown", server_cleanup),
+        ("site root teardown", root_cleanup),
+    ] {
+        match result {
+            Ok(()) => {}
+            Err(error) => errors.push(format!("{stage}: {error}")),
+        }
+    }
+    match (proxy_log, overlay_log) {
+        (Ok(proxy_log), Ok(overlay_log)) => rows.check_final_logs(&proxy_log, &overlay_log),
+        (proxy_log, overlay_log) => errors.extend(
+            [
+                ("proxy-only upstream teardown", proxy_log),
+                ("overlay upstream teardown", overlay_log),
+            ]
+            .into_iter()
+            .filter_map(|(stage, result)| result.err().map(|error| format!("{stage}: {error}"))),
+        ),
+    }
+    errors.extend(rows.failures);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    Ok(())
+}
+
+/// Failures collected across every row, reported together after teardown.
+#[derive(Default)]
+struct HealthRows {
+    failures: Vec<String>,
+}
+
+impl HealthRows {
+    fn status(&mut self, row: &str, actual: u16, expected: u16) {
+        match actual == expected {
+            true => {}
+            false => self
+                .failures
+                .push(format!("{row}: answered {actual}, expected {expected}")),
+        }
+    }
+
+    fn response(&mut self, row: &str, actual: &HttpResponse, status: u16, body: &str) {
+        match (actual.status == status, &*actual.body == body) {
+            (true, true) => {}
+            _ => self.failures.push(format!(
+                "{row}: answered {} with {:?}, expected {status} with {body:?}",
+                actual.status, actual.body
+            )),
+        }
+    }
+
+    fn overlay_refused(&mut self, row: &str, actual: u16) {
+        match actual {
+            503 => {}
+            _ => self.failures.push(format!(
+                "{OVERLAY_BYPASS}: {row} answered {actual}, expected 503"
+            )),
+        }
+    }
+
+    fn untouched(&mut self, label: &str, forwarded: &[ForwardedRequest], since: usize) {
+        let reached: Box<[&ForwardedRequest]> = forwarded
+            .iter()
+            .skip(since)
+            .filter(|request| !is_witness(request))
+            .collect();
+        match reached.is_empty() {
+            true => {}
+            false => self
+                .failures
+                .push(format!("{label} while unhealthy: {reached:?}")),
+        }
+    }
+
+    fn check_final_logs(
+        &mut self,
+        proxy_log: &[ForwardedRequest],
+        overlay_log: &[ForwardedRequest],
+    ) {
+        let proxy_expected = [ForwardedRequest::new("GET", "/proxy-only/api/data")];
+        let overlay_expected = [
+            ForwardedRequest::new("GET", "/overlay/api/data"),
+            ForwardedRequest::new("HEAD", "/overlay/api/data"),
+            ForwardedRequest::new("POST", "/overlay/submit"),
+        ];
+        for (label, log, expected) in [
+            ("proxy-only upstream", proxy_log, &proxy_expected[..]),
+            ("overlay upstream", overlay_log, &overlay_expected[..]),
+        ] {
+            let observed: Box<[&ForwardedRequest]> =
+                log.iter().filter(|request| !is_witness(request)).collect();
+            match observed.iter().copied().eq(expected.iter()) {
+                true => {}
+                false => self.failures.push(format!(
+                    "{label} saw {observed:?}; expected only the recovered requests {expected:?}"
+                )),
+            }
+        }
+    }
+}
+
+/// Commitment witnesses carry this target suffix. They prove when the serve
+/// child published a state, so the final logs leave them out.
+const WITNESS_SUFFIX: &str = "-witness";
+
+fn is_witness(request: &ForwardedRequest) -> bool {
+    request.target.ends_with(WITNESS_SUFFIX)
+}
+
+fn exercise_shared_health(
+    server: &ServeFixture,
+    proxy_upstream: &mut ScriptedUpstream,
+    overlay_upstream: &mut ScriptedUpstream,
+    rows: &mut HealthRows,
+) -> Result<(), FixtureError> {
+    // Each site's initial probe is answered before the child binds its
+    // listener, so readiness already follows the committed unhealthy state.
+    await_committed(server, "GET", "proxy.test", "/start-witness", true)?;
+    await_committed(server, "POST", "overlay.test", "/start-witness", true)?;
+    exercise_unhealthy(server, rows, "initial")?;
+    rows.untouched(OVERLAY_BYPASS, overlay_upstream.forwarded(), 0);
+    rows.untouched(
+        "the proxy-only site reached its upstream",
+        proxy_upstream.forwarded(),
+        0,
+    );
+
+    for upstream in [&mut *proxy_upstream, &mut *overlay_upstream] {
+        upstream.script_health(true);
+        upstream.wait_for_probe(200, PROBE_BOUND)?;
+    }
+    let recovered = await_committed(server, "GET", "proxy.test", "/recovered-witness", false)?;
+    rows.response(
+        "proxy-only recovery witness",
+        &recovered,
+        200,
+        "upstream GET /proxy-only/recovered-witness",
+    );
+    let recovered = await_committed(server, "POST", "overlay.test", "/recovered-witness", false)?;
+    rows.response(
+        "overlay recovery witness",
+        &recovered,
+        200,
+        "upstream POST /overlay/recovered-witness",
+    );
+    exercise_recovered(server, rows)?;
+
+    let proxy_recovered = proxy_upstream.forwarded().len();
+    let overlay_recovered = overlay_upstream.forwarded().len();
+    for upstream in [&mut *proxy_upstream, &mut *overlay_upstream] {
+        upstream.script_health(false);
+        upstream.wait_for_probe(500, PROBE_BOUND)?;
+    }
+    await_committed(server, "GET", "proxy.test", "/fall-witness", true)?;
+    await_committed(server, "POST", "overlay.test", "/fall-witness", true)?;
+    exercise_unhealthy(server, rows, "fallen")?;
+    rows.untouched(
+        OVERLAY_BYPASS,
+        overlay_upstream.forwarded(),
+        overlay_recovered,
+    );
+    rows.untouched(
+        "the proxy-only site reached its upstream",
+        proxy_upstream.forwarded(),
+        proxy_recovered,
+    );
+    Ok(())
+}
+
+/// Rows that hold while both sites' authorities hold their upstreams unhealthy.
+fn exercise_unhealthy(
+    server: &ServeFixture,
+    rows: &mut HealthRows,
+    phase: &str,
+) -> Result<(), FixtureError> {
+    let proxy_only = server.request("proxy.test", "/api/data")?;
+    rows.status(
+        &format!("{phase} unhealthy proxy-only GET /api/data"),
+        proxy_only.status,
+        503,
+    );
+    let submit = server.method_request("POST", "overlay.test", "/submit")?;
+    rows.status(
+        &format!("{phase} unhealthy overlay POST /submit"),
+        submit.status,
+        503,
+    );
+    let missing = server.request("overlay.test", "/api/data")?;
+    rows.overlay_refused(
+        &format!("{phase} overlay missing-file GET /api/data"),
+        missing.status,
+    );
+    let missing_head = server.head_status("overlay.test", "/api/data")?;
+    rows.overlay_refused(
+        &format!("{phase} overlay missing-file HEAD /api/data"),
+        missing_head,
+    );
+    let missing_index = server.request("overlay.test", "/")?;
+    rows.overlay_refused(
+        &format!("{phase} overlay missing-index GET /"),
+        missing_index.status,
+    );
+    let local = server.request("overlay.test", "/style.css")?;
+    rows.response(
+        &format!("{phase} unhealthy overlay local GET /style.css"),
+        &local,
+        200,
+        "body{color:red}",
+    );
+    let local_head = server.head_status("overlay.test", "/style.css")?;
+    rows.status(
+        &format!("{phase} unhealthy overlay local HEAD /style.css"),
+        local_head,
+        200,
+    );
+    Ok(())
+}
+
+/// Rows that hold once both sites' authorities have published recovery.
+fn exercise_recovered(server: &ServeFixture, rows: &mut HealthRows) -> Result<(), FixtureError> {
+    let proxy_only = server.request("proxy.test", "/api/data")?;
+    rows.response(
+        "recovered proxy-only GET /api/data keeps its prefix",
+        &proxy_only,
+        200,
+        "upstream GET /proxy-only/api/data",
+    );
+    let missing = server.request("overlay.test", "/api/data")?;
+    rows.response(
+        "recovered overlay missing-file GET /api/data keeps its prefix",
+        &missing,
+        200,
+        "upstream GET /overlay/api/data",
+    );
+    let missing_head = server.head_status("overlay.test", "/api/data")?;
+    rows.status(
+        "recovered overlay missing-file HEAD /api/data",
+        missing_head,
+        200,
+    );
+    let local = server.request("overlay.test", "/style.css")?;
+    rows.response(
+        "recovered overlay local GET /style.css",
+        &local,
+        200,
+        "body{color:red}",
+    );
+    let submit = server.method_request("POST", "overlay.test", "/submit")?;
+    rows.response(
+        "recovered overlay POST /submit streams past the local file",
+        &submit,
+        200,
+        "upstream POST /overlay/submit",
+    );
+    Ok(())
+}
+
+/// Poll one request until the site's health authority answers with the
+/// expected state: `503` when `refused`, anything else otherwise.
+///
+/// The probe acknowledgement only says the upstream answered; the serve child
+/// publishes after reading that answer. This request reads the published
+/// state itself, so its first matching answer is the commitment.
+fn await_committed(
+    server: &ServeFixture,
+    method: &str,
+    host: &str,
+    path: &str,
+    refused: bool,
+) -> Result<HttpResponse, FixtureError> {
+    let deadline = Instant::now() + COMMIT_BOUND;
+    loop {
+        let response = server.method_request(method, host, path)?;
+        match (
+            (response.status == 503) == refused,
+            Instant::now() < deadline,
+        ) {
+            (true, _) => return Ok(response),
+            (false, true) => std::thread::sleep(COMMIT_POLL),
+            (false, false) => {
+                return Err(FixtureError::new(format!(
+                    "{method} {host}{path} did not observe the committed {} state within {COMMIT_BOUND:?}; last answer {}",
+                    match refused {
+                        true => "unhealthy",
+                        false => "recovered",
+                    },
+                    response.status
+                )));
+            }
+        }
+    }
 }
 
 #[test]

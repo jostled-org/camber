@@ -24,8 +24,9 @@ use camber::__private::LifecycleFailureLog;
 use camber::http::DeadlineBoundary;
 use camber::runtime_test_support::{RuntimeController, runtime_schedule};
 use camber::{
-    LifecycleFailure, LifecycleFailureKind, LifecycleFailures, LifecycleParticipant,
-    LifecyclePhase, ResourceFailure, ResourceFailureKind, ResourcePhase, RuntimeError, runtime,
+    IntegrationKind, LifecycleFailure, LifecycleFailureKind, LifecycleFailures,
+    LifecycleParticipant, LifecyclePhase, ResourceFailure, ResourceFailureKind, ResourcePhase,
+    RuntimeError, runtime,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -103,12 +104,23 @@ fn drain_row(participant: LifecycleParticipant, kind: LifecycleFailureKind) -> R
 /// One row per owner class, recorded in an order no rendering order would
 /// produce, with two background children and two resources to hold recording
 /// order inside a class.
-fn rows_recorded_out_of_rendering_order() -> [Row; 6] {
+///
+/// The integration is recorded after a resource and before the root scope, so
+/// its place between background children and resources comes from the report
+/// order and not from when it was handed over.
+fn rows_recorded_out_of_rendering_order() -> [Row; 7] {
     [
         resource_row(
             "second",
             ResourcePhase::Shutdown,
             ResourceFailureKind::LostWorker,
+        ),
+        drain_row(
+            LifecycleParticipant::Integration {
+                kind: IntegrationKind::Sqs,
+                id: 3,
+            },
+            LifecycleFailureKind::Cancelled,
         ),
         drain_row(
             LifecycleParticipant::BackgroundTask,
@@ -169,12 +181,13 @@ fn assert_rendering_order_is_independent_of_recording_order() {
             "root-scope|graceful-drain|scope-drain",
             "background-task|graceful-drain|join-lost",
             "background-task|graceful-drain|join-lost",
+            "integration:sqs:3|graceful-drain|cancelled",
             "resource:second|resource:shutdown|resource",
             "resource:first|resource:startup-health|resource",
             "exporter|graceful-drain|join-lost",
         ]
     );
-    assert_eq!(failures.len(), 6);
+    assert_eq!(failures.len(), 7);
     assert_eq!(failures.iter().len(), failures.len());
 
     assert_recording_order_survives_within_one_class(&failures);

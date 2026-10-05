@@ -1158,16 +1158,10 @@ async fn assert_released_on_disconnect() {
 
 /// A stopped server releases the owner of a stream still in flight.
 ///
-/// The producer keeps publishing, so the owner keeps taking turns: the first turn
-/// after the graceful transition mints the one aggregate deadline and arms the
-/// wake that ends the transfer on it. A graceful stop does not cancel an admitted
-/// operation before that deadline, which is why this row names a short one rather
-/// than expecting the stop itself to take the stream away — and why the server is
-/// held directly, so the row can read what the transfer did and then join the
-/// server on its own terms. The escalation behind that deadline is held at its
-/// own checkpoint for as long as the reading takes: the abort it starts would
-/// take the transfer away mid-turn, and this row is about what the transfer
-/// decided.
+/// Hold the transfer before requesting shutdown so it cannot finish the graceful
+/// drain before the supervisor selects its deadline. Then hold that escalation
+/// while the released transfer commits its own shutdown terminal. Neither owner
+/// can remove the other's checkpoint before the row observes it.
 async fn assert_released_on_shutdown() {
     let row = "a stopped server";
     let port = http_support::reserve_stopped_transfer();
@@ -1190,13 +1184,14 @@ async fn assert_released_on_shutdown() {
     peer.read_exact(&mut byte)
         .await
         .expect("the committed head reached the peer");
-    // The forced abort a graceful stop escalates to would take this transfer
-    // away where it stands. Both deadlines are the same declared value, and the
-    // transfer's is minted on the turn that first observes the transition —
-    // after the server minted its own — so the two expire together and whichever
-    // task runs first decides what this row reads. The escalation is held at the
-    // production checkpoint the supervisor selects it from, so the deadline this
-    // row named is the one that ends the stream.
+    let source = TransferOwnerEdge::BeforeSourcePoll;
+    controller
+        .transfers
+        .pause_once(source)
+        .expect("arm the transfer's source checkpoint");
+    http_support::wait_until_paused_bounded(&controller, source, row).await;
+
+    // Keep the connection live until the supervisor selects its deadline.
     let escalation = ServerStopEdge::SupervisorSelectedDeadline;
     controller
         .stop
@@ -1204,14 +1199,16 @@ async fn assert_released_on_shutdown() {
         .expect("arm the supervisor's escalation edge");
     handle.shutdown();
 
-    // The server's own deadline is minted first, so it expires first: the row
-    // reads the transfer only once the escalation behind it is held.
     http_support::wait_until_paused_bounded(
         &controller,
         escalation,
         &format!("{row}: {escalation:?}"),
     )
     .await;
+    controller
+        .transfers
+        .release(source)
+        .expect("release the transfer after the supervisor selected its deadline");
     let observed = awaited(&controller.transfers, row, |observed| {
         observed.download.terminal.is_some()
     })
@@ -1223,10 +1220,7 @@ async fn assert_released_on_shutdown() {
     );
     assert_released_once(&controller.transfers, row).await;
 
-    // Teardown is this row's own, on every path: the graceful window has already
-    // closed, so the escalation is let go of and the server is cancelled and
-    // joined under a bound rather than waited on for a completion its own
-    // deadline has passed.
+    // Release escalation only after observing the transfer's terminal and cleanup.
     controller
         .stop
         .release(escalation)

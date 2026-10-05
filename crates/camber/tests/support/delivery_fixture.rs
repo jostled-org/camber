@@ -19,7 +19,11 @@ use super::temp_support::TempRoot;
 pub const HOOK_BOUND: Duration = Duration::from_secs(120);
 
 /// The only directories a hook may search beyond the fixture's own tools.
-const SYSTEM_PATH: &str = "/usr/bin:/bin";
+pub const SYSTEM_PATH: &str = "/usr/bin:/bin";
+
+/// The status every hook and runner reserves for unavailable infrastructure,
+/// never for a policy answer about the tree.
+pub const INFRASTRUCTURE_STATUS: i32 = 75;
 
 /// Records a workflow phase and applies the fixture's injected failure.
 ///
@@ -43,15 +47,26 @@ pub fn repository_file(relative: &str) -> Box<[u8]> {
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
 }
 
+/// The text of a tracked repository file, failing when it is not UTF-8.
+pub fn repository_text(relative: &str) -> Box<str> {
+    String::from_utf8(repository_file(relative).into_vec())
+        .map(String::into_boxed_str)
+        .unwrap_or_else(|error| panic!("{relative} is not UTF-8: {error}"))
+}
+
 /// Resolve `name` on the test's own `PATH`, failing when it is absent.
 pub fn ambient_executable(name: &str) -> PathBuf {
-    std::env::var_os("PATH")
-        .and_then(|path| {
-            std::env::split_paths(&path)
-                .map(|directory| directory.join(name))
-                .find(|candidate| is_executable(candidate))
-        })
+    find_on_path(name, is_executable)
         .unwrap_or_else(|| panic!("required fixture executable is unavailable: {name}"))
+}
+
+/// The first `name` on the test's own `PATH` that `accept` takes.
+pub fn find_on_path(name: &str, accept: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|directory| directory.join(name))
+            .find(|candidate| accept(candidate))
+    })
 }
 
 /// Fail when a system directory could answer for `name` in place of a stub.
@@ -88,7 +103,7 @@ fn is_absent(error: &std::io::Error) -> bool {
     )
 }
 
-fn quoted(path: &Path) -> String {
+pub fn quoted(path: &Path) -> String {
     let text = path.to_str().expect("fixture paths are UTF-8");
     assert!(
         !text.contains('\''),
@@ -117,20 +132,35 @@ pub struct HookRun {
 }
 
 /// Run `command` to exit inside [`HOOK_BOUND`], reaping it and its readers.
-pub fn run_bounded(mut command: Command) -> HookRun {
-    command.stdin(Stdio::null());
-    let mut child = ChildGuard::spawn(command, HOOK_BOUND).expect("hook process did not start");
-    let status = child
-        .wait_bounded(HOOK_BOUND)
-        .expect("hook process did not finish inside its bound");
-    let mut output = String::from_utf8_lossy(child.stdout()).into_owned();
-    output.push_str(&String::from_utf8_lossy(child.stderr()));
+pub fn run_bounded(command: Command) -> HookRun {
+    let (status, stdout, stderr) = run_reaped(command, HOOK_BOUND, "hook process");
+    let mut output = stdout.into_string();
+    output.push_str(&stderr);
     HookRun {
-        status: status
-            .code()
-            .unwrap_or_else(|| panic!("hook process ended by a signal:\n{output}")),
+        status,
         output: output.into_boxed_str(),
     }
+}
+
+/// Run `command`, named `what`, to exit inside `bound`, reaping it and its
+/// readers, and keep its exit code, stdout, and stderr apart.
+///
+/// # Panics
+///
+/// When the process does not start, outlives `bound`, or ends by a signal.
+pub fn run_reaped(mut command: Command, bound: Duration, what: &str) -> (i32, Box<str>, Box<str>) {
+    command.stdin(Stdio::null());
+    let mut child = ChildGuard::spawn(command, bound)
+        .unwrap_or_else(|error| panic!("{what} did not start: {error:?}"));
+    let status = child
+        .wait_bounded(bound)
+        .unwrap_or_else(|error| panic!("{what} did not finish inside its bound: {error:?}"));
+    let stdout = String::from_utf8_lossy(child.stdout()).into_owned();
+    let stderr = String::from_utf8_lossy(child.stderr()).into_owned();
+    let status = status
+        .code()
+        .unwrap_or_else(|| panic!("{what} ended by a signal:\n{stdout}{stderr}"));
+    (status, stdout.into(), stderr.into())
 }
 
 /// A command with no ambient environment: only what the fixture names.

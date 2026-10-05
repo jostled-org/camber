@@ -7,6 +7,18 @@ impl FixtureError {
     pub fn new(message: impl Into<Box<str>>) -> Self {
         Self(message.into())
     }
+
+    /// `observed`, failed as well when `cleanup` failed. An observed failure
+    /// stays first.
+    pub fn with_cleanup(observed: Result<(), Self>, cleanup: Result<(), Self>) -> Result<(), Self> {
+        match (observed, cleanup) {
+            (observed, Ok(())) => observed,
+            (Ok(()), Err(cleanup)) => Err(Self::new(format!("cleanup failed: {cleanup}"))),
+            (Err(failure), Err(cleanup)) => {
+                Err(Self::new(format!("{failure}; cleanup failed: {cleanup}")))
+            }
+        }
+    }
 }
 
 impl Display for FixtureError {

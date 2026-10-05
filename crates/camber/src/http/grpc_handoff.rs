@@ -120,9 +120,9 @@ impl hyper::body::Body for GrpcRequestBody {
 /// Tonic's response body, read as one transfer source.
 ///
 /// Trailers never travel through the transfer: it accounts payload bytes, and a
-/// trailer set carries none. They are captured here and emitted by
-/// [`GrpcDownload`] after the source reaches its normal end, which is the order
-/// the wire already puts them in.
+/// trailer set carries none. They are captured here, they end the source, and
+/// [`GrpcDownload`] emits them after that normal end, which is the order the
+/// wire already puts them in.
 ///
 /// Tonic's own body error is captured the same way. It is a `Status` — the
 /// RPC's real answer — so it becomes the trailer set tonic would have written
@@ -140,9 +140,9 @@ impl TonicSource {
         }
     }
 
-    /// The trailer set tonic ended this body with, if it wrote one.
-    const fn trailers(&self) -> Option<&hyper::HeaderMap> {
-        self.trailers.as_ref()
+    /// Take the trailer set tonic ended this body with, if it wrote one.
+    const fn take_trailers(&mut self) -> Option<hyper::HeaderMap> {
+        self.trailers.take()
     }
 }
 
@@ -162,13 +162,22 @@ impl TransferSource for TonicSource {
 
 impl TonicSource {
     /// Name one frame tonic produced, keeping the trailer set it may carry.
+    ///
+    /// A trailer set is the last frame a body produces, so it ends this
+    /// source. Tonic writes a streamed RPC's error status as trailers and then
+    /// reports its end, but it does not stop the stream under it: a body polled
+    /// again polls the method's stream again, and a stream the method still
+    /// holds open never answers. The status would wait behind it until some
+    /// download bound reset the stream and lost it.
     fn stepped(&mut self, frame: hyper::body::Frame<Bytes>) -> SourceStep {
-        match frame.into_data() {
+        match frame.into_data().map_err(hyper::body::Frame::into_trailers) {
             Ok(data) => step_of(data),
-            Err(trailers) => {
-                self.trailers = trailers.into_trailers().ok();
-                SourceStep::Empty
+            Err(Ok(trailers)) => {
+                self.trailers = Some(trailers);
+                SourceStep::End
             }
+            // Neither payload nor trailers: nothing to measure or forward.
+            Err(Err(_)) => SourceStep::Empty,
         }
     }
 }
@@ -270,9 +279,8 @@ impl GrpcDownload {
     fn trailing(&mut self) -> Option<Result<hyper::body::Frame<Bytes>, BodyError>> {
         self.state = DownloadState::Ended;
         self.transfer
-            .source()
-            .trailers()
-            .cloned()
+            .source_mut()
+            .take_trailers()
             .map(|trailers| Ok(hyper::body::Frame::trailers(trailers)))
     }
 }

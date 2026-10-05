@@ -1,5 +1,6 @@
 //! Who inside a runtime a lifecycle failure belongs to.
 
+use crate::IntegrationKind;
 use std::sync::Arc;
 
 /// The owner a lifecycle failure is recorded against.
@@ -14,10 +15,10 @@ use std::sync::Arc;
 /// executor is not here either: Camber gets no acknowledgement back from it, so
 /// there is no fact about it this vocabulary could honestly state.
 ///
-/// Only a resource carries an identity, and it carries its registered name
-/// shared rather than copied: the coordinator that ran the callback, the
-/// aggregate that retains it, and the operator event that renders it all read
-/// one string.
+/// A resource carries its registered name, shared rather than copied: the
+/// coordinator that ran the callback, the aggregate that retains it, and the
+/// operator event that renders it all read one string. An integration carries
+/// its closed kind and the runtime-local identity admission assigned it.
 ///
 /// `Exporter` is settlement-only vocabulary. The trace provider's shutdown is
 /// unbounded and hands back nothing, so teardown settles it `Completed` through
@@ -31,6 +32,13 @@ pub enum LifecycleParticipant {
     RootScope,
     /// One scope-admitted background child.
     BackgroundTask,
+    /// One managed integration instance, under its admitted identity.
+    Integration {
+        /// The integration's closed kind.
+        kind: IntegrationKind,
+        /// The runtime-local identity admission assigned.
+        id: u64,
+    },
     /// One registered resource, under its registered name.
     Resource(Arc<str>),
     /// The metrics or trace exporter.
@@ -41,16 +49,17 @@ impl LifecycleParticipant {
     /// Where this owner sits in the order an aggregate renders entries in.
     ///
     /// Reproducible output and nothing more: root scope, then background
-    /// children, then resources, then the exporter, with recording order
-    /// deciding the sequence inside one class. It is not causal precedence, and
-    /// no caller may read the first entry as the failure to act on — every
-    /// entry is a direct failure the account reports.
+    /// children, then integrations, then resources, then the exporter, with
+    /// recording order deciding the sequence inside one class. It is not causal
+    /// precedence, and no caller may read the first entry as the failure to act
+    /// on — every entry is a direct failure the account reports.
     pub(crate) const fn report_order(&self) -> u8 {
         match self {
             Self::RootScope => 0,
             Self::BackgroundTask => 1,
-            Self::Resource(_) => 2,
-            Self::Exporter => 3,
+            Self::Integration { .. } => 2,
+            Self::Resource(_) => 3,
+            Self::Exporter => 4,
         }
     }
 }
@@ -58,13 +67,14 @@ impl LifecycleParticipant {
 /// The bounded name each owner is reported under.
 ///
 /// One arm per participant, written where the name is rendered. A separate
-/// name table would have owed the resource an entry it could never reach: the
-/// arm below carries the registered identity, which is the whole reason this
-/// impl exists.
+/// name table would have owed the resource and the integration entries they
+/// could never reach: their arms carry the identity production assigned, which
+/// is the whole reason this impl exists.
 impl std::fmt::Display for LifecycleParticipant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Resource(name) => write!(f, "resource {name}"),
+            Self::Integration { kind, id } => write!(f, "integration {kind} {id}"),
             Self::RootScope => f.write_str("root-scope"),
             Self::BackgroundTask => f.write_str("background-task"),
             Self::Exporter => f.write_str("exporter"),

@@ -1,10 +1,13 @@
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 const RUN_ID_ENVIRONMENT: &str = "CAMBER_EXTERNAL_RUN_ID";
 const CLEANUP_WITNESS_ENVIRONMENT: &str = "CAMBER_EXTERNAL_CLEANUP_WITNESS";
 const MAX_RUN_ID_BYTES: usize = 64;
 const DNS_HEX_LABEL_BYTES: usize = 48;
+const MAX_SQS_QUEUE_BYTES: usize = 80;
+const MAX_NATS_STREAM_BYTES: usize = 255;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExternalResourceError {
@@ -13,6 +16,12 @@ pub enum ExternalResourceError {
         variable: &'static str,
         #[source]
         source: std::env::VarError,
+    },
+    #[error("{variable} is not a socket address")]
+    Address {
+        variable: &'static str,
+        #[source]
+        source: std::net::AddrParseError,
     },
     #[error("invalid external run ID: {0}")]
     RunId(Box<str>),
@@ -33,17 +42,14 @@ pub struct ExternalRun {
 
 impl ExternalRun {
     pub fn from_environment() -> Result<Self, ExternalResourceError> {
-        let run_id = environment(RUN_ID_ENVIRONMENT)?;
+        let run_id = lane_variable(RUN_ID_ENVIRONMENT)?;
         Self::parse(&run_id)
     }
 
     pub fn parse(run_id: &str) -> Result<Self, ExternalResourceError> {
         let valid_length = !run_id.is_empty() && run_id.len() <= MAX_RUN_ID_BYTES;
-        let valid_alphabet = run_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
 
-        match (valid_length, valid_alphabet) {
+        match (valid_length, url_safe(run_id)) {
             (true, true) => Ok(Self {
                 run_id: run_id.into(),
                 encoded_run_id: hex_encode(run_id.as_bytes()),
@@ -64,6 +70,50 @@ impl ExternalRun {
 
     pub fn nats_queue_group(&self, purpose: &str) -> Box<str> {
         format!("camber-workers-{purpose}-{}", self.encoded_run_id).into_boxed_str()
+    }
+
+    /// A Standard queue name unique to this run: letters, digits, `-`, and
+    /// `_`, at most 80 bytes.
+    pub fn sqs_queue(&self, purpose: &str) -> Result<Box<str>, ExternalResourceError> {
+        self.scoped_name(
+            purpose,
+            MAX_SQS_QUEUE_BYTES,
+            "derived SQS queue name is not a valid Standard queue name",
+        )
+    }
+
+    /// A JetStream stream name unique to this run: letters, digits, `-`, and
+    /// `_`, at most 255 bytes, so no subject token, wildcard, or path
+    /// separator can reach the server.
+    pub fn nats_stream(&self, purpose: &str) -> Result<Box<str>, ExternalResourceError> {
+        self.scoped_name(
+            purpose,
+            MAX_NATS_STREAM_BYTES,
+            "derived JetStream stream name is not a valid stream name",
+        )
+    }
+
+    /// `camber-<purpose>-<run>`, when `purpose` is non-empty and the name is
+    /// URL-safe and at most `max_bytes` long.
+    ///
+    /// # Errors
+    ///
+    /// [`ExternalResourceError::ResourceName`] with `refusal` otherwise.
+    fn scoped_name(
+        &self,
+        purpose: &str,
+        max_bytes: usize,
+        refusal: &'static str,
+    ) -> Result<Box<str>, ExternalResourceError> {
+        let name = format!("camber-{purpose}-{}", self.run_id);
+        match (
+            !purpose.is_empty(),
+            name.len() <= max_bytes,
+            url_safe(&name),
+        ) {
+            (true, true, true) => Ok(name.into_boxed_str()),
+            _ => Err(ExternalResourceError::ResourceName(refusal.into())),
+        }
     }
 
     pub fn dns_subdomain(&self, domain: &str) -> Result<Box<str>, ExternalResourceError> {
@@ -101,7 +151,7 @@ pub struct CleanupWitness {
 
 impl CleanupWitness {
     pub fn from_environment() -> Result<Self, ExternalResourceError> {
-        let configured = environment(CLEANUP_WITNESS_ENVIRONMENT)?;
+        let configured = lane_variable(CLEANUP_WITNESS_ENVIRONMENT)?;
         let path = PathBuf::from(configured);
         validate_witness_path(&path)?;
         Ok(Self { path })
@@ -135,6 +185,14 @@ impl CleanupWitness {
     }
 }
 
+/// The run ID and cleanup witness path every selected external test reads.
+pub fn selected_run() -> Result<(ExternalRun, CleanupWitness), ExternalResourceError> {
+    Ok((
+        ExternalRun::from_environment()?,
+        CleanupWitness::from_environment()?,
+    ))
+}
+
 #[derive(serde::Serialize)]
 struct WitnessDocument<'a> {
     run_id: &'a str,
@@ -142,9 +200,25 @@ struct WitnessDocument<'a> {
     cleanup_status: &'static str,
 }
 
-fn environment(variable: &'static str) -> Result<String, ExternalResourceError> {
+/// The value the lane runner published in `variable`. There is no default: a
+/// missing value fails the test rather than reach a service the run does not
+/// own.
+pub fn lane_variable(variable: &'static str) -> Result<String, ExternalResourceError> {
     std::env::var(variable)
         .map_err(|source| ExternalResourceError::Environment { variable, source })
+}
+
+/// The socket address the lane runner published in `variable`.
+pub fn lane_address(variable: &'static str) -> Result<SocketAddr, ExternalResourceError> {
+    lane_variable(variable)?
+        .parse()
+        .map_err(|source| ExternalResourceError::Address { variable, source })
+}
+
+/// Only ASCII letters, digits, `-`, and `_`.
+fn url_safe(name: &str) -> bool {
+    name.bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn hex_encode(input: &[u8]) -> Box<str> {

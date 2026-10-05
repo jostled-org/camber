@@ -2,6 +2,7 @@ use crate::common;
 
 use camber::http::{self, Request, Response, Router};
 use camber::{runtime, spawn_async};
+use std::future::Future;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,6 +13,17 @@ const OVERLAP_REQUEST_COUNT: usize = 4;
 const OVERLAP_TIMEOUT: Duration = Duration::from_secs(2);
 const GENERATED_FORWARDING_CASE_COUNT: u64 = 32;
 pub(crate) const FORWARDING_METADATA_LEAK: &str = "peer forwarding metadata reached upstream";
+
+/// The header bound a generated row's servers run under, which no row reaches.
+///
+/// A server's header bound is also how long it keeps an idle keep-alive
+/// connection open. The proxy pools its connections to the upstream across
+/// cases. Under the 100 ms bound of `#[camber::test]`, a loaded host left one
+/// pooled connection idle past the bound, and the proxy sent the next case into
+/// the upstream's close and answered 502. These rows are about headers, so no
+/// wall-clock bound may decide them.
+const UNREACHED_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
+
 const FIXED_HOP_HEADERS: [&str; 9] = [
     "connection",
     "keep-alive",
@@ -25,6 +37,17 @@ const FIXED_HOP_HEADERS: [&str; 9] = [
 ];
 
 type ReceivedHeaders = Box<[(Box<str>, Box<str>)]>;
+
+/// Run one generated row under [`UNREACHED_HEADER_TIMEOUT`].
+///
+/// A server inside a runtime can only narrow that runtime's bounds, so the
+/// runtime itself carries the wider bound.
+pub(crate) fn run_generated_row<F: Future<Output = ()>>(label: &str, row: impl FnOnce() -> F) {
+    runtime::builder()
+        .header_timeout(UNREACHED_HEADER_TIMEOUT)
+        .run(|| runtime::block_on(row()))
+        .unwrap_or_else(|error| panic!("{label}: the row runtime failed: {error:?}"));
+}
 
 fn complete_header_echo_upstream() -> SocketAddr {
     let mut upstream = Router::new();
@@ -725,8 +748,18 @@ async fn connection_header_tokens_are_removed_from_proxy_responses() {
     runtime::request_shutdown();
 }
 
-#[camber::test]
-async fn generated_forwarding_headers_strip_spoofed_and_connection_named_fields() {
+#[test]
+fn generated_forwarding_headers_strip_spoofed_and_connection_named_fields() {
+    run_generated_row(
+        "generated forwarding headers",
+        generated_forwarding_header_cases,
+    );
+}
+
+/// The cases
+/// [`generated_forwarding_headers_strip_spoofed_and_connection_named_fields`]
+/// drives, in one runtime.
+async fn generated_forwarding_header_cases() {
     let upstream_addr = complete_header_echo_upstream();
     let mut proxy = Router::new();
     proxy.proxy("/api", &format!("http://{upstream_addr}"));

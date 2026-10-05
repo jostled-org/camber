@@ -6,8 +6,9 @@ use rustls_acme::AcmeConfig as RustlsAcmeConfig;
 use rustls_acme::caches::DirCache;
 
 use crate::RuntimeError;
-use crate::config::AcmeBase;
+use crate::config::{AcmeBase, Challenge};
 use crate::runtime_state::LifecycleSignals;
+use crate::tls::{H2_ALPN, HTTP1_ALPN, server_config};
 
 /// Re-export `AcmeState` so downstream crates don't need a direct `rustls-acme` dependency.
 pub use rustls_acme::AcmeState;
@@ -75,9 +76,9 @@ where
     }
 }
 
-/// Configuration for automatic TLS via ACME (Let's Encrypt) using HTTP-01 challenges.
+/// Configuration for automatic TLS via ACME (Let's Encrypt) using TLS-ALPN-01 challenges.
 ///
-/// Wraps [`AcmeBase`] with the HTTP-01-specific build step.
+/// Wraps [`AcmeBase`] with the TLS-ALPN-01-specific build step.
 #[derive(Debug, Clone)]
 pub struct AcmeConfig {
     base: AcmeBase,
@@ -116,7 +117,19 @@ impl AcmeConfig {
         self.base.cache_path()
     }
 
+    /// Validate the configured domain set for a TLS-ALPN-01 order.
+    ///
+    /// Performs no I/O. An empty set, a malformed name, an IP literal, a
+    /// wildcard, or a name that repeats another after canonicalization returns
+    /// `RuntimeError::Config`. Call it before any cache or listener effect;
+    /// [`AcmeConfig::build`] repeats it.
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        self.base.validated_domains(Challenge::TlsAlpn01).map(drop)
+    }
+
     /// Build the rustls-acme state, returning the server config and renewal stream.
+    ///
+    /// The domain set is validated first, as [`AcmeConfig::validate`] does.
     ///
     /// The returned `AcmeState` is a `Stream` that must be polled to drive cert
     /// provisioning and renewal. Spawn it as a background Tokio task.
@@ -129,15 +142,15 @@ impl AcmeConfig {
         ),
         RuntimeError,
     > {
+        let domains = self.base.validated_domains(Challenge::TlsAlpn01)?;
         // `RustlsAcmeConfig::new` takes `impl AsRef<str>` and copies each domain
-        // into its own storage, so the stored list is handed over by reference. An
-        // intermediate `Vec<String>` would clone every domain to be dropped one
-        // line later.
+        // into its own storage, so the canonical list is handed over by
+        // reference.
         let AcmeBase {
-            domains,
             email,
             cache_dir,
             staging,
+            ..
         } = self.base;
 
         let mut acme_cfg = RustlsAcmeConfig::new(domains.iter())
@@ -149,26 +162,18 @@ impl AcmeConfig {
         }
 
         let state = acme_cfg.state();
-        let resolver = state.resolver();
-
-        let mut server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| {
-            RuntimeError::Tls(format!("failed to configure TLS protocol versions: {e}").into())
-        })?
-        .with_no_client_auth()
-        .with_cert_resolver(resolver);
 
         // ACME TLS-ALPN-01 challenge requires the acme-tls/1 ALPN token.
         // Also advertise h2 and http/1.1 for regular traffic.
-        server_config.alpn_protocols = vec![
-            rustls_acme::acme::ACME_TLS_ALPN_NAME.to_vec(),
-            b"h2".to_vec(),
-            b"http/1.1".to_vec(),
-        ];
+        let server_config = server_config(
+            state.resolver(),
+            vec![
+                rustls_acme::acme::ACME_TLS_ALPN_NAME.to_vec(),
+                H2_ALPN.to_vec(),
+                HTTP1_ALPN.to_vec(),
+            ],
+        )?;
 
-        Ok((Arc::new(server_config), state))
+        Ok((server_config, state))
     }
 }

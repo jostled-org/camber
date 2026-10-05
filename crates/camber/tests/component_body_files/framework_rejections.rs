@@ -596,7 +596,7 @@ const REUSE_PROBE_BODY: &[u8] = b"probe";
 ///
 /// `None` is a connection the server ended. The probe reports rather than
 /// asserts, because the paused-time case runs it on a thread of its own — see
-/// [`spawn_stalled_peer`] for why it cannot be a Tokio task — and a panic on
+/// [`wire::spawn_stalled_peer`] for why it cannot be a Tokio task — and a panic on
 /// that thread reaches the test as a join failure that has lost what it saw.
 fn probe_reuse(stream: &mut TcpStream) -> std::io::Result<Option<wire::HttpResponse>> {
     wire::probe_connection_reuse(
@@ -903,18 +903,6 @@ fn host_routed_body_refusal_answers_under_the_selected_child_policy() {
         .expect("the fixture runtime ran to completion");
 }
 
-/// Open the stalled connection and send the head that promises more body than
-/// it sends.
-///
-/// The peer offers to keep the connection for the reason [`DISPOSITION_ROWS`]
-/// does: what the refusal then says about it is the framework's decision and
-/// not an echo of the request.
-fn open_stalled(addr: SocketAddr) -> std::io::Result<TcpStream> {
-    let mut peer = wire::connect(addr)?;
-    wire::write_stalled_body(&mut peer, Some(wire::KEEP_CONNECTION), "POST", "/upload")?;
-    Ok(peer)
-}
-
 /// What the stalled peer was answered, and what its connection did next.
 struct StalledExchange {
     refusal: wire::HttpResponse,
@@ -932,54 +920,6 @@ fn stalled_exchange(peer: &mut TcpStream) -> std::io::Result<StalledExchange> {
     let refusal = wire::read_http_response_bounded(peer)?;
     let reused = probe_reuse(peer)?;
     Ok(StalledExchange { refusal, reused })
-}
-
-/// What the stalled peer reports: that its head is sent, then what it was
-/// answered.
-type StalledReports = (
-    tokio::sync::oneshot::Receiver<std::io::Result<()>>,
-    tokio::sync::oneshot::Receiver<std::io::Result<StalledExchange>>,
-);
-
-/// Run the stalled peer on a thread of its own, reporting each half as it
-/// settles.
-///
-/// The peer is the suite's own blocking socket, bounded by the real-time
-/// deadline [`wire::connect`] arms on it. Nothing here arms a Tokio timer: with
-/// the clock paused the runtime advances to the earliest armed timer whenever
-/// it has nothing left to run, so a Tokio bound armed by this test would be the
-/// earliest timer for as long as the server has none of its own, and would
-/// expire while the server was still waiting for work rather than failing to
-/// answer. `spawn_blocking` cannot host the peer either: a Tokio blocking task
-/// inhibits that advance for as long as it runs, and the advance is what
-/// reaches the collection deadline this case is about. A thread outside the
-/// runtime leaves the clock free and still carries a real bound.
-///
-/// The caller starts serving only once the head is sent, so no accepted
-/// connection ever waits for a request head: such a connection waits on Hyper's
-/// own header deadline, and a paused clock would reach that deadline instead of
-/// the collection one.
-fn spawn_stalled_peer(addr: SocketAddr) -> (std::thread::JoinHandle<()>, StalledReports) {
-    let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
-    let (answered_tx, answered_rx) = tokio::sync::oneshot::channel();
-    let peer = std::thread::spawn(move || match open_stalled(addr) {
-        Ok(mut peer) => {
-            // A oneshot send fails only when its receiver is gone, which here
-            // means the test has already failed and is unwinding past both
-            // reports. Nothing is left to tell, so the report is discarded.
-            let _ = sent_tx.send(Ok(()));
-            // Discarded for the same reason, and with more at stake: the peer
-            // must still finish so its socket closes rather than holding the
-            // unwinding test's connection open.
-            let _ = answered_tx.send(stalled_exchange(&mut peer));
-        }
-        // Nothing was sent, so nothing can be answered: the exchange sender
-        // drops here, and the caller's first report is the failure itself.
-        Err(error) => {
-            let _ = sent_tx.send(Err(error));
-        }
-    });
-    (peer, (sent_rx, answered_rx))
 }
 
 /// The outer bound this fixture's teardown runs under.
@@ -1030,7 +970,7 @@ fn assert_timeout_context(seen: &Observed) {
 /// to keep the connection afterwards. Nothing waits on a wall clock: the runtime
 /// is paused, so the deadline is reached by the scheduler running out of work
 /// rather than by elapsed real time. The peer's own bounds are real, and only a
-/// failure ever reaches them — see [`spawn_stalled_peer`] for why they cannot be
+/// failure ever reaches them — see [`wire::spawn_stalled_peer`] for why they cannot be
 /// Tokio's.
 ///
 /// Every other test in this root serves through `spawn_server`, and the runtime
@@ -1057,7 +997,15 @@ async fn body_collection_deadline_maps_before_the_handler() {
     let addr = listener
         .local_addr()
         .unwrap_or_else(|error| panic!("the reserved port reported its address: {error}"));
-    let (peer, (sent, answered)) = spawn_stalled_peer(addr);
+    // The peer offers to keep the connection for the reason
+    // [`DISPOSITION_ROWS`] does: what the refusal then says about it is the
+    // framework's decision and not an echo of the request.
+    let (peer, (sent, answered)) = wire::spawn_stalled_peer(
+        addr,
+        Some(wire::KEEP_CONNECTION),
+        "/upload",
+        stalled_exchange,
+    );
     sent.await
         .expect("the stalled peer reported its head")
         .expect("the stalled head was sent");

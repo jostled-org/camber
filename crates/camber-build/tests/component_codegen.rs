@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -61,7 +62,13 @@ message HelloReply {
 }
 "#;
 
-const UNARY_VERIFIER: &str = r#"
+/// The generated file and the unary `Greeter` wrapper check every verifier with
+/// a `Greeter` service shares.
+///
+/// A macro rather than a `const`, because `concat!` takes literals only.
+macro_rules! greeter_verifier_prelude {
+    () => {
+        r#"
 include!(concat!(env!("CAMBER_GENERATED_DIR"), "/contract.rs"));
 
 struct GreetingService;
@@ -81,12 +88,23 @@ impl greeter_service::Greeter for GreetingService {
 
 fn requires_tonic_service<T: greeter_server::Greeter>() {}
 
-fn main() {
+fn greeter_wrapper_bridges_to_tonic() {
     requires_tonic_service::<greeter_service::Bridge<GreetingService>>();
     let _: greeter_server::GreeterServer<greeter_service::Bridge<GreetingService>> =
         greeter_service::serve(GreetingService);
 }
-"#;
+"#
+    };
+}
+
+const UNARY_VERIFIER: &str = concat!(
+    greeter_verifier_prelude!(),
+    r#"
+fn main() {
+    greeter_wrapper_bridges_to_tonic();
+}
+"#
+);
 
 const REBUILT_PROTO: &str = r#"
 syntax = "proto3";
@@ -216,24 +234,9 @@ message StreamReply {
 }
 "#;
 
-const MIXED_VERIFIER: &str = r#"
-include!(concat!(env!("CAMBER_GENERATED_DIR"), "/contract.rs"));
-
-struct GreetingService;
-
-#[tonic::async_trait]
-impl greeter_service::Greeter for GreetingService {
-    async fn say_hello(
-        &self,
-        request: tonic::Request<HelloRequest>,
-    ) -> Result<tonic::Response<HelloReply>, tonic::Status> {
-        let name = request.into_inner().name;
-        Ok(tonic::Response::new(HelloReply {
-            message: format!("hello {name}"),
-        }))
-    }
-}
-
+const MIXED_VERIFIER: &str = concat!(
+    greeter_verifier_prelude!(),
+    r#"
 struct ChatService;
 
 #[tonic::async_trait]
@@ -248,18 +251,109 @@ impl streamer_server::Streamer for ChatService {
     }
 }
 
-fn requires_tonic_service<T: greeter_server::Greeter>() {}
 fn requires_streaming_service<T: streamer_server::Streamer>() {}
 
 fn main() {
     // The unary wrapper is still generated, and still bridges to tonic, with a
     // streaming service beside it in the same file.
-    requires_tonic_service::<greeter_service::Bridge<GreetingService>>();
-    let _: greeter_server::GreeterServer<greeter_service::Bridge<GreetingService>> =
-        greeter_service::serve(GreetingService);
+    greeter_wrapper_bridges_to_tonic();
     requires_streaming_service::<ChatService>();
 }
+"#
+);
+
+/// A unary service beside one service carrying every native tonic form.
+const FORMS_PROTO: &str = r#"
+syntax = "proto3";
+package contract;
+
+service Greeter {
+  rpc SayHello (HelloRequest) returns (HelloReply);
+}
+
+service NativeForms {
+  rpc Unary (HelloRequest) returns (HelloReply);
+  rpc ClientStreaming (stream HelloRequest) returns (HelloReply);
+  rpc ServerStreaming (HelloRequest) returns (stream HelloReply);
+  rpc Bidirectional (stream HelloRequest) returns (stream HelloReply);
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloReply {
+  string message = 1;
+}
 "#;
+
+/// Implements every form on tonic's own trait, beside the unary wrapper.
+///
+/// Each method is written against the signature tonic generated for its form,
+/// so a form whose request or response shape drifted fails this check rather
+/// than compiling as some other form.
+const FORMS_VERIFIER: &str = concat!(
+    greeter_verifier_prelude!(),
+    r#"
+struct FormsService;
+
+#[tonic::async_trait]
+impl native_forms_server::NativeForms for FormsService {
+    type ServerStreamingStream = tonic::Streaming<HelloReply>;
+    type BidirectionalStream = tonic::Streaming<HelloReply>;
+
+    async fn unary(
+        &self,
+        request: tonic::Request<HelloRequest>,
+    ) -> Result<tonic::Response<HelloReply>, tonic::Status> {
+        Ok(tonic::Response::new(HelloReply {
+            message: request.into_inner().name,
+        }))
+    }
+
+    async fn client_streaming(
+        &self,
+        _request: tonic::Request<tonic::Streaming<HelloRequest>>,
+    ) -> Result<tonic::Response<HelloReply>, tonic::Status> {
+        Err(tonic::Status::unimplemented("the codegen contract never answers"))
+    }
+
+    async fn server_streaming(
+        &self,
+        _request: tonic::Request<HelloRequest>,
+    ) -> Result<tonic::Response<Self::ServerStreamingStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("the codegen contract never answers"))
+    }
+
+    async fn bidirectional(
+        &self,
+        _request: tonic::Request<tonic::Streaming<HelloRequest>>,
+    ) -> Result<tonic::Response<Self::BidirectionalStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("the codegen contract never answers"))
+    }
+}
+
+fn requires_forms_service<T: native_forms_server::NativeForms>() {}
+
+fn main() {
+    greeter_wrapper_bridges_to_tonic();
+    requires_forms_service::<FormsService>();
+    let _: native_forms_server::NativeFormsServer<FormsService> =
+        native_forms_server::NativeFormsServer::new(FormsService);
+}
+"#
+);
+
+/// The documented, empty module the four-form service gets in place of a
+/// wrapper, exactly as generated.
+const FORMS_ABSENT_WRAPPER: &str = "\
+/// No async wrapper for the NativeForms service.
+///
+/// The wrapper takes one request and answers with one response.
+/// Streaming method(s) `client_streaming`, `server_streaming`, `bidirectional` have no shape in it.
+/// Implement `native_forms_server::NativeForms` directly.
+pub mod native_forms_service {}
+";
 
 const INVALID_PROTO: &str = r#"
 syntax = "proto3";
@@ -274,6 +368,7 @@ fn phase6_codegen_contracts() -> io::Result<()> {
 
     streaming_service_keeps_its_module_and_names_the_absent_wrapper(&fixture)?;
     unary_wrapper_survives_a_streaming_service_in_the_same_proto(&fixture)?;
+    native_streaming_services_compile_beside_unary_convenience_wrappers(&fixture)?;
     invalid_proto_returns_an_explicit_error(&fixture)?;
     successful_unary_generation_and_paths(&fixture)?;
     repeated_generation_replaces_bridge_output(&fixture)?;
@@ -298,6 +393,45 @@ fn phase6_codegen_contracts() -> io::Result<()> {
 
     println!(
         "phase6_codegen_contracts completed in {:?}",
+        started.elapsed()
+    );
+    Ok(())
+}
+
+/// 17.T2 — invariant 15.
+///
+/// Every native tonic form compiles on tonic's own trait in the same generated
+/// file as a unary convenience wrapper. The four-form service's wrapper module
+/// stays documented and empty, naming each streaming method.
+fn native_streaming_services_compile_beside_unary_convenience_wrappers(
+    fixture: &Fixture,
+) -> io::Result<()> {
+    let started = Instant::now();
+    let descriptor = fixture.generate_successfully(
+        FORMS_PROTO,
+        "verify_forms",
+        FORMS_VERIFIER,
+        "forms_descriptor.bin",
+    )?;
+    assert_nonempty_file(&descriptor, "four-form descriptor set")?;
+
+    let generated = fixture.generated()?;
+    assert!(
+        generated.contains(FORMS_ABSENT_WRAPPER),
+        "the four-form service's wrapper module is not the documented empty module\n{generated}"
+    );
+    assert!(
+        generated.contains("pub mod greeter_service {"),
+        "the unary wrapper was dropped beside the four-form service\n{generated}"
+    );
+
+    let compilation = fixture.check("verify_forms")?;
+    assert!(
+        compilation.status.success(),
+        "the four native forms did not compile beside the unary wrapper\n{compilation}"
+    );
+    println!(
+        "native forms beside the unary wrapper: {:?}",
         started.elapsed()
     );
     Ok(())
@@ -448,12 +582,12 @@ fn marker_path(output: &str, marker: &str) -> io::Result<PathBuf> {
 
 fn successful_unary_generation_and_paths(fixture: &Fixture) -> io::Result<()> {
     let started = Instant::now();
-    fixture.write_proto(UNARY_PROTO)?;
-    fixture.write_verifier("verify_unary", UNARY_VERIFIER)?;
-
-    let descriptor = fixture.artifacts.join("unary_descriptor.bin");
-    let generation = fixture.generate(&descriptor)?;
-    assert!(generation.status.success(), "{generation}");
+    let descriptor = fixture.generate_successfully(
+        UNARY_PROTO,
+        "verify_unary",
+        UNARY_VERIFIER,
+        "unary_descriptor.bin",
+    )?;
 
     let generated = fixture.output.join(GENERATED_FILE);
     assert!(
@@ -474,12 +608,12 @@ fn successful_unary_generation_and_paths(fixture: &Fixture) -> io::Result<()> {
 
 fn repeated_generation_replaces_bridge_output(fixture: &Fixture) -> io::Result<()> {
     let started = Instant::now();
-    fixture.write_proto(REBUILT_PROTO)?;
-    fixture.write_verifier("verify_rebuilt", REBUILT_VERIFIER)?;
-
-    let descriptor = fixture.artifacts.join("rebuilt_descriptor.bin");
-    let generation = fixture.generate(&descriptor)?;
-    assert!(generation.status.success(), "{generation}");
+    let descriptor = fixture.generate_successfully(
+        REBUILT_PROTO,
+        "verify_rebuilt",
+        REBUILT_VERIFIER,
+        "rebuilt_descriptor.bin",
+    )?;
     assert_nonempty_file(&descriptor, "rebuilt descriptor set")?;
 
     let compilation = fixture.check("verify_rebuilt")?;
@@ -498,14 +632,14 @@ fn streaming_service_keeps_its_module_and_names_the_absent_wrapper(
     fixture: &Fixture,
 ) -> io::Result<()> {
     let started = Instant::now();
-    fixture.write_proto(STREAMING_PROTO)?;
-    fixture.write_verifier("verify_streaming", STREAMING_VERIFIER)?;
+    fixture.generate_successfully(
+        STREAMING_PROTO,
+        "verify_streaming",
+        STREAMING_VERIFIER,
+        "streaming_descriptor.bin",
+    )?;
 
-    let descriptor = fixture.artifacts.join("streaming_descriptor.bin");
-    let generation = fixture.generate(&descriptor)?;
-    assert!(generation.status.success(), "{generation}");
-
-    let generated = fs::read_to_string(fixture.output.join(GENERATED_FILE))?;
+    let generated = fixture.generated()?;
     assert!(
         generated.contains("pub mod streamer_service {}"),
         "a streaming service was given an async wrapper it has no shape for\n{generated}"
@@ -536,14 +670,14 @@ fn unary_wrapper_survives_a_streaming_service_in_the_same_proto(
     fixture: &Fixture,
 ) -> io::Result<()> {
     let started = Instant::now();
-    fixture.write_proto(MIXED_PROTO)?;
-    fixture.write_verifier("verify_mixed", MIXED_VERIFIER)?;
+    fixture.generate_successfully(
+        MIXED_PROTO,
+        "verify_mixed",
+        MIXED_VERIFIER,
+        "mixed_descriptor.bin",
+    )?;
 
-    let descriptor = fixture.artifacts.join("mixed_descriptor.bin");
-    let generation = fixture.generate(&descriptor)?;
-    assert!(generation.status.success(), "{generation}");
-
-    let generated = fs::read_to_string(fixture.output.join(GENERATED_FILE))?;
+    let generated = fixture.generated()?;
     assert!(
         generated.contains("pub mod greeter_service"),
         "the unary wrapper was dropped because a streaming service shared its file\n{generated}"
@@ -650,6 +784,30 @@ tonic-prost = "=0.14.6"
             self.workspace.path().join(format!("src/bin/{name}.rs")),
             source,
         )
+    }
+
+    /// Write `proto` and the verifier binary `verifier_name`, then generate
+    /// with the descriptor set at `descriptor_name` and require success.
+    ///
+    /// Answers the descriptor set's path.
+    fn generate_successfully(
+        &self,
+        proto: &str,
+        verifier_name: &str,
+        verifier: &str,
+        descriptor_name: &str,
+    ) -> io::Result<PathBuf> {
+        self.write_proto(proto)?;
+        self.write_verifier(verifier_name, verifier)?;
+        let descriptor = self.artifacts.join(descriptor_name);
+        let generation = self.generate(&descriptor)?;
+        assert!(generation.status.success(), "{generation}");
+        Ok(descriptor)
+    }
+
+    /// The generated file's source.
+    fn generated(&self) -> io::Result<String> {
+        fs::read_to_string(self.output.join(GENERATED_FILE))
     }
 
     fn generate(&self, descriptor: &Path) -> io::Result<CommandOutput> {
@@ -811,10 +969,21 @@ struct ChildGuard {
 }
 
 impl ChildGuard {
+    /// Spawn while no other guarded spawn is in flight.
+    ///
+    /// On macOS, std opens a spawn's pipes first and marks them close-on-exec
+    /// after. A cargo child spawned inside that gap keeps a fixture's stdout
+    /// open, and the fixture's output reader then waits for cargo to exit.
     fn spawn(mut command: Command) -> io::Result<Self> {
+        static SPAWN: Mutex<()> = Mutex::new(());
         command.stdin(Stdio::null());
-        let child = command.spawn()?;
-        Ok(Self { child: Some(child) })
+        // The lock guards no data, so a poisoned lock still serializes correctly.
+        let alone = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
+        let child = command.spawn();
+        drop(alone);
+        Ok(Self {
+            child: Some(child?),
+        })
     }
 
     fn take_stdout(&mut self) -> io::Result<ChildStdout> {

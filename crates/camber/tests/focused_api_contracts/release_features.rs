@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::delivery_fixture::{
-    FixtureRepo, ambient_executable, repository_file, repository_root, run_bounded,
+    FixtureRepo, ambient_executable, repository_file, repository_root, repository_text, run_bounded,
 };
 
 const ADAPTER: &str = ".github/scripts/release-tools/cargo-semver-checks";
@@ -12,8 +12,7 @@ const API_FEATURES: &str = "profiling,ws,grpc,acme,dns01,nats,sqs,otel";
 
 #[test]
 fn release_workflow_supplies_token_to_git_setup_and_pr_creation() {
-    let workflow =
-        String::from_utf8(repository_file(".github/workflows/release-plz.yml").into_vec()).unwrap();
+    let workflow = repository_text(".github/workflows/release-plz.yml");
     for header in [
         "      - uses: release-plz/git-config@",
         "      - run: .github/scripts/release.sh release-pr",
@@ -110,8 +109,7 @@ fn release_checker_requires_an_explicit_real_executable() {
 
 #[test]
 fn release_features_cover_every_non_allocator_capability() {
-    let source = String::from_utf8(repository_file("crates/camber/Cargo.toml").into_vec())
-        .expect("Cargo manifest is UTF-8");
+    let source = repository_text("crates/camber/Cargo.toml");
     let manifest: toml::Value = toml::from_str(&source).expect("Cargo manifest is TOML");
     let features = manifest["features"].as_table().expect("feature table");
     let expected: BTreeSet<&str> = features

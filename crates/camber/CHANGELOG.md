@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- *(mq)* NATS and SQS operations are async only. The `connect_async`,
+  `publish_async`, `subscribe_async`, `queue_subscribe_async`,
+  `send_message_async`, `receive_messages_async`, and `delete_message_async`
+  aliases and the blocking `mq` bridge are removed. Call `connect`, `publish`,
+  `subscribe`, `queue_subscribe`, `send_message`, `receive_messages`, and
+  `delete_message`, and await them. Configure bounds through `nats::builder`
+  and `sqs::builder`.
+- *(mq)* A connection captures its Camber runtime when it connects. Outside a
+  runtime, connect returns `NoRuntime`. After root admission closes, it returns
+  `ScopeClosed`. At 64 live integrations or a full report budget, it returns
+  `Busy`.
+- *(mq)* `nats::Subscription::next_timeout` returns `Option<Message>`. It
+  returns `None` for a completed subscription, not `ChannelClosed`.
+  `try_next` on a completed subscription returns `Integration` with `Closed`,
+  not `ChannelClosed`.
+- *(dns01)* `CloudflareProvider::new(token)` and
+  `CloudflareProvider::with_base_url(token, base_url)` take no domain argument.
+  They are synchronous and return `Result`. They validate their input and do
+  no zone lookup. Remove the domain argument and the `.await` from each call.
+- *(dns01)* `RuntimeBuilder::tls_auto_dns01(acme, api_token)` takes no
+  domain argument. The runtime prepares the zone of each domain `acme` names.
+  Remove the third argument.
+- *(dns01)* `DnsProvider` requires `prepare(&mut self, domains)`. Camber calls
+  it with the order's whole domain set before it writes a TXT record.
+- *(dns01)* `AcmeDns01::provision_cert(provider)` takes the provider by value,
+  not by reference. The order owns the provider until its cleanup settles.
+- *(dns01)* Provisioning fails when record cleanup is incomplete or the cache
+  write fails. A `DnsProvider::create_txt_record` failure must use the
+  `OutcomeUnknown` retryability unless nothing was created.
+- *(dns01)* `AcmeDns01::spawn_renewal(provider, store)` returns
+  `AsyncJoinHandle<Result<(), RuntimeError>>`, not `JoinHandle<()>`. Outside a
+  Camber runtime it does not panic: the handle resolves with `NoRuntime`.
+- *(errors)* NATS, SQS, and DNS-01 failures are `RuntimeError::Integration`.
+  `RuntimeError::MessageQueue` is removed. Read the kind, operation, failure,
+  and retryability from the `IntegrationError`.
+- *(lifecycle)* `LifecycleParticipant` has a new `Integration { kind, id }`
+  variant. An exhaustive `match` must handle it.
+- *(config)* `TlsConfig` refuses unknown fields when it is parsed.
+  `TlsConfig::validate` refuses fields that the selected TLS mode does not use.
+  `dns_provider` must be exactly `"cloudflare"`.
+
+### Added
+
+- *(mq)* `nats::builder` and `sqs::builder` set timeouts, in-flight and
+  message-size bounds, and SQS region, endpoint, and credentials.
+  `nats::Connection::ready`, `nats::Subscription::next` and `close`,
+  `sqs::Client::ready`, and `close` on each handle are new.
+- *(dns01)* `AcmeDns01::validate`, `operation_timeout`, `cleanup_timeout`,
+  `directory_url`, and `add_root_certificate`.
+- *(config)* `camber::config::canonical_dns_name` and `AcmeConfig::validate`.
+- *(config)* `TlsConfig::mode` parses a valid block into `TlsMode`: `Manual`,
+  `TlsAlpn`, or `Dns01`. `AcmeSettings` holds the inputs both automatic modes
+  share.
+- *(errors)* `IntegrationError`, `IntegrationKind`, `IntegrationOperation`,
+  `IntegrationFailure`, `Retryability`, and `CleanupItem`.
+
+### Fixed
+
+- *(dns01)* Do not report uncertain ACME account, order, challenge, or finalize
+  writes as safe to retry. Read-only failures and explicit rate-limit or
+  bad-nonce refusals remain safe. Stops retain the submitted write's uncertainty.
+- *(dns01)* Verify account persistence through the production writer, including
+  cache creation, atomic replacement, private permissions, and typed failures.
+- *(grpc)* A streamed RPC's error status reaches the client while the method
+  still holds its stream open. Before, the status waited until a download
+  bound reset the stream, and the client lost it.
+- *(dns01)* The cache stores one `certificate.pem` generation. Camber admits a
+  cached or issued generation only when its key matches the leaf, the leaf is
+  inside its validity window, and its names cover every configured domain.
+  Renewal reads the leaf's own expiry. A valid legacy `cert.pem` and `key.pem`
+  pair migrates on read.
+
 ## [0.10.1](https://github.com/jostled-org/camber/compare/camber-v0.10.0...camber-v0.10.1) - 2026-09-26
 
 ### Fixed

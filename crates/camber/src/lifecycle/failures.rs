@@ -14,8 +14,9 @@ use std::sync::Arc;
 /// the whole collection, through [`iter`](Self::iter) or the rendering below.
 ///
 /// Entries are frozen in a stable rendering order — root scope, background
-/// children, resources, then the exporter — whatever order teardown happened to
-/// record them in, and keep their recording sequence inside one owner class.
+/// children, integrations, resources, then the exporter — whatever order
+/// teardown happened to record them in, and keep their recording sequence
+/// inside one owner class.
 /// That order is reproducible output and nothing else: it is not causal
 /// precedence, and the first entry is not more responsible than the last.
 ///

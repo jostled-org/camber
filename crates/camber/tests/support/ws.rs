@@ -185,8 +185,7 @@ pub fn write_masked_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) {
 }
 
 fn try_read_until_double_crlf(stream: &mut TcpStream) -> io::Result<Box<str>> {
-    let head = super::http::read_head(stream, WS_IO_TIMEOUT)?;
-    Ok(String::from_utf8_lossy(&head).into_owned().into_boxed_str())
+    super::http::read_head_text(stream, WS_IO_TIMEOUT)
 }
 
 /// Read one frame against a single deadline over the whole of it.

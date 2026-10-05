@@ -695,6 +695,63 @@ fn declared_stream_truncation_records_source_failure() {
         .expect("the declared-truncation runtime ran to completion");
 }
 
+/// A body failure that is ready in the same turn as the bytes before it.
+///
+/// The producer queues its whole prefix and ends short before the handler
+/// returns, so Hyper's first body poll reads the prefix and the next reads the
+/// failure. Hyper buffers the head and the prefix, and an error returned from
+/// that same write loop closes the connection before they are flushed. The
+/// peer is still owed every byte produced before the failure.
+#[test]
+fn declared_truncation_ready_with_its_prefix_still_delivers_the_prefix() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(2))
+        .run(|| {
+            let mut router = Router::new();
+            router.get_stream("/short", |_req: &Request| {
+                Box::pin(async move {
+                    let (response, sender) = StreamResponse::new(200);
+                    sender
+                        .send(TRUNCATED_PREFIX)
+                        .await
+                        .expect("the queued prefix fits the stream buffer");
+                    drop(sender);
+                    response.with_header("content-length", &ADVERTISED_BODY_LENGTH.to_string())
+                })
+            });
+            let addr = common::spawn_server(router);
+
+            let mut stream = TcpStream::connect(addr).expect("connect to the short stream");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("bound the short stream read");
+            write!(
+                stream,
+                "GET /short HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .expect("write the short stream request");
+            let mut response = Vec::new();
+            std::io::Read::read_to_end(&mut stream, &mut response)
+                .expect("read the short stream until the server closes");
+            let (head, body) = response
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|end| response.split_at(end + 4))
+                .unwrap_or_else(|| panic!("the committed head reached the peer: {response:?}"));
+            assert!(
+                head.starts_with(b"HTTP/1.1 200 OK\r\n"),
+                "the committed status is kept: {head:?}"
+            );
+            assert_eq!(
+                body, TRUNCATED_PREFIX,
+                "the peer receives the produced prefix and nothing past it"
+            );
+
+            runtime::request_shutdown();
+        })
+        .expect("the queued-truncation runtime ran to completion");
+}
+
 /// The route whose HTTP/2 stream ends short.
 const H2_SHORT_PATH: &str = "/h2/declared-short";
 

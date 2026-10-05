@@ -1,3 +1,15 @@
+mod integration;
+
+#[cfg(feature = "dns01")]
+pub(crate) use integration::MAX_CLEANUP_ITEMS;
+pub(crate) use integration::hides_sources;
+pub use integration::{
+    CleanupItem, IntegrationError, IntegrationFailure, IntegrationKind, IntegrationOperation,
+    Retryability,
+};
+#[cfg(any(feature = "nats", feature = "sqs", feature = "dns01"))]
+pub(crate) use integration::{Effect, interrupted, valid_duration};
+
 use std::io;
 use std::sync::Arc;
 
@@ -159,9 +171,16 @@ pub enum RuntimeError {
     #[error("schedule error: {0}")]
     Schedule(Box<str>),
 
-    /// A message queue transport or protocol error occurred.
-    #[error("message queue error: {0}")]
-    MessageQueue(Box<str>),
+    /// A managed integration operation failed.
+    ///
+    /// Carries the typed account an adapter built: which integration and
+    /// operation failed, why, and whether repeating it is safe. Shared, because
+    /// the caller and the runtime's settlement can hold the same failure. The
+    /// third-party source stays reachable through `source`; `Display` and
+    /// `Debug` never render it. The HTTP rejection boundary answers it with the
+    /// fixed internal-service response.
+    #[error(transparent)]
+    Integration(Arc<IntegrationError>),
 
     /// Configuration loading or validation failed.
     #[error("config error: {0}")]

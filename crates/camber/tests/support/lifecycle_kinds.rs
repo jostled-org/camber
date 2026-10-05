@@ -22,8 +22,8 @@
 //! only the vocabulary mounts only this.
 
 use camber::{
-    LifecycleFailure, LifecycleFailureKind, LifecycleFailures, LifecycleParticipant,
-    LifecyclePhase, ResourceFailureKind, ResourcePhase, RuntimeError,
+    IntegrationKind, LifecycleFailure, LifecycleFailureKind, LifecycleFailures,
+    LifecycleParticipant, LifecyclePhase, ResourceFailureKind, ResourcePhase, RuntimeError,
 };
 
 /// Every entry a returned aggregate holds, rendered on one line.
@@ -105,14 +105,27 @@ fn background_panic_payload(failure: &LifecycleFailure) -> Option<&str> {
 
 /// Every closed participant, matched without a wildcard.
 ///
-/// A resource carries its own name, so its entry is the one value here derived
-/// from a registration rather than fixed by the enum.
+/// A resource carries its own name and an integration its kind and admission
+/// identity, so those entries are derived from what production assigned rather
+/// than fixed by the enum.
 pub fn participant_name(participant: &LifecycleParticipant) -> String {
     match participant {
         LifecycleParticipant::RootScope => "root-scope".to_owned(),
         LifecycleParticipant::BackgroundTask => "background-task".to_owned(),
+        LifecycleParticipant::Integration { kind, id } => {
+            format!("integration:{}:{id}", integration_kind_name(*kind))
+        }
         LifecycleParticipant::Resource(name) => format!("resource:{name}"),
         LifecycleParticipant::Exporter => "exporter".to_owned(),
+    }
+}
+
+/// Every closed integration kind, matched without a wildcard.
+pub fn integration_kind_name(kind: IntegrationKind) -> &'static str {
+    match kind {
+        IntegrationKind::Nats => "nats",
+        IntegrationKind::Sqs => "sqs",
+        IntegrationKind::Dns01 => "dns01",
     }
 }
 

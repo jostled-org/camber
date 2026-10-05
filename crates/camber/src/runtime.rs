@@ -67,6 +67,9 @@ pub struct RuntimeBuilder {
     acme_config: Option<crate::acme::AcmeConfig>,
     #[cfg(feature = "dns01")]
     dns01_setup: Option<crate::dns01::Dns01Setup>,
+    /// The Cloudflare API base a test names for this runtime's DNS-01 owner.
+    #[cfg(feature = "dns01")]
+    dns01_base_url: Option<Box<str>>,
     #[cfg(feature = "otel")]
     otel_endpoint: Option<Box<str>>,
 }
@@ -85,6 +88,8 @@ impl RuntimeBuilder {
             acme_config: None,
             #[cfg(feature = "dns01")]
             dns01_setup: None,
+            #[cfg(feature = "dns01")]
+            dns01_base_url: None,
             #[cfg(feature = "otel")]
             otel_endpoint: None,
         }
@@ -268,20 +273,31 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Use automatic TLS via ACME DNS-01 challenges (for servers behind NAT).
-    /// Mutually exclusive with `tls_cert`/`tls_key`/`tls_auto`.
+    /// Use automatic TLS via ACME DNS-01 challenges through Cloudflare (for
+    /// servers behind NAT). Mutually exclusive with
+    /// `tls_cert`/`tls_key`/`tls_auto`.
+    ///
+    /// `run` validates the whole configuration and the token before anything
+    /// is established. Inside the established runtime it then admits one
+    /// DNS-01 owner, which prepares every configured domain's zone and serves
+    /// its first certificate before the closure runs. A failure ends the run
+    /// through its ordinary teardown, before anything serves.
     #[cfg(feature = "dns01")]
-    pub fn tls_auto_dns01(
-        mut self,
-        acme: crate::dns01::AcmeDns01,
-        api_token: Box<str>,
-        domain: Box<str>,
-    ) -> Self {
-        self.dns01_setup = Some(crate::dns01::Dns01Setup {
-            acme,
-            api_token,
-            domain,
-        });
+    pub fn tls_auto_dns01(mut self, acme: crate::dns01::AcmeDns01, api_token: Box<str>) -> Self {
+        self.dns01_setup = Some(crate::dns01::Dns01Setup::new(acme, api_token));
+        self
+    }
+
+    /// Send this runtime's DNS-01 provider requests to the Cloudflare-shaped
+    /// API at `base_url` instead of the production API.
+    ///
+    /// The same provider construction normal startup uses consumes it, so
+    /// the base is validated as `CloudflareProvider::with_base_url` validates
+    /// it.
+    #[cfg(feature = "dns01")]
+    #[doc(hidden)]
+    pub fn with_test_dns_transport(mut self, base_url: &str) -> Self {
+        self.dns01_base_url = Some(base_url.into());
         self
     }
 
@@ -313,14 +329,15 @@ impl RuntimeBuilder {
         // Resolve manual TLS (cert files or CertStore).
         // When ACME is active, these are all None (enforced by validate_tls_options).
         // `PathBuf::from(Box<Path>)` reuses the boxed allocation, so handing
-        // `resolve_tls` the owned type it takes costs no copy.
-        let (tls_cfg, store) = crate::tls::resolve_tls(
+        // `resolve_tls` the owned type it takes costs no copy. The returned
+        // store is the one the config's resolver already shares, so the
+        // runtime keeps no second handle to it.
+        let (tls_cfg, _) = crate::tls::resolve_tls(
             self.tls_cert_store,
             self.tls_cert_path.map(std::path::PathBuf::from),
             self.tls_key_path.map(std::path::PathBuf::from),
         )?;
         config.tls_config = tls_cfg;
-        config.cert_store = store;
 
         #[cfg(feature = "acme")]
         let acme_state = match self.acme_config {
@@ -328,6 +345,19 @@ impl RuntimeBuilder {
                 let (tls_cfg, state) = acme_cfg.build()?;
                 config.tls_config = Some(tls_cfg);
                 Some(state)
+            }
+            None => None,
+        };
+
+        // Validated whole before anything is established: a refused name,
+        // bound, token, or provider base costs no executor, recorder, or
+        // request.
+        #[cfg(feature = "dns01")]
+        let dns01 = match self.dns01_setup {
+            Some(setup) => {
+                let startup = setup.with_base_url(self.dns01_base_url).validate()?;
+                config.tls_config = Some(startup.tls_config()?);
+                Some(startup)
             }
             None => None,
         };
@@ -340,7 +370,7 @@ impl RuntimeBuilder {
             #[cfg(feature = "acme")]
             acme_state,
             #[cfg(feature = "dns01")]
-            self.dns01_setup,
+            dns01,
             #[cfg(feature = "otel")]
             self.otel_endpoint,
         )
@@ -596,16 +626,24 @@ type ScopedOutcome<T> = Result<T, Box<dyn std::any::Any + Send>>;
 /// The closure returning is itself a graceful transition, so the aggregate
 /// deadline is minted here for a run that was never asked to stop. A run that
 /// was asked minted it at the request, and this call reads that instant back.
+///
+/// Closing also started the integration registry's stop, so the drain waits
+/// for integration work under the same expiry. The registry then settles what
+/// the drain left and transfers its history once, before any resource shuts
+/// down.
 fn close_and_drain(
     inner: &RuntimeInner,
     tokio_rt: &tokio::runtime::Runtime,
     log: &mut LifecycleFailureLog,
 ) {
-    inner.close_scope();
+    // Mint before closing: an owner the closing latch wakes reads the expiry
+    // at once, and must find it fixed.
     inner
         .shutdown_deadline_ref()
         .mint_at(tokio::time::Instant::now());
+    inner.close_scope();
     drain_root_scope(inner, tokio_rt.handle(), log);
+    inner.integrations().settle_into(log);
 }
 
 /// Record the panic a Camber-owned child left in the scope's slot.
@@ -668,23 +706,18 @@ fn run_inner_impl<F, T>(
     registry: ResourceRegistry,
     f: F,
     #[cfg(feature = "acme")] acme_state: Option<crate::acme::AcmeState<std::io::Error>>,
-    #[cfg(feature = "dns01")] dns01_setup: Option<crate::dns01::Dns01Setup>,
+    #[cfg(feature = "dns01")] dns01: Option<crate::dns01::Dns01Startup>,
     #[cfg(feature = "otel")] otel_endpoint: Option<Box<str>>,
 ) -> Result<T, crate::RuntimeError>
 where
     F: FnOnce() -> T,
 {
     // Resolved first: a recorder the process refuses is a startup failure, and
-    // failing before an executor is built or a DNS-01 cert is provisioned means
-    // nothing has to be unwound to report it.
+    // failing before an executor is built means nothing has to be unwound to
+    // report it.
     let metrics_handle = install_metrics(config.metrics_enabled)?;
 
     let tokio_rt = build_executor(config.worker_threads)?;
-
-    // DNS-01 setup: provision or load cert before the server starts, so the
-    // config the runtime is established with already carries the result.
-    #[cfg(feature = "dns01")]
-    let (config, dns01_renewal) = provision_dns01(&tokio_rt, config, dns01_setup)?;
 
     // The OTLP exporter is installed HERE, in the function that shuts it down,
     // and after the last step that can return early. `init_exporter` leaves a
@@ -711,6 +744,12 @@ where
     // Run the user closure inside tokio's block_on so that tokio::spawn_blocking
     // and other tokio APIs are available on this thread.
     let runtime_scope = || async {
+        // The DNS-01 owner is admitted inside the established runtime, so its
+        // zone queries follow ownership admission, and its first certificate
+        // is served before the closure can start a server. A refusal takes
+        // the same teardown as any other runtime failure.
+        #[cfg(feature = "dns01")]
+        crate::dns01::start_dns01(&inner, dns01).await?;
         // The readiness pass runs before anything is admitted and before the
         // closure serves. Every resource is visited, so a caller reads the whole
         // account of what was unwell, and any failure at all refuses the run
@@ -723,8 +762,6 @@ where
                     &registry,
                     #[cfg(feature = "acme")]
                     acme_state,
-                    #[cfg(feature = "dns01")]
-                    dns01_renewal,
                 );
                 Ok(f())
             }
@@ -791,49 +828,6 @@ fn shutdown_exporter_participant(inner: &RuntimeInner) {
     );
 }
 
-/// Provision or load the DNS-01 certificate before the server starts, folding
-/// the result into the config the runtime will be established with.
-///
-/// Runs on the executor the runtime will use, before that runtime exists: the
-/// cert has to be in the config the shared state is built from, and no scope
-/// child may be admitted until it is.
-#[cfg(feature = "dns01")]
-fn provision_dns01(
-    tokio_rt: &tokio::runtime::Runtime,
-    config: RuntimeConfig,
-    setup: Option<crate::dns01::Dns01Setup>,
-) -> Result<(RuntimeConfig, Option<Dns01Renewal>), crate::RuntimeError> {
-    let setup = match setup {
-        Some(setup) => setup,
-        None => return Ok((config, None)),
-    };
-    let state = tokio_rt.block_on(crate::dns01::init_dns01(setup))?;
-
-    let mut config = config;
-    config.tls_config = Some(state.tls_config);
-    config.cert_store = Some(state.store.clone());
-    Ok((
-        config,
-        Some(Dns01Renewal {
-            acme: state.acme,
-            provider: state.provider,
-            store: state.store,
-        }),
-    ))
-}
-
-/// What the DNS-01 renewal loop is built from, carried out of provisioning.
-///
-/// The provisioning state also holds the TLS material, which belongs to the
-/// config and is consumed there; splitting it here means the admission step
-/// receives only what its loop actually needs.
-#[cfg(feature = "dns01")]
-struct Dns01Renewal {
-    acme: crate::dns01::AcmeDns01,
-    provider: crate::dns01::CloudflareProvider,
-    store: CertStore,
-}
-
 /// The registry `/health` answers from, or nothing at all when no resource is
 /// registered.
 ///
@@ -864,7 +858,6 @@ fn admit_owned_subsystems(
     inner: &Arc<RuntimeInner>,
     registry: &ResourceRegistry,
     #[cfg(feature = "acme")] acme_state: Option<crate::acme::AcmeState<std::io::Error>>,
-    #[cfg(feature = "dns01")] dns01_renewal: Option<Dns01Renewal>,
 ) {
     // The refusal is already reported against the subsystem's own name, and
     // this setup runs inside the block that yields the user closure's value —
@@ -877,22 +870,6 @@ fn admit_owned_subsystems(
             inner,
             "acme renewal",
             move |signals| crate::acme::acme_renewal_loop(state, signals),
-        ));
-    }
-
-    #[cfg(feature = "dns01")]
-    if let Some(renewal) = dns01_renewal {
-        drop(crate::task::admit_signalled_subsystem_on(
-            inner,
-            "dns01 renewal",
-            move |signals| {
-                crate::dns01::dns01_renewal_loop(
-                    renewal.acme,
-                    renewal.provider,
-                    renewal.store,
-                    signals,
-                )
-            },
         ));
     }
 

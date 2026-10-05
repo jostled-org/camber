@@ -4,6 +4,23 @@ use camber::http::mock;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 
+#[tokio::test(start_paused = true)]
+async fn address_reuse_bound_uses_real_time_when_runtime_time_is_paused() {
+    let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = held.local_addr().unwrap();
+    let bound = std::time::Duration::from_millis(50);
+    let started = std::time::Instant::now();
+    let result = crate::http::rebind_within(addr, bound).await;
+    assert!(result.is_err(), "a held listener must prevent reuse");
+    assert!(
+        started.elapsed() >= bound,
+        "virtual time exhausted a real socket bound"
+    );
+    drop(held);
+    let rebound = crate::http::rebind_within(addr, bound).await.unwrap();
+    drop(rebound);
+}
+
 #[camber::test]
 async fn mock_http_intercepts_outbound_call() {
     let mock = mock::http("https://external-api/data")

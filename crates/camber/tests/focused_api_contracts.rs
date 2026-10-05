@@ -7,8 +7,14 @@ pub mod deterministic;
 // `retry_delays` uses.
 #[path = "support/http.rs"]
 pub mod http;
+#[path = "support/integration_vocabulary.rs"]
+pub mod integration_vocabulary;
+#[path = "support/leaky_source.rs"]
+pub mod leaky_source;
 #[path = "support/lifecycle_kinds.rs"]
 pub mod lifecycle_kinds;
+#[path = "support/local_integrations/mod.rs"]
+pub mod local_integrations;
 #[path = "support/process.rs"]
 pub mod process;
 #[path = "support/rejection_kinds.rs"]
@@ -32,6 +38,26 @@ mod configuration_validation;
 mod delivery_inputs;
 #[path = "focused_api_contracts/framework_rejections.rs"]
 mod framework_rejections;
+#[path = "focused_api_contracts/integration_api.rs"]
+mod integration_api;
+#[path = "focused_api_contracts/integration_delivery.rs"]
+mod integration_delivery;
+#[cfg(feature = "dns01")]
+#[path = "focused_api_contracts/integration_dns_cutover.rs"]
+mod integration_dns_cutover;
+#[path = "focused_api_contracts/integration_errors.rs"]
+mod integration_errors;
+#[cfg(feature = "nats")]
+#[path = "focused_api_contracts/integration_nats_cutover.rs"]
+mod integration_nats_cutover;
+#[cfg(feature = "sqs")]
+#[path = "focused_api_contracts/integration_sqs_cutover.rs"]
+mod integration_sqs_cutover;
+#[path = "focused_api_contracts/local_integration_delivery.rs"]
+mod local_integration_delivery;
+#[cfg(feature = "nats")]
+#[path = "focused_api_contracts/nats_acknowledged_api.rs"]
+mod nats_acknowledged_api;
 #[path = "focused_api_contracts/owned_server_api.rs"]
 mod owned_server_api;
 #[path = "focused_api_contracts/public_trait_contracts.rs"]

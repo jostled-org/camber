@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -39,6 +40,67 @@ pub fn run_command_with_timeout(command: Command, timeout: Duration) -> io::Resu
 
 pub fn run_command(command: Command) -> io::Result<CommandOutput> {
     run_command_with_timeout(command, COMMAND_TIMEOUT)
+}
+
+/// Hang guard for a CLI that must refuse its configuration and exit. A CLI
+/// that reaches startup either blocks on a FIFO secret or serves; this bound
+/// kills it.
+pub const CONFIG_REFUSAL_BOUND: Duration = Duration::from_secs(30);
+
+/// `camber serve <config>`, ready for the caller's environment changes.
+pub fn serve_command(config: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_camber"));
+    command.arg("serve").arg(config);
+    command
+}
+
+/// Run `command` under `bound`. `None` is a child the bound had to kill.
+pub fn run_command_within(command: Command, bound: Duration) -> io::Result<Option<CommandOutput>> {
+    match run_command_with_timeout(command, bound) {
+        Ok(output) => Ok(Some(output)),
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+impl CommandOutput {
+    /// Whether the child announced a bound listener on either stream.
+    pub fn announced_listener(&self) -> bool {
+        [&self.stdout, &self.stderr]
+            .into_iter()
+            .any(|stream| String::from_utf8_lossy(stream).contains("listening on"))
+    }
+}
+
+/// The reasons of every `(holds, reason)` check that does not hold, joined;
+/// `None` when every check holds.
+pub fn failed_checks(checks: &[(bool, &str)]) -> Option<String> {
+    let failed: Box<[&str]> = checks
+        .iter()
+        .filter_map(|&(holds, reason)| (!holds).then_some(reason))
+        .collect();
+    match failed.is_empty() {
+        true => None,
+        false => Some(failed.join("; ")),
+    }
+}
+
+/// Create a FIFO secret sentinel. With no writer, any open for reading blocks,
+/// so a child that loads the secret hangs until its caller's bound kills it.
+pub fn make_fifo(path: &Path) -> io::Result<()> {
+    let status = Command::new("mkfifo").arg(path).status()?;
+    match status.success() {
+        true => Ok(()),
+        false => Err(io::Error::other(format!(
+            "mkfifo {} exited with {status}",
+            path.display()
+        ))),
+    }
+}
+
+/// Whether `path` is still a FIFO: a sentinel no child replaced.
+pub fn is_fifo(path: &Path) -> io::Result<bool> {
+    Ok(std::fs::symlink_metadata(path)?.file_type().is_fifo())
 }
 
 pub struct ChildGuard {

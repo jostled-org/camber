@@ -1,4 +1,4 @@
-use super::rejection::SourceChain;
+use super::source_chain::SourceChain;
 
 /// Strip surrounding double quotes from a header value (RFC 6265 / RFC 2616).
 pub(crate) fn strip_quotes(v: &str) -> &str {
