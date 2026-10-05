@@ -43,9 +43,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::delivery_fixture::{
-    FixtureRepo, INFRASTRUCTURE_STATUS, SYSTEM_PATH, Tool, ambient_executable,
-    assert_absent_from_system_path, isolated_command, logged_text, quoted, repository_file,
-    repository_root, run_reaped, write_executable, write_file,
+    FixtureRepo, INFRASTRUCTURE_STATUS, Tool, ambient_executable, isolated_command, link_utilities,
+    logged_text, quoted, repository_file, repository_root, run_reaped, write_executable,
+    write_file,
 };
 use crate::temp_support::TempRoot;
 
@@ -279,28 +279,31 @@ for argument in "$@"; do
 done
 "#;
 
-/// The controlled executables one row searches before the system path, and
+/// The controlled executables and selected utilities one row searches, and
 /// the state its stubs record into.
 pub(crate) struct StubTools {
     root: TempRoot,
 }
 
 impl StubTools {
-    /// A tool directory holding real Bash, Git, ripgrep, and jq.
+    /// A private tool directory holding real Git and selected shell utilities.
     pub(crate) fn new() -> Self {
         let root = TempRoot::new().expect("stub tool root was not created");
         let tools = Self { root };
         fs::create_dir_all(tools.bin()).expect("stub tool directory was not created");
         fs::create_dir_all(tools.state()).expect("stub tool state was not created");
-        for name in ["bash", "git", "rg", "jq"] {
-            std::os::unix::fs::symlink(ambient_executable(name), tools.bin().join(name))
-                .expect("stub tool was not linked");
-        }
+        link_utilities(&tools.bin());
+        std::os::unix::fs::symlink(ambient_executable("git"), tools.bin().join("git"))
+            .expect("Git was not linked");
         tools
     }
 
     pub(crate) fn bin(&self) -> PathBuf {
         self.root.path().join("bin")
+    }
+
+    pub(crate) fn search_path(&self) -> String {
+        self.bin().display().to_string()
     }
 
     pub(crate) fn state(&self) -> PathBuf {
@@ -624,7 +627,7 @@ fn declared_target(repo: &FixtureRepo) -> PathBuf {
 
 fn run_budget(repo: &FixtureRepo, mode: Mode) -> BudgetRun {
     let tools = budget_tools(mode);
-    let search_path = format!("{}:{SYSTEM_PATH}", tools.bin().display());
+    let search_path = tools.search_path();
     let command = runner_command(repo, RUNNER, &search_path, &declared_target(repo));
     let (status, stdout, stderr) = run_reaped(command, RUN_BOUND, "budget runner");
     let cargo_log = tools.cargo_log();
@@ -1152,9 +1155,6 @@ fn integration_budget_receipt_rejects_missing_or_failed_samples() {
         repository_root().join(RUNNER).is_file(),
         "{RED_DIAGNOSTIC}: the integration budget runner {RUNNER} is absent"
     );
-    for tool in ["cargo", "rustc"] {
-        assert_absent_from_system_path(tool);
-    }
     let repo = tracked_checkout("integration budget fixture");
     let mut failures = Vec::new();
     check_cases_exist(&mut failures);

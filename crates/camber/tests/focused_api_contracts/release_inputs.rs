@@ -77,7 +77,7 @@ fn run_refresh(
         .env("API_STATUS", status.to_string())
         .env(
             "PATH",
-            format!("{}/bin:/usr/bin:/bin", repo.path().display()),
+            format!("{}/bin:{}", repo.path().display(), repo.utility_path()),
         );
     run_bounded(command)
 }

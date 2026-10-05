@@ -2,9 +2,9 @@
 //!
 //! Each row runs `.github/scripts/check-local-integrations.sh` as a real Bash
 //! process from an owned checkout of the tracked `.github` tree. Only the
-//! container engine and Cargo are controlled executables, placed ahead of a
-//! system-only `PATH`; the selection, identity, and evidence logic under test
-//! is the tracked runner itself. No broker behavior is claimed here.
+//! container engine and Cargo are controlled executables on a private `PATH`
+//! with selected shell utilities. The tracked runner owns the selection,
+//! identity, and evidence logic. No broker behavior is claimed here.
 //!
 //! The runner contract these rows hold it to:
 //!
@@ -34,8 +34,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::delivery_fixture::{
-    FixtureRepo, HookRun, INFRASTRUCTURE_STATUS, SYSTEM_PATH, Tool, assert_absent_from_system_path,
-    logged_text, quoted, repository_root, repository_text, run_bounded, write_file,
+    FixtureRepo, HookRun, INFRASTRUCTURE_STATUS, Tool, logged_text, quoted, repository_root,
+    repository_text, run_bounded, write_file,
 };
 use crate::integration_delivery::{
     CargoCall, Checks, RunnerReport, StubTools, cargo_calls, copy_tracked_inputs, runner_command,
@@ -271,13 +271,9 @@ fn run_lane(repo: &FixtureRepo, row: &str, arguments: &[&str], scenario: Scenari
     let search_path = match scenario.engine {
         EngineState::Present(identity) => {
             engine.set_identity(identity);
-            format!(
-                "{}:{}:{SYSTEM_PATH}",
-                tools.bin().display(),
-                engine.bin().display()
-            )
+            format!("{}:{}", tools.search_path(), engine.bin().display())
         }
-        EngineState::Absent => format!("{}:{SYSTEM_PATH}", tools.bin().display()),
+        EngineState::Absent => tools.search_path(),
     };
     let evidence_dir = repo.outside(&format!("evidence-{row}"));
     fs::create_dir_all(&evidence_dir).expect("evidence directory was not created");
@@ -587,9 +583,6 @@ fn local_integration_selection_requires_exact_tests_and_cleanup() {
         repository_root().join(RUNNER).is_file(),
         "{RED_DIAGNOSTIC}: the shared local lane runner {RUNNER} is absent"
     );
-    for engine in ["docker", "podman"] {
-        assert_absent_from_system_path(engine);
-    }
     let inventory = tool_inventory();
     assert!(
         !inventory.contains(SUBSTITUTED_DIGEST.trim_start_matches("sha256:")),

@@ -2,9 +2,9 @@
 //!
 //! The hooks under test are real Bash processes. Everything they reach outside
 //! the checkout — the Rust toolchain, Pedant, cargo-deny — is a controlled
-//! executable in a directory the fixture owns, placed ahead of a system-only
-//! `PATH`. An installed tool can never answer for a stub, and a stub never
-//! reports the outcome the hook is meant to decide.
+//! executable in a directory the fixture owns, alongside selected utilities.
+//! `PATH` has no system-directory fallback. An installed tool cannot answer for
+//! a missing stub. A stub never reports the outcome the hook must decide.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -17,9 +17,6 @@ use super::temp_support::TempRoot;
 
 /// The bound on one hook process, from spawn to reap.
 pub const HOOK_BOUND: Duration = Duration::from_secs(120);
-
-/// The only directories a hook may search beyond the fixture's own tools.
-pub const SYSTEM_PATH: &str = "/usr/bin:/bin";
 
 /// The status every hook and runner reserves for unavailable infrastructure,
 /// never for a policy answer about the tree.
@@ -69,15 +66,17 @@ pub fn find_on_path(name: &str, accept: impl Fn(&Path) -> bool) -> Option<PathBu
     })
 }
 
-/// Fail when a system directory could answer for `name` in place of a stub.
-pub fn assert_absent_from_system_path(name: &str) {
-    for directory in SYSTEM_PATH.split(':') {
-        let candidate = Path::new(directory).join(name);
-        assert!(
-            !is_executable(&candidate),
-            "{} would answer for the fixture's absent {name}",
-            candidate.display()
-        );
+/// Link only the shell utilities used by delivery hooks and their fixtures.
+/// Git and tools under test are installed separately by each fixture.
+pub fn link_utilities(bin: &Path) {
+    fs::create_dir_all(bin).expect("utility directory was not created");
+    for name in [
+        "base64", "basename", "bash", "cat", "chmod", "cp", "cut", "date", "diff", "dirname", "du",
+        "env", "find", "head", "jq", "mkdir", "mktemp", "mv", "rg", "rm", "sed", "sh", "shasum",
+        "sleep", "sort", "tail", "tee", "touch", "tr", "wc",
+    ] {
+        std::os::unix::fs::symlink(ambient_executable(name), bin.join(name))
+            .unwrap_or_else(|error| panic!("fixture utility {name} was not linked: {error}"));
     }
 }
 
@@ -282,7 +281,7 @@ impl PedantVerify<'static> {
     };
 }
 
-/// A directory of controlled executables, searched before the system path.
+/// A private directory of controlled executables and selected shell utilities.
 pub struct ToolBin {
     root: TempRoot,
 }
@@ -297,10 +296,7 @@ impl ToolBin {
         let tools = Self { root };
         fs::create_dir_all(tools.bin()).expect("tool directory was not created");
         fs::create_dir_all(tools.home()).expect("tool home was not created");
-        std::os::unix::fs::symlink(ambient_executable("bash"), tools.bin().join("bash"))
-            .expect("bash was not linked");
-        std::os::unix::fs::symlink(ambient_executable("rg"), tools.bin().join("rg"))
-            .expect("rg was not linked");
+        link_utilities(&tools.bin());
         write_executable(&tools.bin().join("git"), delegating_git());
         write_executable(
             &tools.bin().join("protoc"),
@@ -423,9 +419,9 @@ exit 0
         self.root.path().join("home")
     }
 
-    /// `PATH` for a hook: these tools first, then the system directories.
+    /// `PATH` for a hook, with no ambient directory fallback.
     pub fn search_path(&self) -> String {
-        format!("{}:{SYSTEM_PATH}", self.bin().display())
+        self.bin().display().to_string()
     }
 
     fn verify_log(&self) -> PathBuf {
@@ -513,23 +509,22 @@ pub struct FixtureRepo {
     root: TempRoot,
     /// Real Git, resolved once rather than on every fixture command.
     git: PathBuf,
-    /// `PATH` for fixture Git: its own directory, then the system ones.
-    git_search_path: Box<str>,
+    /// Real Git and selected utilities, without ambient directory fallback.
+    utility_path: Box<str>,
 }
 
 impl FixtureRepo {
     pub fn new() -> Self {
         let root = TempRoot::new().expect("repository fixture root was not created");
         let git = ambient_executable("git");
-        let git_search_path = format!(
-            "{}:{SYSTEM_PATH}",
-            git.parent().expect("git has a directory").display()
-        )
-        .into_boxed_str();
+        let bin = root.path().join("utilities");
+        link_utilities(&bin);
+        std::os::unix::fs::symlink(&git, bin.join("git")).expect("Git was not linked");
+        let utility_path = bin.display().to_string().into_boxed_str();
         let repo = Self {
             root,
             git,
-            git_search_path,
+            utility_path,
         };
         for directory in [repo.path(), repo.home(), repo.scratch()] {
             fs::create_dir_all(directory).expect("repository fixture directory was not created");
@@ -582,7 +577,7 @@ impl FixtureRepo {
     /// Run real Git in the repository, requiring success.
     pub fn git(&self, args: &[&str]) -> HookRun {
         let mut command =
-            isolated_command(&self.git, &self.path(), &self.home(), &self.git_search_path);
+            isolated_command(&self.git, &self.path(), &self.home(), self.utility_path());
         command.args(args);
         let run = run_bounded(command);
         assert_eq!(
@@ -593,10 +588,14 @@ impl FixtureRepo {
         run
     }
 
-    /// A command run from the repository that searches only the system
-    /// directories.
+    /// The private path containing Git and selected shell utilities.
+    pub fn utility_path(&self) -> &str {
+        &self.utility_path
+    }
+
+    /// A command that searches only this repository fixture's utility directory.
     pub fn system_command(&self, program: &Path) -> Command {
-        isolated_command(program, &self.path(), &self.home(), SYSTEM_PATH)
+        isolated_command(program, &self.path(), &self.home(), self.utility_path())
     }
 
     /// A hook command run from the repository with `tools` on its path.

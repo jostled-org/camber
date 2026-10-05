@@ -10,8 +10,8 @@ use std::process::Command;
 
 use crate::delivery_fixture::{
     FixtureRepo, HookRun, INFRASTRUCTURE_STATUS, Identity, PedantVerify, Tool, ToolBin,
-    ambient_executable, assert_absent_from_system_path, isolated_command, logged_text, phase_hook,
-    repository_file, repository_root, run_bounded,
+    ambient_executable, isolated_command, logged_text, phase_hook, repository_file,
+    repository_root, run_bounded,
 };
 
 const SUPPLY_CHAIN_HOOK: &str = ".github/scripts/check-supply-chain.sh";
@@ -42,6 +42,42 @@ const WORKFLOW_PHASES: [&str; 10] = [
 const WORKFLOW_TOOL_RECORDS: [&str; 2] = ["rust-toolchain.toml", ".github/workflow-tools.toml"];
 
 // --- Supply-chain input admission ---------------------------------------
+
+#[test]
+fn delivery_fixture_path_excludes_undeclared_host_tools() {
+    let repo = FixtureRepo::new();
+    let tools = ToolBin::new(|_| Identity::Missing, PedantVerify::CLEAN);
+    let stubs = crate::integration_delivery::StubTools::new();
+    for search_path in [
+        tools.search_path(),
+        stubs.search_path(),
+        repo.utility_path().to_owned(),
+    ] {
+        let mut command = repo.command(Path::new("/bin/bash"), &tools);
+        command.env("PATH", search_path).args([
+            "-c",
+            r#"for tool in "$@"; do
+    if command -v "$tool" >/dev/null 2>&1; then
+        printf 'undeclared executable is reachable: %s\n' "$tool" >&2
+        exit 1
+    fi
+done
+for utility in bash cat git rg; do command -v "$utility" >/dev/null || exit 2; done"#,
+            "fixture",
+            "docker",
+            "podman",
+            "ls",
+        ]);
+        for tool in Tool::ALL {
+            command.args(tool.executables());
+        }
+        let run = run_bounded(command);
+        assert_eq!(run.status, 0, "{}", run.output);
+    }
+    stubs.close();
+    tools.close();
+    repo.close();
+}
 
 /// A repository holding the shipped supply-chain hook and its inputs.
 struct SupplyChainRepo {
@@ -337,8 +373,6 @@ fn assert_missing_verifier_is_infrastructure() {
 
 #[test]
 fn reviewed_dependency_inputs_accept_only_the_recorded_tree() {
-    assert_absent_from_system_path("pedant");
-
     assert_recorded_trees_are_admitted();
     assert_unrecorded_trees_are_refused();
     assert_accepted_exception_is_reported_as_incomplete();
@@ -411,12 +445,6 @@ fn only(tool: Tool, identity: Identity) -> impl Fn(Tool) -> Identity {
 
 #[test]
 fn workflow_tools_reject_unapproved_identity() {
-    for tool in Tool::ALL {
-        tool.executables()
-            .iter()
-            .for_each(|executable| assert_absent_from_system_path(executable));
-    }
-
     let pinned = run_tool_admission(|_| Identity::Pinned);
     assert_eq!(
         pinned.run.status, 0,

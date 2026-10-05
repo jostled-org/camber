@@ -162,7 +162,7 @@ fn release_preflight_is_isolated_and_preserves_failure_status() {
             .args([".github/scripts/reproduce-ci.sh", "release"])
             .env(
                 "PATH",
-                format!("{}/bin:/usr/bin:/bin", repo.path().display()),
+                format!("{}/bin:{}", repo.path().display(), repo.utility_path()),
             )
             .env("PREFLIGHT_STATUS", status.to_string());
         let result = run_bounded(command);
