@@ -1,0 +1,9 @@
+#!/bin/bash
+set -eu
+printf 'release-plz %s\n' "$*" >>"$FIXTURE_LOG"
+[ "${RELEASE_STATUS:-0}" = 0 ] || exit "$RELEASE_STATUS"
+for tag in camber-v0.12.0 camber-macros-v0.7.0; do
+    if ! git rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1; then
+        git tag "$tag"
+    fi
+done

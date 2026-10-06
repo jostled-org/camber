@@ -1,0 +1,40 @@
+#!/bin/bash
+set -eu
+[ "${CURL_STATUS:-0}" = 0 ] || exit "$CURL_STATUS"
+output=''
+url=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output) output="$2"; shift ;;
+        https:*) url="$1" ;;
+    esac
+    shift
+done
+case "$url" in
+    https://static.crates.io/*) printf 'archive\n' >"$output"; exit 0 ;;
+esac
+if [ "${BAD_INDEX:-0}" = 1 ]; then
+    printf 'malformed\n' >"$output"
+    printf '200'
+    exit 0
+fi
+if [ "${REGISTRY_STATUS:-200}" != 200 ]; then
+    printf '%s' "$REGISTRY_STATUS"
+    exit 0
+fi
+name="${url##*/}"
+version=0.12.0
+published=0
+[ "$name" != camber-macros ] || version=0.7.0
+[ "$name" != camber-macros ] || published="${PUBLISHED_MACROS:-0}"
+if [ -f "$FIXTURE_STATE" ]; then
+    printf 'confirm %s\n' "$name" >>"$FIXTURE_LOG"
+    [ "${NO_CONFIRMATION:-0}" = 1 ] || published=1
+fi
+if [ "$published" = 1 ]; then
+    printf '{"name":"%s","vers":"%s","yanked":false}\n' "$name" "$version" >"$output"
+fi
+if [ "$published" = 0 ]; then
+    printf '{"name":"%s","vers":"0.1.0","yanked":false}\n' "$name" >"$output"
+fi
+printf '200'

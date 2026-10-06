@@ -72,7 +72,7 @@ fn body_admission_has_no_clone_impl() {
         }
     }
     impl<T: ?Sized> AmbiguousIfClone<()> for T {}
-    impl<T: ?Sized + Clone> AmbiguousIfClone<u8> for T {}
+    impl<T: Clone> AmbiguousIfClone<u8> for T {}
 
     assert!(
         <BodyAdmission as AmbiguousIfClone<_>>::admits_one_owner(),

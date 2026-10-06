@@ -1,0 +1,23 @@
+#!/bin/bash
+set -eu
+[ "${GH_STATUS:-0}" = 0 ] || exit "$GH_STATUS"
+case "$*" in
+    *'/commits/'*'/pulls') printf '%s\n' "${PR_RESPONSE:-[]}" ;;
+    *'/releases/tags/'*)
+        if [[ "$2" = */camber-macros-v0.7.0 ]] && [ "${MISSING_RELEASE:-0}" = 1 ] && [ ! -f "${FIXTURE_STATE}.release" ]; then exit 44; fi
+        printf '{"tag_name":"%s"}\n' "${2##*/}"
+        ;;
+    *'/releases?per_page=100')
+        if [ "${MISSING_RELEASE:-0}" = 1 ]; then printf '[[{"tag_name":"camber-v0.12.0"}]]\n'; exit 0; fi
+        printf '[[{"tag_name":"camber-v0.12.0"},{"tag_name":"camber-macros-v0.7.0"}]]\n'
+        ;;
+    'release create '*)
+        printf '%s\n' "$*" >>"$FIXTURE_LOG"
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = --notes-file ]; then cat "$2" >>"$FIXTURE_LOG"; fi
+            shift
+        done
+        touch "${FIXTURE_STATE}.release"
+        ;;
+    *) exit 99 ;;
+esac

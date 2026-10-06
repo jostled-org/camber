@@ -71,8 +71,10 @@ impl NatsBuilder {
         }
     }
 
-    /// Bound each operation, from admission through the SDK's queue to its
-    /// flush. Default 30 seconds; positive and at most 24 hours.
+    /// Bound each publish or subscribe from admission through completion,
+    /// including SDK queuing. Core operations wait for the local flush;
+    /// acknowledged publishes wait for the server receipt under the same deadline.
+    /// Default 30 seconds; positive and at most 24 hours.
     pub fn operation_timeout(mut self, timeout: Duration) -> Self {
         self.limits.operation_timeout = timeout;
         self

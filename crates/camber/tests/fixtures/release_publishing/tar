@@ -1,0 +1,3 @@
+#!/bin/bash
+set -eu
+printf '{"git":{"sha1":"%s"}}\n' "${ARCHIVE_SHA:-$FIXTURE_SHA}"

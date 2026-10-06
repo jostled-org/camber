@@ -2,6 +2,7 @@
 semver_check = true
 changelog_update = true
 git_release_enable = true
+publish = false
 
 # Only conventional commit types that represent real work trigger a
 # version bump. This prevents release-plz's own "chore: release"

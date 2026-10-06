@@ -70,6 +70,8 @@ mod query_identity;
 mod release_features;
 #[path = "focused_api_contracts/release_inputs.rs"]
 mod release_inputs;
+#[path = "focused_api_contracts/release_publishing.rs"]
+mod release_publishing;
 #[path = "focused_api_contracts/request_validation.rs"]
 mod request_validation;
 #[path = "focused_api_contracts/response_validation.rs"]

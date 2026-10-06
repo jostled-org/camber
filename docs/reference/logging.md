@@ -33,6 +33,22 @@ Camber keeps the choice small:
 
 Verbosity runs from `Error` through `Trace`.
 
+## Integration Telemetry
+
+NATS, SQS, and DNS-01 report operation results through `tracing` and `metrics`.
+Each terminal result emits one `INFO` event: `integration operation finished`.
+It increments `camber_integration_operations_total`; admitted operations also
+record `camber_integration_operation_duration_seconds`.
+
+Metric labels use only `kind`, `operation`, and `outcome`. Payloads and
+credentials appear in neither events nor labels. Reading a result again or
+moving it into the runtime's lifecycle report emits no additional terminal.
+
+See [Integration Telemetry](integrations.md#telemetry) for event fields and
+per-operation rules, and [DNS-01 Telemetry](tls.md#acme-dns-01-telemetry) for
+nested operations and cleanup records. `init_logging` installs only the tracing
+subscriber; it does not install a metrics recorder.
+
 ## Scope
 
 This module only installs the subscriber.

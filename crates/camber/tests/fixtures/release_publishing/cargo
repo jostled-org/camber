@@ -1,0 +1,14 @@
+#!/bin/bash
+set -eu
+case "$1" in
+    metadata)
+        printf '{"workspace_members":["app","macros","bench"],"packages":[{"id":"app","name":"camber","version":"0.12.0","publish":null,"manifest_path":"crates/camber/Cargo.toml"},{"id":"macros","name":"camber-macros","version":"0.7.0","publish":null,"manifest_path":"crates/camber-macros/Cargo.toml"},{"id":"bench","name":"camber-bench","version":"0.2.2","publish":[]}]}'
+        ;;
+    publish)
+        printf '%s\n' "$*" >>"$FIXTURE_LOG"
+        printf 'warning: recovered network error: OpenSSL error:0A000126\n' >&2
+        [ "${PUBLISH_STATUS:-0}" = 0 ] || exit "$PUBLISH_STATUS"
+        touch "$FIXTURE_STATE"
+        ;;
+    *) exit 99 ;;
+esac

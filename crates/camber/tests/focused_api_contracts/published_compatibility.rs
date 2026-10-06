@@ -10,22 +10,28 @@ fn expect_flat_server_future(future: impl Future<Output = Result<(), RuntimeErro
 }
 
 async fn published_embedded_server_calls(
-    async_listener: TcpListener,
-    async_tls_listener: TcpListener,
-    async_hosts_listener: TcpListener,
-    async_hosts_tls_listener: TcpListener,
-    background_listener: TcpListener,
-    background_tls_listener: TcpListener,
-    background_hosts_listener: TcpListener,
-    background_hosts_tls_listener: TcpListener,
-    async_router: Router,
-    async_tls_router: Router,
-    async_host_router: HostRouter,
-    async_host_tls_router: HostRouter,
-    background_router: Router,
-    background_tls_router: Router,
-    background_host_router: HostRouter,
-    background_host_tls_router: HostRouter,
+    [
+        async_listener,
+        async_tls_listener,
+        async_hosts_listener,
+        async_hosts_tls_listener,
+        background_listener,
+        background_tls_listener,
+        background_hosts_listener,
+        background_hosts_tls_listener,
+    ]: [TcpListener; 8],
+    [
+        async_router,
+        async_tls_router,
+        background_router,
+        background_tls_router,
+    ]: [Router; 4],
+    [
+        async_host_router,
+        async_host_tls_router,
+        background_host_router,
+        background_host_tls_router,
+    ]: [HostRouter; 4],
     tls_config: Arc<rustls::ServerConfig>,
 ) {
     expect_flat_server_future(
