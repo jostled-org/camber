@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/jostled-org/camber/compare/camber-v0.11.0...camber-v0.11.1) - 2026-10-06
+
+### Other
+
+- order upstream answers after upload starts
+- isolate delivery fixtures from host executables
+
 ### Breaking changes
 
 - *(mq)* NATS and SQS operations are async only. The `connect_async`,

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/jostled-org/camber/compare/camber-cli-v0.8.5...camber-cli-v0.9.0) - 2026-10-06
+
+### Added
+
+- [**breaking**] harden integration contracts and add acknowledged nats publishing
+
 ### Breaking changes
 
 - *(serve)* `camber serve` validates the whole config before it has any
