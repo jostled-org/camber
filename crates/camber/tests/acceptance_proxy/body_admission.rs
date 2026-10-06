@@ -143,7 +143,7 @@ fn upstream_head_winner_quiesces_upload_before_downstream_commit() {
     common::test_runtime()
         .shutdown_timeout(Duration::from_secs(5))
         .run(|| {
-            let upstream = raw_upstream(200, UPSTREAM_BODY, UpstreamAnswers::OnHead);
+            let upstream = raw_upstream(200, UPSTREAM_BODY, UpstreamAnswers::AfterBodyStarted);
             let probes = Probes::new();
             let server = streaming_proxy(&upstream.backend(), CEILING, &probes);
             let controller = server.controller();
@@ -154,8 +154,7 @@ fn upstream_head_winner_quiesces_upload_before_downstream_commit() {
 
             let mut peer = wire::connect(server.addr()).expect("the paced peer connected");
             open_upload(&mut peer, wire::DEFAULT_HOST);
-            wire::tolerate_dead_socket(wire::write_chunk(&mut peer, UNDER))
-                .expect("the first frame reached the proxy");
+            wire::write_chunk(&mut peer, UNDER).expect("the first frame reached the proxy");
 
             wire::wait_paused_blocking(
                 controller,

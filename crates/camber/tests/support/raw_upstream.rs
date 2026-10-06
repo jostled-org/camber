@@ -34,6 +34,8 @@ const CHUNKED_TERMINATOR: &[u8] = b"0\r\n\r\n";
 pub enum UpstreamAnswers {
     /// As soon as the request head has arrived, with the upload still running.
     OnHead,
+    /// Once body transmission starts, without waiting for the upload to finish.
+    AfterBodyStarted,
     /// As [`UpstreamAnswers::OnHead`], and then the connection is held open.
     ///
     /// For the one claim a whole answer cannot stage: an upstream that commits
@@ -79,10 +81,11 @@ struct UpstreamState {
 
 impl UpstreamState {
     /// Whether this upstream may answer a connection standing at `read`.
-    fn may_answer(&self, read: ConnectionRead) -> bool {
+    fn may_answer(&self, read: ConnectionRead, connection: &ConnectionBuffer) -> bool {
         match (self.answers, read) {
             (_, ConnectionRead::Partial) => false,
             (UpstreamAnswers::OnHead | UpstreamAnswers::OnHeadThenHold, _) => true,
+            (UpstreamAnswers::AfterBodyStarted, _) => connection.body_started(),
             (UpstreamAnswers::Withheld, _) => false,
             (UpstreamAnswers::OnBodyEnd, read) => {
                 matches!(read, ConnectionRead::Ended | ConnectionRead::Closed)
@@ -296,7 +299,7 @@ fn serve_connection(mut stream: TcpStream, state: &Arc<UpstreamState>, deadline:
     let mut buffer = [0_u8; 8192];
     while !state.stopped.load(Ordering::Acquire) && Instant::now() < deadline {
         let read = read_into(&mut stream, &mut buffer, &mut connection, state);
-        answered = answer_when_due(&mut stream, state, answered, read);
+        answered = answer_when_due(&mut stream, state, answered, read, &connection);
         // A peer that ended the transport always ends this connection: nothing
         // more can arrive on it, and holding it would spend this fixture's whole
         // deadline before the next connection is accepted.
@@ -370,6 +373,11 @@ impl ConnectionBuffer {
             bytes: Vec::new(),
             head: None,
         }
+    }
+
+    /// Whether bytes have arrived beyond this connection's request headers.
+    fn body_started(&self) -> bool {
+        self.head.is_some_and(|head| self.bytes.len() > head.end)
     }
 
     /// Take what one read produced and say where the request now stands.
@@ -491,8 +499,9 @@ fn answer_when_due(
     state: &Arc<UpstreamState>,
     answered: bool,
     read: ConnectionRead,
+    connection: &ConnectionBuffer,
 ) -> bool {
-    match (answered, state.may_answer(read)) {
+    match (answered, state.may_answer(read, connection)) {
         (true, _) => true,
         (false, false) => false,
         (false, true) => write_answer(stream, state),
