@@ -122,6 +122,12 @@ A panic in a task **you** spawned with `camber::spawn` or `camber::spawn_async`
 is delivered on that task's own handle and leaves the runtime result alone.
 Panics never cancel sibling tasks.
 
+## Async tests
+
+Use `#[camber::test]` on an async function with no parameters or return type.
+The macro installs Camber's runtime context and preserves test attributes such as `#[should_panic]`.
+Declare the runtime dependency as `camber` in `Cargo.toml`; dependency aliases are unsupported.
+
 ## Runtime Builder
 
 `runtime::builder()` configures the runtime before it starts.

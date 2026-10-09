@@ -8,6 +8,12 @@ async fn test_macro_runs_async_body() {
 }
 
 #[camber::test]
+#[should_panic(expected = "macro preserves panic attributes")]
+async fn test_macro_preserves_should_panic() {
+    panic!("macro preserves panic attributes");
+}
+
+#[camber::test]
 async fn test_macro_supports_spawn_async() {
     assert_eq!(camber::spawn_async(async { 42 }).await.unwrap(), 42);
 }

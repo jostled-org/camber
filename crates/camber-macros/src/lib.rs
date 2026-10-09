@@ -12,6 +12,7 @@ use syn::{ItemFn, parse_macro_input};
 ///
 /// Sets up a multi-thread Tokio runtime with Camber context installed.
 /// The test body runs as an async block inside `camber::runtime::__test_async`.
+/// Declare the runtime dependency as `camber`; dependency aliases are unsupported.
 ///
 /// ```ignore
 /// #[camber::test]

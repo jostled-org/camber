@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- `#[camber::test]` requires the runtime dependency name `camber`. Dependency aliases are no longer supported.
+
 - *(ws)* `Router::ws` takes a callback that returns a future:
   `F: Fn(&Request, WsConn) -> Fut`, where
   `Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static`. The future
