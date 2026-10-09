@@ -205,7 +205,7 @@ async fn serve_verified_peer(
         return Ok(());
     };
     let authenticated = accepted.map_err(|error| accept_failure(&error))?;
-    let handshake = tokio_tungstenite::accept_hdr_async(authenticated, select_the_first_offer);
+    let handshake = tokio_tungstenite::accept_hdr_async(authenticated, SelectFirstOffer);
     let Some(upgraded) = unless_halted(halt, handshake).await else {
         return Ok(());
     };
@@ -244,24 +244,31 @@ fn accept_failure(error: &std::io::Error) -> TlsBackendEvent {
 }
 
 /// Select the first protocol the client offered, the way a backend does.
-fn select_the_first_offer(
-    request: &tungstenite::handshake::server::Request,
-    mut response: tungstenite::handshake::server::Response,
-) -> Result<tungstenite::handshake::server::Response, tungstenite::handshake::server::ErrorResponse>
-{
-    let selected = request
-        .headers()
-        .get("sec-websocket-protocol")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .and_then(|token| http::HeaderValue::from_str(token).ok());
-    if let Some(selected) = selected {
-        response
-            .headers_mut()
-            .insert("sec-websocket-protocol", selected);
+struct SelectFirstOffer;
+
+impl tungstenite::handshake::server::Callback for SelectFirstOffer {
+    fn on_request(
+        self,
+        request: &tungstenite::handshake::server::Request,
+        mut response: tungstenite::handshake::server::Response,
+    ) -> Result<
+        tungstenite::handshake::server::Response,
+        tungstenite::handshake::server::ErrorResponse,
+    > {
+        let selected = request
+            .headers()
+            .get("sec-websocket-protocol")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+            .and_then(|token| http::HeaderValue::from_str(token).ok());
+        if let Some(selected) = selected {
+            response
+                .headers_mut()
+                .insert("sec-websocket-protocol", selected);
+        }
+        Ok(response)
     }
-    Ok(response)
 }
 
 // ── Rows ───────────────────────────────────────────────────────────

@@ -236,11 +236,9 @@ pub enum ConnectionOwnerEdge {
 
 /// Every edge one upgrade child can be held at.
 ///
-/// Owner-local, and deliberately only the four moments the handoff has: the
-/// child was offered to its connection, the connection is about to answer, the
-/// connection has taken the child and has not answered yet, and the peer went
-/// away. A controller holding one of these cannot admit, refuse, commit,
-/// cancel, or join the upgrade.
+/// Holds cover handoff, transport commitment, reader backpressure, callback
+/// settlement, and peer closure. A controller can pause an owner at these edges;
+/// it cannot admit, refuse, commit, cancel, or join the upgrade.
 #[doc(hidden)]
 #[cfg(feature = "ws")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -259,6 +257,10 @@ pub enum UpgradeOwnerEdge {
     /// response. A hold at [`Self::BeforeTransferAcknowledge`] is upstream of
     /// the transfer, so it can prove nothing about it.
     AfterTransferRecorded,
+    /// The `101` response is sent, but the bridge cannot read its transport yet.
+    BeforeTransportCommit,
+    /// The reader holds a data chunk while its incoming queue is full.
+    TransportQueueFull,
     /// The bridge has closed its callback's endpoints and fixed the one
     /// settlement deadline, and has not started settling the callback yet.
     ///

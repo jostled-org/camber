@@ -520,6 +520,14 @@ impl UpgradeTransportOwner {
         }
     }
 
+    pub(in crate::http) async fn before_transport_commit(&self) {
+        LifecycleScript::pause_at_upgrade(
+            self.script.as_deref(),
+            UpgradeOwnerEdge::BeforeTransportCommit,
+        )
+        .await;
+    }
+
     pub(in crate::http) fn commit(&self) {
         self.state_sender
             .send_replace(UpgradeTransportState::Committed);

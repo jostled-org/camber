@@ -1158,6 +1158,86 @@ async fn forced_shutdown_rejects_unacknowledged_direct_upgrade() {
     pending_direct_upgrade_shutdown_is_rejected(true).await;
 }
 
+#[camber::test]
+async fn upgrade_commit_progresses_while_transport_queue_is_full() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let controller = upgrade_owner(addr).unwrap();
+    for edge in [
+        UpgradeOwnerEdge::BeforeTransportCommit,
+        UpgradeOwnerEdge::TransportQueueFull,
+    ] {
+        controller.pause_once(edge).unwrap();
+    }
+    let (received, mut messages) = tokio::sync::mpsc::unbounded_channel();
+    let mut router = Router::new();
+    router.ws("/ws", move |_: &Request, mut connection: WsConn| {
+        let received = received.clone();
+        async move {
+            while let Some(message) = connection.recv_message().await {
+                received.send(message).unwrap();
+            }
+            Ok(())
+        }
+    });
+    let handle = camber::http::serve_background(listener, router).unwrap();
+    let mut peer = connect_async_websocket(addr, "/ws").await;
+    lifecycle_event(
+        "upgrade waits after 101",
+        controller.wait_until_paused(UpgradeOwnerEdge::BeforeTransportCommit),
+    )
+    .await
+    .unwrap();
+    let payload = (0..65_536)
+        .map(|index| (index % 251) as u8)
+        .collect::<Box<[u8]>>();
+    let frame = common::RawFrame {
+        mask: Some([1, 2, 3, 4]),
+        ..common::RawFrame::complete(common::BINARY, &payload)
+    }
+    .encode();
+    lifecycle_event(
+        "write eager binary frame",
+        tokio::io::AsyncWriteExt::write_all(&mut peer, &frame),
+    )
+    .await
+    .unwrap();
+    common::write_async_ws_frame(
+        &mut peer,
+        common::CLOSE,
+        &1000_u16.to_be_bytes(),
+        "write close",
+    )
+    .await;
+    lifecycle_event(
+        "reader fills its queue before commitment",
+        controller.wait_until_paused(UpgradeOwnerEdge::TransportQueueFull),
+    )
+    .await
+    .unwrap();
+    controller
+        .release(UpgradeOwnerEdge::TransportQueueFull)
+        .unwrap();
+    controller
+        .release(UpgradeOwnerEdge::BeforeTransportCommit)
+        .unwrap();
+    let message = lifecycle_event("bridge drains the blocked reader", messages.recv()).await;
+    match message {
+        Some(WsMessage::Binary(bytes)) => assert_eq!(&*bytes, &*payload),
+        other => panic!("expected the complete binary payload, got {other:?}"),
+    }
+    let (opcode, reply) = common::read_async_ws_frame(&mut peer).await;
+    assert_eq!(opcode, common::CLOSE);
+    assert_eq!(&*reply, &1000_u16.to_be_bytes());
+    common::assert_transport_eof(&mut peer, "completed eager upgrade").await;
+    handle.shutdown();
+    assert!(
+        lifecycle_event("upgrade owner joins", handle.into_future())
+            .await
+            .is_ok()
+    );
+}
+
 // 1.T21, direct WebSocket supervisor-unwind portion.
 #[camber::test]
 async fn supervisor_unwind_joins_acknowledged_and_pending_direct_upgrades() {

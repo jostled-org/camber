@@ -69,7 +69,7 @@ fn split_exposes_one_receiver_and_cloneable_senders() {
         requires_clone_send_sync::<WsSender>();
         requires_send::<WsReceiver>();
         assert!(
-            (&CloneProbe::<WsSender>::new()).is_clone(),
+            CloneProbe::<WsSender>::new().is_clone(),
             "WsSender stopped being cloneable, so no send capability can fan out"
         );
         assert!(

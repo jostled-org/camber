@@ -484,20 +484,61 @@ async fn drive_owned_reader<S>(
         let count = match result {
             Ok(count) => count,
             Err(error) => {
+                report_peer_closed(peer_closed, script.as_deref()).await;
                 report_unsent_read_error(incoming.send(Err(error)).await);
-                break;
+                return;
             }
         };
         if count == 0 {
             break;
         }
-        if incoming.send(Ok(buffer.split().freeze())).await.is_err() {
+        if incoming.capacity() == 0 {
+            super::mock::LifecycleScript::pause_at_upgrade(
+                script.as_deref(),
+                super::mock::UpgradeOwnerEdge::TransportQueueFull,
+            )
+            .await;
+        }
+        if !deliver_transport_chunk(&incoming, &mut barriers, buffer.split().freeze()).await {
             break;
         }
     }
+    report_peer_closed(peer_closed, script.as_deref()).await;
+}
+
+/// Keep upgrade requests responsive while the bridge waits for permission to read.
+#[cfg(feature = "ws")]
+async fn deliver_transport_chunk(
+    incoming: &tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
+    barriers: &mut tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<()>>,
+    chunk: bytes::Bytes,
+) -> bool {
+    loop {
+        tokio::select! {
+            biased;
+            permit = incoming.reserve() => match permit {
+                Ok(permit) => {
+                    permit.send(Ok(chunk));
+                    return true;
+                }
+                Err(_) => return false,
+            },
+            barrier = barriers.recv() => match barrier {
+                Some(barrier) => { let _ = barrier.send(()); }
+                None => return false,
+            },
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+async fn report_peer_closed(
+    peer_closed: tokio::sync::oneshot::Sender<()>,
+    script: Option<&super::mock::LifecycleScript>,
+) {
     let _ = peer_closed.send(());
     super::mock::LifecycleScript::pause_at_upgrade(
-        script.as_deref(),
+        script,
         super::mock::UpgradeOwnerEdge::PeerClosed,
     )
     .await;
@@ -841,6 +882,7 @@ async fn commit_open_transport(
     upgrade_transport: &super::server_lifecycle::UpgradeTransportOwner,
     transport: &mut OwnedTransport,
 ) {
+    upgrade_transport.before_transport_commit().await;
     match transport.peer_remains_open().await {
         true => upgrade_transport.commit(),
         false => {
