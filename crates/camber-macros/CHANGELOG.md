@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/jostled-org/camber/compare/camber-macros-v0.7.0...camber-macros-v0.8.0) - 2026-10-09
+
+### Added
+
+- [**breaking**] implement async-first-websockets
+
+### Other
+
+- *(macros)* [**breaking**] remove dependency alias support
+
 ### Breaking changes
 
 - `#[camber::test]` requires the runtime dependency name `camber`. Dependency aliases are no longer supported.

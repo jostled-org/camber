@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/jostled-org/camber/compare/camber-v0.11.1...camber-v0.12.0) - 2026-10-09
+
+### Added
+
+- [**breaking**] implement async-first-websockets
+
+### Fixed
+
+- *(ws)* [**breaking**] prevent upgrade deadlock under reader backpressure
+- *(release)* publish with cargo and recover interrupted releases
+
+### Other
+
+- *(macros)* [**breaking**] remove dependency alias support
+
 ### Breaking changes
 
 - `#[camber::test]` requires the runtime dependency name `camber`. Dependency aliases are no longer supported.
