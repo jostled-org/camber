@@ -18,6 +18,12 @@ use crate::RuntimeError;
 /// Success means the frame entered that queue. Whether the bridge then writes
 /// it or cancels it is decided by the connection's terminal cause, not by the
 /// send that admitted it.
+///
+/// A waiting send is a future, and admission is its only effect. A send that
+/// is still pending has admitted nothing: dropping it drops the payload it was
+/// offered and frees its place in line, and nothing enqueues that payload
+/// later. Once admitted, the frame belongs to the bridge, and the terminal
+/// cause alone decides what happens to it.
 #[derive(Clone)]
 pub struct WsSender {
     frames: Sender<WsMessage>,
@@ -37,15 +43,16 @@ impl WsSender {
 
     /// Send a text message, waiting for outbound queue capacity.
     ///
+    /// The wait suspends the calling task and holds no thread, so it makes
+    /// progress on a current-thread runtime as well as a multi-thread one.
+    /// Dropping the future before it completes admits nothing.
+    ///
     /// # Errors
     ///
-    /// [`RuntimeError::WebSocketClosed`] once the connection has ended, and
-    /// [`RuntimeError::BlockingInAsyncContext`] when the caller is on a
-    /// current-thread Tokio runtime, where waiting would stop the only thread
-    /// that could free a slot.
-    pub fn send(&self, text: &str) -> Result<(), RuntimeError> {
+    /// [`RuntimeError::WebSocketClosed`] once the connection has ended.
+    pub async fn send(&self, text: &str) -> Result<(), RuntimeError> {
         self.live()?;
-        self.admit(WsMessage::Text(Box::from(text)))
+        self.admit(WsMessage::Text(Box::from(text))).await
     }
 
     /// Send a text message only if the outbound queue has a free slot now.
@@ -61,17 +68,19 @@ impl WsSender {
 
     /// Send a binary message, waiting for outbound queue capacity.
     ///
-    /// The borrowed payload is copied once, here, because the frame outlives
-    /// this call by exactly as long as it sits in the queue. A producer that
-    /// already owns immutable storage can give that storage to
-    /// [`Self::send_shared_binary`] instead and pay no copy at all.
+    /// The borrowed payload is copied once per send, when the future is first
+    /// polled, because the frame outlives this call by exactly as long as it
+    /// sits in the queue. A producer that already owns immutable storage can
+    /// give that storage to [`Self::send_shared_binary`] instead and pay no
+    /// copy at all.
     ///
     /// # Errors
     ///
-    /// The same two as [`Self::send`].
-    pub fn send_binary(&self, data: &[u8]) -> Result<(), RuntimeError> {
+    /// The same as [`Self::send`].
+    pub async fn send_binary(&self, data: &[u8]) -> Result<(), RuntimeError> {
         self.live()?;
         self.admit(WsMessage::Binary(Bytes::copy_from_slice(data)))
+            .await
     }
 
     /// Send a binary message only if the outbound queue has a free slot now.
@@ -98,9 +107,9 @@ impl WsSender {
     ///
     /// ```rust,no_run
     /// # use camber::http::{Bytes, WsSender};
-    /// # fn fan_out(payload: Bytes, recipients: &[WsSender]) -> Result<(), camber::RuntimeError> {
+    /// # async fn fan_out(payload: Bytes, recipients: &[WsSender]) -> Result<(), camber::RuntimeError> {
     /// for recipient in recipients {
-    ///     recipient.send_shared_binary(payload.clone())?;
+    ///     recipient.send_shared_binary(payload.clone()).await?;
     /// }
     /// # Ok(())
     /// # }
@@ -109,15 +118,16 @@ impl WsSender {
     /// Success means the same thing every other send means: the frame entered
     /// this connection's bounded queue. Whether it is then written or dropped
     /// is the connection's terminal cause to decide, and either way the handle
-    /// is released when the bridge is done with it.
+    /// is released when the bridge is done with it. A send dropped while it
+    /// waits releases the handle it holds, exactly as a refusal does.
     ///
     /// # Errors
     ///
-    /// The same two as [`Self::send`]. A refused call drops only the handle it
-    /// was given; every other clone of that payload is untouched.
-    pub fn send_shared_binary(&self, data: Bytes) -> Result<(), RuntimeError> {
+    /// The same as [`Self::send`]. A refused call drops only the handle it was
+    /// given; every other clone of that payload is untouched.
+    pub async fn send_shared_binary(&self, data: Bytes) -> Result<(), RuntimeError> {
         self.live()?;
-        self.admit(WsMessage::Binary(data))
+        self.admit(WsMessage::Binary(data)).await
     }
 
     /// Send shared immutable binary storage only if the outbound queue has a
@@ -145,8 +155,10 @@ impl WsSender {
     /// no copy, but the same check is what lets its refusal answer with this
     /// connection's cause before the handle is spent.
     ///
-    /// A fast path only. The admissions below keep their own check, which is
-    /// what closes the race with a closure that lands between the two.
+    /// The admissions below do not repeat it: nothing is awaited between this
+    /// check and the queue operation. A closure that lands in that window is
+    /// read from the queue's own refusal, or, once admitted, the frame belongs
+    /// to the bridge and the terminal cause decides it.
     fn live(&self) -> Result<(), RuntimeError> {
         match self.terminal.cause() {
             Some(cause) => Err(RuntimeError::WebSocketClosed(cause)),
@@ -156,19 +168,25 @@ impl WsSender {
 
     /// Wait for a slot in the outbound queue and take it.
     ///
-    /// The terminal check comes first so a connection that has already ended
-    /// answers with its cause rather than with a channel result the caller
-    /// would have to interpret. A closure that lands after that check is caught
-    /// by the send's own failure, which reads the same committed cause.
-    fn admit(&self, message: WsMessage) -> Result<(), RuntimeError> {
-        self.live()?;
-        crate::task::wait_blocking(|| self.frames.blocking_send(message))?
+    /// The one bounded admission every waiting send goes through, after the
+    /// caller's [`Self::live`] check. A closure that lands after that check is
+    /// caught by the send's own failure, which reads the committed cause.
+    ///
+    /// The queue's own send is the whole wait. It holds the message in this
+    /// future until a slot is free and then enqueues it in the same poll, so a
+    /// future dropped while pending drops the message with it and leaves no
+    /// reservation behind. No task is spawned to finish it.
+    async fn admit(&self, message: WsMessage) -> Result<(), RuntimeError> {
+        self.frames
+            .send(message)
+            .await
             .map_err(|_| RuntimeError::WebSocketClosed(self.terminal.committed()))
     }
 
-    /// Take a slot in the outbound queue if one is free right now.
+    /// Take a slot in the outbound queue if one is free right now, after the
+    /// caller's [`Self::live`] check. A closure that lands after that check is
+    /// read by [`Self::refusal`].
     fn try_admit(&self, message: WsMessage) -> Result<(), RuntimeError> {
-        self.live()?;
         self.frames
             .try_send(message)
             .map_err(|refused| self.refusal(refused))

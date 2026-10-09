@@ -16,7 +16,7 @@
 
 #![cfg(feature = "ws")]
 
-use crate::common::{self, RawFrame};
+use crate::common::{self, BINARY, CLOSE, PING, PONG, RawFrame, TEXT};
 use crate::deterministic::{DeterministicCase, Family};
 use crate::handshake::{assert_transport_ends, perform_raw_ws_handshake};
 use bytes::Bytes;
@@ -48,11 +48,6 @@ const VALID_SEQUENCE_SEED: u64 = 0x5746_5641_4c49_4401;
 const PROTOCOL_FAULT_SEED: u64 = 0x5746_4641_554c_5402;
 
 const CONTINUATION: u8 = 0x0;
-const TEXT: u8 = 0x1;
-const BINARY: u8 = 0x2;
-const CLOSE: u8 = 0x8;
-const PING: u8 = 0x9;
-const PONG: u8 = 0xa;
 
 /// Characters valid text is built from: one to four UTF-8 bytes each, with the
 /// edges of every encoded width.
@@ -550,9 +545,15 @@ fn masked_close(payload: &[u8]) -> Box<[u8]> {
 fn recording_router(log: mpsc::Sender<Box<[Received]>>) -> Router {
     let mut router = Router::new();
     router.ws(SOCKET, move |_request: &Request, mut connection: WsConn| {
-        let received: Box<[Received]> =
-            std::iter::from_fn(|| connection.recv_message().map(Received::from)).collect();
-        log.send(received).map_err(|_| RuntimeError::ChannelClosed)
+        let log = log.clone();
+        async move {
+            let mut received = Vec::new();
+            while let Some(message) = connection.recv_message().await {
+                received.push(Received::from(message));
+            }
+            log.send(received.into_boxed_slice())
+                .map_err(|_| RuntimeError::ChannelClosed)
+        }
     });
     router
 }

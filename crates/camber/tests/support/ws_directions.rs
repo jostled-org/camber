@@ -2,8 +2,8 @@
 //! connects, arms, or spawns.
 //!
 //! Direction cases hold a live listener, an owned server, a raw client socket,
-//! application threads parked in a blocking endpoint operation, and armed
-//! production checkpoints at once. A case that asserts its way out through an
+//! application tasks suspended in an endpoint operation, and armed production
+//! checkpoints at once. A case that asserts its way out through an
 //! unwind leaves every one of them behind: a parked checkpoint keeps the
 //! production bridge from ever finishing, and a bridge that never finishes keeps
 //! the server from joining and the port from being rebindable. So cleanup here
@@ -16,8 +16,8 @@ use std::future::Future;
 use std::net::{SocketAddr, TcpStream};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::Duration;
 
 use camber::RuntimeError;
@@ -30,8 +30,11 @@ use camber::http::{
 };
 use futures_util::FutureExt;
 
-use super::http::{BridgeHold, assert_server_joined, bounded_pause, reserve_registered};
-use super::ws_async::lifecycle_event;
+use super::http::{
+    BridgeHold, assert_server_joined, bounded_pause, reserve_registered, serve_router_with_policy,
+};
+use super::ws_async::{expect_async_close, lifecycle_event};
+use super::ws_callbacks::{CallbackRelease, callback_gate, park_until_released};
 
 /// The bound every wait, join, read, and shutdown in a direction case runs
 /// under.
@@ -67,12 +70,12 @@ pub struct DirectionHandoff {
     /// server to stop has to be the one that lets the callback go — a gate
     /// released only when this handoff drops would hold the connection past
     /// the stop and turn every such row into a drain that ran out.
-    parked: Option<std::sync::mpsc::Sender<()>>,
+    parked: Option<CallbackRelease>,
 }
 
 impl DirectionHandoff {
     /// Take the gate every parked callback of this row waits on.
-    pub fn take_gate(&mut self) -> Option<std::sync::mpsc::Sender<()>> {
+    pub fn take_gate(&mut self) -> Option<CallbackRelease> {
         self.parked.take()
     }
 
@@ -87,25 +90,30 @@ impl DirectionHandoff {
     }
 }
 
-/// A router whose direct callback hands its connection out and parks.
+/// A router whose direct callback hands its connection out and parks, at the
+/// default queue capacity.
 ///
 /// Parking rather than returning, because every row here owns the halves
 /// through the callback's own lifetime: a callback that returned would drop
 /// whichever half the row had not taken, and end the connection under it.
-pub fn direction_router(path: &str, buffer: usize) -> (Router, DirectionHandoff) {
+pub fn parking_router(path: &str) -> (Router, DirectionHandoff) {
     let (connections_tx, connections) = tokio::sync::mpsc::channel(4);
-    let (parked, parked_rx) = std::sync::mpsc::channel();
-    let parked_rx = Mutex::new(parked_rx);
+    let (parked, parked_rx) = callback_gate();
     let mut router = Router::new();
     router.ws(path, move |_request: &Request, connection: WsConn| {
-        connections_tx
-            .blocking_send(connection)
-            .map_err(|_| RuntimeError::ChannelClosed)?;
-        park_until_released(&parked_rx);
-        Ok(())
+        let connections_tx = connections_tx.clone();
+        let parked_rx = parked_rx.clone();
+        async move {
+            connections_tx
+                .send(connection)
+                .await
+                .map_err(|_| RuntimeError::ChannelClosed)?;
+            park_until_released(&parked_rx).await;
+            Ok(())
+        }
     });
     (
-        router.ws_buffer_size(buffer),
+        router,
         DirectionHandoff {
             connections,
             parked: Some(parked),
@@ -113,18 +121,10 @@ pub fn direction_router(path: &str, buffer: usize) -> (Router, DirectionHandoff)
     )
 }
 
-/// Hold a callback in its own frame until the case lets it go.
-///
-/// The release is the sender dropping, never a value: a case that had to
-/// remember to send one would leave the callback parked on every failure path,
-/// and a parked callback holds the connection its row is finished with. The
-/// lock is recovered rather than refused for the same reason — a poisoned gate
-/// would park the callback forever.
-pub fn park_until_released(gate: &Mutex<Receiver<()>>) {
-    let _ = gate
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .recv();
+/// The same parking router, with both queues sized to `buffer`.
+pub fn direction_router(path: &str, buffer: usize) -> (Router, DirectionHandoff) {
+    let (router, handoff) = parking_router(path);
+    (router.ws_buffer_size(buffer), handoff)
 }
 
 /// The route every direction row registers.
@@ -133,76 +133,58 @@ pub const DIRECTION_PATH: &str = "/ws";
 /// The second route a returning row serves: a callback that never comes back.
 pub const PARKED_PATH: &str = "/parked";
 
-/// The one send the parked callback makes, once its row lets it go.
-const PARKED_SEND: &str = "after-the-owner-completed";
-
-/// What the parked callback reports, in the order it reports it.
-///
-/// One channel rather than two: these are one callback's own two steps, and a
-/// second channel would let a row take them out of the order the callback took
-/// them in.
-#[derive(Debug)]
-pub enum ParkedStep {
-    /// The callback is in the blocking pool, holding its connection.
-    Entered,
-    /// What the connection it held across its owner's completion answered when
-    /// it was finally used.
-    Sent(Result<(), RuntimeError>),
-}
-
-/// Hand one step to the row, or report the row as gone.
-fn report(
-    steps: &tokio::sync::mpsc::Sender<ParkedStep>,
-    step: ParkedStep,
-) -> Result<(), RuntimeError> {
-    steps
-        .blocking_send(step)
-        .map_err(|_| RuntimeError::ChannelClosed)
-}
-
 /// A router whose direct callback splits its connection, hands both halves out,
 /// and returns — beside a second one that keeps its connection and parks.
 ///
 /// The returning callback is the opposite of [`direction_router`] in the one way
 /// that matters: it exits while the application still owns both halves, which is
 /// the only way to ask whether a callback return ends a connection. The parked
-/// route is what the same row asks the other half of that question with — an
-/// owned server completes without claiming a callback still sitting in the
-/// blocking pool has exited — and it has to be served by the same server, since
-/// that server's completion is the claim.
+/// route is what the same row asks the other half of that question with — a
+/// callback future still suspended when its connection ends is settled by the
+/// bridge that owns it, so the owned server's completion means that future is
+/// gone — and it has to be served by the same server, since that server's
+/// completion is the claim.
 ///
-/// The parked callback also makes one send after its row releases it. A
-/// connection retained across its owner's completion is the second half of what
-/// that completion did not claim: the callback is still in its frame, and the
-/// connection it is holding is over. Only the callback can ask that, because
-/// only the callback holds it.
+/// The parked callback reports that it is suspended and does nothing else: it
+/// holds its connection until its bridge cancels it at the settlement deadline.
 pub fn returning_direction_router(path: &str, buffer: usize) -> (Router, ReturningHandoff) {
     let (halves_tx, halves) = tokio::sync::mpsc::channel(4);
     let (returned_tx, returned) = tokio::sync::mpsc::channel(4);
-    let (steps_tx, parked_steps) = tokio::sync::mpsc::channel(4);
+    let (entered_tx, parked_entered) = tokio::sync::mpsc::channel(4);
     let parked_frame = CallbackFrame::new();
-    let (parked, parked_rx) = std::sync::mpsc::channel();
-    let parked_rx = Mutex::new(parked_rx);
+    let (parked, parked_rx) = callback_gate();
     let entered_frame = parked_frame.clone();
     let mut router = Router::new();
     router.ws(path, move |_request: &Request, connection: WsConn| {
-        halves_tx
-            .blocking_send(connection.split())
-            .map_err(|_| RuntimeError::ChannelClosed)?;
-        returned_tx
-            .blocking_send(())
-            .map_err(|_| RuntimeError::ChannelClosed)?;
-        Ok(())
+        let halves_tx = halves_tx.clone();
+        let returned_tx = returned_tx.clone();
+        async move {
+            halves_tx
+                .send(connection.split())
+                .await
+                .map_err(|_| RuntimeError::ChannelClosed)?;
+            returned_tx
+                .send(())
+                .await
+                .map_err(|_| RuntimeError::ChannelClosed)?;
+            Ok(())
+        }
     });
     router.ws(
         PARKED_PATH,
         move |_request: &Request, connection: WsConn| {
-            let _exit = entered_frame.enter();
-            report(&steps_tx, ParkedStep::Entered)?;
-            park_until_released(&parked_rx);
-            report(&steps_tx, ParkedStep::Sent(connection.send(PARKED_SEND)))?;
-            drop(connection);
-            Ok(())
+            let exit = entered_frame.enter();
+            let entered_tx = entered_tx.clone();
+            let parked_rx = parked_rx.clone();
+            async move {
+                let _held = (exit, connection);
+                entered_tx
+                    .send(())
+                    .await
+                    .map_err(|_| RuntimeError::ChannelClosed)?;
+                park_until_released(&parked_rx).await;
+                Ok(())
+            }
         },
     );
     (
@@ -210,20 +192,21 @@ pub fn returning_direction_router(path: &str, buffer: usize) -> (Router, Returni
         ReturningHandoff {
             halves,
             returned,
-            parked_steps,
+            parked_entered,
             parked_frame,
-            parked: Some(parked),
+            _parked: parked,
         },
     )
 }
 
-/// One blocking callback's frame, seen from outside it.
+/// One callback future's captures, seen from outside it.
 ///
-/// The case holds one of these to ask whether that frame is still there. The
-/// callback holds the [`CallbackExit`] it hands out, which answers by dropping:
-/// a flag set on drop rather than before the callback's last statement, because
-/// the claim is about the frame itself, and only leaving it — by returning or
-/// by unwinding — can say otherwise.
+/// The case holds one of these to ask whether that future still exists. The
+/// callback captures the [`CallbackExit`] it hands out, which answers by
+/// dropping: a flag set on drop rather than before the callback's last
+/// statement, because the claim is about the future itself, and only its
+/// destruction — by returning, unwinding, or being cancelled — can say
+/// otherwise.
 #[derive(Clone)]
 struct CallbackFrame(Arc<std::sync::atomic::AtomicBool>);
 
@@ -255,15 +238,15 @@ impl Drop for CallbackExit {
 pub struct ReturningHandoff {
     halves: tokio::sync::mpsc::Receiver<(WsSender, WsReceiver)>,
     returned: tokio::sync::mpsc::Receiver<()>,
-    parked_steps: tokio::sync::mpsc::Receiver<ParkedStep>,
+    parked_entered: tokio::sync::mpsc::Receiver<()>,
     parked_frame: CallbackFrame,
     /// The other end of the channel the parked callback waits on.
     ///
-    /// Never sent on: it is held for its `Drop`, which is what lets that
-    /// callback leave once the case is done asking whether it has. In an
-    /// `Option` because a row that wants the callback's last act needs to
-    /// perform that drop itself, at the moment it names.
-    parked: Option<std::sync::mpsc::Sender<()>>,
+    /// Never sent on, and held for the handoff's whole life: the row's claim is
+    /// that its owner's completion ends the parked callback, so this release
+    /// must never be what does. Its `Drop` only lets the callback go on a path
+    /// where the row failed first.
+    _parked: CallbackRelease,
 }
 
 impl ReturningHandoff {
@@ -284,93 +267,43 @@ impl ReturningHandoff {
             .expect("the direct callback never returned");
     }
 
-    /// Wait for the parked callback to report that it is in the blocking pool.
+    /// Wait for the parked callback to report that it is suspended.
     pub async fn wait_parked(&mut self) {
-        match self.parked_step().await {
-            ParkedStep::Entered => {}
-            other => panic!("the parked direct callback reported {other:?} before it entered"),
-        }
-    }
-
-    /// Let the parked callback leave its frame.
-    ///
-    /// Explicit, so the release is an event of the row's own rather than
-    /// whenever this handoff happens to be dropped: what the callback does next
-    /// is only worth reading after the row has finished with its server.
-    pub fn release_parked(&mut self) {
-        drop(self.parked.take());
-    }
-
-    /// What the released callback's retained connection answered.
-    pub async fn parked_send(&mut self) -> Result<(), RuntimeError> {
-        match self.parked_step().await {
-            ParkedStep::Sent(outcome) => outcome,
-            other => panic!("the parked direct callback reported {other:?} instead of its send"),
-        }
-    }
-
-    /// The next step that callback reported, under the suite's own bound.
-    async fn parked_step(&mut self) -> ParkedStep {
         lifecycle_event(
-            "the parked direct callback to report a step",
-            self.parked_steps.recv(),
+            "the parked direct callback to report that it entered",
+            self.parked_entered.recv(),
         )
         .await
-        .expect("the parked direct callback reported nothing")
+        .expect("the parked direct callback never entered");
     }
 
-    /// Whether the parked callback's frame has been left.
+    /// Whether the parked callback's future has been destroyed.
     pub fn parked_exited(&self) -> bool {
         self.parked_frame.left()
     }
 }
 
-/// Serve one capacity-`buffer` route whose callback returns, connect a peer, and
-/// run `case` against the halves it left behind.
-pub async fn returning_direction_row<C, Fut>(buffer: usize, case: C)
-where
-    C: FnOnce(Arc<DirectionTestFixture>, TcpStream, ReturningHandoff) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let (router, handoff) = returning_direction_router(DIRECTION_PATH, buffer);
-    DirectionTestFixture::run(
-        |listener| {
-            camber::http::serve_background(listener, router)
-                .expect("owned server requires a Tokio runtime")
-        },
-        |fixture| async move {
-            let peer = fixture.connect(DIRECTION_PATH);
-            case(fixture, peer, handoff).await;
-        },
-    )
-    .await;
-}
-
-/// The same row as [`direction_row`], over a peer whose close is a TCP reset.
+/// The same row as [`async_direction_row`], over a peer whose close is a TCP reset.
 ///
-/// A separate row rather than a flag, because the peer type differs: only a
-/// Tokio socket can be given the zero linger that turns its close into the
-/// transport failure a `PeerDisconnected` row needs.
+/// Only a Tokio socket can be given the zero linger that turns its close into
+/// the transport failure a `PeerDisconnected` row needs.
 pub async fn abortive_direction_row<C, Fut>(buffer: usize, case: C)
 where
     C: FnOnce(Arc<DirectionTestFixture>, tokio::net::TcpStream, WsConn) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let (router, mut handoff) = direction_router(DIRECTION_PATH, buffer);
-    DirectionTestFixture::run(
-        |listener| {
-            camber::http::serve_background(listener, router)
-                .expect("owned server requires a Tokio runtime")
-        },
-        |fixture| async move {
-            fixture.hold_callbacks(handoff.take_gate());
-            let peer = fixture.connect_abortive(DIRECTION_PATH).await;
-            let connection = handoff.connection().await;
-            case(fixture, peer, connection).await;
-            drop(handoff);
-        },
-    )
-    .await;
+    abortive_direction_row_with_shutdown(buffer, DIRECTION_DEADLINE, case).await;
+}
+
+pub async fn abortive_direction_row_with_shutdown<C, Fut>(
+    buffer: usize,
+    shutdown: Duration,
+    case: C,
+) where
+    C: FnOnce(Arc<DirectionTestFixture>, tokio::net::TcpStream, WsConn) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    direction_row_with_shutdown(buffer, shutdown, DirectionPeer::Abortive, case).await;
 }
 
 /// The capacity a child router under a `HostRouter` row configures for itself.
@@ -386,20 +319,114 @@ const IGNORED_CHILD_BUFFER: usize = 8;
 ///
 /// Every row here needs the same five steps in the same order, and a row that
 /// wrote them out again is a row whose listener, server, callback handoff, and
-/// teardown can drift from the others.
-pub async fn direction_row<C, Fut>(buffer: usize, case: C)
+/// teardown can drift from the others. Peer I/O is async, so the case never
+/// blocks the server's executor.
+pub async fn async_direction_row<C, Fut>(buffer: usize, case: C)
 where
-    C: FnOnce(Arc<DirectionTestFixture>, TcpStream, WsConn) -> Fut,
+    C: FnOnce(Arc<DirectionTestFixture>, tokio::net::TcpStream, WsConn) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    async_direction_row_with_shutdown(buffer, DIRECTION_DEADLINE, case).await;
+}
+
+pub async fn async_direction_row_with_shutdown<C, Fut>(buffer: usize, shutdown: Duration, case: C)
+where
+    C: FnOnce(Arc<DirectionTestFixture>, tokio::net::TcpStream, WsConn) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    direction_row_with_shutdown(buffer, shutdown, DirectionPeer::Orderly, case).await;
+}
+
+/// Serve one bounded direct route under `shutdown` and run `case` over a
+/// `peer` of the kind the row names.
+async fn direction_row_with_shutdown<C, Fut>(
+    buffer: usize,
+    shutdown: Duration,
+    peer: DirectionPeer,
+    case: C,
+) where
+    C: FnOnce(Arc<DirectionTestFixture>, tokio::net::TcpStream, WsConn) -> Fut,
     Fut: Future<Output = ()>,
 {
     let (router, handoff) = direction_router(DIRECTION_PATH, buffer);
-    run_row(
+    run_async_row(
+        |listener| bounded_direction_server(listener, router, shutdown),
+        handoff,
+        peer,
+        case,
+    )
+    .await;
+}
+
+/// How a row's peer ends its side of the transport.
+#[derive(Clone, Copy)]
+enum DirectionPeer {
+    /// An orderly TCP close.
+    Orderly,
+    /// A TCP reset, for the rows about a transport failure.
+    Abortive,
+}
+
+/// Bind, serve, connect, take the callback's connection, run the case.
+///
+/// The handoff stays owned here for the whole case, so the production callback
+/// stays parked in its own frame rather than returning under the row. Its gate
+/// goes to the fixture, which is what releases the callback when the row asks
+/// its server to stop.
+async fn run_async_row<S, C, Fut>(
+    serve: S,
+    mut handoff: DirectionHandoff,
+    peer: DirectionPeer,
+    case: C,
+) where
+    S: FnOnce(tokio::net::TcpListener) -> ServerHandle,
+    C: FnOnce(Arc<DirectionTestFixture>, tokio::net::TcpStream, WsConn) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    DirectionTestFixture::run(serve, |fixture| async move {
+        fixture.hold_callbacks(handoff.take_gate());
+        let peer = match peer {
+            DirectionPeer::Orderly => fixture.connect_async(DIRECTION_PATH).await,
+            DirectionPeer::Abortive => fixture.connect_abortive(DIRECTION_PATH).await,
+        };
+        let connection = handoff.connection().await;
+        case(fixture, peer, connection).await;
+        drop(handoff);
+    })
+    .await;
+}
+
+fn bounded_direction_server(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    shutdown: Duration,
+) -> ServerHandle {
+    serve_router_with_policy(
+        listener,
+        router,
+        camber::http::ServerPolicy::default()
+            .connection_limit(1)
+            .expect("one connection is a valid bound")
+            .shutdown_timeout(shutdown)
+            .expect("the direction deadline is finite"),
+    )
+}
+
+pub async fn async_returning_direction_row<C, Fut>(buffer: usize, case: C)
+where
+    C: FnOnce(Arc<DirectionTestFixture>, tokio::net::TcpStream, ReturningHandoff) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let (router, handoff) = returning_direction_router(DIRECTION_PATH, buffer);
+    DirectionTestFixture::run(
         |listener| {
             camber::http::serve_background(listener, router)
                 .expect("owned server requires a Tokio runtime")
         },
-        handoff,
-        case,
+        |fixture| async move {
+            let peer = fixture.connect_async(DIRECTION_PATH).await;
+            case(fixture, peer, handoff).await;
+        },
     )
     .await;
 }
@@ -409,72 +436,61 @@ where
 /// A separate public construction path, not a second spelling of the same one:
 /// the child router below configures its own capacity and that value must not
 /// reach either queue.
-pub async fn host_direction_row<C, Fut>(buffer: usize, case: C)
+pub async fn async_host_direction_row<C, Fut>(buffer: usize, case: C)
 where
-    C: FnOnce(Arc<DirectionTestFixture>, TcpStream, WsConn) -> Fut,
+    C: FnOnce(Arc<DirectionTestFixture>, tokio::net::TcpStream, WsConn) -> Fut,
     Fut: Future<Output = ()>,
 {
     let (router, handoff) = direction_router(DIRECTION_PATH, IGNORED_CHILD_BUFFER);
     let mut hosts = camber::http::HostRouter::new();
     hosts.set_default(router);
     let hosts = hosts.ws_buffer_size(buffer);
-    run_row(
+    run_async_row(
         |listener| {
             camber::http::serve_background_hosts(listener, hosts)
                 .expect("owned server requires a Tokio runtime")
         },
         handoff,
+        DirectionPeer::Orderly,
         case,
     )
     .await;
 }
 
-/// Bind, serve, connect, take the callback's connection, run the case.
+/// What one application task the case started reports back.
 ///
-/// The handoff stays owned here for the whole case, so the production callback
-/// stays parked in its own frame rather than returning under the row. Its gate
-/// goes to the fixture, which is what releases the callback when the row asks
-/// its server to stop.
-async fn run_row<S, C, Fut>(serve: S, mut handoff: DirectionHandoff, case: C)
-where
-    S: FnOnce(tokio::net::TcpListener) -> ServerHandle,
-    C: FnOnce(Arc<DirectionTestFixture>, TcpStream, WsConn) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    DirectionTestFixture::run(serve, |fixture| async move {
-        fixture.hold_callbacks(handoff.take_gate());
-        let peer = fixture.connect(DIRECTION_PATH);
-        let connection = handoff.connection().await;
-        case(fixture, peer, connection).await;
-        drop(handoff);
-    })
-    .await;
-}
-
-/// What one application thread the case started reports back.
-///
-/// The thread itself belongs to the fixture, which joins it; this is only the
+/// The task itself belongs to the fixture, which joins it; this is only the
 /// bounded way to read its answer.
 pub struct WorkerResult<T> {
     label: Box<str>,
-    outcome: Receiver<T>,
+    outcome: tokio::sync::oneshot::Receiver<T>,
 }
 
 impl<T> WorkerResult<T> {
     /// The worker's answer, or a failure naming the worker that never gave one.
-    pub fn take(&self) -> T {
-        match self.outcome.recv_timeout(DIRECTION_DEADLINE) {
-            Ok(outcome) => outcome,
-            Err(error) => panic!("{}: {error}", self.label),
+    pub async fn take(self) -> T {
+        match tokio::time::timeout(DIRECTION_DEADLINE, self.outcome).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => panic!("{}: the task ended without an answer", self.label),
+            Err(_) => panic!("{}: no answer within {DIRECTION_DEADLINE:?}", self.label),
         }
     }
+}
 
-    /// Whether the worker has answered yet, without waiting for it to.
-    pub fn settled(&self) -> bool {
-        !matches!(
-            self.outcome.try_recv(),
-            Err(std::sync::mpsc::TryRecvError::Empty)
-        )
+/// Poll one endpoint operation once and require that it is waiting.
+///
+/// A single poll in the caller's own task, so the claim is about the operation
+/// and not about when another task was scheduled: a `Pending` here is the
+/// operation itself declining to finish. The operation stays pinned with the
+/// caller, who decides whether to drive it on or to drop it.
+pub async fn assert_pending<F>(operation: Pin<&mut F>, what: &str)
+where
+    F: Future,
+    F::Output: std::fmt::Debug,
+{
+    match futures_util::poll!(operation) {
+        Poll::Pending => {}
+        Poll::Ready(outcome) => panic!("{what} finished with {outcome:?} instead of waiting"),
     }
 }
 
@@ -488,12 +504,18 @@ pub struct FacadeReceives {
 }
 
 impl FacadeReceives {
-    fn take(mut connection: WsConn) -> Self {
-        let text = connection.recv();
+    /// Take one message through each untimed facade receiver, in order.
+    ///
+    /// Untimed, so the caller bounds the whole of it: a facade that stopped
+    /// answering would otherwise park the row. The connection comes back with
+    /// the answers, so the rest of the row still owns it.
+    pub async fn take(mut connection: WsConn) -> Self {
+        let text = connection.recv().await;
         let binary = connection
             .recv_binary()
+            .await
             .map(|data| Box::<[u8]>::from(data.as_ref()));
-        let either = connection.recv_message();
+        let either = connection.recv_message().await;
         Self {
             text,
             binary,
@@ -516,12 +538,12 @@ pub struct DirectionTestFixture {
     controller: Mutex<Option<Arc<ScopedRetainedBridge>>>,
     server: Mutex<Option<ServerHandle>>,
     armed: Mutex<Vec<BridgeHold>>,
-    workers: Mutex<Vec<(Box<str>, std::thread::JoinHandle<()>)>>,
+    workers: Mutex<Vec<(Box<str>, tokio::task::JoinHandle<()>)>>,
     /// The gate this row's parked callbacks wait on, once the row hands it over.
     ///
     /// `None` for a row whose callbacks park on nothing. Held rather than read:
     /// dropping it is the release.
-    callbacks: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    callbacks: Mutex<Option<CallbackRelease>>,
 }
 
 impl DirectionTestFixture {
@@ -618,44 +640,21 @@ impl DirectionTestFixture {
             .expect("the direction fixture already gave back its lifecycle observer")
     }
 
-    /// Open one raw client WebSocket against this fixture's server.
-    ///
-    /// The socket is handed to the case outright. A socket needs no protocol to
-    /// be released — closing its file descriptor is what a dropped `TcpStream`
-    /// already does — so registering it here would buy nothing and cost the
-    /// case the `&mut` its frame reads need.
-    pub fn connect(&self, path: &str) -> TcpStream {
-        direction_peer(self.addr, path)
+    pub async fn connect_async(&self, path: &str) -> tokio::net::TcpStream {
+        super::ws_callbacks::upgraded_ws_peer(self.addr, path, "the direction peer").await
     }
 
     /// Open one client WebSocket whose close will be a TCP reset.
     ///
-    /// Tokio-side, because the zero linger that produces the reset is only
-    /// reachable through a Tokio socket. A row takes this peer exactly when the
-    /// transport failure, rather than an orderly close, is what it is about.
+    /// A row takes this peer exactly when the transport failure, rather than
+    /// an orderly close, is what it is about.
     pub async fn connect_abortive(&self, path: &str) -> tokio::net::TcpStream {
-        use tokio::io::AsyncWriteExt;
-        let mut peer = lifecycle_event(
-            "the abortive direction peer to connect",
-            super::http::abortive_tcp_socket().connect(self.addr),
+        super::ws_callbacks::abortive_upgraded_ws_peer(
+            self.addr,
+            path,
+            "the abortive direction peer",
         )
         .await
-        .expect("connect abortive direction peer");
-        // Bounded like the connect either side of it. A handshake is small
-        // enough that a stalled write is unlikely, and an unlikely stall in an
-        // unbounded write is a hung binary rather than a failed row.
-        lifecycle_event(
-            "the abortive direction handshake to be written",
-            peer.write_all(super::ws::ws_upgrade_request(path).as_bytes()),
-        )
-        .await
-        .expect("write abortive direction handshake");
-        let head = super::ws_async::read_async_http_head(&mut peer, "the abortive handshake").await;
-        assert!(
-            head.starts_with("HTTP/1.1 101 "),
-            "the abortive direction handshake was refused: {head}"
-        );
-        peer
     }
 
     /// Arm one production owner's edge, recording it for release at teardown.
@@ -715,19 +714,28 @@ impl DirectionTestFixture {
         self.forget(BridgeHold::Direction(edge));
     }
 
-    /// Take one message through each untimed facade receiver, on a worker.
+    /// Queue one async peer message, and hold until the receive owner can see
+    /// it.
     ///
-    /// Run off the case's own task because all three loop on the receive half's
-    /// unbounded blocking call: a facade that stopped answering would park the
-    /// case — and the whole harness behind it — where the worker's own bounded
-    /// result fails it instead. The connection comes back with the answers, so
-    /// the rest of the row still owns it.
-    pub fn spawn_facade_receives(&self, connection: WsConn) -> WorkerResult<FacadeReceives> {
-        self.spawn_worker("facade-receives", move || FacadeReceives::take(connection))
+    /// The queued edge is the barrier: a row that wants a receive to find a
+    /// message ready must not guess when the inbound owner put it there. The
+    /// edge is armed before the write, so the pump cannot pass it unheld, and
+    /// released only once the message is in the queue.
+    pub async fn queue_from_async_peer(
+        &self,
+        peer: &mut tokio::net::TcpStream,
+        opcode: u8,
+        payload: &[u8],
+        context: &str,
+    ) {
+        self.arm(QUEUED);
+        super::ws_async::write_async_ws_frame(peer, opcode, payload, context).await;
+        self.wait_paused(QUEUED).await;
+        self.release(QUEUED);
     }
 
     /// Take this row's parked-callback gate, so the fixture can release it.
-    pub fn hold_callbacks(&self, gate: Option<std::sync::mpsc::Sender<()>>) {
+    pub fn hold_callbacks(&self, gate: Option<CallbackRelease>) {
         *self
             .callbacks
             .lock()
@@ -849,58 +857,28 @@ impl DirectionTestFixture {
         lifecycle_event("the direction server to complete", server.join()).await
     }
 
-    /// Start one application thread and register it for a bounded join.
+    /// Start one application task and register it for a bounded join.
     ///
-    /// A plain thread rather than an admitted task: these run public blocking
-    /// endpoint operations, and the claim under test is what those operations do
-    /// off every runtime as well as on one.
+    /// An owned task rather than a detached one: the fixture joins it at
+    /// teardown, after the server, and a task still running then is a leak
+    /// the row fails on.
     pub fn spawn_worker<T, F>(&self, label: &str, work: F) -> WorkerResult<T>
     where
         T: Send + 'static,
-        F: FnOnce() -> T + Send + 'static,
+        F: Future<Output = T> + Send + 'static,
     {
-        let (reported, outcome) = std::sync::mpsc::channel();
-        let thread = std::thread::spawn(move || {
-            let _ = reported.send(work());
+        let (reported, outcome) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = reported.send(work.await);
         });
         self.workers
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .push((label.into(), thread));
+            .push((label.into(), task));
         WorkerResult {
             label: format!("worker `{label}` never reported").into(),
             outcome,
         }
-    }
-
-    /// Start one application thread that says when it is about to make its
-    /// endpoint call, and wait for it to say so.
-    ///
-    /// [`Self::spawn_worker`] returns as soon as the thread is spawned, so a row
-    /// that probes [`WorkerResult::settled`] straight after it is asking whether
-    /// a thread that may not have been scheduled yet has finished — which is
-    /// true of a thread that never started, and stays true if the operation
-    /// under test stops blocking altogether. The report is the barrier that
-    /// makes the probe a claim about the operation instead: it is sent from the
-    /// worker's own frame with nothing between it and the call.
-    ///
-    /// Not a sleep, and not a substitute for one: it establishes that the worker
-    /// reached its call, which is exactly what an unsettled result is supposed to
-    /// mean.
-    pub fn spawn_entered_worker<T, F>(&self, label: &str, work: F) -> WorkerResult<T>
-    where
-        T: Send + 'static,
-        F: FnOnce() -> T + Send + 'static,
-    {
-        let (entered, entry) = std::sync::mpsc::channel();
-        let started = self.spawn_worker(label, move || {
-            let _ = entered.send(());
-            work()
-        });
-        entry.recv_timeout(DIRECTION_DEADLINE).unwrap_or_else(|_| {
-            panic!("worker `{label}` never reached the endpoint operation it was started for")
-        });
-        started
     }
 
     /// Release every held gate, shut the server down, join every owner, give
@@ -1011,19 +989,18 @@ impl DirectionTestFixture {
         );
     }
 
-    /// Join every application thread the case started, under one bound each.
+    /// Join every application task the case started, under one bound each.
     ///
-    /// The join itself is blocking and unbounded, so it runs on a blocking
-    /// thread and the bound is applied to that. A worker still parked in an
-    /// endpoint operation after the server has joined is the leak these cases
-    /// exist to catch, so it fails the case rather than being waited on.
+    /// A worker still suspended in an endpoint operation after the server has
+    /// joined is the leak these cases exist to catch, so it is cancelled,
+    /// joined, and then fails the case rather than being waited on.
     ///
     /// What the join answered is read rather than only whether it answered. A
-    /// worker whose closure panicked joins promptly and carries its panic back
-    /// in that answer, so a bound that only checks the timer reports a case's
-    /// own failed assertion as a healthy owner — and any row spawning a worker
-    /// it never takes loses its assertion entirely. The payload is resumed here
-    /// so the row fails on what the worker actually claimed.
+    /// worker that panicked joins promptly and carries its panic back in that
+    /// answer, so a bound that only checks the timer reports a case's own
+    /// failed assertion as a healthy owner — and any row spawning a worker it
+    /// never takes loses its assertion entirely. The payload is resumed here so
+    /// the row fails on what the worker actually claimed.
     async fn join_workers(&self) {
         let workers = std::mem::take(
             &mut *self
@@ -1031,15 +1008,18 @@ impl DirectionTestFixture {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()),
         );
-        for (label, thread) in workers {
-            let joined = tokio::task::spawn_blocking(move || thread.join());
-            match tokio::time::timeout(DIRECTION_DEADLINE, joined).await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(unwound))) => std::panic::resume_unwind(unwound),
-                Ok(Err(join_error)) => panic!("the join of worker `{label}` failed: {join_error}"),
-                Err(_) => panic!(
-                    "worker `{label}` was still running {DIRECTION_DEADLINE:?} after the server joined"
-                ),
+        for (label, mut task) in workers {
+            match tokio::time::timeout(DIRECTION_DEADLINE, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                Ok(Err(error)) => panic!("the join of worker `{label}` failed: {error}"),
+                Err(_) => {
+                    task.abort();
+                    let cancelled = tokio::time::timeout(DIRECTION_DEADLINE, task).await;
+                    panic!(
+                        "worker `{label}` was still running {DIRECTION_DEADLINE:?} after the server joined; its cancelled join answered {cancelled:?}"
+                    )
+                }
             }
         }
     }
@@ -1080,12 +1060,18 @@ impl Drop for DirectionTestFixture {
     ///
     /// A case that unwound before its runner could finish still has to let
     /// production out of every gate it armed and stop the server, or the whole
-    /// binary hangs on a bridge nothing will ever release. Nothing here waits:
+    /// binary hangs on a bridge nothing will ever release. Worker tasks are
+    /// cancelled rather than joined. Nothing here waits:
     /// this runs on whatever thread the unwind is on, and a bounded wait needs
     /// an executor.
     fn drop(&mut self) {
         self.release_every_gate();
         self.release_callbacks();
+        self.workers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .for_each(|(_, task)| task.abort());
         match self
             .server
             .lock()
@@ -1103,7 +1089,7 @@ impl Drop for DirectionTestFixture {
 /// Free rather than a fixture method, because the runtime-authority rows serve
 /// from three different owners and only one of them is a
 /// [`DirectionTestFixture`]. The handshake and the `101` check are the same for
-/// all four callers.
+/// every one of them.
 ///
 /// No bound is armed on the socket here. Every frame reader and writer in the
 /// suite arms its own for the length of one operation and restores what it
@@ -1136,9 +1122,13 @@ pub const FRAME_BUILT: BridgeHold =
 pub const AFTER_COMMIT: BridgeHold = BridgeHold::Terminal(WebSocketTerminalEdge::AfterCommit);
 /// The edge that holds a bridge with a cause offered and not yet committed.
 pub const BEFORE_COMMIT: BridgeHold = BridgeHold::Terminal(WebSocketTerminalEdge::BeforeCommit);
+/// The edge that holds the inbound direction once a peer message is queued.
+pub const QUEUED: BridgeHold = BridgeHold::Direction(WebSocketDirectionEdge::InboundFrameQueued);
 
-/// The WebSocket close opcode, as it appears on the wire.
-pub const CLOSE: u8 = 0x08;
+/// The frame [`fill_outbound_behind_the_writer`] leaves the writer holding.
+pub const HELD_TEXT: &str = "held-by-the-writer";
+/// The frame [`fill_outbound_behind_the_writer`] leaves in the one slot.
+pub const FILLING_TEXT: &str = "fills-the-only-slot";
 
 /// Fill a capacity-one outbound queue behind a held writer.
 ///
@@ -1153,12 +1143,34 @@ pub const CLOSE: u8 = 0x08;
 pub async fn fill_outbound_behind_the_writer(fixture: &DirectionTestFixture, sender: &WsSender) {
     fixture.arm(BEFORE_WRITE);
     sender
-        .send("held-by-the-writer")
+        .send(HELD_TEXT)
+        .await
         .expect("admit the frame the writer holds");
     fixture.wait_paused(BEFORE_WRITE).await;
     sender
-        .send("fills-the-only-slot")
+        .try_send(FILLING_TEXT)
         .expect("fill the one outbound slot");
+}
+
+/// Drop the receive owner, require the close it owes the peer, and require
+/// every sender's waiting send to read `ReceiverDropped`.
+pub async fn assert_receiver_drop_closes(
+    peer: &mut tokio::net::TcpStream,
+    receiver: WsReceiver,
+    senders: &[&WsSender],
+) {
+    drop(receiver);
+    expect_async_close(peer, "the close a dropped receive owner owes").await;
+    for sender in senders {
+        assert_eq!(
+            closed_cause(
+                sender.send("after").await,
+                "a send after the receiver dropped"
+            ),
+            WsCloseCause::ReceiverDropped,
+            "a retained sender did not read the receiver's drop"
+        );
+    }
 }
 
 /// A closed connection, as the compatibility facade reports one.
@@ -1168,7 +1180,7 @@ pub async fn fill_outbound_behind_the_writer(fixture: &DirectionTestFixture, sen
 /// two owners underneath would have given it.
 pub fn assert_broken_pipe(outcome: Result<(), RuntimeError>, what: &str) {
     match outcome {
-        Err(RuntimeError::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(error) if super::ws::is_peer_departure(&error) => {}
         other => panic!("{what} did not report a broken pipe: {other:?}"),
     }
 }
@@ -1185,10 +1197,23 @@ pub fn closed_cause<T: std::fmt::Debug>(
     }
 }
 
-/// One blocking receive, so a row that only wants the answer does not have to
-/// restate which half owns the `&mut`.
-pub fn receive_once(mut receiver: WsReceiver) -> Result<WsReceive, RuntimeError> {
-    receiver.recv()
+/// One typed receive under [`DIRECTION_DEADLINE`], so no row waits on a
+/// message or a terminal cause that is never coming.
+///
+/// `WsReceiver::recv` has no deadline, and a row calls this on its own task: a
+/// bridge that stopped delivering would park the row, and the harness behind
+/// it, instead of failing it.
+pub async fn bounded_receive(receiver: &mut WsReceiver, what: &str) -> WsReceive {
+    receiver
+        .recv_timeout(DIRECTION_DEADLINE)
+        .await
+        .unwrap_or_else(|error| panic!("{what} was refused: {error}"))
+}
+
+/// One receive, so a row that only wants the answer does not have to restate
+/// which half owns the `&mut`.
+pub async fn receive_once(mut receiver: WsReceiver) -> Result<WsReceive, RuntimeError> {
+    receiver.recv().await
 }
 
 /// The message one receive answered with, or a failure naming the answer it
@@ -1213,11 +1238,25 @@ pub fn assert_received_text(received: WsReceive, expected: &str, what: &str) {
     }
 }
 
+/// Require that one receive answered with exactly `expected` as binary.
+pub fn assert_received_binary(received: WsReceive, expected: &[u8], what: &str) {
+    match received_message(received, what) {
+        WsMessage::Binary(data) => assert_eq!(data.as_ref(), expected, "{what}"),
+        WsMessage::Text(text) => panic!("{what} took text {text:?} instead of {expected:?}"),
+    }
+}
+
+/// The cause a closed receive settled on, or a failure naming what it took
+/// instead.
+pub fn closed_receive_cause(received: WsReceive, what: &str) -> WsCloseCause {
+    match received {
+        WsReceive::Closed(cause) => cause,
+        WsReceive::Message(message) => panic!("{what} took {message:?} instead of closing"),
+    }
+}
+
 /// Require that one receive answered with the connection being over, for
 /// exactly `expected`.
 pub fn assert_closed_with(received: WsReceive, expected: WsCloseCause, what: &str) {
-    match received {
-        WsReceive::Closed(cause) => assert_eq!(cause, expected, "{what}"),
-        WsReceive::Message(message) => panic!("{what} took {message:?} instead of closing"),
-    }
+    assert_eq!(closed_receive_cause(received, what), expected, "{what}");
 }

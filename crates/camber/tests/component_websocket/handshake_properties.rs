@@ -258,10 +258,12 @@ fn echo_once_router(entered: &Arc<AtomicUsize>) -> Router {
     let mut router = Router::new();
     router.ws(SOCKET, move |_request: &Request, mut connection: WsConn| {
         entered.fetch_add(1, Ordering::AcqRel);
-        if let Some(message) = connection.recv() {
-            connection.send(&message)?;
+        async move {
+            if let Some(message) = connection.recv().await {
+                connection.send(&message).await?;
+            }
+            Ok(())
         }
-        Ok(())
     });
     router.rejection_mapper(|rejection: &Rejection, _context: &RejectionContext| {
         Ok(Response::text(rejection.status(), rejection.message())?

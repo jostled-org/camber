@@ -1504,11 +1504,19 @@ mod cross_class {
     /// Serve the upstream both proxy prefixes forward upgrade traffic to.
     fn upgrade_upstream() -> SocketAddr {
         let mut upstream = Router::new();
-        upstream.ws("/echo", |_request: &Request, conn: WsConn| {
-            conn.send(WS_GREETING)?;
-            Ok(())
-        });
+        upstream.ws("/echo", greeting_ws);
         common::spawn_server(upstream)
+    }
+
+    /// Greet the peer once, then return and let the bridge close.
+    ///
+    /// Shaped as a route so both registrations name it directly. The returned
+    /// future captures only the connection, never the borrowed request.
+    fn greeting_ws(
+        _: &Request,
+        conn: WsConn,
+    ) -> impl Future<Output = Result<(), RuntimeError>> + Send + use<> {
+        common::send_once(conn, WS_GREETING)
     }
 
     /// Register every class one full-feature router can answer.
@@ -1534,10 +1542,7 @@ mod cross_class {
         router.get_sse(SSE_ROUTE, |_request: &Request, writer: &mut SseWriter| {
             writer.event("message", SSE_EVENT)
         });
-        router.ws(WS_ROUTE, |_request: &Request, conn: WsConn| {
-            conn.send(WS_GREETING)?;
-            Ok(())
-        });
+        router.ws(WS_ROUTE, greeting_ws);
         router.get(ONLY_GET, |_request: &Request| async {
             Response::text(200, "only-get").expect("valid status")
         });

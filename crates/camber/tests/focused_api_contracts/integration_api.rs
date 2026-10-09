@@ -37,6 +37,8 @@ use camber::mq::sqs;
 use camber::{CertStore, RuntimeError};
 
 use crate::delivery_fixture::{repository_root, repository_text};
+#[cfg(any(feature = "nats", feature = "sqs", feature = "dns01"))]
+use crate::probes::require_send;
 
 const REFERENCE: &str = "docs/reference/integrations.md";
 const DIAGNOSTIC: &str = "M9 published integration contract disagrees with its compiled shapes";
@@ -95,17 +97,6 @@ fn removed_spellings() -> [&'static str; 9] {
 }
 
 // --- Probes --------------------------------------------------------------
-
-/// Proves a probe future can cross Tokio workers, without polling it.
-#[cfg(any(feature = "nats", feature = "sqs", feature = "dns01"))]
-pub(crate) fn require_send<F: std::future::Future + Send>(future: F) -> F {
-    future
-}
-
-/// Compiles only when `T` can cross a thread boundary. The cutover roots
-/// prove their owned builders with it.
-#[cfg(any(feature = "nats", feature = "sqs"))]
-pub(crate) fn assert_send<T: Send>() {}
 
 /// The Core NATS example the reference prints.
 #[cfg(feature = "nats")]

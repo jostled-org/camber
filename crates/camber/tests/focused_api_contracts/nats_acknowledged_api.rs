@@ -11,7 +11,7 @@
 use camber::RuntimeError;
 use camber::mq::nats::{self, NatsBuilder};
 
-use crate::integration_api::require_send;
+use crate::probes::require_send;
 
 /// Returns the publish result unconverted, so its type is the Core one.
 async fn acknowledged_publish(url: &str) -> Result<(), RuntimeError> {

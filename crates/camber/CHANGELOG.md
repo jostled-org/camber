@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- *(ws)* `Router::ws` takes a callback that returns a future:
+  `F: Fn(&Request, WsConn) -> Fut`, where
+  `Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static`. The future
+  need not be `Sync` or `Unpin`. Return an `async move` block from each
+  callback.
+- *(ws)* The waiting WebSocket operations are async. On `WsSender`, await
+  `send`, `send_binary`, and `send_shared_binary`. On `WsReceiver`, await
+  `recv` and `recv_timeout`. On `WsConn`, await `send`, `send_binary`, `recv`,
+  `recv_timeout`, `recv_binary`, and `recv_message`. `WsSender::try_send`,
+  `try_send_binary`, and `try_send_shared_binary`, and `WsConn::sender` and
+  `split`, stay synchronous.
+- *(ws)* A WebSocket callback runs inline in its upgrade task, not on the
+  blocking pool. A callback that blocks the thread stops its own connection's
+  settlement. Move blocking work to `camber::spawn` and await the result
+  through a channel.
+- *(ws)* The operator event `camber.websocket.callback.outstanding` is now
+  `camber.websocket.callback.cancelled`, and its `disposition` field is
+  `cancelled`, not `outstanding-after-forced-grace`. Camber drops a callback
+  that is still pending at its settlement deadline, with its captures, before
+  the upgrade settles. Change alerts that match the old event name.
+
+### Added
+
+- *(ws)* Current-thread Tokio runtimes serve WebSockets. A wait there no longer
+  returns `BlockingInAsyncContext`.
+- *(ws)* Dropping a pending send admits nothing and drops the offered payload.
+  Dropping a pending `WsReceiver::recv` loses no message. `recv_timeout` spends
+  one deadline, and a filtered message does not restart it.
+
+### Fixed
+
+- *(ws)* A forced server stop reports `Finished` only after it has joined each
+  aborted WebSocket upgrade task. Before, the server could report `Finished`
+  while Tokio had not yet dropped an aborted upgrade task.
+
 ## [0.11.1](https://github.com/jostled-org/camber/compare/camber-v0.11.0...camber-v0.11.1) - 2026-10-06
 
 ### Other

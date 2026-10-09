@@ -4,12 +4,9 @@
 //! workers. Its behavior, bounds, and wire effects belong to the component,
 //! acceptance, and external roots.
 
-#[path = "nats_ack_identity.rs"]
-mod nats_ack_identity;
-
 use camber::mq::nats::NatsBuilder;
 
-use crate::integration_api::assert_send;
+use crate::probes::assert_send;
 
 #[test]
 fn nats_public_cutover_contract_exists() {

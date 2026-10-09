@@ -181,13 +181,7 @@ fn add_bridge_route(router: &mut Router, bridge: bool) {
     if !bridge {
         return;
     }
-    router.ws(
-        BRIDGE_ROUTE,
-        |_req: &Request, mut conn: camber::http::WsConn| {
-            while conn.recv().is_some() {}
-            Ok(())
-        },
-    );
+    router.ws(BRIDGE_ROUTE, crate::common::drain_ws);
 }
 
 /// A build with no `ws` feature registers no bridge, and reaches no upgrade.

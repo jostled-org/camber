@@ -121,10 +121,7 @@ async fn connect_async_websocket(addr: std::net::SocketAddr, path: &str) -> toki
 
 fn lifecycle_websocket_router() -> Router {
     let mut router = Router::new();
-    router.ws("/ws", |_request: &Request, mut connection: WsConn| {
-        while connection.recv().is_some() {}
-        Ok(())
-    });
+    router.ws("/ws", common::drain_ws);
     router
 }
 
@@ -199,12 +196,22 @@ fn assert_websocket_switch(head: &common::HttpResponse, context: &str) {
 
 fn websocket_probe_router(dispatch_count: Arc<AtomicUsize>) -> Router {
     let mut router = Router::new();
-    router.ws("/ws", move |_request: &Request, connection: WsConn| {
+    router.ws("/ws", move |request: &Request, connection: WsConn| {
         dispatch_count.fetch_add(1, Ordering::AcqRel);
-        connection.send("connected")?;
-        Ok(())
+        connected_ws(request, connection)
     });
     router
+}
+
+/// A WebSocket route that sends one `connected` frame and returns.
+///
+/// Shaped as a route so a registration names it directly. The returned future
+/// captures only the connection, never the borrowed request.
+fn connected_ws(
+    _req: &Request,
+    connection: WsConn,
+) -> impl Future<Output = Result<(), RuntimeError>> + Send + use<> {
+    common::send_once(connection, "connected")
 }
 
 /// Read the probe's one frame, then finish the close its return started.
@@ -570,10 +577,7 @@ fn generated_websocket_origins_normalize_or_reject() {
 /// policy that would refuse anything it was asked about, and one WS route.
 fn body_limit_ws_router(asked: &Arc<AtomicUsize>) -> Router {
     let mut router = Router::new().max_request_body(10);
-    router.ws("/ws", |_req: &Request, conn: WsConn| {
-        conn.send("connected")?;
-        Ok(())
-    });
+    router.ws("/ws", connected_ws);
     router.body_admission(common::refusing_body_admission(asked))
 }
 
@@ -621,10 +625,10 @@ fn websocket_server_sends_multiple() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |_req: &Request, conn: WsConn| {
-                conn.send("one")?;
-                conn.send("two")?;
-                conn.send("three")?;
+            router.ws("/ws", |_req: &Request, conn: WsConn| async move {
+                conn.send("one").await?;
+                conn.send("two").await?;
+                conn.send("three").await?;
                 Ok(())
             });
 
@@ -652,8 +656,11 @@ fn websocket_handler_sees_request_path_and_headers() {
         .run(|| {
             let mut router = Router::new();
             router.ws("/ws", |req: &Request, conn: WsConn| {
-                conn.send(req.path())?;
-                Ok(())
+                let path: Box<str> = req.path().into();
+                async move {
+                    conn.send(&path).await?;
+                    Ok(())
+                }
             });
 
             let addr = common::spawn_server(router);
@@ -676,13 +683,8 @@ fn ws_send_and_recv_binary_frames() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |_req: &Request, mut conn: WsConn| {
-                while let Some(data) = conn.recv_binary() {
-                    if conn.send_binary(&data).is_err() {
-                        break;
-                    }
-                }
-                Ok(())
+            router.ws("/ws", |_req: &Request, mut conn: WsConn| async move {
+                common::echo_binary_until_closed(&mut conn).await
             });
 
             let addr = common::spawn_server(router);
@@ -710,9 +712,13 @@ fn ws_recv_timeout_bounds_a_silent_peer() {
             let (reported, outcome) = std::sync::mpsc::channel();
             let mut router = Router::new();
             router.ws("/ws", move |_req: &Request, mut conn: WsConn| {
-                let result = conn.recv_timeout(Duration::from_millis(50));
-                reported.send(result).unwrap();
-                Ok(())
+                let reported = reported.clone();
+                async move {
+                    let result = conn.recv_timeout(Duration::from_millis(50)).await;
+                    reported
+                        .send(result)
+                        .map_err(|_| RuntimeError::ChannelClosed)
+                }
             });
 
             let addr = common::spawn_server(router);
@@ -739,14 +745,14 @@ fn ws_recv_message_returns_both_types() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |_req: &Request, mut conn: WsConn| {
+            router.ws("/ws", |_req: &Request, mut conn: WsConn| async move {
                 // Echo back a description of each received message type
-                while let Some(msg) = conn.recv_message() {
+                while let Some(msg) = conn.recv_message().await {
                     let reply = match &msg {
                         WsMessage::Text(t) => format!("text:{t}"),
                         WsMessage::Binary(b) => format!("binary:{}", b.len()),
                     };
-                    conn.send(&reply)?;
+                    conn.send(&reply).await?;
                 }
                 Ok(())
             });
@@ -777,10 +783,10 @@ fn ws_recv_binary_skips_text_frames() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |_req: &Request, mut conn: WsConn| {
+            router.ws("/ws", |_req: &Request, mut conn: WsConn| async move {
                 // recv_binary should skip text frames
-                if let Some(data) = conn.recv_binary() {
-                    conn.send_binary(&data)?;
+                if let Some(data) = conn.recv_binary().await {
+                    conn.send_binary(&data).await?;
                 }
                 Ok(())
             });
@@ -809,10 +815,7 @@ fn websocket_accepts_same_host_origin() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |_req: &Request, conn: WsConn| {
-                conn.send("connected")?;
-                Ok(())
-            });
+            router.ws("/ws", connected_ws);
 
             let addr = common::spawn_server(router);
             let port = addr.port();
@@ -843,10 +846,7 @@ fn websocket_rejects_cross_host_origin() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |_req: &Request, conn: WsConn| {
-                conn.send("should not reach")?;
-                Ok(())
-            });
+            router.ws("/ws", connected_ws);
 
             let addr = common::spawn_server(router);
 
@@ -866,10 +866,7 @@ fn websocket_rejects_null_origin() {
         .shutdown_timeout(Duration::from_secs(2))
         .run(|| {
             let mut router = Router::new();
-            router.ws("/ws", |_req: &Request, conn: WsConn| {
-                conn.send("should not reach")?;
-                Ok(())
-            });
+            router.ws("/ws", connected_ws);
 
             let addr = common::spawn_server(router);
 
@@ -1006,10 +1003,9 @@ fn auth_middleware_allows_authenticated_websocket() {
                         as std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>>,
                 }
             });
-            router.ws("/chat", |_req: &Request, mut conn: WsConn| {
-                conn.send("welcome")?;
-                common::echo_until_closed(&mut conn);
-                Ok(())
+            router.ws("/chat", |_req: &Request, mut conn: WsConn| async move {
+                conn.send("welcome").await?;
+                common::echo_until_closed(&mut conn).await
             });
 
             let addr = common::spawn_server(router);
@@ -1094,7 +1090,7 @@ async fn cancelled_pending_direct_upgrade_is_joined_and_connection_local() {
         let callback_count = Arc::clone(&callback_count);
         move |_request: &Request, _connection: WsConn| {
             callback_count.fetch_add(1, Ordering::AcqRel);
-            Ok(())
+            std::future::ready(Ok(()))
         }
     });
     router.get("/ok", |_request: &Request| async {
@@ -1227,10 +1223,7 @@ fn owner_tree_router() -> Router {
     router.get("/ok", |_request: &Request| async {
         Response::text(200, "ok")
     });
-    router.ws("/ws", |_request: &Request, mut conn: WsConn| {
-        while conn.recv().is_some() {}
-        Ok(())
-    });
+    router.ws("/ws", common::drain_ws);
     router
 }
 

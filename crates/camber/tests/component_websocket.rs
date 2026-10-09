@@ -3,6 +3,9 @@ pub mod common;
 pub mod deterministic;
 
 #[cfg(feature = "ws")]
+#[path = "component_websocket/async_endpoints.rs"]
+mod async_endpoints;
+#[cfg(feature = "ws")]
 #[path = "component_websocket/backend_tls.rs"]
 mod backend_tls;
 #[cfg(feature = "ws")]

@@ -1193,16 +1193,22 @@ async fn assert_stream_postcommit_terminal_reaches_no_mapper() {
 
 /// Echo one message the WebSocket bridge delivered back to the peer.
 ///
-/// A send that fails needs no answer here: the connection is over, and the very
-/// next receive reports the bridge's own cause for it.
+/// A send refused as closed needs no answer here: the connection is over, and
+/// the very next receive reports the bridge's own cause for it. Any other
+/// refusal is not a closure, and it fails the callback.
 #[cfg(feature = "ws")]
-fn echoed(sender: &camber::http::WsSender, message: camber::http::WsMessage) {
-    match message {
-        camber::http::WsMessage::Text(text) => {
-            let _ = sender.send(&text);
-        }
+async fn echoed(
+    sender: &camber::http::WsSender,
+    message: camber::http::WsMessage,
+) -> Result<(), camber::RuntimeError> {
+    let text = match message {
+        camber::http::WsMessage::Text(text) => text,
         // Nothing in this row sends a binary frame.
-        camber::http::WsMessage::Binary(_) => {}
+        camber::http::WsMessage::Binary(_) => return Ok(()),
+    };
+    match sender.send(&text).await {
+        Ok(()) | Err(camber::RuntimeError::WebSocketClosed(_)) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -1215,25 +1221,27 @@ fn reporting_ws_router(
     journal: &common::Journal,
     reported: std::sync::mpsc::Sender<camber::http::WsCloseCause>,
 ) -> Router {
-    let reported = Arc::new(Mutex::new(reported));
     let mut router = Router::new().rejection_mapper(common::recording_mapper(journal, "ws-owner"));
     router.ws(
         "/ws",
         move |_req: &camber::http::Request, conn: camber::http::WsConn| {
-            let (sender, mut receiver) = conn.split();
-            // The bridge's own answer for this connection, taken from the
-            // receive owner rather than inferred from a closed socket.
-            let cause = loop {
-                match receiver.recv()? {
-                    camber::http::WsReceive::Message(message) => echoed(&sender, message),
-                    camber::http::WsReceive::Closed(cause) => break cause,
-                }
-            };
-            let _ = reported
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .send(cause);
-            Ok(())
+            let reported = reported.clone();
+            async move {
+                let (sender, mut receiver) = conn.split();
+                // The bridge's own answer for this connection, taken from the
+                // receive owner rather than inferred from a closed socket.
+                let cause = loop {
+                    match receiver.recv().await? {
+                        camber::http::WsReceive::Message(message) => {
+                            echoed(&sender, message).await?;
+                        }
+                        camber::http::WsReceive::Closed(cause) => break cause,
+                    }
+                };
+                reported
+                    .send(cause)
+                    .map_err(|_| camber::RuntimeError::ChannelClosed)
+            }
         },
     );
     router
@@ -1911,12 +1919,7 @@ fn register_matrix_upstream_upgrade(upstream: &mut Router, work: &Arc<MatrixWork
     upstream.ws(
         "/ws",
         move |_req: &camber::http::Request, conn: camber::http::WsConn| {
-            entered.enter();
-            // Held until the peer or the bridge ends it, so the session is live
-            // while the shutdown row runs.
-            let ended = held_session(conn);
-            entered.end_upgrade();
-            ended
+            counted_upgrade(Arc::clone(&entered), conn)
         },
     );
 }
@@ -2088,13 +2091,25 @@ fn register_matrix_upgrade(child: &mut Router, work: &Arc<MatrixWork>, backend: 
     child.ws(
         MATRIX_WS,
         move |_req: &camber::http::Request, conn: camber::http::WsConn| {
-            work.enter();
-            let ended = held_session(conn);
-            work.end_upgrade();
-            ended
+            counted_upgrade(Arc::clone(&work), conn)
         },
     );
     child.proxy("/wsproxy", backend);
+}
+
+/// One counted upgrade owner, direct or upstream of the proxied class.
+///
+/// Held until the peer or the bridge ends it, so the session is live while the
+/// shutdown row runs. The end is counted whatever the session's result.
+#[cfg(feature = "ws")]
+async fn counted_upgrade(
+    work: Arc<MatrixWork>,
+    conn: camber::http::WsConn,
+) -> Result<(), camber::RuntimeError> {
+    work.enter();
+    let ended = held_session(conn).await;
+    work.end_upgrade();
+    ended
 }
 
 /// Read one upgrade until its session ends, and report how it ended.
@@ -2104,15 +2119,10 @@ fn register_matrix_upgrade(child: &mut Router, work: &Arc<MatrixWork>, backend: 
 /// owner finishing, and a count that only rose on the graceful spelling would
 /// leave the shutdown row unable to say the owner returned at all.
 #[cfg(feature = "ws")]
-fn held_session(conn: camber::http::WsConn) -> Result<(), camber::RuntimeError> {
+async fn held_session(conn: camber::http::WsConn) -> Result<(), camber::RuntimeError> {
     let (_sender, mut receiver) = conn.split();
-    loop {
-        match receiver.recv() {
-            Ok(camber::http::WsReceive::Message(_)) => continue,
-            Ok(_) => return Ok(()),
-            Err(error) => return Err(error),
-        }
-    }
+    while let camber::http::WsReceive::Message(_) = receiver.recv().await? {}
+    Ok(())
 }
 
 #[cfg(not(feature = "ws"))]

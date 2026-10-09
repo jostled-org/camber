@@ -7,7 +7,7 @@
 #![cfg(feature = "ws")]
 
 use crate::common::{
-    Collapsed, Journal, ReadyServer, UNAVAILABLE_BODY, assert_classification, only,
+    Collapsed, Journal, ReadyServer, UNAVAILABLE_BODY, assert_classification, drain_ws, only,
     recording_mapper,
 };
 
@@ -44,10 +44,9 @@ const SUBPROTOCOL: &str = "camber.v1";
 fn counted_socket(dispatched: &Arc<AtomicUsize>) -> Router {
     let mut router = Router::new();
     let dispatched = Arc::clone(dispatched);
-    router.ws(SOCKET, move |_request: &Request, mut connection: WsConn| {
+    router.ws(SOCKET, move |request: &Request, connection: WsConn| {
         dispatched.fetch_add(1, Ordering::SeqCst);
-        while connection.recv().is_some() {}
-        Ok(())
+        drain_ws(request, connection)
     });
     router
 }

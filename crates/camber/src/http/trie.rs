@@ -8,7 +8,7 @@ use super::response_commitment::ResponseOrigin;
 use super::sse::SseWriter;
 use super::stream::StreamResponse;
 #[cfg(feature = "ws")]
-use super::websocket::WsConn;
+use super::ws_proxy::{BridgeStart, GatedBridge, WsBridgeInput};
 use crate::RuntimeError;
 use arrayvec::ArrayVec;
 use std::collections::BTreeMap;
@@ -27,8 +27,13 @@ pub(super) type SseProducer =
     Box<dyn Fn(&Request, &mut SseWriter) -> Result<(), RuntimeError> + Send + Sync>;
 pub(super) type StreamHandler =
     Box<dyn Fn(&Request) -> Pin<Box<dyn Future<Output = StreamResponse> + Send>> + Send + Sync>;
+/// One `Router::ws` registration's shared launch.
+///
+/// Only this closure is erased. Each call spawns one direct bridge behind that
+/// upgrade's `BridgeStart` gate and returns it as a `GatedBridge`, so the
+/// callback inside it keeps its own type.
 #[cfg(feature = "ws")]
-pub(super) type WsHandler = Arc<dyn Fn(&Request, WsConn) -> Result<(), RuntimeError> + Send + Sync>;
+pub(super) type WsLauncher = Arc<dyn Fn(WsBridgeInput, BridgeStart) -> GatedBridge + Send + Sync>;
 /// One streaming multipart handler, erased the way every stored handler is.
 ///
 /// Boxed inside its registration rather than shared on its own. What the route
@@ -129,7 +134,7 @@ pub(super) enum RouteHandler {
     /// A streaming multipart route, held as one shared registration.
     Multipart(Arc<MultipartRegistration>),
     #[cfg(feature = "ws")]
-    WebSocket(WsHandler),
+    WebSocket(WsLauncher),
     Proxy {
         backend: Arc<str>,
         prefix: Arc<str>,

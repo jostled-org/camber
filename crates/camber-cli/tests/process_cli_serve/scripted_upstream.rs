@@ -18,7 +18,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::support::FixtureError;
-use crate::support::http::{accept, find, header_value, invalid_data, reason_phrase};
+use crate::support::http::{accept, find, invalid_data, reason_phrase};
+use crate::support::http_head::header_value;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const ACCEPT_SLICE: Duration = Duration::from_millis(10);

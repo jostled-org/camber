@@ -14,6 +14,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "ws")]
+use std::sync::{Mutex, PoisonError};
 use std::task::{Context, Poll};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -458,6 +460,7 @@ impl UpgradeTransportOwner {
         &self,
         mut handoff: UpgradeHandoff,
         peer_closed: bool,
+        retention: &Arc<UpgradeRetention>,
     ) -> Option<UpgradeOwner> {
         LifecycleScript::pause_at_upgrade(
             self.script.as_deref(),
@@ -490,6 +493,7 @@ impl UpgradeTransportOwner {
             },
             self.shutdown_aggregate.clone(),
             self.script.clone(),
+            Arc::clone(retention),
         );
         // Between the record and the answer, which is the one place a case can
         // read the transfer and still know the peer has seen nothing: the
@@ -546,6 +550,12 @@ pub(in crate::http) struct UpgradeOwner {
     owner: UpgradeIdentity,
     shutdown: Option<Arc<AggregateShutdown>>,
     script: Option<Arc<LifecycleScript>>,
+    /// Where this owner leaves its child if its connection is taken away
+    /// mid-join.
+    ///
+    /// `None` only for a child already left there: nothing is above it any more
+    /// but the server that joins it.
+    retention: Option<Arc<UpgradeRetention>>,
 }
 
 #[cfg(feature = "ws")]
@@ -555,6 +565,7 @@ impl UpgradeOwner {
         owner: UpgradeIdentity,
         shutdown: Option<Arc<AggregateShutdown>>,
         script: Option<Arc<LifecycleScript>>,
+        retention: Arc<UpgradeRetention>,
     ) -> Self {
         LifecycleScript::observe_ownership(
             script.as_deref(),
@@ -568,6 +579,7 @@ impl UpgradeOwner {
             owner,
             shutdown,
             script,
+            retention: Some(retention),
         }
     }
 
@@ -587,12 +599,29 @@ impl UpgradeOwner {
     /// The join is the connection's own bound: a bridge that will not settle is
     /// ended by the server aborting the connection that holds it, which is the
     /// same forced deadline every other owner answers to.
+    ///
+    /// The handle is awaited where it lives, not taken out first. A join
+    /// dropped mid-wait — the connection aborted around it — then drops this
+    /// owner with the handle still in place, and [`Drop`] hands the aborted
+    /// child to the server to join. A handle moved into the wait would be
+    /// dropped without an abort, which detaches the bridge and the callback it
+    /// owns.
     pub(in crate::http) async fn join(mut self) {
-        let disposition = match self.handle.take() {
-            None => ParticipantDisposition::Completed,
-            Some(handle) => upgrade_disposition(handle.await),
+        std::future::poll_fn(|context| self.poll_settled(context)).await;
+    }
+
+    /// Wait for the child's task to end, then publish how it ended.
+    ///
+    /// Ready at once for a child already settled. The one wait both joiners
+    /// run: the connection that owns the child, and the server that took over
+    /// a child its connection left behind.
+    fn poll_settled(&mut self, context: &mut Context<'_>) -> Poll<()> {
+        let joined = match self.handle.as_mut() {
+            Some(handle) => std::task::ready!(Pin::new(handle).poll(context)),
+            None => return Poll::Ready(()),
         };
-        self.settle(disposition);
+        self.settle(upgrade_disposition(joined));
+        Poll::Ready(())
     }
 
     /// Publish how this child ended, once, to both accounts that name it.
@@ -635,35 +664,81 @@ fn upgrade_disposition(joined: Result<(), tokio::task::JoinError>) -> Participan
 
 /// End a child whose owner was dropped without joining it.
 ///
-/// Only reachable when the connection itself was taken away mid-settlement, and
-/// the abort is the whole disposition then: an orphaned bridge has no parent
-/// left to hand its transport back to.
+/// Only reachable when the connection itself was taken away mid-settlement.
+/// The abort is only a request: Tokio drops the bridge's future — and the
+/// callback it owns — on a later poll, so settling here would claim a join
+/// that has not happened. The aborted child is left on its connection's
+/// retention record instead, and the server joins it before it counts the
+/// connection as ended. A child already left there has no one above it, so
+/// the abort is its whole disposition.
 #[cfg(feature = "ws")]
 impl Drop for UpgradeOwner {
     fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-            self.settle(ParticipantDisposition::CancelledAndJoined);
+        let handle = match self.handle.take() {
+            Some(handle) => handle,
+            None => return,
+        };
+        handle.abort();
+        match self.retention.take() {
+            Some(retention) => retention.leave(Self {
+                handle: Some(handle),
+                owner: self.owner,
+                shutdown: self.shutdown.take(),
+                script: self.script.take(),
+                retention: None,
+            }),
+            None => self.settle(ParticipantDisposition::CancelledAndJoined),
         }
     }
 }
 
-/// Whether one connection is holding an upgrade child right now.
+/// Whether one connection is holding an upgrade child right now, and the
+/// child it left behind if it was taken away while joining one.
 ///
 /// Written by the connection that transfers and settles the child, read by the
 /// server that decides which owners a forced abort may end where they stand.
-/// A parent publishing one fact about itself is not a sibling registry: nothing
-/// else can write it, and the server reads it without being able to reach the
-/// child at all.
+/// A parent publishing facts about itself is not a sibling registry: nothing
+/// else can write it, and the server reaches a child only once its connection
+/// is gone and the child is already aborted — to join it, never to start or
+/// steer it.
 pub(in crate::http) struct UpgradeRetention {
     retained: AtomicBool,
+    /// The aborted child of a connection dropped mid-join, until the server
+    /// joins it.
+    #[cfg(feature = "ws")]
+    orphan: Mutex<Option<UpgradeOwner>>,
 }
 
 impl UpgradeRetention {
     pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             retained: AtomicBool::new(false),
+            #[cfg(feature = "ws")]
+            orphan: Mutex::new(None),
         })
+    }
+
+    /// Leave an aborted child here for the server to join.
+    #[cfg(feature = "ws")]
+    fn leave(&self, orphan: UpgradeOwner) {
+        *self.orphan.lock().unwrap_or_else(PoisonError::into_inner) = Some(orphan);
+    }
+
+    /// Join the child this connection left behind, if it left one.
+    ///
+    /// Ready once no child is left: the child's future, and every callback it
+    /// owned, has been dropped, and its settlement is published. A child whose
+    /// destructor never returns is never joined, and the connection is never
+    /// reported as ended — Camber does not claim work it could not stop.
+    #[cfg(feature = "ws")]
+    fn poll_orphan(&self, context: &mut Context<'_>) -> Poll<()> {
+        let mut orphan = self.orphan.lock().unwrap_or_else(PoisonError::into_inner);
+        match orphan.as_mut() {
+            Some(owner) => std::task::ready!(owner.poll_settled(context)),
+            None => return Poll::Ready(()),
+        }
+        *orphan = None;
+        Poll::Ready(())
     }
 
     #[cfg(feature = "ws")]
@@ -687,16 +762,56 @@ struct ConnectionOwner {
     /// The opaque identity this owner was registered under.
     identity: u64,
     upgrade: Arc<UpgradeRetention>,
+    /// The connection task's own result, held while the child it left behind
+    /// is joined.
+    #[cfg(feature = "ws")]
+    ended: Option<Result<(), tokio::task::JoinError>>,
+}
+
+impl ConnectionOwner {
+    /// The connection task's result, once the task and any upgrade child it
+    /// left behind have both ended.
+    #[cfg(feature = "ws")]
+    fn poll_ended(
+        &mut self,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), tokio::task::JoinError>> {
+        let result = match self.ended.take() {
+            Some(result) => result,
+            None => std::task::ready!(Pin::new(&mut self.handle).poll(context)),
+        };
+        match self.upgrade.poll_orphan(context) {
+            Poll::Ready(()) => Poll::Ready(result),
+            Poll::Pending => {
+                self.ended = Some(result);
+                Poll::Pending
+            }
+        }
+    }
+
+    /// The connection task's result. Without `ws` there is no upgrade child to
+    /// leave behind, so the task ending is the whole connection ending.
+    #[cfg(not(feature = "ws"))]
+    fn poll_ended(
+        &mut self,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), tokio::task::JoinError>> {
+        Pin::new(&mut self.handle).poll(context)
+    }
 }
 
 impl Future for ConnectionOwner {
     type Output = ConnectionCompletion;
 
+    /// A connection is complete once its task has ended and so has any upgrade
+    /// child it left behind, so a server never finishes while an aborted
+    /// bridge — or the callback it owns — still exists.
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let identity = self.identity;
-        Pin::new(&mut self.handle)
-            .poll(context)
-            .map(|result| ConnectionCompletion { result, identity })
+        let result = std::task::ready!(self.poll_ended(context));
+        Poll::Ready(ConnectionCompletion {
+            result,
+            identity: self.identity,
+        })
     }
 }
 
@@ -746,6 +861,8 @@ impl OwnedConnections {
             handle,
             identity,
             upgrade,
+            #[cfg(feature = "ws")]
+            ended: None,
         });
     }
 

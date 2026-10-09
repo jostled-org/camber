@@ -882,9 +882,10 @@ fn register_completion_grpc(_router: &mut camber::http::Router) {}
 /// Register the upgrade the handoff completion row commits.
 #[cfg(feature = "ws")]
 fn register_completion_upgrade(router: &mut camber::http::Router) {
-    router.ws(UPGRADE_PATH, |_req: &Request, _ws: camber::http::WsConn| {
-        Ok(())
-    });
+    router.ws(
+        UPGRADE_PATH,
+        |_req: &Request, _ws: camber::http::WsConn| async { Ok(()) },
+    );
 }
 
 #[cfg(not(feature = "ws"))]

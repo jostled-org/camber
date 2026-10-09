@@ -9,53 +9,43 @@
 
 #![cfg(feature = "ws")]
 
-use std::future::Future;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::common::{
-    AFTER_COMMIT, BEFORE_COMMIT, BEFORE_WRITE, BridgeHold, CLOSE, DIRECTION_DEADLINE,
-    DIRECTION_PATH, DirectionTestFixture, EXPIRING_STOP, PARKED_PATH, PayloadWitness,
-    abortive_direction_row, assert_broken_pipe, assert_closed_with, assert_received_text,
-    assert_within_one_deadline, closed_cause, direction_peer, direction_row,
-    fill_outbound_behind_the_writer, park_until_released, payload_bytes, read_ws_text_frame,
-    receive_once, returning_direction_row, try_read_ws_frame_raw, witnessed_payload,
-    write_ws_close_frame, write_ws_text_frame,
+    AFTER_COMMIT, BEFORE_COMMIT, BEFORE_WRITE, BINARY, BridgeHold, CLOSE, CallbackPark,
+    CallbackRelease, DIRECTION_DEADLINE, DIRECTION_PATH, DirectionTestFixture, EXPIRING_STOP,
+    FILLING_TEXT, PARKED_PATH, PayloadWitness, QUEUED, RawFrame, TEXT, abortive_direction_row,
+    abortive_direction_row_with_shutdown, assert_closed_with, assert_no_further_payload,
+    assert_pending, assert_received_text, assert_within_one_deadline, async_direction_row,
+    async_direction_row_with_shutdown, async_returning_direction_row, bounded_receive,
+    callback_gate, close_ws_peer, closed_cause, direction_peer, expect_async_close,
+    expect_async_text, fill_outbound_behind_the_writer, lifecycle_event, on_ws_executors,
+    park_until_released, payload_bytes, read_async_ws_frame_or_eof, receive_once,
+    transferred_upgrades, try_read_ws_frame_raw, witnessed_payload, write_async_ws_text_frame,
+    write_ws_text_frame,
 };
 use crate::disconnect::fixture::{DRIVER_AND_PRODUCER, with_drain_window};
 use crate::disconnect::peer::send;
 use crate::disconnect::routes::probe_router;
 use crate::disconnect::servers::SyncServer;
+use crate::spawn_probe::{AWAITING_PEER, ChildParts, SpawnProbe, await_peer};
 use camber::RuntimeError;
 use camber::http::mock::{ConnectionOwnershipEvent, WebSocketDirectionEdge, WebSocketTerminalEdge};
-use camber::http::{
-    Request, Response, Router, WsCloseCause, WsConn, WsReceive, WsReceiver, WsSender,
-};
-use camber::runtime;
+use camber::http::{Request, Response, Router, WsCloseCause, WsConn, WsReceiver, WsSender};
 
 /// The edge that holds the inbound direction with one peer item in hand.
 const ARRIVED_EDGE: WebSocketDirectionEdge = WebSocketDirectionEdge::InboundFrameArrived;
 /// The same edge, named for the fixture that arms and waits on it.
 const ARRIVED: BridgeHold = BridgeHold::Direction(ARRIVED_EDGE);
-/// The edge that holds the inbound direction once a peer message is queued.
-const QUEUED: BridgeHold = BridgeHold::Direction(WebSocketDirectionEdge::InboundFrameQueued);
 /// The edge that holds a graceful bridge before it awaits the peer close.
 const CLOSE_AWAIT: BridgeHold = BridgeHold::Terminal(WebSocketTerminalEdge::BeforePeerCloseAwait);
-
-/// The WebSocket text opcode, as it appears on the wire.
-const TEXT: u8 = 0x01;
-/// The WebSocket binary opcode, which every witnessed payload arrives under.
-const BINARY: u8 = 0x02;
 
 /// The frame every terminal row admits and never lets reach the peer on its own.
 const HELD: &str = "admitted-before-the-end";
 /// The peer message every terminal row leaves in the receive queue.
 const QUEUED_INBOUND: &str = "queued-before-the-end";
-
-/// The bound the matrix rows' own runtime shuts down under.
-const MATRIX_SHUTDOWN: Duration = Duration::from_secs(5);
 
 /// The bound a row whose server must never reach its deadline runs under.
 ///
@@ -65,109 +55,86 @@ const MATRIX_SHUTDOWN: Duration = Duration::from_secs(5);
 /// would have answered it anyway.
 const UNREACHED_SHUTDOWN: Duration = Duration::from_secs(30);
 
-/// Run one direction row on a server runtime of its own.
-///
-/// The shutdown bound belongs to the row and not to the file: a row that waits
-/// for a deadline to expire and a row that must never reach one need opposite
-/// values, and only a runtime of their own can carry them.
-///
-/// The executor is sized from the production count `#[camber::test]` sizes its
-/// own from, which is what every other row in this file runs on.
-/// `runtime::builder` defaults to the server shape — four workers per core —
-/// and a test entry is exactly what that default is documented not to be for: a
-/// row here serves one connection at a time, while nine other cases in this
-/// binary hold runtimes of their own. The surplus workers buy the rows nothing
-/// and cost every checkpoint rendezvous they wait on, because each one is a task
-/// wake that has to reach a core. Calling the helper rather than restating it
-/// means a retune there moves this row with it.
-fn direction_runtime<R, Fut>(shutdown: Duration, row: R)
-where
-    R: FnOnce() -> Fut,
-    Fut: Future<Output = ()>,
-{
-    runtime::builder()
-        .worker_threads(runtime::tokio_default_worker_threads())
-        .connection_limit(1)
-        .shutdown_timeout(shutdown)
-        .run(|| runtime::block_on(row()))
-        .expect("the direction runtime completed");
-}
-
 // 2.T1
-#[camber::test]
-async fn full_inbound_queue_does_not_block_admitted_outbound_frame() {
-    direction_row(1, |fixture, mut peer, connection| async move {
-        let sender = connection.sender();
-        fixture.arm(QUEUED);
-        write_ws_text_frame(&mut peer, "fills-the-only-slot");
-        fixture.wait_paused(QUEUED).await;
-        fixture.release(QUEUED);
-        // Nothing consumes this connection's receive queue, so the pump that
-        // picks this frame up can never place it: from here the inbound
-        // direction is stuck for the rest of the row. The pump is held with that
-        // frame in hand, because a count taken before it read would be 1 whether
-        // the inbound direction is stuck at a full queue or simply behind.
-        fixture.arm(ARRIVED);
-        write_ws_text_frame(&mut peer, "held-at-a-full-queue");
-        fixture.wait_paused(ARRIVED).await;
-        sender
-            .send("admitted-outbound")
-            .expect("admit one outbound frame");
-        expect_peer_text(
-            &mut peer,
-            "admitted-outbound",
-            "inbound queue blocked admitted outbound progress",
-        );
-        assert_eq!(
-            fixture.observed().inbound_admitted,
-            1,
-            "the second peer frame reached the receive queue, so the inbound direction was never full"
-        );
-        fixture.release(ARRIVED);
-        drop(connection);
-    })
-    .await;
+#[test]
+fn full_inbound_queue_does_not_block_admitted_outbound_frame() {
+    on_ws_executors(|| async {
+        async_direction_row(1, |fixture, mut peer, connection| async move {
+            let sender = connection.sender();
+            fixture.arm(QUEUED);
+            write_async_ws_text_frame(&mut peer, FILLING_TEXT).await;
+            fixture.wait_paused(QUEUED).await;
+            fixture.release(QUEUED);
+            // Nothing consumes this connection's receive queue, so the pump that
+            // picks this frame up can never place it: from here the inbound
+            // direction is stuck for the rest of the row. The pump is held with that
+            // frame in hand, because a count taken before it read would be 1 whether
+            // the inbound direction is stuck at a full queue or simply behind.
+            fixture.arm(ARRIVED);
+            write_async_ws_text_frame(&mut peer, "held-at-a-full-queue").await;
+            fixture.wait_paused(ARRIVED).await;
+            sender
+                .send("admitted-outbound")
+                .await
+                .expect("admit one outbound frame");
+            expect_async_text(
+                &mut peer,
+                "admitted-outbound",
+                "inbound queue blocked admitted outbound progress",
+            )
+            .await;
+            assert_eq!(
+                fixture.observed().inbound_admitted,
+                1,
+                "the second peer frame reached the receive queue, \
+                 so the inbound direction was never full"
+            );
+            fixture.release(ARRIVED);
+            drop(connection);
+        })
+        .await;
+    });
 }
 
 // 2.T2
-#[camber::test]
-async fn full_outbound_queue_does_not_block_receive_owner() {
-    direction_row(1, |fixture, mut peer, connection| async move {
-        let (sender, mut receiver) = connection.split();
-        fill_outbound_behind_the_writer(&fixture, &sender).await;
-        let waiting = sender.clone();
-        // The worker reports reaching its send before it makes it, so the
-        // unsettled result below is a send that is waiting rather than a thread
-        // that has not run.
-        let blocked = fixture
-            .spawn_entered_worker("outbound-send", move || waiting.send("waits-for-capacity"));
-        write_ws_text_frame(&mut peer, "inbound-while-outbound-is-full");
-        let received = receiver
-            .recv_timeout(DIRECTION_DEADLINE)
-            .expect("full outbound queue blocked the receive owner");
-        assert_received_text(
-            received,
-            "inbound-while-outbound-is-full",
-            "the receive owner behind a full outbound queue",
-        );
-        assert!(
-            !blocked.settled(),
-            "the held send completed before its writer was released"
-        );
-        fixture.release(BEFORE_WRITE);
-        blocked
-            .take()
-            .expect("the released writer never completed the waiting send");
-        drop((sender, receiver));
-    })
-    .await;
+#[test]
+fn full_outbound_queue_does_not_block_receive_owner() {
+    on_ws_executors(|| async {
+        async_direction_row(1, |fixture, mut peer, connection| async move {
+            let (sender, mut receiver) = connection.split();
+            fill_outbound_behind_the_writer(&fixture, &sender).await;
+            // Polled once here, in the row's own task, so the pending answer is the
+            // send itself declining to finish rather than a task not yet scheduled.
+            let mut blocked = std::pin::pin!(sender.send("waits-for-capacity"));
+            assert_pending(blocked.as_mut(), "a send into the full outbound queue").await;
+            write_async_ws_text_frame(&mut peer, "inbound-while-outbound-is-full").await;
+            let what = "the receive owner behind a full outbound queue";
+            assert_received_text(
+                bounded_receive(&mut receiver, what).await,
+                "inbound-while-outbound-is-full",
+                what,
+            );
+            assert_pending(
+                blocked.as_mut(),
+                "the held send before its writer was released",
+            )
+            .await;
+            fixture.release(BEFORE_WRITE);
+            lifecycle_event("the released writer to admit the waiting send", blocked)
+                .await
+                .expect("the released writer never completed the waiting send");
+            // The sender goes with the row's scope, after the send that borrows it.
+            drop(receiver);
+        })
+        .await;
+    });
 }
 
 // 2.T3, and the merged owner of the direct permit, callback-boundary, graceful,
 // and forced rows the component suite used to hold.
 #[test]
 fn direct_terminal_matrix_fixes_disposition_and_releases_every_owner() {
-    direction_runtime(MATRIX_SHUTDOWN, || async {
+    on_ws_executors(|| async {
         peer_close_row().await;
         peer_reset_row().await;
         invalid_frame_row().await;
@@ -182,20 +149,16 @@ fn direct_terminal_matrix_fixes_disposition_and_releases_every_owner() {
 /// A peer close frame: the cause the peer chose, its own close echoed back, and
 /// the messages it sent before it delivered.
 async fn peer_close_row() {
-    direction_row(1, |fixture, mut peer, connection| async move {
+    async_direction_row(1, |fixture, mut peer, connection| async move {
         let (sender, mut receiver) = connection.split();
-        stage_admitted_and_queued(&fixture, &mut peer, &sender).await;
+        stage_async_admitted_and_queued(&fixture, &mut peer, &sender).await;
         fixture.arm(AFTER_COMMIT);
-        write_ws_close_frame(&mut peer);
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_terminal(&fixture, WsCloseCause::PeerClosed);
-        assert_closed_send(&sender, WsCloseCause::PeerClosed);
-        fixture.release(AFTER_COMMIT);
-        fixture.release(BEFORE_WRITE);
-        expect_peer_close(&mut peer, "a peer close was not echoed");
-        assert_delivered(&mut receiver, WsCloseCause::PeerClosed);
+        close_ws_peer(&mut peer, "the closing peer").await;
+        release_committed(&fixture, &sender, WsCloseCause::PeerClosed).await;
+        expect_async_close(&mut peer, "a peer close was not echoed").await;
+        assert_delivered(&mut receiver, WsCloseCause::PeerClosed).await;
         drop((sender, receiver));
-        assert_owners_released(&fixture, WsCloseCause::PeerClosed, 1);
+        assert_owners_released(&fixture, WsCloseCause::PeerClosed, 1).await;
     })
     .await;
 }
@@ -203,35 +166,33 @@ async fn peer_close_row() {
 /// A peer whose transport is reset: no close is possible, and everything the
 /// peer sent before the reset is still owed to the application.
 async fn peer_reset_row() {
-    abortive_direction_row(1, |fixture, peer, connection| async move {
+    abortive_direction_row(1, |fixture, mut peer, connection| async move {
         let (sender, mut receiver) = connection.split();
-        stage_over_abortive_peer(&fixture, peer, &sender).await;
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_terminal(&fixture, WsCloseCause::PeerDisconnected);
-        assert_closed_send(&sender, WsCloseCause::PeerDisconnected);
-        fixture.release(AFTER_COMMIT);
-        fixture.release(BEFORE_WRITE);
-        assert_delivered(&mut receiver, WsCloseCause::PeerDisconnected);
+        stage_async_admitted_and_queued(&fixture, &mut peer, &sender).await;
+        fixture.arm(AFTER_COMMIT);
+        drop(peer);
+        release_committed(&fixture, &sender, WsCloseCause::PeerDisconnected).await;
+        assert_delivered(&mut receiver, WsCloseCause::PeerDisconnected).await;
         drop((sender, receiver));
-        assert_owners_released(&fixture, WsCloseCause::PeerDisconnected, 1);
+        assert_owners_released(&fixture, WsCloseCause::PeerDisconnected, 1).await;
     })
     .await;
 }
 
 /// A frame this transport cannot parse is the peer disconnecting, not a message.
 async fn invalid_frame_row() {
-    direction_row(1, |fixture, mut peer, connection| async move {
+    async_direction_row(1, |fixture, mut peer, connection| async move {
         let (sender, mut receiver) = connection.split();
-        stage_admitted_and_queued(&fixture, &mut peer, &sender).await;
+        stage_async_admitted_and_queued(&fixture, &mut peer, &sender).await;
         fixture.arm(AFTER_COMMIT);
-        write_unmasked_frame(&mut peer);
+        write_async_unmasked_frame(&mut peer).await;
         fixture.wait_paused(AFTER_COMMIT).await;
         assert_terminal(&fixture, WsCloseCause::PeerDisconnected);
         fixture.release(AFTER_COMMIT);
         fixture.release(BEFORE_WRITE);
-        assert_delivered(&mut receiver, WsCloseCause::PeerDisconnected);
+        assert_delivered(&mut receiver, WsCloseCause::PeerDisconnected).await;
         drop((sender, receiver));
-        assert_owners_released(&fixture, WsCloseCause::PeerDisconnected, 1);
+        assert_owners_released(&fixture, WsCloseCause::PeerDisconnected, 1).await;
     })
     .await;
 }
@@ -241,16 +202,14 @@ async fn invalid_frame_row() {
 async fn outbound_write_failure_row() {
     abortive_direction_row(1, |fixture, peer, connection| async move {
         let (sender, mut receiver) = connection.split();
-        fixture.arm(BEFORE_WRITE);
-        sender.send(HELD).expect("admit the held outbound frame");
-        fixture.wait_paused(BEFORE_WRITE).await;
+        hold_admitted_frame(&fixture, &sender).await;
         fixture.arm(AFTER_COMMIT);
         drop(peer);
         fixture.release(BEFORE_WRITE);
         fixture.wait_paused(AFTER_COMMIT).await;
         assert_terminal(&fixture, WsCloseCause::PeerDisconnected);
         fixture.release(AFTER_COMMIT);
-        assert_closed_receive(&mut receiver, WsCloseCause::PeerDisconnected);
+        assert_closed_receive(&mut receiver, WsCloseCause::PeerDisconnected).await;
         drop((sender, receiver));
         assert_write_failure_released(&fixture);
     })
@@ -259,24 +218,21 @@ async fn outbound_write_failure_row() {
 
 /// A graceful stop keeps the promise a successful send was given, and closes.
 async fn graceful_row() {
-    direction_row(1, |fixture, mut peer, connection| async move {
+    async_direction_row(1, |fixture, mut peer, connection| async move {
         let (sender, mut receiver) = connection.split();
-        stage_admitted_and_queued(&fixture, &mut peer, &sender).await;
+        stage_async_admitted_and_queued(&fixture, &mut peer, &sender).await;
         fixture.arm(AFTER_COMMIT);
         fixture.shutdown_server();
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_terminal(&fixture, WsCloseCause::ServerShutdown);
-        assert_closed_send(&sender, WsCloseCause::ServerShutdown);
-        fixture.release(AFTER_COMMIT);
-        fixture.release(BEFORE_WRITE);
-        expect_peer_text(
+        release_committed(&fixture, &sender, WsCloseCause::ServerShutdown).await;
+        expect_async_text(
             &mut peer,
             HELD,
             "a graceful stop cancelled an admitted frame",
-        );
-        expect_peer_close(&mut peer, "a graceful stop sent no close frame");
-        write_ws_close_frame(&mut peer);
-        assert_delivered(&mut receiver, WsCloseCause::ServerShutdown);
+        )
+        .await;
+        expect_async_close(&mut peer, "a graceful stop sent no close frame").await;
+        close_ws_peer(&mut peer, "the gracefully stopped peer").await;
+        assert_delivered(&mut receiver, WsCloseCause::ServerShutdown).await;
         drop((sender, receiver));
         assert_stopped_owners_released(&fixture, WsCloseCause::ServerShutdown, 0).await;
     })
@@ -292,18 +248,19 @@ async fn graceful_row() {
 /// frames its disposition dropped, and the permit it gave back — not the answer
 /// a taken-away bridge would have left behind.
 async fn cancelled_row() {
-    direction_row(1, |fixture, mut peer, connection| async move {
+    async_direction_row(1, |fixture, mut peer, connection| async move {
         let (sender, mut receiver) = connection.split();
-        stage_admitted_and_queued(&fixture, &mut peer, &sender).await;
+        stage_async_admitted_and_queued(&fixture, &mut peer, &sender).await;
         fixture.select_server_cancellation().await;
-        assert_closed_send(&sender, WsCloseCause::ServerCancelled);
+        assert_closed_send(&sender, WsCloseCause::ServerCancelled).await;
         fixture.release(AFTER_COMMIT);
         fixture.release(BEFORE_WRITE);
-        assert_closed_receive(&mut receiver, WsCloseCause::ServerCancelled);
-        expect_transport_end(
+        assert_closed_receive(&mut receiver, WsCloseCause::ServerCancelled).await;
+        assert_no_further_payload(
             &mut peer,
             "a cancelled server still wrote an admitted frame",
-        );
+        )
+        .await;
         drop((sender, receiver));
         assert_cancelled_owners_released(&fixture, WsCloseCause::ServerCancelled, 1).await;
     })
@@ -313,31 +270,28 @@ async fn cancelled_row() {
 /// A connection with nothing left to read it ends, and drops what it was
 /// holding.
 async fn receiver_drop_row() {
-    direction_row(1, |fixture, mut peer, connection| async move {
+    async_direction_row(1, |fixture, mut peer, connection| async move {
         let (sender, receiver) = connection.split();
-        stage_admitted_and_queued(&fixture, &mut peer, &sender).await;
+        stage_async_admitted_and_queued(&fixture, &mut peer, &sender).await;
         fixture.arm(AFTER_COMMIT);
         drop(receiver);
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_terminal(&fixture, WsCloseCause::ReceiverDropped);
-        assert_closed_send(&sender, WsCloseCause::ReceiverDropped);
-        fixture.release(AFTER_COMMIT);
-        fixture.release(BEFORE_WRITE);
-        expect_transport_end(
+        release_committed(&fixture, &sender, WsCloseCause::ReceiverDropped).await;
+        assert_no_further_payload(
             &mut peer,
             "a dropped receive owner still wrote an admitted frame",
-        );
+        )
+        .await;
         drop(sender);
-        assert_owners_released(&fixture, WsCloseCause::ReceiverDropped, 1);
+        assert_owners_released(&fixture, WsCloseCause::ReceiverDropped, 1).await;
     })
     .await;
 }
 
 /// A connection with nothing left to write it drains what it has, then closes.
 async fn senders_drop_row() {
-    direction_row(1, |fixture, mut peer, connection| async move {
+    async_direction_row(1, |fixture, mut peer, connection| async move {
         let (sender, mut receiver) = connection.split();
-        stage_admitted_and_queued(&fixture, &mut peer, &sender).await;
+        stage_async_admitted_and_queued(&fixture, &mut peer, &sender).await;
         fixture.arm(AFTER_COMMIT);
         drop(sender);
         // The writer is released before the wait: a pump holding a frame is not
@@ -347,24 +301,25 @@ async fn senders_drop_row() {
         fixture.wait_paused(AFTER_COMMIT).await;
         assert_terminal(&fixture, WsCloseCause::SendersDropped);
         fixture.release(AFTER_COMMIT);
-        expect_peer_text(
+        expect_async_text(
             &mut peer,
             HELD,
             "a last-sender drop cancelled an admitted frame",
-        );
-        expect_peer_close(&mut peer, "a last-sender drop sent no close frame");
-        assert_delivered(&mut receiver, WsCloseCause::SendersDropped);
+        )
+        .await;
+        expect_async_close(&mut peer, "a last-sender drop sent no close frame").await;
+        assert_delivered(&mut receiver, WsCloseCause::SendersDropped).await;
         drop(receiver);
-        assert_owners_released(&fixture, WsCloseCause::SendersDropped, 0);
+        assert_owners_released(&fixture, WsCloseCause::SendersDropped, 0).await;
     })
     .await;
 }
 
-/// Wait until both of this listener's bridges have fixed the join deadline
-/// their retained callback answers to.
+/// Wait until both of this listener's bridges have fixed the settlement
+/// deadline their callback answers to.
 ///
 /// The commit is not this barrier. It fixes the cause; the deadline is fixed a
-/// step later, where the settlement closes the endpoints a blocked callback
+/// step later, where the settlement closes the endpoints a pending callback
 /// wakes on, and it is fixed from whatever the server had committed by then. So
 /// a row that asked for its stop between those two steps would give its parked
 /// callback the whole drain plus the grace, and end on the aggregate expiry
@@ -378,7 +333,7 @@ async fn await_second_callback_deadline(fixture: &DirectionTestFixture) {
     crate::common::await_live(
         || deadline_owners(fixture) >= 2,
         DIRECTION_DEADLINE,
-        "the parked route's bridge never fixed its callback join deadline",
+        "the parked route's bridge never fixed its callback settlement deadline",
     )
     .await;
     for record in fixture.callbacks() {
@@ -389,7 +344,8 @@ async fn await_second_callback_deadline(fixture: &DirectionTestFixture) {
     }
 }
 
-/// How many connections have a bridge that published a callback join deadline.
+/// How many connections have a bridge that published a callback settlement
+/// deadline.
 ///
 /// Counted rather than collected: a bridge publishes its record when it fixes
 /// the deadline and again when it disposes of the callback, so the records have
@@ -411,118 +367,147 @@ fn deadline_owners(fixture: &DirectionTestFixture) -> usize {
 }
 
 // 2.T4
-#[camber::test]
-async fn callback_return_with_retained_halves_keeps_bridge_owned() {
-    returning_direction_row(1, |fixture, mut peer, mut handoff| async move {
-        // A second connection whose callback keeps its own connection and sits
-        // in the blocking pool for the whole row. What the owned server claims
-        // when it completes is about its bridges, not about this.
-        let parked_peer = fixture.connect(PARKED_PATH);
-        handoff.wait_parked().await;
-        let (sender, mut receiver) = handoff.halves().await;
-        handoff.wait_returned().await;
-        sender
-            .send("after-the-callback-returned")
-            .expect("the returned callback closed its connection");
-        expect_peer_text(
-            &mut peer,
-            "after-the-callback-returned",
-            "a callback return stopped a retained sender",
-        );
-        write_ws_text_frame(&mut peer, "into-retained-halves");
-        let received = receiver
-            .recv_timeout(DIRECTION_DEADLINE)
-            .expect("a callback return stopped a retained receiver");
-        assert_received_text(
-            received,
-            "into-retained-halves",
-            "the receiver a returned callback left behind",
-        );
-        fixture.arm(AFTER_COMMIT);
-        drop(receiver);
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_terminal(&fixture, WsCloseCause::ReceiverDropped);
-        assert_closed_send(&sender, WsCloseCause::ReceiverDropped);
-        fixture.release(AFTER_COMMIT);
-        drop(sender);
-        // The parked connection's peer goes first: its bridge owes that peer a
-        // close handshake it would never answer, and this row is not about how
-        // long a server waits for one.
-        drop(parked_peer);
-        // Waited for, not assumed. That bridge's own terminal is what bounds
-        // its parked callback: a peer that went away on a running server gives
-        // the callback the fixed forced-join grace, while a graceful stop that
-        // got there first would give it the whole drain and end this row on the
-        // deadline instead of on the claim it is making.
-        await_second_callback_deadline(&fixture).await;
-        fixture.shutdown_server();
-        fixture
-            .join_server()
-            .await
-            .expect("the owned server completed");
-        let observed = fixture.observed();
-        assert!(
-            observed.permit_released,
-            "the owned server completed without its bridge releasing the connection permit"
-        );
-        assert!(
-            !handoff.parked_exited(),
-            "owner completion claimed a still-parked blocking callback had exited"
-        );
-        // The other half of what that completion did not claim: the callback is
-        // still in its frame, and the connection it carried across the
-        // completion is over. Its own send is the only place that can be read
-        // from, because the callback is the only thing holding it.
-        handoff.release_parked();
-        assert_broken_pipe(
-            handoff.parked_send().await,
-            "a callback-side connection retained across owner completion",
-        );
-    })
-    .await;
+#[test]
+fn callback_return_with_retained_halves_keeps_bridge_owned() {
+    on_ws_executors(|| async {
+        async_returning_direction_row(1, |fixture, mut peer, mut handoff| async move {
+            // A second connection whose callback keeps its own connection and stays
+            // suspended for the whole row. Its bridge owns that future, so the owned
+            // server's completion has to mean the future is gone.
+            let parked_peer = fixture.connect_async(PARKED_PATH).await;
+            handoff.wait_parked().await;
+            let (sender, mut receiver) = handoff.halves().await;
+            handoff.wait_returned().await;
+            sender
+                .send("after-the-callback-returned")
+                .await
+                .expect("the returned callback closed its connection");
+            expect_async_text(
+                &mut peer,
+                "after-the-callback-returned",
+                "a callback return stopped a retained sender",
+            )
+            .await;
+            write_async_ws_text_frame(&mut peer, "into-retained-halves").await;
+            let what = "the receiver a returned callback left behind";
+            assert_received_text(
+                bounded_receive(&mut receiver, what).await,
+                "into-retained-halves",
+                what,
+            );
+            fixture.arm(AFTER_COMMIT);
+            drop(receiver);
+            fixture.wait_paused(AFTER_COMMIT).await;
+            assert_terminal(&fixture, WsCloseCause::ReceiverDropped);
+            assert_closed_send(&sender, WsCloseCause::ReceiverDropped).await;
+            fixture.release(AFTER_COMMIT);
+            drop(sender);
+            // The parked connection's peer goes first: its bridge owes that peer a
+            // close handshake it would never answer, and this row is not about how
+            // long a server waits for one.
+            drop(parked_peer);
+            // Waited for, not assumed. That bridge's own terminal is what bounds
+            // its parked callback: a peer that went away on a running server gives
+            // the callback the fixed forced-join grace, while a graceful stop that
+            // got there first would give it the whole drain and end this row on the
+            // deadline instead of on the claim it is making.
+            await_second_callback_deadline(&fixture).await;
+            fixture.shutdown_server();
+            fixture
+                .join_server()
+                .await
+                .expect("the owned server completed");
+            let observed = fixture.observed();
+            assert!(
+                observed.permit_released,
+                "the owned server completed without its bridge releasing the connection permit"
+            );
+            // The parked callback never answered anything, and its gate is still
+            // held, so nothing but its bridge could have ended it: the settlement
+            // deadline dropped the future, and the joined completion is what says
+            // that drop has already happened.
+            assert!(
+                handoff.parked_exited(),
+                "owner completion left a still-pending callback future alive"
+            );
+            assert_callback_dispositions(&fixture, &["cancelled", "completed"]);
+        })
+        .await;
+    });
+}
+
+/// Require exactly these callback dispositions, in any order.
+///
+/// Both bridges of the returning row publish one each: the callback that
+/// returned completed, and the one still suspended at its deadline was dropped.
+fn assert_callback_dispositions(fixture: &DirectionTestFixture, expected: &[&str]) {
+    let mut decided = callback_dispositions(fixture);
+    decided.sort_unstable();
+    assert_eq!(
+        &*decided, expected,
+        "the bridges published other callback dispositions"
+    );
+}
+
+/// Every callback disposition this listener's bridges have published, in
+/// publication order.
+fn callback_dispositions(fixture: &DirectionTestFixture) -> Box<[&'static str]> {
+    fixture
+        .callbacks()
+        .iter()
+        .filter_map(|record| record.disposition)
+        .collect()
 }
 
 // 2.T5
 #[test]
 fn graceful_shutdown_drains_closes_and_joins_direction_pumps() {
-    direction_runtime(MATRIX_SHUTDOWN, drained_close_row);
-    direction_runtime(EXPIRING_STOP, silent_peer_row);
+    on_ws_executors(drained_close_row);
+    on_ws_executors(silent_peer_row);
 }
 
 /// Everything a graceful stop owes an answering peer: the frames it admitted,
 /// the close after them, and both pumps joined before the permit goes back.
 async fn drained_close_row() {
-    direction_row(2, |fixture, mut peer, connection| async move {
-        let (sender, receiver) = connection.split();
-        fixture.arm(BEFORE_WRITE);
-        sender
-            .send("first-admitted")
-            .expect("admit the first frame");
-        fixture.wait_paused(BEFORE_WRITE).await;
-        sender
-            .send("second-admitted")
-            .expect("admit the second frame");
-        fixture.arm(AFTER_COMMIT);
-        fixture.shutdown_server();
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_closed_send(&sender, WsCloseCause::ServerShutdown);
-        fixture.release(AFTER_COMMIT);
-        fixture.release(BEFORE_WRITE);
-        expect_peer_text(
-            &mut peer,
-            "first-admitted",
-            "the drain lost its first frame",
-        );
-        expect_peer_text(
-            &mut peer,
-            "second-admitted",
-            "the drain lost its second frame",
-        );
-        expect_peer_close(&mut peer, "the drain sent no close frame");
-        write_ws_close_frame(&mut peer);
-        drop((sender, receiver));
-        assert_stopped_owners_released(&fixture, WsCloseCause::ServerShutdown, 0).await;
-    })
+    async_direction_row_with_shutdown(
+        2,
+        UNREACHED_SHUTDOWN,
+        |fixture, mut peer, connection| async move {
+            let (sender, receiver) = connection.split();
+            fixture.arm(BEFORE_WRITE);
+            sender
+                .send("first-admitted")
+                .await
+                .expect("admit the first frame");
+            fixture.wait_paused(BEFORE_WRITE).await;
+            sender
+                .send("second-admitted")
+                .await
+                .expect("admit the second frame");
+            fixture.arm(AFTER_COMMIT);
+            fixture.shutdown_server();
+            fixture.wait_paused(AFTER_COMMIT).await;
+            assert_closed_send(&sender, WsCloseCause::ServerShutdown).await;
+            fixture.release(AFTER_COMMIT);
+            fixture.release(BEFORE_WRITE);
+            expect_async_text(
+                &mut peer,
+                "first-admitted",
+                "the drain lost its first frame",
+            )
+            .await;
+            expect_async_text(
+                &mut peer,
+                "second-admitted",
+                "the drain lost its second frame",
+            )
+            .await;
+            expect_async_close(&mut peer, "the drain sent no close frame").await;
+            close_ws_peer(&mut peer, "the drained peer").await;
+            drop((sender, receiver));
+            assert_stopped_owners_released(&fixture, WsCloseCause::ServerShutdown, 0).await;
+        },
+    )
     .await;
 }
 
@@ -535,36 +520,40 @@ async fn drained_close_row() {
 /// It settles both directions and gives its permit back within the one deadline
 /// the stop was given, rather than being taken away by a second one.
 async fn silent_peer_row() {
-    direction_row(1, |fixture, mut peer, connection| async move {
-        let (sender, receiver) = connection.split();
-        fixture.arm(CLOSE_AWAIT);
-        fixture.arm(AFTER_COMMIT);
-        let requested = tokio::time::Instant::now();
-        fixture.shutdown_server();
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_terminal(&fixture, WsCloseCause::ServerShutdown);
-        fixture.release(AFTER_COMMIT);
-        expect_peer_close(&mut peer, "a graceful stop sent no close frame");
-        fixture.wait_paused(CLOSE_AWAIT).await;
-        fixture.release(CLOSE_AWAIT);
-        let completed = fixture.join_server().await;
-        assert!(
-            matches!(completed, Err(RuntimeError::Timeout)),
-            "a graceful stop a peer never answered completed as {completed:?}"
-        );
-        assert_within_one_deadline(requested, "a graceful stop its peer never answered");
-        assert_settled_itself(&fixture);
-        drop((sender, receiver, peer));
-    })
+    async_direction_row_with_shutdown(
+        1,
+        EXPIRING_STOP,
+        |fixture, mut peer, connection| async move {
+            let (sender, receiver) = connection.split();
+            fixture.arm(CLOSE_AWAIT);
+            fixture.arm(AFTER_COMMIT);
+            let requested = tokio::time::Instant::now();
+            fixture.shutdown_server();
+            fixture.wait_paused(AFTER_COMMIT).await;
+            assert_terminal(&fixture, WsCloseCause::ServerShutdown);
+            fixture.release(AFTER_COMMIT);
+            expect_async_close(&mut peer, "a graceful stop sent no close frame").await;
+            fixture.wait_paused(CLOSE_AWAIT).await;
+            fixture.release(CLOSE_AWAIT);
+            let completed = fixture.join_server().await;
+            assert!(
+                matches!(completed, Err(RuntimeError::Timeout)),
+                "a graceful stop a peer never answered completed as {completed:?}"
+            );
+            assert_within_one_deadline(requested, "a graceful stop its peer never answered");
+            assert_settled_itself(&fixture);
+            drop((sender, receiver, peer));
+        },
+    )
     .await;
 }
 
 // 2.T6
 #[test]
 fn forced_cancellation_wakes_operations_and_releases_permit() {
-    direction_runtime(MATRIX_SHUTDOWN, forced_cancellation_row);
-    direction_runtime(UNREACHED_SHUTDOWN, cancelled_close_await_row);
-    direction_runtime(EXPIRING_STOP, unsettling_bridge_row);
+    on_ws_executors(forced_cancellation_row);
+    on_ws_executors(cancelled_close_await_row);
+    on_ws_executors(unsettling_bridge_row);
 }
 
 /// One send held at a full outbound queue, one receive held on an empty one,
@@ -577,30 +566,39 @@ fn forced_cancellation_wakes_operations_and_releases_permit() {
 /// then permit, then completion — is read at production transitions rather than
 /// inferred from a finished server.
 async fn forced_cancellation_row() {
-    direction_row(1, |fixture, mut peer, connection| async move {
-        let (sender, receiver) = connection.split();
-        fill_outbound_behind_the_writer(&fixture, &sender).await;
-        let waiting = sender.clone();
-        let blocked =
-            fixture.spawn_worker("cancelled-send", move || waiting.send("never-admitted"));
-        let receiving = fixture.spawn_worker("cancelled-receive", move || receive_once(receiver));
-        fixture.select_server_cancellation().await;
-        assert_permit_still_held(&fixture);
-        fixture.release(AFTER_COMMIT);
-        assert_eq!(
-            closed_cause(blocked.take(), "the blocked send"),
-            WsCloseCause::ServerCancelled,
-            "a blocked send was not woken with the cancellation"
-        );
-        assert_closed_with(
-            receiving.take().expect("the blocked receive was woken"),
-            WsCloseCause::ServerCancelled,
-            "the receive a cancellation woke",
-        );
-        drop(sender);
-        expect_transport_end(&mut peer, "a cancelled server still wrote a queued frame");
-        assert_cancelled_owners_released(&fixture, WsCloseCause::ServerCancelled, 2).await;
-    })
+    async_direction_row_with_shutdown(
+        1,
+        UNREACHED_SHUTDOWN,
+        |fixture, mut peer, connection| async move {
+            let (sender, receiver) = connection.split();
+            fill_outbound_behind_the_writer(&fixture, &sender).await;
+            let waiting = sender.clone();
+            let blocked = fixture.spawn_worker("cancelled-send", async move {
+                waiting.send("never-admitted").await
+            });
+            let receiving = fixture.spawn_worker("cancelled-receive", receive_once(receiver));
+            fixture.select_server_cancellation().await;
+            assert_permit_still_held(&fixture);
+            fixture.release(AFTER_COMMIT);
+            assert_eq!(
+                closed_cause(blocked.take().await, "the blocked send"),
+                WsCloseCause::ServerCancelled,
+                "a blocked send was not woken with the cancellation"
+            );
+            assert_closed_with(
+                receiving
+                    .take()
+                    .await
+                    .expect("the blocked receive was woken"),
+                WsCloseCause::ServerCancelled,
+                "the receive a cancellation woke",
+            );
+            drop(sender);
+            assert_no_further_payload(&mut peer, "a cancelled server still wrote a queued frame")
+                .await;
+            assert_cancelled_owners_released(&fixture, WsCloseCause::ServerCancelled, 2).await;
+        },
+    )
     .await;
 }
 
@@ -613,7 +611,7 @@ async fn forced_cancellation_row() {
 /// happened — which is what "joins both pumps before it releases the permit"
 /// means on a connection nobody gets to reuse afterwards.
 ///
-/// The two blocked operations are deliberately not read here. A worker thread
+/// The two blocked operations are deliberately not read here. A worker task
 /// that had not reached its endpoint call yet would be answered by the
 /// committed cause instead of waiting for it, so "not yet woken" is a claim
 /// about this row's own scheduling rather than about production.
@@ -631,29 +629,33 @@ fn assert_permit_still_held(fixture: &DirectionTestFixture) {
 /// deadline is longer than the bound this row waits under, so a cancellation
 /// answered only by that deadline fails here rather than passing late.
 async fn cancelled_close_await_row() {
-    direction_row(1, |fixture, mut peer, connection| async move {
-        let (sender, receiver) = connection.split();
-        fixture.arm(CLOSE_AWAIT);
-        fixture.arm(AFTER_COMMIT);
-        fixture.shutdown_server();
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_terminal(&fixture, WsCloseCause::ServerShutdown);
-        fixture.release(AFTER_COMMIT);
-        // The close reaching the peer is what says the bridge is past its own
-        // write. The checkpoint proves it has reached the wait for an answer.
-        // The peer sends none.
-        expect_peer_close(&mut peer, "a graceful stop sent no close frame");
-        fixture.wait_paused(CLOSE_AWAIT).await;
-        fixture.cancel_server();
-        fixture.release(CLOSE_AWAIT);
-        let completed = fixture.join_server().await;
-        assert!(
-            matches!(completed, Err(RuntimeError::Cancelled)),
-            "a server cancelled during a close wait completed as {completed:?}"
-        );
-        assert_settled_itself(&fixture);
-        drop((sender, receiver, peer));
-    })
+    async_direction_row_with_shutdown(
+        1,
+        UNREACHED_SHUTDOWN,
+        |fixture, mut peer, connection| async move {
+            let (sender, receiver) = connection.split();
+            fixture.arm(CLOSE_AWAIT);
+            fixture.arm(AFTER_COMMIT);
+            fixture.shutdown_server();
+            fixture.wait_paused(AFTER_COMMIT).await;
+            assert_terminal(&fixture, WsCloseCause::ServerShutdown);
+            fixture.release(AFTER_COMMIT);
+            // The close reaching the peer is what says the bridge is past its own
+            // write. The checkpoint proves it has reached the wait for an answer.
+            // The peer sends none.
+            expect_async_close(&mut peer, "a graceful stop sent no close frame").await;
+            fixture.wait_paused(CLOSE_AWAIT).await;
+            fixture.cancel_server();
+            fixture.release(CLOSE_AWAIT);
+            let completed = fixture.join_server().await;
+            assert!(
+                matches!(completed, Err(RuntimeError::Cancelled)),
+                "a server cancelled during a close wait completed as {completed:?}"
+            );
+            assert_settled_itself(&fixture);
+            drop((sender, receiver, peer));
+        },
+    )
     .await;
 }
 
@@ -665,7 +667,7 @@ async fn cancelled_close_await_row() {
 /// cancellation. Nothing but the deadline that abort has carried since it began
 /// can end this server, and that deadline still does.
 async fn unsettling_bridge_row() {
-    direction_row(1, |fixture, peer, connection| async move {
+    async_direction_row_with_shutdown(1, EXPIRING_STOP, |fixture, peer, connection| async move {
         let (sender, receiver) = connection.split();
         let requested = tokio::time::Instant::now();
         fixture.select_server_cancellation().await;
@@ -709,7 +711,7 @@ fn assert_settled_itself(fixture: &DirectionTestFixture) {
 // committed.
 #[test]
 fn ordered_websocket_causes_cross_public_and_protocol_barriers() {
-    direction_runtime(UNREACHED_SHUTDOWN, || async {
+    on_ws_executors(|| async {
         accepted_cancellation_precedes_a_released_peer().await;
         acknowledged_peer_close_stands_under_a_graceful_stop().await;
         acknowledged_peer_close_precedes_a_later_cancellation().await;
@@ -733,26 +735,26 @@ fn ordered_websocket_causes_cross_public_and_protocol_barriers() {
 /// control watch is the only source that can answer, and the row would prove
 /// the notification rather than the commit.
 async fn accepted_cancellation_precedes_a_released_peer() {
-    abortive_direction_row(1, |fixture, peer, connection| async move {
-        let (sender, mut receiver) = connection.split();
-        let mut witness = hold_witnessed_frame(&fixture, &sender, CANCELLED_TAG).await;
-        fixture.arm(BEFORE_COMMIT);
-        drop(peer);
-        fixture.wait_paused(BEFORE_COMMIT).await;
-        fixture.cancel_server();
-        fixture.arm(AFTER_COMMIT);
-        fixture.release(BEFORE_COMMIT);
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_terminal(&fixture, WsCloseCause::ServerCancelled);
-        assert_closed_send(&sender, WsCloseCause::ServerCancelled);
-        fixture.release(AFTER_COMMIT);
-        fixture.release(BEFORE_WRITE);
-        assert_closed_receive(&mut receiver, WsCloseCause::ServerCancelled);
-        drop((sender, receiver));
-        assert_cancelled_owners_released(&fixture, WsCloseCause::ServerCancelled, 1).await;
-        assert_ordered_row_settled(&fixture, WsCloseCause::ServerCancelled).await;
-        witness.assert_released("the cancelled bridge").await;
-    })
+    abortive_direction_row_with_shutdown(
+        1,
+        UNREACHED_SHUTDOWN,
+        |fixture, peer, connection| async move {
+            let (sender, mut receiver) = connection.split();
+            let mut witness = hold_witnessed_frame(&fixture, &sender, CANCELLED_TAG).await;
+            fixture.arm(BEFORE_COMMIT);
+            drop(peer);
+            fixture.wait_paused(BEFORE_COMMIT).await;
+            fixture.cancel_server();
+            fixture.arm(AFTER_COMMIT);
+            fixture.release(BEFORE_COMMIT);
+            release_committed(&fixture, &sender, WsCloseCause::ServerCancelled).await;
+            assert_closed_receive(&mut receiver, WsCloseCause::ServerCancelled).await;
+            drop((sender, receiver));
+            assert_cancelled_owners_released(&fixture, WsCloseCause::ServerCancelled, 1).await;
+            assert_ordered_row_settled(&fixture, WsCloseCause::ServerCancelled);
+            witness.assert_released("the cancelled bridge").await;
+        },
+    )
     .await;
 }
 
@@ -767,33 +769,34 @@ async fn accepted_cancellation_precedes_a_released_peer() {
 /// reports. The echoed close the peer takes afterwards is the protocol
 /// acknowledgement that the bridge answered the peer rather than the stop.
 async fn acknowledged_peer_close_stands_under_a_graceful_stop() {
-    direction_row(1, |fixture, mut peer, connection| async move {
-        let (sender, mut receiver) = connection.split();
-        let mut witness = hold_witnessed_frame(&fixture, &sender, SHUTDOWN_TAG).await;
-        fixture.arm(BEFORE_COMMIT);
-        write_ws_close_frame(&mut peer);
-        fixture.wait_paused(BEFORE_COMMIT).await;
-        fixture.shutdown_server();
-        fixture.arm(AFTER_COMMIT);
-        fixture.release(BEFORE_COMMIT);
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_terminal(&fixture, WsCloseCause::PeerClosed);
-        assert_closed_send(&sender, WsCloseCause::PeerClosed);
-        fixture.release(AFTER_COMMIT);
-        fixture.release(BEFORE_WRITE);
-        expect_peer_close(&mut peer, "the acknowledged peer close was never echoed");
-        expect_transport_end(
-            &mut peer,
-            "the peer-closed bridge kept its transport past the close it echoed",
-        );
-        assert_closed_receive(&mut receiver, WsCloseCause::PeerClosed);
-        drop((sender, receiver, peer));
-        assert_stopped_owners_released(&fixture, WsCloseCause::PeerClosed, 1).await;
-        assert_ordered_row_settled(&fixture, WsCloseCause::PeerClosed).await;
-        witness
-            .assert_released("the peer-closed bridge under a graceful stop")
+    async_direction_row_with_shutdown(
+        1,
+        UNREACHED_SHUTDOWN,
+        |fixture, mut peer, connection| async move {
+            let (sender, mut receiver) = connection.split();
+            let mut witness = hold_witnessed_frame(&fixture, &sender, SHUTDOWN_TAG).await;
+            fixture.arm(BEFORE_COMMIT);
+            close_ws_peer(&mut peer, "the peer closing under a graceful stop").await;
+            fixture.wait_paused(BEFORE_COMMIT).await;
+            fixture.shutdown_server();
+            fixture.arm(AFTER_COMMIT);
+            fixture.release(BEFORE_COMMIT);
+            release_committed(&fixture, &sender, WsCloseCause::PeerClosed).await;
+            expect_async_close(&mut peer, "the acknowledged peer close was never echoed").await;
+            assert_no_further_payload(
+                &mut peer,
+                "the peer-closed bridge kept its transport past the close it echoed",
+            )
             .await;
-    })
+            assert_closed_receive(&mut receiver, WsCloseCause::PeerClosed).await;
+            drop((sender, receiver, peer));
+            assert_stopped_owners_released(&fixture, WsCloseCause::PeerClosed, 1).await;
+            assert_ordered_row_settled(&fixture, WsCloseCause::PeerClosed);
+            witness
+                .assert_released("the peer-closed bridge under a graceful stop")
+                .await;
+        },
+    )
     .await;
 }
 
@@ -807,29 +810,34 @@ async fn acknowledged_peer_close_stands_under_a_graceful_stop() {
 /// decide: it is published before the flush this cause owes, so the peer's read
 /// accepts either answer and requires the end.
 async fn acknowledged_peer_close_precedes_a_later_cancellation() {
-    direction_row(1, |fixture, mut peer, connection| async move {
-        let (sender, mut receiver) = connection.split();
-        let mut witness = hold_witnessed_frame(&fixture, &sender, CLOSED_TAG).await;
-        fixture.arm(AFTER_COMMIT);
-        write_ws_close_frame(&mut peer);
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_terminal(&fixture, WsCloseCause::PeerClosed);
-        fixture.cancel_server();
-        assert_closed_send(&sender, WsCloseCause::PeerClosed);
-        fixture.release(AFTER_COMMIT);
-        fixture.release(BEFORE_WRITE);
-        assert_closed_receive(&mut receiver, WsCloseCause::PeerClosed);
-        expect_transport_end(
-            &mut peer,
-            "the committed peer close still wrote the frame it cancelled",
-        );
-        drop((sender, receiver, peer));
-        assert_cancelled_owners_released(&fixture, WsCloseCause::PeerClosed, 1).await;
-        assert_ordered_row_settled(&fixture, WsCloseCause::PeerClosed).await;
-        witness
-            .assert_released("the peer-closed bridge under a later cancel")
+    async_direction_row_with_shutdown(
+        1,
+        UNREACHED_SHUTDOWN,
+        |fixture, mut peer, connection| async move {
+            let (sender, mut receiver) = connection.split();
+            let mut witness = hold_witnessed_frame(&fixture, &sender, CLOSED_TAG).await;
+            fixture.arm(AFTER_COMMIT);
+            close_ws_peer(&mut peer, "the peer closing before a cancellation").await;
+            fixture.wait_paused(AFTER_COMMIT).await;
+            assert_terminal(&fixture, WsCloseCause::PeerClosed);
+            fixture.cancel_server();
+            assert_closed_send(&sender, WsCloseCause::PeerClosed).await;
+            fixture.release(AFTER_COMMIT);
+            fixture.release(BEFORE_WRITE);
+            assert_closed_receive(&mut receiver, WsCloseCause::PeerClosed).await;
+            assert_no_further_payload(
+                &mut peer,
+                "the committed peer close still wrote the frame it cancelled",
+            )
             .await;
-    })
+            drop((sender, receiver, peer));
+            assert_cancelled_owners_released(&fixture, WsCloseCause::PeerClosed, 1).await;
+            assert_ordered_row_settled(&fixture, WsCloseCause::PeerClosed);
+            witness
+                .assert_released("the peer-closed bridge under a later cancel")
+                .await;
+        },
+    )
     .await;
 }
 
@@ -841,27 +849,27 @@ async fn acknowledged_peer_close_precedes_a_later_cancellation() {
 /// while that offer is still uncommitted, which is the one arrangement where a
 /// bridge that re-weighed its sources would answer differently.
 async fn local_receive_loss_precedes_a_later_peer_eof() {
-    direction_row(1, |fixture, peer, connection| async move {
-        let (sender, receiver) = connection.split();
-        let mut witness = hold_witnessed_frame(&fixture, &sender, RECEIVER_TAG).await;
-        fixture.arm(BEFORE_COMMIT);
-        drop(receiver);
-        fixture.wait_paused(BEFORE_COMMIT).await;
-        drop(peer);
-        fixture.arm(AFTER_COMMIT);
-        fixture.release(BEFORE_COMMIT);
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_terminal(&fixture, WsCloseCause::ReceiverDropped);
-        assert_closed_send(&sender, WsCloseCause::ReceiverDropped);
-        fixture.release(AFTER_COMMIT);
-        fixture.release(BEFORE_WRITE);
-        drop(sender);
-        assert_owners_released(&fixture, WsCloseCause::ReceiverDropped, 1);
-        assert_ordered_row_settled(&fixture, WsCloseCause::ReceiverDropped).await;
-        witness
-            .assert_released("the receive-owner-loss bridge")
-            .await;
-    })
+    async_direction_row_with_shutdown(
+        1,
+        UNREACHED_SHUTDOWN,
+        |fixture, peer, connection| async move {
+            let (sender, receiver) = connection.split();
+            let mut witness = hold_witnessed_frame(&fixture, &sender, RECEIVER_TAG).await;
+            fixture.arm(BEFORE_COMMIT);
+            drop(receiver);
+            fixture.wait_paused(BEFORE_COMMIT).await;
+            drop(peer);
+            fixture.arm(AFTER_COMMIT);
+            fixture.release(BEFORE_COMMIT);
+            release_committed(&fixture, &sender, WsCloseCause::ReceiverDropped).await;
+            drop(sender);
+            assert_owners_released(&fixture, WsCloseCause::ReceiverDropped, 1).await;
+            assert_ordered_row_settled(&fixture, WsCloseCause::ReceiverDropped);
+            witness
+                .assert_released("the receive-owner-loss bridge")
+                .await;
+        },
+    )
     .await;
 }
 
@@ -880,32 +888,38 @@ async fn local_receive_loss_precedes_a_later_peer_eof() {
 /// answered anyway would take the cause while that frame was still unwritten,
 /// and cancel it.
 async fn whole_connection_release_drains_before_its_normal_close() {
-    direction_row(1, |fixture, mut peer, connection| async move {
-        let (sender, receiver) = connection.split();
-        let mut witness = hold_witnessed_frame(&fixture, &sender, RELEASED_TAG).await;
-        fixture.arm(AFTER_COMMIT);
-        drop((sender, receiver));
-        fixture.release(BEFORE_WRITE);
-        fixture.wait_paused(AFTER_COMMIT).await;
-        assert_terminal(&fixture, WsCloseCause::SendersDropped);
-        fixture.release(AFTER_COMMIT);
-        expect_peer_payload(
-            &mut peer,
-            RELEASED_TAG,
-            "a whole-connection release cancelled an admitted frame",
-        );
-        expect_peer_close(&mut peer, "a whole-connection release sent no close frame");
-        expect_transport_end(
-            &mut peer,
-            "the released-connection bridge kept its transport past its close",
-        );
-        drop(peer);
-        assert_owners_released(&fixture, WsCloseCause::SendersDropped, 0);
-        assert_ordered_row_settled(&fixture, WsCloseCause::SendersDropped).await;
-        witness
-            .assert_released("the released-connection bridge")
+    async_direction_row_with_shutdown(
+        1,
+        UNREACHED_SHUTDOWN,
+        |fixture, mut peer, connection| async move {
+            let (sender, receiver) = connection.split();
+            let mut witness = hold_witnessed_frame(&fixture, &sender, RELEASED_TAG).await;
+            fixture.arm(AFTER_COMMIT);
+            drop((sender, receiver));
+            fixture.release(BEFORE_WRITE);
+            fixture.wait_paused(AFTER_COMMIT).await;
+            assert_terminal(&fixture, WsCloseCause::SendersDropped);
+            fixture.release(AFTER_COMMIT);
+            expect_async_peer_payload(
+                &mut peer,
+                RELEASED_TAG,
+                "a whole-connection release cancelled an admitted frame",
+            )
             .await;
-    })
+            expect_async_close(&mut peer, "a whole-connection release sent no close frame").await;
+            assert_no_further_payload(
+                &mut peer,
+                "the released-connection bridge kept its transport past its close",
+            )
+            .await;
+            drop(peer);
+            assert_owners_released(&fixture, WsCloseCause::SendersDropped, 0).await;
+            assert_ordered_row_settled(&fixture, WsCloseCause::SendersDropped);
+            witness
+                .assert_released("the released-connection bridge")
+                .await;
+        },
+    )
     .await;
 }
 
@@ -938,6 +952,7 @@ async fn hold_witnessed_frame(
     fixture.arm(BEFORE_WRITE);
     sender
         .send_shared_binary(payload)
+        .await
         .expect("admit the held outbound payload");
     fixture.wait_paused(BEFORE_WRITE).await;
     witness
@@ -946,8 +961,8 @@ async fn hold_witnessed_frame(
 /// Everything one ordered row's committed cause had to settle.
 ///
 /// Stated once because every row in the table owes the same list: both
-/// directions settled, the connection permit back, the retained callback either
-/// joined or named, and the upgrade recorded as its connection's child and
+/// directions settled, the connection permit back, the callback either
+/// completed or cancelled at its deadline, and the upgrade recorded as its connection's child and
 /// settled there. A row that spelled its own could quietly owe less.
 ///
 /// The queue disposition the cause fixed is owed too, and it is asserted one
@@ -960,23 +975,19 @@ async fn hold_witnessed_frame(
 /// server proves it by admitting a second peer, and a stopping or cancelled one
 /// admits nothing, so its completion is the barrier and the release the bridge
 /// published is what the row reads.
-async fn assert_ordered_row_settled(fixture: &DirectionTestFixture, cause: WsCloseCause) {
+fn assert_ordered_row_settled(fixture: &DirectionTestFixture, cause: WsCloseCause) {
     assert_settlement_observed(fixture, cause);
     assert_callback_settled(fixture, cause);
     assert_upgrade_settled_under_its_connection(fixture, cause);
 }
 
-/// The retained callback ended in the closed disposition vocabulary.
+/// The callback's settlement ended in the closed disposition vocabulary.
 ///
-/// Either answer is a settlement: a callback that returned was joined, and one
-/// that would not return is named against the grace it outlasted. What may not
-/// happen is a bridge that published no decision at all.
+/// Either answer is a settlement: a callback that returned completed, and one
+/// still pending at its deadline was dropped there. What may not happen is a
+/// bridge that published no decision at all.
 fn assert_callback_settled(fixture: &DirectionTestFixture, cause: WsCloseCause) {
-    let callbacks = fixture.callbacks();
-    let decided = callbacks
-        .iter()
-        .filter_map(|record| record.disposition)
-        .collect::<Box<[_]>>();
+    let decided = callback_dispositions(fixture);
     assert_eq!(
         decided.len(),
         1,
@@ -984,30 +995,25 @@ fn assert_callback_settled(fixture: &DirectionTestFixture, cause: WsCloseCause) 
         decided.len()
     );
     assert!(
-        matches!(decided[0], "completed" | "outstanding-after-forced-grace"),
+        matches!(decided[0], "completed" | "cancelled"),
         "the {cause:?} row named callback disposition {:?}, outside the closed set",
         decided[0]
     );
 }
 
 /// The upgrade this row served was its connection's child, and settled there.
+///
+/// The row's upgrade is the first one transferred. A row whose server keeps
+/// running proves its permit by upgrading a second peer, so a later transfer is
+/// that probe rather than a second owner of this row.
 fn assert_upgrade_settled_under_its_connection(
     fixture: &DirectionTestFixture,
     cause: WsCloseCause,
 ) {
     let observed = fixture.ownership();
-    let transferred = observed
-        .events
-        .iter()
-        .find_map(|event| match event {
-            ConnectionOwnershipEvent::ConnectionUpgradeTransferred {
-                connection,
-                upgrade,
-            } => Some((*connection, *upgrade)),
-            _ => None,
-        })
+    let (connection, upgrade) = *transferred_upgrades(&observed)
+        .first()
         .unwrap_or_else(|| panic!("the {cause:?} row transferred no upgrade to its connection"));
-    let (connection, upgrade) = transferred;
     assert!(
         observed.contains(ConnectionOwnershipEvent::ConnectionUpgradeSettled {
             connection,
@@ -1029,7 +1035,7 @@ fn assert_upgrade_settled_under_its_connection(
 #[test]
 fn unordered_peer_cancel_race_accepts_closed_set_and_releases_every_owner() {
     for _ in 0..causality_iterations() {
-        direction_runtime(MATRIX_SHUTDOWN, || async {
+        on_ws_executors(|| async {
             unordered_peer_cancel_iteration().await;
         });
     }
@@ -1042,7 +1048,10 @@ fn unordered_peer_cancel_race_accepts_closed_set_and_releases_every_owner() {
 /// something it cannot get rather than a silent fallback to one.
 fn causality_iterations() -> usize {
     match std::env::var("CAMBER_CAUSALITY_ITERATIONS") {
-        Err(_) => 1,
+        Err(std::env::VarError::NotPresent) => 1,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            panic!("CAMBER_CAUSALITY_ITERATIONS is not a count: {error}")
+        }
         Ok(value) => {
             let requested = value.parse::<usize>().unwrap_or_else(|error| {
                 panic!("CAMBER_CAUSALITY_ITERATIONS is not a count: {error}")
@@ -1070,6 +1079,7 @@ async fn unordered_peer_cancel_iteration() {
         let (payload, mut witness) = witnessed_payload(&bytes, "the raced payload");
         sender
             .send_shared_binary(payload)
+            .await
             .expect("admit the raced payload");
         drop(peer);
         fixture.cancel_server();
@@ -1089,12 +1099,10 @@ async fn unordered_peer_cancel_iteration() {
             ),
             "an unordered peer/cancel race committed {cause:?}, outside its closed result set"
         );
-        assert_closed_send(&sender, cause);
-        assert_closed_receive(&mut receiver, cause);
+        assert_closed_send(&sender, cause).await;
+        assert_closed_receive(&mut receiver, cause).await;
         drop((sender, receiver));
-        assert_settlement_observed(&fixture, cause);
-        assert_callback_settled(&fixture, cause);
-        assert_upgrade_settled_under_its_connection(&fixture, cause);
+        assert_ordered_row_settled(&fixture, cause);
         witness.assert_released("the raced bridge").await;
     })
     .await;
@@ -1111,42 +1119,51 @@ async fn unordered_peer_cancel_iteration() {
 /// escalation never offered one.
 #[test]
 fn a_committed_cause_survives_a_later_escalation() {
-    direction_runtime(UNREACHED_SHUTDOWN, || async {
-        direction_row(1, |fixture, mut peer, connection| async move {
-            let (sender, receiver) = connection.split();
-            fixture.arm(AFTER_COMMIT);
-            fixture.shutdown_server();
-            fixture.wait_paused(AFTER_COMMIT).await;
-            assert_terminal(&fixture, WsCloseCause::ServerShutdown);
-            fixture.cancel_server();
-            fixture.release(AFTER_COMMIT);
-            write_ws_close_frame(&mut peer);
-            drop(receiver);
-            // The join is a barrier rather than a claim: everything the
-            // escalation could do to this bridge has happened by the time its
-            // server completes, so the two assertions below are read after it.
-            // Which of the two stops names that completion is the subject of
-            // the rows above, not of this one — but a stop that expired would
-            // mean the escalation left the bridge behind, and that is this
-            // row's business.
-            let completed = fixture.join_server().await;
-            assert!(
-                !matches!(completed, Err(RuntimeError::Timeout)),
-                "the escalated stop expired instead of completing: {completed:?}"
-            );
-            assert_closed_send(&sender, WsCloseCause::ServerShutdown);
-            assert_eq!(
-                fixture.observed().terminal_commits,
-                1,
-                "the escalation offered the bridge a second cause"
-            );
-            drop((sender, peer));
-        })
+    on_ws_executors(|| async {
+        async_direction_row_with_shutdown(
+            1,
+            UNREACHED_SHUTDOWN,
+            |fixture, mut peer, connection| async move {
+                let (sender, receiver) = connection.split();
+                fixture.arm(AFTER_COMMIT);
+                fixture.shutdown_server();
+                fixture.wait_paused(AFTER_COMMIT).await;
+                assert_terminal(&fixture, WsCloseCause::ServerShutdown);
+                fixture.cancel_server();
+                fixture.release(AFTER_COMMIT);
+                close_ws_peer(&mut peer, "the escalated peer").await;
+                drop(receiver);
+                // The join is a barrier rather than a claim: everything the
+                // escalation could do to this bridge has happened by the time its
+                // server completes, so the two assertions below are read after it.
+                // Which of the two stops names that completion is the subject of
+                // the rows above, not of this one — but a stop that expired would
+                // mean the escalation left the bridge behind, and that is this
+                // row's business.
+                let completed = fixture.join_server().await;
+                assert!(
+                    !matches!(completed, Err(RuntimeError::Timeout)),
+                    "the escalated stop expired instead of completing: {completed:?}"
+                );
+                assert_closed_send(&sender, WsCloseCause::ServerShutdown).await;
+                assert_eq!(
+                    fixture.observed().terminal_commits,
+                    1,
+                    "the escalation offered the bridge a second cause"
+                );
+                drop((sender, peer));
+            },
+        )
         .await;
     });
 }
 
-// 3.T1
+// 3.T1, revised by async-first-websockets 2.T7
+//
+// The callback's authority is probed at two sites: the factory that builds its
+// future, and the future itself after it has suspended in a receive the peer
+// acknowledged. Both admit while root admission is open, and the future is
+// refused once it has closed.
 #[test]
 fn owned_camber_callback_carries_runtime_authority() {
     let (router, handoff) =
@@ -1185,47 +1202,42 @@ fn owned_camber_callback_carries_runtime_authority() {
 /// Everything the owned-authority row carries from inside the runtime closure
 /// into the drain window.
 struct AuthorityRow {
-    /// The peer whose upgrade put the callback in the blocking pool.
-    ///
-    /// Held rather than read: the connection it opened is what the row is
-    /// about, and closing this socket early would end that connection under the
-    /// window.
-    #[expect(dead_code, reason = "held so the callback's connection stays up")]
+    /// The peer whose upgrade started the callback, and that resumes it.
     peer: TcpStream,
-    /// The callback's connection, held for the same reason.
-    #[expect(dead_code, reason = "held so the callback's connection stays up")]
-    connection: WsConn,
     handoff: AuthorityHandoff,
     admitted: camber::JoinHandle<&'static str>,
 }
 
-/// Enter the direct callback and admit its child while the root scope is still
-/// open.
+/// Admit one child from the factory and one from the suspended future while the
+/// root scope is still open, then leave the future suspended again.
 ///
 /// Runs inside the runtime closure, so every step here happens on the near side
-/// of the close transition: the spawn is issued, taken, and running before
-/// anything asks the runtime to stop admitting.
+/// of the close transition: both spawns are issued and taken, and the second is
+/// running, before anything asks the runtime to stop admitting.
 fn admit_before_admission_closes(addr: SocketAddr, handoff: AuthorityHandoff) -> AuthorityRow {
     // The capture site, read before the upgrade. It is what the callback's
     // authority below is carried from, and reading it here is what makes the
-    // synchronous row's opposite answer mean something.
+    // bare row's opposite answer mean something.
     assert_carrier(
         addr,
         CARRIER_HELD,
         "an owned server started inside a Camber runtime had no authority to carry",
     );
-    let peer = direction_peer(addr, AUTHORITY_PATH);
-    let admitted = handoff.admitted();
+    let mut peer = direction_peer(addr, AUTHORITY_PATH);
+    assert_factory_admitted(&handoff, "owned Camber callback factory");
+    let admitted = resume_into_spawn(&mut peer, &handoff);
     // A refused spawn never runs its closure, so a closure that reports itself
     // running was admitted — by this runtime, which is the only one there is.
     assert!(
         handoff.first().entered(),
-        "owned Camber callback lost runtime authority"
+        "owned Camber callback lost runtime authority across its suspension"
     );
-    let connection = handoff.connection();
+    // The callback suspends again before the window opens, so the spawn it
+    // makes when the probe resumes it is issued from a future that was already
+    // waiting when admission closed.
+    acknowledged_suspension(&mut peer);
     AuthorityRow {
         peer,
-        connection,
         handoff,
         admitted,
     }
@@ -1233,21 +1245,22 @@ fn admit_before_admission_closes(addr: SocketAddr, handoff: AuthorityHandoff) ->
 
 /// What the drain window observed about a callback that had runtime authority.
 struct AuthorityWindow {
-    /// What the callback's second `camber::spawn` answered.
+    /// What the callback's late `camber::spawn` answered.
     late: Result<&'static str, RuntimeError>,
     /// Whether that refused closure stayed unrun.
     late_never_ran: bool,
-    /// What the first, admitted child answered.
+    /// What the child admitted after the first suspension answered.
     child: Result<&'static str, RuntimeError>,
 }
 
-/// Ask the same callback for a second child once root admission has closed.
+/// Resume the same callback once root admission has closed, and ask it for a
+/// late child.
 ///
 /// The window is the proof of both halves of the contract at once: the drain is
 /// holding exactly the supervisor driver and this callback's admitted child, so
 /// the child is counted by runtime completion and the callback itself is not.
-fn refuse_after_admission_closes(row: AuthorityRow) -> AuthorityWindow {
-    row.handoff.proceed();
+fn refuse_after_admission_closes(mut row: AuthorityRow) -> AuthorityWindow {
+    write_ws_text_frame(&mut row.peer, LATE_SIGNAL);
     let late = row.handoff.late();
     let late_never_ran = row.handoff.second().never_ran();
     row.handoff.first().release_and_finish();
@@ -1259,7 +1272,7 @@ fn refuse_after_admission_closes(row: AuthorityRow) -> AuthorityWindow {
     }
 }
 
-// 3.T2
+// 3.T2, revised by async-first-websockets 2.T7
 #[test]
 fn owned_bare_tokio_callback_has_no_camber_runtime() {
     bare_executor().block_on(async {
@@ -1274,15 +1287,16 @@ fn owned_bare_tokio_callback_has_no_camber_runtime() {
             .expect("owned server requires a Tokio runtime");
         let mut peer = direction_peer(addr, AUTHORITY_PATH);
 
-        let mut connection = assert_callback_admits_nothing(&handoff);
-        exchange_authority_frames(&mut peer, &mut connection);
+        assert_callback_admits_nothing(&mut peer, &handoff);
 
-        drop(connection);
+        // The gate going is the callback's return, and its return drops the
+        // connection: the close is the bridge answering that, so the transport
+        // the refusals were read across was live to the end.
+        drop(handoff);
         expect_peer_close(
             &mut peer,
             "the bare-Tokio bridge never closed its transport",
         );
-        drop(handoff);
         server.shutdown();
         // Bounded like every other join in the file. This server has no Camber
         // runtime over it, so no `shutdown_timeout` governs the wait and an
@@ -1293,7 +1307,7 @@ fn owned_bare_tokio_callback_has_no_camber_runtime() {
     });
 }
 
-// 4.T1
+// 4.T1, revised by async-first-websockets 2.T7
 #[test]
 fn synchronous_serving_carries_one_supervisor_authority() {
     let (router, handoff) =
@@ -1313,38 +1327,42 @@ fn synchronous_serving_carries_one_supervisor_authority() {
     );
     let mut peer = direction_peer(server.addr(), AUTHORITY_PATH);
 
-    // The callback holds the same authority, because one supervisor owns both
-    // serving families and there is no detached branch left to lose it.
-    let admitted = handoff.admitted();
+    // The callback holds the same authority at both sites and across both of
+    // its suspensions, because one supervisor owns both serving families and
+    // there is no detached branch left to lose it.
+    assert_factory_admitted(&handoff, "the synchronous callback factory");
+    let admitted = resume_into_spawn(&mut peer, &handoff);
     assert!(
         handoff.first().entered(),
-        "the synchronous callback lost its runtime authority"
+        "the synchronous callback lost its runtime authority across its suspension"
     );
-    let mut connection = handoff.connection();
-    // The exchange's receive is bounded, and a bound needs a clock. This server
-    // owns its runtime on another thread, so the case brings a clock of its
-    // own.
-    bare_executor().block_on(async { exchange_authority_frames(&mut peer, &mut connection) });
     handoff.first().release_and_finish();
     assert_eq!(
         admitted.join().expect("the admitted child never completed"),
         AUTHORITY_CHILD,
         "the synchronous callback's admitted child did not run under the captured runtime"
     );
+    acknowledged_suspension(&mut peer);
+    write_ws_text_frame(&mut peer, LATE_SIGNAL);
+    assert_eq!(
+        handoff.late().expect("the late child never completed"),
+        AUTHORITY_CHILD,
+        "the synchronous callback lost its authority across its second suspension"
+    );
 
-    drop(connection);
+    drop(handoff);
     expect_peer_close(
         &mut peer,
         "the synchronous bridge never closed its transport",
     );
-    drop(handoff);
     server.assert_served();
 }
 
 /// An executor with no Camber runtime over it.
 ///
-/// Multi-thread, because that is the only flavor Camber's blocking endpoint
-/// operations may wait on, and both rows below run one.
+/// Multi-thread, because the row reads its peer on a blocking socket from the
+/// thread that drives this executor, and the server it owns has to keep making
+/// progress on workers of its own while that read waits.
 fn bare_executor() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -1353,24 +1371,34 @@ fn bare_executor() -> tokio::runtime::Runtime {
         .expect("build the row's bare Tokio executor")
 }
 
-/// Both of one callback's spawns are refused for want of a runtime, neither
-/// closure runs, and the connection it was given is handed back live.
+/// Every spawn one callback issues is refused for want of a runtime, and no
+/// closure runs.
 ///
-/// Shared by the two serving paths that carry no Camber authority. They differ
-/// in who owns the server and nothing else, so a second spelling of these four
-/// assertions would only be a second thing to keep in step.
-fn assert_callback_admits_nothing(handoff: &AuthorityHandoff) -> WsConn {
-    let admitted = handoff.admitted().join();
+/// The factory's, the future's after its acknowledged suspension, and the
+/// future's after a second one: a carrier that reached only one of those sites
+/// would be refused at the others for some other reason, and this says the
+/// reason is the same at all three.
+fn assert_callback_admits_nothing(peer: &mut TcpStream, handoff: &AuthorityHandoff) {
+    let built = handoff.built();
+    assert!(
+        matches!(built, Err(RuntimeError::NoRuntime)),
+        "a callback factory with no Camber runtime admitted a task: {built:?}"
+    );
+    assert!(
+        handoff.factory().never_ran(),
+        "a refused factory closure ran without a runtime to run under"
+    );
+    let admitted = resume_into_spawn(peer, handoff).join();
     assert!(
         matches!(admitted, Err(RuntimeError::NoRuntime)),
-        "a callback with no Camber runtime admitted a task: {admitted:?}"
+        "a suspended callback with no Camber runtime admitted a task: {admitted:?}"
     );
     assert!(
         handoff.first().never_ran(),
         "a refused closure ran without a runtime to run under"
     );
-    let connection = handoff.connection();
-    handoff.proceed();
+    acknowledged_suspension(peer);
+    write_ws_text_frame(peer, LATE_SIGNAL);
     let late = handoff.late();
     assert!(
         matches!(late, Err(RuntimeError::NoRuntime)),
@@ -1380,7 +1408,45 @@ fn assert_callback_admits_nothing(handoff: &AuthorityHandoff) -> WsConn {
         handoff.second().never_ran(),
         "a refused later closure ran without a runtime to run under"
     );
-    connection
+}
+
+/// Require the factory's spawn to have been admitted and to finish.
+fn assert_factory_admitted(handoff: &AuthorityHandoff, subject: &str) {
+    assert!(
+        handoff.factory().entered(),
+        "{subject} lost runtime authority"
+    );
+    handoff.factory().release_and_finish();
+    let built = handoff.built();
+    assert!(
+        matches!(built, Ok(AUTHORITY_CHILD)),
+        "{subject}'s child did not run under the serving runtime: {built:?}"
+    );
+}
+
+/// Take the callback's acknowledgement, resume it, and take the handle its
+/// spawn produced.
+fn resume_into_spawn(
+    peer: &mut TcpStream,
+    handoff: &AuthorityHandoff,
+) -> camber::JoinHandle<&'static str> {
+    acknowledged_suspension(peer);
+    write_ws_text_frame(peer, ADMIT_SIGNAL);
+    handoff.admitted()
+}
+
+/// Read the frame a callback sends just before it waits for the peer.
+///
+/// The callback admits the frame and then polls its receive in the same turn,
+/// before the bridge beside it can write anything. A frame the peer has read is
+/// therefore a callback already suspended on an empty receive queue, and the
+/// spawn it makes once resumed is made across that suspension.
+fn acknowledged_suspension(peer: &mut TcpStream) {
+    expect_peer_text(
+        peer,
+        AWAITING_PEER,
+        "the callback never acknowledged its suspension",
+    );
 }
 
 /// The route every runtime-authority row registers.
@@ -1388,6 +1454,12 @@ const AUTHORITY_PATH: &str = "/authority";
 
 /// The value a callback child answers with once it has run to completion.
 const AUTHORITY_CHILD: &str = "the callback's child ran";
+
+/// What the peer answers to resume the callback into its admitted spawn.
+const ADMIT_SIGNAL: &str = "admit";
+
+/// What the peer answers to resume the callback into its late spawn.
+const LATE_SIGNAL: &str = "late";
 
 /// The route a runtime-authority row probes to see what the connection task
 /// serving it may admit.
@@ -1443,155 +1515,69 @@ fn assert_carrier(addr: SocketAddr, expected: &str, subject: &str) {
     );
 }
 
-/// One task a direct callback tried to admit, seen from outside the callback.
-///
-/// Both spawns a runtime-authority callback issues have this shape, so one type
-/// answers the two questions every row asks of them: whether the closure ran at
-/// all, and — for a closure that did — whether it was still running when the
-/// runtime counted it.
-struct SpawnProbe {
-    entered: Receiver<()>,
-    release: Sender<()>,
-    finished: Receiver<()>,
-}
-
-impl SpawnProbe {
-    /// Whether the closure reported itself running, waiting under the bound for
-    /// it to.
-    ///
-    /// A refused spawn never runs its closure, so an answer here is itself the
-    /// admission: the runtime that took the spawn is the one running it. The
-    /// answer is a value rather than an assertion because what a missing one
-    /// means belongs to the row — this type does not know which runtime, or
-    /// which absence of one, its callback was serving under.
-    fn entered(&self) -> bool {
-        self.entered.recv_timeout(DIRECTION_DEADLINE).is_ok()
-    }
-
-    /// Whether the closure has reported running, without waiting for it to.
-    ///
-    /// Read only after the spawn's refusal is already in hand: a refusal drops
-    /// the closure unrun, so the answer is settled rather than raced.
-    fn never_ran(&self) -> bool {
-        self.entered.try_recv().is_err()
-    }
-
-    /// Let a running closure leave, and wait for it to.
-    ///
-    /// Nothing to release if the closure never ran, which is every row but the
-    /// admitted one — so a closed gate is an answer, not a failure.
-    fn release(&self) {
-        let _ = self.release.send(());
-    }
-
-    /// Release the closure and require it to finish.
-    fn release_and_finish(&self) {
-        self.release();
-        self.finished
-            .recv_timeout(DIRECTION_DEADLINE)
-            .expect("the callback's admitted child never finished");
-    }
-}
-
-/// The callback's end of one [`SpawnProbe`].
-///
-/// Every part is clonable because the callback that admits the child is an
-/// `Fn`: each admission builds its closure fresh rather than moving one in.
-struct ChildParts {
-    entered: Sender<()>,
-    release: Arc<Mutex<Receiver<()>>>,
-    finished: Sender<()>,
-}
-
-impl ChildParts {
-    fn new() -> (Self, SpawnProbe) {
-        let (entered, entered_rx) = std::sync::mpsc::channel();
-        let (release, release_rx) = std::sync::mpsc::channel();
-        let (finished, finished_rx) = std::sync::mpsc::channel();
-        (
-            Self {
-                entered,
-                release: Arc::new(Mutex::new(release_rx)),
-                finished,
-            },
-            SpawnProbe {
-                entered: entered_rx,
-                release,
-                finished: finished_rx,
-            },
-        )
-    }
-
-    /// One admission's closure: report entry, hold, report completion.
-    ///
-    /// It holds rather than returns, so a runtime that admitted it is still
-    /// counting it when that runtime's own completion looks.
-    fn body(&self) -> impl FnOnce() -> &'static str + Send + 'static {
-        let entered = self.entered.clone();
-        let release = Arc::clone(&self.release);
-        let finished = self.finished.clone();
-        move || {
-            let _ = entered.send(());
-            park_until_released(&release);
-            let _ = finished.send(());
-            AUTHORITY_CHILD
-        }
-    }
-}
-
 /// What a direct callback reports about the runtime authority it was given.
 ///
-/// The callback issues one `camber::spawn` before it hands its connection out
-/// and a second one when the case says admission has closed. Both are the same
-/// shape, so the three serving paths differ only in what their runtime answers.
+/// The callback issues one `camber::spawn` from its factory, one from its
+/// future after the peer resumes it, and one after the peer resumes it again.
+/// All three are the same shape, so the three serving paths differ only in what
+/// their runtime answers.
 struct AuthorityHandoff {
-    connections: Receiver<WsConn>,
+    built: Receiver<camber::JoinHandle<&'static str>>,
     admitted: Receiver<camber::JoinHandle<&'static str>>,
-    proceed: Sender<()>,
-    late: Receiver<Result<&'static str, RuntimeError>>,
+    late: Receiver<camber::JoinHandle<&'static str>>,
+    factory: SpawnProbe,
     first: SpawnProbe,
     second: SpawnProbe,
-    /// The other end of the channel the callback parks on.
+    /// The release end of the gate the callback parks on once it is done.
     ///
-    /// Never sent on: it is held for its `Drop`, which is what lets the
-    /// callback return once the row is done with its connection.
+    /// Held for its `Drop`, which is what lets the callback return once the
+    /// row is done with its connection.
     #[expect(dead_code, reason = "held for its Drop, which unparks the callback")]
-    parked: Sender<()>,
+    parked: CallbackRelease,
 }
 
 impl AuthorityHandoff {
-    /// The connection the production callback was given.
-    fn connection(&self) -> WsConn {
-        self.connections
-            .recv_timeout(DIRECTION_DEADLINE)
-            .expect("the direct callback never handed out its connection")
-    }
-
-    /// The handle the callback's first `camber::spawn` produced.
-    fn admitted(&self) -> camber::JoinHandle<&'static str> {
-        self.admitted
-            .recv_timeout(DIRECTION_DEADLINE)
-            .expect("the direct callback never issued its first spawn")
-    }
-
-    /// Tell the callback to issue its second spawn.
-    fn proceed(&self) {
-        self.proceed
-            .send(())
-            .expect("the direct callback stopped waiting for its second spawn");
-    }
-
-    /// What joining that second spawn answered.
+    /// What joining the factory's spawn answered.
     ///
-    /// The second child is released first. It is refused on every path this
-    /// contract allows and so never runs, but a spawn that was wrongly admitted
-    /// would park — and this row must fail on the outcome rather than hang on
-    /// it.
+    /// Read only once the factory's closure has been released or refused, so
+    /// the join answers rather than waits.
+    fn built(&self) -> Result<&'static str, RuntimeError> {
+        Self::issued(&self.built, "the callback factory never issued its spawn").join()
+    }
+
+    /// The handle the resumed callback's first `camber::spawn` produced.
+    fn admitted(&self) -> camber::JoinHandle<&'static str> {
+        Self::issued(
+            &self.admitted,
+            "the resumed callback never issued its spawn",
+        )
+    }
+
+    /// What joining the late spawn answered.
+    ///
+    /// The late child is released first. It is refused wherever admission has
+    /// closed or there is no runtime, and so never runs there, but a spawn that
+    /// was wrongly admitted would park — and this row must fail on the outcome
+    /// rather than hang on it.
     fn late(&self) -> Result<&'static str, RuntimeError> {
         self.second.release();
-        self.late
-            .recv_timeout(DIRECTION_DEADLINE)
-            .expect("the direct callback never reported its second spawn")
+        Self::issued(
+            &self.late,
+            "the resumed callback never issued its late spawn",
+        )
+        .join()
+    }
+
+    /// The handle one of the callback's spawns produced, under the bound.
+    fn issued(
+        handles: &Receiver<camber::JoinHandle<&'static str>>,
+        missing: &str,
+    ) -> camber::JoinHandle<&'static str> {
+        handles.recv_timeout(DIRECTION_DEADLINE).expect(missing)
+    }
+
+    fn factory(&self) -> &SpawnProbe {
+        &self.factory
     }
 
     fn first(&self) -> &SpawnProbe {
@@ -1603,42 +1589,53 @@ impl AuthorityHandoff {
     }
 }
 
+/// The callback's end of an [`AuthorityHandoff`].
+///
+/// Cloned once per future, because the factory is an `Fn` and each future has
+/// to own what it reports through across its suspensions.
+#[derive(Clone)]
+struct AuthorityReports {
+    admitted: Sender<camber::JoinHandle<&'static str>>,
+    late: Sender<camber::JoinHandle<&'static str>>,
+    parked: CallbackPark,
+}
+
 /// Add a direct route whose callback asks its own runtime what it may admit.
 ///
 /// Takes the router rather than building one: each serving path needs its
 /// owner's readiness route beside this one, and a second definition of that
 /// route here would be a second thing to keep in step.
 fn authority_router(mut router: Router, path: &str) -> (Router, AuthorityHandoff) {
+    let (factory_parts, factory) = ChildParts::new();
     let (first_parts, first) = ChildParts::new();
     let (second_parts, second) = ChildParts::new();
-    let (connections_tx, connections) = std::sync::mpsc::channel();
-    let (admitted_tx, admitted) = std::sync::mpsc::channel();
-    let (proceed, proceed_rx) = std::sync::mpsc::channel();
-    let (late_tx, late) = std::sync::mpsc::channel();
-    let (parked, parked_rx) = std::sync::mpsc::channel();
-    let proceed_rx = Mutex::new(proceed_rx);
-    let parked_rx = Mutex::new(parked_rx);
+    let (built_tx, built) = std::sync::mpsc::channel();
+    let (admitted, admitted_rx) = std::sync::mpsc::channel();
+    let (late, late_rx) = std::sync::mpsc::channel();
+    let (parked, parked_rx) = callback_gate();
+    let reports = AuthorityReports {
+        admitted,
+        late,
+        parked: parked_rx,
+    };
     router.ws(path, move |_request: &Request, connection: WsConn| {
-        admitted_tx
-            .send(camber::spawn(first_parts.body()))
-            .map_err(|_| RuntimeError::ChannelClosed)?;
-        connections_tx
-            .send(connection)
-            .map_err(|_| RuntimeError::ChannelClosed)?;
-        park_until_released(&proceed_rx);
-        late_tx
-            .send(camber::spawn(second_parts.body()).join())
-            .map_err(|_| RuntimeError::ChannelClosed)?;
-        park_until_released(&parked_rx);
-        Ok(())
+        // The factory's own site: this spawn is issued before any future exists.
+        let issued = built_tx.send(camber::spawn(factory_parts.body(AUTHORITY_CHILD)));
+        let resumed = first_parts.body(AUTHORITY_CHILD);
+        let late = second_parts.body(AUTHORITY_CHILD);
+        let reports = reports.clone();
+        async move {
+            issued.map_err(|_| RuntimeError::ChannelClosed)?;
+            authority_callback(connection, reports, resumed, late).await
+        }
     });
     (
         router,
         AuthorityHandoff {
-            connections,
-            admitted,
-            proceed,
-            late,
+            built,
+            admitted: admitted_rx,
+            late: late_rx,
+            factory,
             first,
             second,
             parked,
@@ -1646,29 +1643,32 @@ fn authority_router(mut router: Router, path: &str) -> (Router, AuthorityHandoff
     )
 }
 
-/// Prove one connection still carries frames in both directions.
+/// The future one runtime-authority callback returns.
 ///
-/// The row that calls this has just asserted what its callback could not
-/// admit. That claim is only worth making about a connection that still works,
-/// so the transport is exercised rather than assumed.
-fn exchange_authority_frames(peer: &mut TcpStream, connection: &mut WsConn) {
-    connection
-        .send("server-to-peer")
-        .expect("send through the live connection");
-    assert_eq!(
-        &*read_ws_text_frame(peer),
-        "server-to-peer",
-        "the peer never received the frame the connection sent"
-    );
-    write_ws_text_frame(peer, "peer-to-server");
-    let received = connection
-        .recv_timeout(DIRECTION_DEADLINE)
-        .expect("receive through the live connection");
-    assert_eq!(
-        received.as_deref(),
-        Some("peer-to-server"),
-        "the connection never received the peer's frame"
-    );
+/// Each spawn follows a receive the callback acknowledged before it waited, so
+/// both are issued by a future that has already been suspended at least once.
+async fn authority_callback<A, L>(
+    mut connection: WsConn,
+    reports: AuthorityReports,
+    admitted: A,
+    late: L,
+) -> Result<(), RuntimeError>
+where
+    A: FnOnce() -> &'static str + Send + 'static,
+    L: FnOnce() -> &'static str + Send + 'static,
+{
+    await_peer(&mut connection).await?;
+    reports
+        .admitted
+        .send(camber::spawn(admitted))
+        .map_err(|_| RuntimeError::ChannelClosed)?;
+    await_peer(&mut connection).await?;
+    reports
+        .late
+        .send(camber::spawn(late))
+        .map_err(|_| RuntimeError::ChannelClosed)?;
+    park_until_released(&reports.parked).await;
+    Ok(())
 }
 
 /// One admitted outbound frame held at the writer, and one peer message already
@@ -1677,52 +1677,41 @@ fn exchange_authority_frames(peer: &mut TcpStream, connection: &mut WsConn) {
 /// Every terminal row starts here, because these two are exactly what the
 /// disposition table decides the fate of: a send that returned success without
 /// reaching the peer, and a message that arrived before the connection ended.
-async fn stage_admitted_and_queued(
+async fn stage_async_admitted_and_queued(
     fixture: &DirectionTestFixture,
-    peer: &mut TcpStream,
+    peer: &mut tokio::net::TcpStream,
     sender: &WsSender,
 ) {
     hold_admitted_frame(fixture, sender).await;
-    fixture.arm(QUEUED);
-    write_ws_text_frame(peer, QUEUED_INBOUND);
-    await_queued_message(fixture).await;
+    fixture
+        .queue_from_async_peer(
+            peer,
+            TEXT,
+            QUEUED_INBOUND.as_bytes(),
+            "the queued peer message",
+        )
+        .await;
 }
 
-/// The same staging over a peer that then resets its transport.
-///
-/// Only the write differs: a reset needs a Tokio socket, and a Tokio socket
-/// writes its frame asynchronously. Everything either side of that is the same
-/// staging, so it is the same two calls.
-async fn stage_over_abortive_peer(
-    fixture: &DirectionTestFixture,
-    mut peer: tokio::net::TcpStream,
-    sender: &WsSender,
-) {
-    hold_admitted_frame(fixture, sender).await;
-    fixture.arm(QUEUED);
-    crate::common::write_async_ws_frame(
-        &mut peer,
-        TEXT,
-        QUEUED_INBOUND.as_bytes(),
-        "the abortive peer's queued message",
+/// Write a text frame with its mask bit clear, which no client may send.
+async fn write_async_unmasked_frame(peer: &mut tokio::net::TcpStream) {
+    use tokio::io::AsyncWriteExt;
+    lifecycle_event(
+        "the unmasked frame",
+        peer.write_all(&RawFrame::complete(TEXT, b"bad").encode()),
     )
-    .await;
-    await_queued_message(fixture).await;
-    fixture.arm(AFTER_COMMIT);
-    drop(peer);
+    .await
+    .expect("write an unmasked client frame");
 }
 
 /// Admit one outbound frame and hold the writer with it in hand.
 async fn hold_admitted_frame(fixture: &DirectionTestFixture, sender: &WsSender) {
     fixture.arm(BEFORE_WRITE);
-    sender.send(HELD).expect("admit the held outbound frame");
+    sender
+        .send(HELD)
+        .await
+        .expect("admit the held outbound frame");
     fixture.wait_paused(BEFORE_WRITE).await;
-}
-
-/// Wait until the peer's message is in the receive queue, then let the pump go.
-async fn await_queued_message(fixture: &DirectionTestFixture) {
-    fixture.wait_paused(QUEUED).await;
-    fixture.release(QUEUED);
 }
 
 /// Every owner one terminal row's cause had to let go of, on a live server.
@@ -1730,8 +1719,12 @@ async fn await_queued_message(fixture: &DirectionTestFixture) {
 /// The connection permit is proved by a second handshake: this runtime admits
 /// one connection at a time, so a peer that completes its upgrade could only
 /// have done so on a permit the ended bridge gave back.
-fn assert_owners_released(fixture: &DirectionTestFixture, cause: WsCloseCause, cancelled: usize) {
-    drop(fixture.connect(DIRECTION_PATH));
+async fn assert_owners_released(
+    fixture: &DirectionTestFixture,
+    cause: WsCloseCause,
+    cancelled: usize,
+) {
+    drop(fixture.connect_async(DIRECTION_PATH).await);
     assert_released(fixture, cause, cancelled);
 }
 
@@ -1799,17 +1792,15 @@ fn assert_write_failure_released(fixture: &DirectionTestFixture) {
     );
 }
 
+/// Require the row's cause, then hand back what the bridge settled with.
+///
+/// The cause is fixed once committed, so the second read names the same one.
 fn assert_release_state(
     fixture: &DirectionTestFixture,
     cause: WsCloseCause,
 ) -> camber::http::mock::WebSocketDirectionObservation {
-    let observed = fixture.observed();
-    assert_eq!(
-        observed.terminal,
-        Some(cause),
-        "the row fixed another cause"
-    );
-    observed
+    assert_terminal(fixture, cause);
+    fixture.observed()
 }
 
 /// A stopped server has no second handshake to prove its bridge settled.
@@ -1845,47 +1836,49 @@ fn assert_terminal(fixture: &DirectionTestFixture, expected: WsCloseCause) {
     );
 }
 
+/// Read the cause a bridge held at its commit fixed, then let it go on.
+///
+/// Read twice: through the bridge's own record, and through a send, which asks
+/// production's terminal state. The held writer goes with the commit, so what
+/// each row reads next is what that cause did with the frame it was holding.
+async fn release_committed(fixture: &DirectionTestFixture, sender: &WsSender, cause: WsCloseCause) {
+    fixture.wait_paused(AFTER_COMMIT).await;
+    assert_terminal(fixture, cause);
+    assert_closed_send(sender, cause).await;
+    fixture.release(AFTER_COMMIT);
+    fixture.release(BEFORE_WRITE);
+}
+
 /// A send on a connection whose cause is already fixed reports that cause.
-fn assert_closed_send(sender: &WsSender, expected: WsCloseCause) {
+async fn assert_closed_send(sender: &WsSender, expected: WsCloseCause) {
     assert_eq!(
-        closed_cause(sender.send("after-the-end"), "a send past the end"),
+        closed_cause(sender.send("after-the-end").await, "a send past the end"),
         expected,
         "a send past the end reported another cause"
     );
 }
 
 /// A delivering cause hands over what was queued before it, then itself.
-fn assert_delivered(receiver: &mut WsReceiver, cause: WsCloseCause) {
+async fn assert_delivered(receiver: &mut WsReceiver, cause: WsCloseCause) {
     assert_received_text(
-        receive(receiver, "the queued message"),
+        bounded_receive(receiver, "the queued message").await,
         QUEUED_INBOUND,
         "the queued message",
     );
     assert_closed_with(
-        receive(receiver, "the terminal cause"),
+        bounded_receive(receiver, "the terminal cause").await,
         cause,
         "the delivery",
     );
 }
 
 /// A discarding cause hands over nothing but itself.
-fn assert_closed_receive(receiver: &mut WsReceiver, cause: WsCloseCause) {
+async fn assert_closed_receive(receiver: &mut WsReceiver, cause: WsCloseCause) {
     assert_closed_with(
-        receive(receiver, "the terminal cause"),
+        bounded_receive(receiver, "the terminal cause").await,
         cause,
         "the discarding cause",
     );
-}
-
-/// One bounded receive, so no row here waits on a message that is never coming.
-///
-/// `WsReceiver::recv` has no deadline and these calls run on the row's own task:
-/// a bridge that stopped delivering a queued message or a terminal cause would
-/// park the row, and the whole harness behind it, instead of failing it.
-fn receive(receiver: &mut WsReceiver, what: &str) -> WsReceive {
-    receiver
-        .recv_timeout(DIRECTION_DEADLINE)
-        .unwrap_or_else(|error| panic!("{what} was refused: {error}"))
 }
 
 /// Read one text frame from a peer, failing with the row's own claim.
@@ -1911,8 +1904,10 @@ fn expect_peer_close(peer: &mut TcpStream, what: &str) {
 /// The bytes and not only the opcode, because a drain claim is that the frame
 /// the application handed over is the frame the peer got — a binary frame of
 /// some other length would satisfy the opcode and still lose it.
-fn expect_peer_payload(peer: &mut TcpStream, tag: u8, what: &str) {
-    let (opcode, payload) = expect_peer_frame(peer, what);
+async fn expect_async_peer_payload(peer: &mut tokio::net::TcpStream, tag: u8, what: &str) {
+    let (opcode, payload) = read_async_ws_frame_or_eof(peer, what)
+        .await
+        .expect("the peer closed before its payload");
     assert_eq!(opcode, BINARY, "{what}: the peer took opcode {opcode:#x}");
     assert_eq!(
         &*payload,
@@ -1929,53 +1924,4 @@ fn expect_peer_frame(peer: &mut TcpStream, what: &str) -> (u8, Box<[u8]>) {
             error.kind()
         )
     })
-}
-
-/// Read a peer's transport to its end, and require nothing but closes on the way.
-///
-/// Two claims at once, because one read answers both. Nothing the row has not
-/// already accounted for reached the peer, and the bridge let its transport go
-/// afterwards.
-///
-/// Closes are skipped rather than stopped at. A close is either the
-/// acknowledgement the row read for itself, or the one a cause owed with nothing
-/// else to say. A bridge that wrote its close and then the frame it was supposed
-/// to drop would pass on the first frame alone.
-///
-/// The end itself has to arrive. A read that expired is a bridge that neither
-/// wrote what it owed nor let the transport go — the leak these rows exist to
-/// catch — so it fails here rather than reading as the silence it wanted.
-fn expect_transport_end(peer: &mut TcpStream, what: &str) {
-    let ended = loop {
-        match try_read_ws_frame_raw(peer) {
-            Ok((CLOSE, _)) => {}
-            Ok((opcode, payload)) => {
-                panic!("{what}: the peer took opcode {opcode:#x} with payload {payload:?}")
-            }
-            Err(error) => break error,
-        }
-    };
-    assert_transport_ended(&ended, what);
-}
-
-/// The read that ends a transport, told from the read that ran out of time.
-fn assert_transport_ended(error: &std::io::Error, what: &str) {
-    match error.kind() {
-        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset => {}
-        kind => {
-            panic!("{what}: the peer's transport answered {kind:?} rather than ending: {error}")
-        }
-    }
-}
-
-/// Write a frame no server-role WebSocket may accept.
-///
-/// A client frame must be masked. An unmasked one is a protocol error the
-/// transport reports rather than a message, which is the inbound-error ingress
-/// this row is about.
-fn write_unmasked_frame(peer: &mut TcpStream) {
-    use std::io::Write;
-    peer.write_all(&[0x81, 0x03, b'b', b'a', b'd'])
-        .expect("write an unmasked client frame");
-    peer.flush().expect("flush an unmasked client frame");
 }

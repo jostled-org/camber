@@ -88,7 +88,7 @@ For exact method names and type behavior, use the reference docs. This table is 
 | `tower_http::compression` | `camber::http::compression` | `compression::auto()` — gzip for text responses > 1KB |
 | Tower rate limiting | `camber::http::rate_limit` | `rate_limit::per_second(100)?` or `rate_limit::builder()` with burst config |
 | Tower body validation | `camber::http::validate` | `validate::json::<T>()` — rejects invalid JSON before the handler runs |
-| `axum::extract::ws::WebSocket` | `router.ws(path, handler)` | Handler receives `(&Request, WsConn)`. Feature: `ws` |
+| `axum::extract::ws::WebSocket` | `router.ws(path, handler)` | Handler receives `(&Request, WsConn)` and returns a future. Waits use `.await`. Feature: `ws` |
 | Axum SSE (via `Sse<impl Stream>`) | `router.get_sse(path, handler)` | Handler receives `(&Request, &mut SseWriter)`. Sync, long-lived |
 | Axum streaming body | `router.get_stream(path, handler)` | Async handler returns `StreamResponse`. Push chunks via `StreamSender` |
 | `reqwest::get(url).await` | `http::get(url).await?` | Async. Same `.await` pattern as reqwest |
@@ -423,18 +423,58 @@ let app = Router::new().route("/ws", get(ws_handler));
 ### Camber
 
 ```rust
-use camber::http::{Request, Router};
-use camber::http::WsConn;
+use camber::http::{Request, Router, WsConn};
 
-router.ws("/ws", |_req: &Request, mut conn: WsConn| {
-    while let Some(text) = conn.recv() {
-        conn.send(&format!("echo: {text}"))?;
+let mut router = Router::new();
+router.ws("/ws", |_req: &Request, mut conn: WsConn| async move {
+    while let Some(text) = conn.recv().await {
+        conn.send(&format!("echo: {text}")).await?;
     }
     Ok(())
 });
 ```
 
-Sync handler. The `WsConn` bridges async WebSocket IO to blocking `recv()`/`send()` calls. Also supports `recv_binary()` and `recv_message()` for mixed text/binary protocols.
+The handler is a factory. It gets the upgrade request and a `WsConn`, and it
+returns the future that serves the connection, like the closure you give to
+Axum's `on_upgrade`. The future must be `Send + 'static`. It does not need to
+be `Sync` or `Unpin`. Copy request data out before `async move`, because the
+future cannot borrow `&Request`.
+
+`recv()` and `send()` are async. `recv()` skips binary messages, and
+`recv_binary()` skips text. `recv_message()` returns both kinds. A skipped
+message stays skipped when the receive is cancelled. A send succeeds when its
+frame enters the connection's bounded outbound queue, not when the peer
+receives it. Dropping a pending send admits nothing.
+
+For the terminal cause, split the facade into its two owners:
+
+```rust
+use camber::http::{Router, WsConn, WsMessage, WsReceive};
+
+let mut router = Router::new();
+router.ws("/events", |_req, conn: WsConn| async move {
+    let (sender, mut receiver) = conn.split();
+    loop {
+        match receiver.recv().await? {
+            WsReceive::Message(WsMessage::Text(text)) => sender.send(&text).await?,
+            WsReceive::Message(WsMessage::Binary(bytes)) => sender.send_shared_binary(bytes).await?,
+            WsReceive::Closed(cause) => {
+                camber::tracing::info!(%cause, "connection ended");
+                return Ok(());
+            }
+        }
+    }
+});
+```
+
+`WsReceiver::recv` answers `WsReceive::Closed(cause)` once the connection ends.
+After that, every `WsSender` send fails with
+`RuntimeError::WebSocketClosed(cause)`. Dropping a pending typed receive
+consumes nothing, so a `tokio::select!` branch on `receiver.recv()` is safe.
+
+The callback must cooperate with the executor, like any Tokio task. Camber
+cannot preempt a poll that blocks the thread. A callback still pending when the
+connection's settlement deadline expires is dropped.
 
 ## Server-Sent Events
 

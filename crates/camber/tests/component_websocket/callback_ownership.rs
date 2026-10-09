@@ -16,21 +16,20 @@
 #![cfg(feature = "ws")]
 
 use std::net::SocketAddr;
-use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use camber::__private::FORCED_JOIN_GRACE;
 use camber::http::mock::{
     ScopedRetainedCallback, UpgradeOwnerEdge, WebSocketCallbackObservation, WebSocketTerminalEdge,
-    retained_callback,
 };
-use camber::http::{Request, Router, ServerHandle, WsConn};
+use camber::http::{Request, Router, ServerHandle, WsCloseCause, WsConn, WsReceiver, WsSender};
 
 use crate::common::{
-    ASYNC_EVENT_TIMEOUT, TraceCapture, arm_point, assert_callbacks_own, callback_gate,
-    capture_events, close_ws_peer, park_until_released, published_callbacks, release_point,
-    transferred_upgrades, upgraded_ws_peer,
+    ASYNC_EVENT_TIMEOUT, CallbackPark, DropWitnesses, FrozenClock, Observers, OwnerPoint, Owns,
+    RetainedCallbackListener, TIMER_TICK, TraceCapture, arm_point, assert_callbacks_own,
+    assert_cancelled_fields, block_on_detached, callback_gate, capture_events, close_ws_peer,
+    lifecycle_event, only_event, park_until_released, published_callbacks, release_point,
+    stall_callback_transport, transferred_child, upgraded_ws_peer,
 };
 
 /// The route every row offers its bridge on.
@@ -43,8 +42,12 @@ const SOCKET_ROUTE: &str = "/ws";
 /// two cannot pass by arithmetic coincidence.
 const DRAIN_BOUND: Duration = Duration::from_secs(20);
 
-/// The one WARN event an outstanding callback publishes.
-const OUTSTANDING_EVENT: &str = "name=camber.websocket.callback.outstanding";
+/// The edge every row holds its bridge at: after the join deadline is fixed,
+/// before the join begins.
+const JOIN_EDGE: UpgradeOwnerEdge = UpgradeOwnerEdge::BeforeCallbackSettle;
+
+/// The one WARN event a callback dropped at its deadline publishes.
+const CANCELLED_EVENT: &str = "name=camber.websocket.callback.cancelled";
 
 /// How much of a held join's grace a row spends before escalating.
 ///
@@ -53,72 +56,178 @@ const OUTSTANDING_EVENT: &str = "name=camber.websocket.callback.outstanding";
 /// the clock is frozen, and this is spent in one step.
 const ESCALATION_OFFSET: Duration = Duration::from_millis(60);
 
+/// Require exactly `expected` callback futures to still hold their captures,
+/// and every one already destroyed to have gone before any disposition was
+/// named.
+///
+/// The factory enters one witness and moves it into the future it returns, so
+/// a witness goes only when that future is destroyed — by returning or by being
+/// dropped at its deadline. Production publishes a disposition only after the
+/// future is gone, so a witness that saw one already published outlived the
+/// settlement that named it.
+fn assert_live(witnesses: &DropWitnesses, expected: usize, context: &str) {
+    let dropped = witnesses.dropped();
+    assert_eq!(
+        witnesses.entered() - dropped.len(),
+        expected,
+        "{context}: the wrong number of callback futures still held their captures"
+    );
+    assert!(
+        dropped.iter().all(|at| at.dispositions == 0),
+        "{context}: a disposition was published while its callback still held its captures: {dropped:?}"
+    );
+}
+
 /// A router whose one bridge parks its callback on `parked`.
-fn parked_callback_router(parked: &Arc<Mutex<Receiver<()>>>) -> Router {
-    let parked = Arc::clone(parked);
+///
+/// The callback suspends on the gate and nothing else, so closing its
+/// endpoints wakes nothing: only the release or the bridge's deadline ends it.
+fn parked_callback_router(parked: &CallbackPark, witnesses: &DropWitnesses) -> Router {
+    let parked = parked.clone();
+    let witnesses = witnesses.clone();
     let mut router = Router::new();
-    router.ws(SOCKET_ROUTE, move |_request: &Request, _conn: WsConn| {
-        park_until_released(&parked);
-        Ok(())
+    router.ws(SOCKET_ROUTE, move |_request: &Request, conn: WsConn| {
+        let parked = parked.clone();
+        let capture = witnesses.enter();
+        async move {
+            let _held = (capture, conn);
+            park_until_released(&parked).await;
+            Ok(())
+        }
     });
     router
 }
 
-/// One row's server: a real listener, an observer over it, and its handle.
+/// One row's server: a real listener, an observer over it, its handle, and the
+/// drop witnesses of its callback futures.
 struct ParkedServer {
     addr: SocketAddr,
     controller: ScopedRetainedCallback,
     handle: ServerHandle,
+    witnesses: DropWitnesses,
 }
 
-fn parked_server(parked: &Arc<Mutex<Receiver<()>>>) -> ParkedServer {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the callback fixture");
-    listener
-        .set_nonblocking(true)
-        .expect("the callback fixture's listener takes a Tokio reactor");
-    let listener =
-        tokio::net::TcpListener::from_std(listener).expect("adopt the callback fixture's listener");
-    let addr = listener.local_addr().expect("read the fixture's address");
-    let controller = retained_callback(addr).expect("register the callback observer");
-    let policy = camber::http::ServerPolicy::default()
-        .shutdown_timeout(DRAIN_BOUND)
-        .expect("a positive drain bound");
-    let handle = camber::http::server(parked_callback_router(parked))
-        .policy(policy)
-        .serve_background(listener)
-        .expect("the callback fixture requires a Tokio runtime");
+/// Serve the router `route` builds over this server's own drop witnesses.
+///
+/// The listener, the observer, the witnesses, and the drain bound are the same
+/// for every row; only what the callback does with its connection differs.
+async fn parked_server_with(route: impl FnOnce(&DropWitnesses) -> Router) -> ParkedServer {
+    let bound = RetainedCallbackListener::bind().await;
+    let witnesses = DropWitnesses::new(Observers::of(&bound.controller));
+    let (addr, controller, handle) = bound.serve(route(&witnesses), DRAIN_BOUND);
     ParkedServer {
         addr,
         controller,
         handle,
+        witnesses,
     }
 }
 
-/// Wait until the bridge is held at `edge`, under a real-clock bound.
-///
-/// The edge every row waits at sits inside the settlement of a retained
-/// callback, so a bridge that never arrives is a bridge with no retained
-/// callback to settle — which is what the failure says rather than reporting a
-/// missing pause.
-async fn hold_at(controller: &ScopedRetainedCallback, edge: UpgradeOwnerEdge, context: &str) {
-    tokio::time::timeout(
-        ASYNC_EVENT_TIMEOUT,
-        controller.upgrades.wait_until_paused(edge),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("{context}: the bridge never held a retained callback at {edge:?}"))
-    .unwrap_or_else(|error| panic!("{context}: waiting at {edge:?} failed: {error}"));
+async fn parked_server(parked: &CallbackPark) -> ParkedServer {
+    parked_server_with(|witnesses| parked_callback_router(parked, witnesses)).await
 }
 
-/// The one upgrade this listener's connection took as its child.
-fn transferred_child(controller: &ScopedRetainedCallback, context: &str) -> (u64, u64) {
-    let transferred = transferred_upgrades(&controller.connections.observed());
-    assert_eq!(
-        transferred.len(),
-        1,
-        "{context}: exactly one upgrade transfer was expected: {transferred:?}"
+/// A server whose callback hands its split endpoints to the row, then parks.
+async fn escaped_parked_server(
+    parked: &CallbackPark,
+) -> (
+    ParkedServer,
+    tokio::sync::mpsc::Receiver<(WsSender, WsReceiver)>,
+) {
+    let (sender, escaped) = tokio::sync::mpsc::channel(1);
+    let server =
+        parked_server_with(|witnesses| escaping_callback_router(parked, witnesses, sender)).await;
+    (server, escaped)
+}
+
+/// A router whose one bridge hands its split endpoints out on `sender`, then
+/// parks its callback on `parked`.
+fn escaping_callback_router(
+    parked: &CallbackPark,
+    witnesses: &DropWitnesses,
+    sender: tokio::sync::mpsc::Sender<(WsSender, WsReceiver)>,
+) -> Router {
+    let parked = parked.clone();
+    let witnesses = witnesses.clone();
+    let mut router = Router::new();
+    router.ws(SOCKET_ROUTE, move |_request: &Request, conn: WsConn| {
+        let sender = sender.clone();
+        let parked = parked.clone();
+        let capture = witnesses.enter();
+        async move {
+            let _held = capture;
+            sender
+                .send(conn.split())
+                .await
+                .map_err(|_| camber::RuntimeError::ChannelClosed)?;
+            park_until_released(&parked).await;
+            Ok(())
+        }
+    });
+    router
+}
+
+async fn local_terminal_cancels_callback_while_transport_is_pending() {
+    let context = "local terminal with a stalled peer";
+    let (gate, parked) = callback_gate();
+    let (server, mut escaped) = escaped_parked_server(&parked).await;
+    let peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
+    let (sender, receiver) = lifecycle_event(context, escaped.recv())
+        .await
+        .expect("callback endpoints");
+    let clock = FrozenClock::freeze();
+    while_frozen(
+        stall_callback_transport(&sender, receiver, &server.controller, context),
+        context,
+    )
+    .await;
+    let fixed = only_decision(&server.controller, context);
+    assert_decision(
+        &fixed,
+        "none",
+        fixed.endpoints_closed_at + FORCED_JOIN_GRACE,
+        context,
     );
-    transferred[0]
+    assert_eq!(
+        server.controller.terminals.observed().terminal,
+        Some(WsCloseCause::ReceiverDropped)
+    );
+    assert_live(&server.witnesses, 1, context);
+    assert_still_waiting(&server.controller, context).await;
+    advance_onto(fixed.deadline, context).await;
+    let decisions = await_decisions(&server.controller, 2, context).await;
+    assert_disposition(&decisions, "cancelled", "none", context);
+    assert_live(&server.witnesses, 0, context);
+    assert!(
+        !server.controller.terminals.observed().permit_released,
+        "{context}: transport finished before callback destruction"
+    );
+    assert!(
+        !server.controller.terminals.observed().inbound_settled,
+        "{context}: pending close settled early"
+    );
+    assert_eq!(server.controller.stop.observed().phase, "running");
+    drop((sender, peer, gate));
+    stop_row(server, clock).await;
+}
+
+/// Wait until the bridge is held at `point`, under a real-clock bound.
+///
+/// Every point a row waits at sits on a retained callback's way to its
+/// settlement — its terminal commit or the join itself — so a bridge that never
+/// arrives is a bridge with no retained callback to settle, which is what the
+/// failure says rather than reporting a missing pause.
+async fn hold_at<P>(controller: &ScopedRetainedCallback, point: P, context: &str)
+where
+    P: OwnerPoint,
+    ScopedRetainedCallback: Owns<P::Owner>,
+{
+    tokio::time::timeout(ASYNC_EVENT_TIMEOUT, point.paused_on(controller))
+        .await
+        .unwrap_or_else(|_| {
+            panic!("{context}: the bridge never held a retained callback at {point:?}")
+        })
+        .unwrap_or_else(|error| panic!("{context}: waiting at {point:?} failed: {error}"));
 }
 
 /// Assert every record this listener published names the upgrade its connection
@@ -235,15 +344,6 @@ async fn assert_still_waiting(controller: &ScopedRetainedCallback, context: &str
     );
 }
 
-/// The granularity the runtime's timer rounds a deadline up to.
-///
-/// A sleep does not fire at its own instant but at the first tick at or after
-/// it, so a row that advanced exactly onto a deadline would wait on a timer
-/// that has not been reached. The margin is what crosses that rounding, and it
-/// is why the exactness of a deadline is asserted on the instant production
-/// published rather than on the tick a row happened to stop at.
-const TIMER_TICK: Duration = Duration::from_millis(1);
-
 /// Move the frozen clock onto `deadline`, and no further than its own tick.
 ///
 /// Every other forced window in these rows sits a whole grace beyond this
@@ -332,22 +432,6 @@ fn forced_commit(controller: &ScopedRetainedCallback, context: &str) -> tokio::t
         .unwrap_or_else(|| panic!("{context}: no forced phase committed"))
 }
 
-/// Run one row on a runtime of its own.
-///
-/// A runtime per row, because a row pauses its clock and stops its server: two
-/// rows sharing one runtime would have the first row's frozen time and forced
-/// abort deciding the second row's deadline.
-fn row<F>(body: F)
-where
-    F: AsyncFnOnce(),
-{
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("the callback rows need a current-thread runtime");
-    runtime.block_on(body());
-}
-
 /// Table row: a peer terminal on a running server.
 ///
 /// The whole first line of the table. Nothing has been asked of the server, so
@@ -358,20 +442,11 @@ where
 async fn peer_terminal_on_a_running_server() {
     let context = "the peer terminal row";
     let (gate, parked) = callback_gate();
-    let server = parked_server(&parked);
+    let server = parked_server(&parked).await;
     let mut peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
-    arm_point(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    );
+    arm_point(&server.controller, JOIN_EDGE, context);
     close_ws_peer(&mut peer, context).await;
-    hold_at(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    )
-    .await;
+    hold_at(&server.controller, JOIN_EDGE, context).await;
 
     let fixed = only_decision(&server.controller, context);
     assert_decision(
@@ -381,30 +456,23 @@ async fn peer_terminal_on_a_running_server() {
         context,
     );
 
-    let capture = capture_events(OUTSTANDING_EVENT);
-    tokio::time::pause();
-    release_point(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    );
+    let capture = capture_events(CANCELLED_EVENT);
+    let clock = FrozenClock::freeze();
+    release_point(&server.controller, JOIN_EDGE, context);
     // With the clock frozen the join is still waiting, which is what makes the
     // step onto the deadline evidence rather than a coincidence of ordering.
     assert_still_waiting(&server.controller, context).await;
+    assert_live(&server.witnesses, 1, context);
     advance_onto(fixed.deadline, context).await;
     let decisions = await_decisions(&server.controller, 2, context).await;
 
     assert_never_rebased(&decisions, context);
     assert_owned_by_the_transferred_upgrade(&server.controller, &decisions, context);
-    assert_disposition(
-        &decisions,
-        "outstanding-after-forced-grace",
-        "none",
-        context,
-    );
-    assert_outstanding_event(&capture, "peer closed", "none", context);
+    assert_disposition(&decisions, "cancelled", "none", context);
+    assert_live(&server.witnesses, 0, context);
+    assert_cancelled_event(&capture, "peer closed", "none", context);
     drop(gate);
-    stop_row(server).await;
+    stop_row(server, clock).await;
 }
 
 /// Table row: a peer terminal, then a cancellation the deadline must ignore.
@@ -417,27 +485,18 @@ async fn peer_terminal_on_a_running_server() {
 async fn cancellation_after_a_peer_terminal_never_rebases() {
     let context = "the peer-then-cancel row";
     let (gate, parked) = callback_gate();
-    let server = parked_server(&parked);
+    let server = parked_server(&parked).await;
     let mut peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
-    arm_point(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    );
+    arm_point(&server.controller, JOIN_EDGE, context);
     close_ws_peer(&mut peer, context).await;
-    hold_at(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    )
-    .await;
+    hold_at(&server.controller, JOIN_EDGE, context).await;
 
     let fixed = only_decision(&server.controller, context);
     let expected = fixed.endpoints_closed_at + FORCED_JOIN_GRACE;
     assert_decision(&fixed, "none", expected, context);
 
-    let capture = capture_events(OUTSTANDING_EVENT);
-    tokio::time::pause();
+    let capture = capture_events(CANCELLED_EVENT);
+    let clock = FrozenClock::freeze();
     // Spent before the escalation, so the forced window the server opens ends a
     // clear margin after the one this deadline already runs on. Without it the
     // two would land on the same timer tick, and a row that reached its
@@ -449,27 +508,20 @@ async fn cancellation_after_a_peer_terminal_never_rebases() {
         escalated > expected + TIMER_TICK,
         "{context}: the row did not put the escalation clear of the fixed deadline"
     );
-    release_point(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    );
+    release_point(&server.controller, JOIN_EDGE, context);
     assert_still_waiting(&server.controller, context).await;
+    assert_live(&server.witnesses, 1, context);
     advance_onto(expected, context).await;
     let decisions = await_decisions(&server.controller, 2, context).await;
 
     assert_never_rebased(&decisions, context);
     assert_owned_by_the_transferred_upgrade(&server.controller, &decisions, context);
     assert_decision(&decisions[1], "none", expected, context);
-    assert_disposition(
-        &decisions,
-        "outstanding-after-forced-grace",
-        "cancelled",
-        context,
-    );
-    assert_outstanding_event(&capture, "peer closed", "cancelled", context);
+    assert_disposition(&decisions, "cancelled", "cancelled", context);
+    assert_live(&server.witnesses, 0, context);
+    assert_cancelled_event(&capture, "peer closed", "cancelled", context);
     drop(gate);
-    stop_row(server).await;
+    stop_row(server, clock).await;
 }
 
 /// Table row: a graceful stop, whose deadline is the aggregate's and not a
@@ -481,28 +533,18 @@ async fn cancellation_after_a_peer_terminal_never_rebases() {
 /// grace would expire on the instant its connection is taken away.
 ///
 /// Also the cooperative half of the contract: a callback that returns inside
-/// its window settles as a completion and publishes no outstanding event at
-/// all.
+/// its window settles as a completion and publishes no cancelled event at all.
 async fn graceful_stop_borrows_the_aggregate_expiry() {
     let context = "the graceful row";
     let (gate, parked) = callback_gate();
-    let server = parked_server(&parked);
+    let server = parked_server(&parked).await;
     let mut peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
-    arm_point(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    );
-    let capture = capture_events(OUTSTANDING_EVENT);
+    arm_point(&server.controller, JOIN_EDGE, context);
+    let capture = capture_events(CANCELLED_EVENT);
     server.handle.shutdown();
     // The bridge owes this peer the full handshake, so the peer answers it.
     close_ws_peer(&mut peer, context).await;
-    hold_at(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    )
-    .await;
+    hold_at(&server.controller, JOIN_EDGE, context).await;
 
     let fixed = only_decision(&server.controller, context);
     let expiry = aggregate_expiry(&server.controller, context);
@@ -515,15 +557,11 @@ async fn graceful_stop_borrows_the_aggregate_expiry() {
     // Frozen from here, so this row ends on the same clock discipline as the
     // rows that measure a deadline: nothing below waits out a real interval,
     // and the teardown resumes it.
-    tokio::time::pause();
+    let clock = FrozenClock::freeze();
     // Released before the join begins, so the join finds a callback that has
     // already returned and no deadline is spent proving it.
     drop(gate);
-    release_point(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    );
+    release_point(&server.controller, JOIN_EDGE, context);
     let decisions = await_decisions(&server.controller, 2, context).await;
 
     assert_never_rebased(&decisions, context);
@@ -531,11 +569,12 @@ async fn graceful_stop_borrows_the_aggregate_expiry() {
     // The drain it entered, not the deadline it never reached: a callback that
     // returned inside its window has no expiry to name.
     assert_disposition(&decisions, "completed", "graceful", context);
+    assert_live(&server.witnesses, 0, context);
     assert!(
-        !capture.recorded(&[OUTSTANDING_EVENT]),
-        "{context}: a cooperative callback published the outstanding event"
+        !capture.recorded(&[CANCELLED_EVENT]),
+        "{context}: a cooperative callback published the cancelled event"
     );
-    stop_row(server).await;
+    stop_row(server, clock).await;
 }
 
 /// Table row: a cancellation inside the drain, which brings the deadline
@@ -543,34 +582,21 @@ async fn graceful_stop_borrows_the_aggregate_expiry() {
 async fn cancellation_inside_a_drain_shortens_to_the_commit() {
     let context = "the graceful-to-cancel row";
     let (gate, parked) = callback_gate();
-    let server = parked_server(&parked);
+    let server = parked_server(&parked).await;
     let mut peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
-    arm_point(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    );
+    arm_point(&server.controller, JOIN_EDGE, context);
     server.handle.shutdown();
     close_ws_peer(&mut peer, context).await;
-    hold_at(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    )
-    .await;
+    hold_at(&server.controller, JOIN_EDGE, context).await;
 
     let fixed = only_decision(&server.controller, context);
     let expiry = aggregate_expiry(&server.controller, context);
     assert_decision(&fixed, "graceful", expiry, context);
 
-    tokio::time::pause();
+    let clock = FrozenClock::freeze();
     server.handle.cancel();
     let shortened = forced_commit(&server.controller, context) + FORCED_JOIN_GRACE;
-    release_point(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    );
+    release_point(&server.controller, JOIN_EDGE, context);
     let narrowed = await_decisions(&server.controller, 2, context).await;
 
     assert_decision(&narrowed[1], "graceful", shortened, context);
@@ -585,7 +611,8 @@ async fn cancellation_inside_a_drain_shortens_to_the_commit() {
     assert_never_rebased(&decisions, context);
     assert_owned_by_the_transferred_upgrade(&server.controller, &decisions, context);
     assert_disposition(&decisions, "completed", "cancelled", context);
-    stop_row(server).await;
+    assert_live(&server.witnesses, 0, context);
+    stop_row(server, clock).await;
 }
 
 /// Table row: a cancellation that committed before this bridge applied any
@@ -597,20 +624,11 @@ async fn cancellation_inside_a_drain_shortens_to_the_commit() {
 async fn cancellation_before_control_uses_the_fixed_grace() {
     let context = "the cancel-first row";
     let (gate, parked) = callback_gate();
-    let server = parked_server(&parked);
+    let server = parked_server(&parked).await;
     let _peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
-    arm_point(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    );
+    arm_point(&server.controller, JOIN_EDGE, context);
     server.handle.cancel();
-    hold_at(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    )
-    .await;
+    hold_at(&server.controller, JOIN_EDGE, context).await;
 
     let fixed = only_decision(&server.controller, context);
     assert_decision(
@@ -624,19 +642,16 @@ async fn cancellation_before_control_uses_the_fixed_grace() {
         "{context}: a cancellation minted an aggregate expiry"
     );
 
-    tokio::time::pause();
+    let clock = FrozenClock::freeze();
     drop(gate);
-    release_point(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    );
+    release_point(&server.controller, JOIN_EDGE, context);
     let decisions = await_decisions(&server.controller, 2, context).await;
 
     assert_never_rebased(&decisions, context);
     assert_owned_by_the_transferred_upgrade(&server.controller, &decisions, context);
     assert_disposition(&decisions, "completed", "cancelled", context);
-    stop_row(server).await;
+    assert_live(&server.witnesses, 0, context);
+    stop_row(server, clock).await;
 }
 
 /// Table row: an aggregate deadline that expired before this bridge applied
@@ -649,36 +664,28 @@ async fn cancellation_before_control_uses_the_fixed_grace() {
 async fn expiry_before_control_uses_the_fixed_grace() {
     let context = "the timeout-first row";
     let (gate, parked) = callback_gate();
-    let server = parked_server(&parked);
+    let server = parked_server(&parked).await;
     let peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
     arm_point(
         &server.controller,
         WebSocketTerminalEdge::AfterCommit,
         context,
     );
-    arm_point(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    );
+    arm_point(&server.controller, JOIN_EDGE, context);
     server.handle.shutdown();
-    tokio::time::timeout(
-        ASYNC_EVENT_TIMEOUT,
-        server
-            .controller
-            .terminals
-            .wait_until_paused(WebSocketTerminalEdge::AfterCommit),
+    hold_at(
+        &server.controller,
+        WebSocketTerminalEdge::AfterCommit,
+        context,
     )
-    .await
-    .unwrap_or_else(|_| panic!("{context}: the bridge never committed its terminal"))
-    .unwrap_or_else(|error| panic!("{context}: waiting on the terminal edge failed: {error}"));
+    .await;
 
     // Spent while the bridge is held short of its settlement, so the drain runs
     // out before this upgrade ever applies the graceful control it committed
     // its cause from. Everything after it runs on a frozen clock: the forced
     // window the expiry opens is what would otherwise take this connection away
     // mid-settlement, and an idle runtime would advance straight onto it.
-    tokio::time::pause();
+    let clock = FrozenClock::freeze();
     tokio::time::advance(DRAIN_BOUND + TIMER_TICK).await;
     while_frozen(
         stop_phase_reached(&server.controller, "deadline-expired"),
@@ -691,10 +698,7 @@ async fn expiry_before_control_uses_the_fixed_grace() {
         context,
     );
     while_frozen(
-        server
-            .controller
-            .upgrades
-            .wait_until_paused(UpgradeOwnerEdge::BeforeCallbackJoin),
+        server.controller.upgrades.wait_until_paused(JOIN_EDGE),
         context,
     )
     .await
@@ -709,17 +713,14 @@ async fn expiry_before_control_uses_the_fixed_grace() {
     );
 
     drop(gate);
-    release_point(
-        &server.controller,
-        UpgradeOwnerEdge::BeforeCallbackJoin,
-        context,
-    );
+    release_point(&server.controller, JOIN_EDGE, context);
     let decisions = await_decisions(&server.controller, 2, context).await;
     assert_never_rebased(&decisions, context);
     assert_owned_by_the_transferred_upgrade(&server.controller, &decisions, context);
     assert_disposition(&decisions, "completed", "deadline-expired", context);
+    assert_live(&server.witnesses, 0, context);
     drop(peer);
-    stop_row(server).await;
+    stop_expired_row(server, clock, context).await;
 }
 
 /// Whether this server minted no aggregate expiry at all.
@@ -727,59 +728,63 @@ fn controller_minted_no_aggregate(controller: &ScopedRetainedCallback) -> bool {
     controller.stop.observed().aggregate_deadline.is_none()
 }
 
-/// Assert the one WARN event an outstanding callback owes, and its closed
-/// fields.
-fn assert_outstanding_event(capture: &TraceCapture, cause: &str, shutdown: &str, context: &str) {
+/// Assert the one WARN event a cancelled callback owes, and its closed fields.
+fn assert_cancelled_event(capture: &TraceCapture, cause: &str, shutdown: &str, context: &str) {
     let events = capture.events();
-    assert_eq!(
-        events.len(),
-        1,
-        "{context}: exactly one outstanding event was expected: {events:?}"
-    );
-    let event = events[0].as_ref();
-    crate::common::assert_field_value(event, "name", &OUTSTANDING_EVENT[5..], context);
-    crate::common::assert_field_value(
-        event,
-        "disposition",
-        "outstanding-after-forced-grace",
-        context,
-    );
-    crate::common::assert_field_value(event, "shutdown", shutdown, context);
-    assert!(
-        event.contains(&format!("cause={cause}")),
-        "{context}: the event does not name the committed cause: {event}"
-    );
+    let event = only_event(&events, CANCELLED_EVENT, context);
+    assert_cancelled_fields(event, cause, shutdown, context);
 }
 
-/// End one row: take its server down under a live clock.
+/// End one row whose server was never past its drain: it joins as stopped.
+async fn stop_row(server: ParkedServer, clock: FrozenClock) {
+    crate::common::assert_server_joined(cancel_and_join(server, clock).await);
+}
+
+/// End the row whose drain ran out: its server answers the expiry it committed.
 ///
-/// Every row has already dropped its gate sender by the time it gets here, so
-/// the callback is on its way out rather than parked on a channel nothing will
-/// close. Time is resumed first, because a paused clock would leave the
-/// server's own forced window frozen and the join below waiting on an instant
-/// nothing advances to.
-async fn stop_row(server: ParkedServer) {
-    tokio::time::resume();
-    server.handle.cancel();
-    let _stopped = tokio::time::timeout(ASYNC_EVENT_TIMEOUT, server.handle).await;
+/// The forced phase was fixed before teardown, so the cancellation below finds
+/// a settled phase and cannot replace the result.
+async fn stop_expired_row(server: ParkedServer, clock: FrozenClock, context: &str) {
+    match cancel_and_join(server, clock).await {
+        Ok(Err(camber::RuntimeError::Timeout)) => {}
+        other => panic!("{context}: the server did not answer its committed expiry: {other:?}"),
+    }
 }
 
-// 3.T1 — Invariant 8: the direct WebSocket callback join handle is retained;
-// every bridge terminal bounds its join, and callback completion or an emitted
-// outstanding-callback disposition precedes upgrade settlement.
+/// Take one row's server down under a live clock and join it.
+///
+/// Every row has already dropped its gate's release end by the time it gets
+/// here, so the callback is on its way out rather than parked on a gate nothing
+/// will release. Every row freezes the clock before it gets here and hands the
+/// guard in, so time is resumed first and exactly once: a paused clock would
+/// leave the server's own forced window frozen and the join below waiting on an
+/// instant nothing advances to.
+async fn cancel_and_join(
+    server: ParkedServer,
+    clock: FrozenClock,
+) -> Result<Result<(), camber::RuntimeError>, tokio::time::error::Elapsed> {
+    drop(clock);
+    server.handle.cancel();
+    tokio::time::timeout(ASYNC_EVENT_TIMEOUT, server.handle).await
+}
+
+// 3.T1, revised in 2.T6 — Invariant 8: the direct WebSocket callback future is
+// polled inline by its bridge; every bridge terminal bounds its settlement, and
+// callback completion or a cancelled disposition — published only after the
+// future's captures are gone — precedes upgrade settlement.
 //
-// Six rows, one per line of the spec's deadline table plus the two rules that
-// cut across it: a later transition may bring the deadline forward and never
-// push it back, and a cooperative return publishes no outstanding event.
+// Deadline-table rows cover entry phases, later escalation, and cooperative
+// return. The stalled-transport row proves cleanup cannot delay callback expiry.
 //
-// Each row owns its runtime, its listener, and its callback gate, so a paused
-// clock or a cancelled server in one cannot decide another.
+// Each row owns a current-thread runtime, its listener, and its callback gate,
+// so a paused clock or a cancelled server in one cannot decide another.
 #[test]
 fn callback_join_deadline_table_is_exact_and_never_rebases() {
-    row(peer_terminal_on_a_running_server);
-    row(cancellation_after_a_peer_terminal_never_rebases);
-    row(graceful_stop_borrows_the_aggregate_expiry);
-    row(cancellation_inside_a_drain_shortens_to_the_commit);
-    row(cancellation_before_control_uses_the_fixed_grace);
-    row(expiry_before_control_uses_the_fixed_grace);
+    block_on_detached(local_terminal_cancels_callback_while_transport_is_pending());
+    block_on_detached(peer_terminal_on_a_running_server());
+    block_on_detached(cancellation_after_a_peer_terminal_never_rebases());
+    block_on_detached(graceful_stop_borrows_the_aggregate_expiry());
+    block_on_detached(cancellation_inside_a_drain_shortens_to_the_commit());
+    block_on_detached(cancellation_before_control_uses_the_fixed_grace());
+    block_on_detached(expiry_before_control_uses_the_fixed_grace());
 }

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::Receiver;
 
+use super::deadline::ReceiveDeadline;
 use super::message::{WsMessage, WsReceive};
 use super::terminal::{TerminalState, WsCloseCause};
 use crate::RuntimeError;
@@ -12,6 +13,10 @@ use crate::RuntimeError;
 /// only be taken once, so the type system admits one receive at a time and one
 /// owner at all. Dropping this half means nothing will consume the connection's
 /// inbound frames, which ends the connection.
+///
+/// A waiting receive is a future that takes a message only in the poll that
+/// returns it. Dropping one that is still pending consumes nothing, so the
+/// next receive takes that message exactly once.
 pub struct WsReceiver {
     frames: Receiver<WsMessage>,
     terminal: Arc<TerminalState>,
@@ -32,41 +37,53 @@ impl WsReceiver {
     ///
     /// Ping and pong frames never arrive here — the transport answers those
     /// itself — so every message this returns is one the peer's application
-    /// sent.
+    /// sent. The wait suspends the calling task, needs no clock, and makes
+    /// progress on a current-thread runtime as well as a multi-thread one.
     ///
     /// # Errors
     ///
-    /// [`RuntimeError::BlockingInAsyncContext`] on a current-thread Tokio
-    /// runtime, where waiting would stop the only thread that could deliver a
-    /// frame.
-    pub fn recv(&mut self) -> Result<WsReceive, RuntimeError> {
-        match self.discarded() {
-            Some(cause) => Ok(WsReceive::Closed(cause)),
-            None => {
-                let next = crate::task::wait_blocking(|| self.frames.blocking_recv())?;
-                Ok(self.settle(next))
-            }
-        }
+    /// None today. The public contract keeps the `Result` in reserve, but every
+    /// way the connection ends is the [`WsReceive::Closed`] answer, not an
+    /// error.
+    pub async fn recv(&mut self) -> Result<WsReceive, RuntimeError> {
+        Ok(self.next_receive().await)
     }
 
     /// [`Self::recv`], bounded by `timeout`.
     ///
-    /// The connection is asked before the runtime is. A connection that has
-    /// already ended answers with its cause, exactly as [`Self::recv`] does, so
-    /// a receive loop sees the end of the connection on every flavor and off
-    /// every runtime. Only a live connection has to wait, so only a live
-    /// connection can be refused a clock or a thread to wait on.
+    /// The deadline is fixed once, when this future is first polled, and
+    /// re-polling never moves it. The connection is asked before the clock is:
+    /// a message already queued, or a connection that has already ended,
+    /// answers at once, so a zero `timeout` is an immediate check rather than a
+    /// close. Expiry does not end the connection; the next receive can still
+    /// take the next message.
     ///
     /// # Errors
     ///
-    /// [`RuntimeError::NoRuntime`] with no Tokio runtime to take a clock from,
-    /// [`RuntimeError::BlockingInAsyncContext`] on a current-thread runtime,
-    /// and [`RuntimeError::Timeout`] when the deadline expires with neither a
-    /// message nor a closure.
-    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<WsReceive, RuntimeError> {
+    /// [`RuntimeError::NoRuntime`] when the receive has to wait and no Tokio
+    /// runtime is entered to take a clock from, and [`RuntimeError::Timeout`]
+    /// when the deadline expires with neither a message nor a closure. The
+    /// entered runtime must enable its time driver.
+    pub async fn recv_timeout(&mut self, timeout: Duration) -> Result<WsReceive, RuntimeError> {
+        ReceiveDeadline::after(timeout)
+            .bound(self.next_receive())
+            .await
+    }
+
+    /// The one receive every public receive is built from. It cannot fail.
+    ///
+    /// A cause that discards the queue is asked before anything else, so a
+    /// cancelled connection answers without waiting. After that the queue's
+    /// own receive is the whole wait, and it takes a message only in the poll
+    /// that returns it: a deadline or a dropped future leaves that message for
+    /// the next receive.
+    pub(super) async fn next_receive(&mut self) -> WsReceive {
         match self.discarded() {
-            Some(cause) => Ok(WsReceive::Closed(cause)),
-            None => self.timed(timeout),
+            Some(cause) => WsReceive::Closed(cause),
+            None => {
+                let next = self.frames.recv().await;
+                self.settle(next)
+            }
         }
     }
 
@@ -76,13 +93,15 @@ impl WsReceiver {
     /// Asked before every receive, because the queue itself cannot answer it:
     /// a cancelled bridge fixes the cause and lets go of its producers, and the
     /// messages already in the queue would still be handed out by a receive
-    /// that only asked the channel. Closing the receiver here is what actually
-    /// drops them.
+    /// that only asked the channel. Closing the receiver here stops any further
+    /// admission, and the drain after it is what drops the messages already
+    /// queued.
     fn discarded(&mut self) -> Option<WsCloseCause> {
         let cause = self.settled_cause()?;
         match cause.discards_queued_messages() {
             true => {
                 self.frames.close();
+                while self.frames.try_recv().is_ok() {}
                 Some(cause)
             }
             false => None,
@@ -105,40 +124,6 @@ impl WsReceiver {
             (None, true) => Some(self.terminal.committed()),
             (None, false) => None,
         }
-    }
-
-    /// One bounded wait, on a runtime that can afford to serve it.
-    ///
-    /// The deadline is the entered runtime's clock, so a caller off every
-    /// runtime has nothing to bound the wait with. A current-thread runtime has
-    /// the clock and not the thread: waiting there would stop the only worker
-    /// that could deliver a frame.
-    ///
-    /// [`crate::task::wait_blocking`] states the same policy for the unbounded
-    /// waits and cannot stand in for this one. It runs the wait inline off every
-    /// runtime, and this wait has no handle to take a clock from there —
-    /// answering `NoRuntime` is the difference, and it is a difference in
-    /// behavior rather than in wording.
-    fn timed(&mut self, timeout: Duration) -> Result<WsReceive, RuntimeError> {
-        let handle = tokio::runtime::Handle::try_current().map_err(|_| RuntimeError::NoRuntime)?;
-        match handle.runtime_flavor() {
-            tokio::runtime::RuntimeFlavor::MultiThread => self.timed_on_worker(&handle, timeout),
-            _ => Err(RuntimeError::BlockingInAsyncContext),
-        }
-    }
-
-    /// One timed receive, run off the poll path of the worker that asked for
-    /// it.
-    fn timed_on_worker(
-        &mut self,
-        handle: &tokio::runtime::Handle,
-        timeout: Duration,
-    ) -> Result<WsReceive, RuntimeError> {
-        let next = crate::task::block_in_place(|| {
-            handle.block_on(tokio::time::timeout(timeout, self.frames.recv()))
-        })
-        .map_err(|_| RuntimeError::Timeout)?;
-        Ok(self.settle(next))
     }
 
     /// Turn one queue answer into a public receive answer.

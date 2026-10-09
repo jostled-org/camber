@@ -168,10 +168,10 @@ fn main() -> Result<(), RuntimeError> {
         })
     });
 
-    // WebSocket echo
-    router.ws("/ws/echo", |_req: &Request, mut conn: WsConn| {
-        while let Some(msg) = conn.recv() {
-            conn.send(&msg)?;
+    // WebSocket echo — the callback returns a future; waits use `.await`
+    router.ws("/ws/echo", |_req: &Request, mut conn: WsConn| async move {
+        while let Some(msg) = conn.recv().await {
+            conn.send(&msg).await?;
         }
         Ok(())
     });

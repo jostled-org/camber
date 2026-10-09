@@ -939,12 +939,7 @@ impl<Owner> ObservedPort<Owner> {
     /// a fixture that could not name it would have to reach for a whole runtime
     /// to say so.
     pub fn serve_with_policy(self, router: Router, policy: ServerPolicy) -> ObservedServer<Owner> {
-        self.serve_with(move |listener| {
-            http::server(router)
-                .policy(policy)
-                .serve_background(listener)
-                .expect("owned server requires a Tokio runtime")
-        })
+        self.serve_with(move |listener| serve_router_with_policy(listener, router, policy))
     }
 
     /// Serve a host table on this reservation under the policy the case names.
@@ -1062,6 +1057,21 @@ pub fn serve_background_ready(
     timeout: Duration,
 ) -> Result<ServerHandle, FixtureError> {
     ReadyServer::start(listener, router, timeout).map(ReadyServer::into_handle)
+}
+
+/// Serve `router` on an owned Tokio listener under the policy the case names.
+///
+/// The one spelling of the policy-bound server every fixture starts, so a
+/// fixture that names its own bound does not carry its own copy of the chain.
+pub fn serve_router_with_policy(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    policy: ServerPolicy,
+) -> ServerHandle {
+    http::server(router)
+        .policy(policy)
+        .serve_background(listener)
+        .expect("owned server requires a Tokio runtime")
 }
 
 /// Hand an owned Tokio listener to whichever server serves it, and guard the
@@ -2670,10 +2680,7 @@ pub fn held_server(limit: usize, drain: Duration) -> HeldServer {
         .expect("a positive connection limit")
         .shutdown_timeout(drain)
         .expect("a positive drain bound");
-    let handle = http::server(router)
-        .policy(policy)
-        .serve_background(listener)
-        .expect("the owned server requires a Tokio runtime");
+    let handle = serve_router_with_policy(listener, router, policy);
 
     HeldServer {
         controller,

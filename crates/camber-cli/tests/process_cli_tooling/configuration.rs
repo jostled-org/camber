@@ -6,6 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use tempfile::NamedTempFile;
 
+use crate::support::process::camber_bin;
 use crate::support::{
     CONFIG_REFUSAL_BOUND, FixtureError, failed_checks, is_fifo, make_fifo,
     run_command_with_timeout, run_command_within, serve_command,
@@ -1026,7 +1027,7 @@ const HELP_DIAGNOSTIC: &str = "M9 CLI help disagrees with validated configuratio
 
 /// `camber serve --help`, as an operator reads it.
 fn serve_help() -> Result<String, FixtureError> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_camber"));
+    let mut command = Command::new(camber_bin());
     command.args(["serve", "--help"]);
     let output = run_command_with_timeout(command, CONFIG_REFUSAL_BOUND)?;
     match output.status.success() {

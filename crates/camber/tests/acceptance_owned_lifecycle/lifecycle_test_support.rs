@@ -14,16 +14,14 @@
 //! that noticed.
 
 use std::net::SocketAddr;
-use std::sync::Mutex;
-use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
 
 use camber::RuntimeError;
-use camber::http::{Request, Response, Router, ServerPolicy, WsCloseCause, WsConn};
+use camber::http::{Request, Response, Router, ServerPolicy, WsCloseCause};
 
 use crate::common::{
-    assert_closed_with, closed_cause, direction_peer, park_until_released, rebind_within, request,
-    try_read_ws_frame_raw,
+    assert_closed_with, assert_transport_eof, closed_cause, parking_router, rebind_within, request,
+    upgraded_ws_peer,
 };
 
 /// How long any public result in this row has to arrive.
@@ -54,40 +52,6 @@ const READMIT_PATH: &str = "/readmitted";
 /// in beside the first would prove nothing about the permit the first gave back.
 const ADMISSION_LIMIT: usize = 1;
 
-/// What the served callback hands the case, and the gate that keeps it in its
-/// frame.
-///
-/// The callback holds nothing once it has handed its connection over, so the
-/// gate is what decides when it returns. It is released by dropping the sender:
-/// a case that had to remember to send a value would leave the callback parked
-/// on every failure path.
-struct Handoff {
-    connections: tokio::sync::mpsc::Receiver<WsConn>,
-    parked: Option<Sender<()>>,
-}
-
-/// A router whose direct callback hands its connection out and parks.
-fn upgrading_router() -> (Router, Handoff) {
-    let (connections_tx, connections) = tokio::sync::mpsc::channel(1);
-    let (parked, parked_rx) = channel();
-    let parked_rx = Mutex::new(parked_rx);
-    let mut router = Router::new();
-    router.ws(WS_PATH, move |_request: &Request, connection: WsConn| {
-        connections_tx
-            .blocking_send(connection)
-            .map_err(|_| RuntimeError::ChannelClosed)?;
-        park_until_released(&parked_rx);
-        Ok(())
-    });
-    (
-        router,
-        Handoff {
-            connections,
-            parked: Some(parked),
-        },
-    )
-}
-
 /// Serve `router` on a fresh ephemeral port under the row's own policy.
 ///
 /// The policy is the row's because both halves of the claim depend on it: the
@@ -103,42 +67,6 @@ fn serve_limited(router: Router, listener: tokio::net::TcpListener) -> camber::h
         .policy(policy)
         .serve_background(listener)
         .expect("the owned server requires a Tokio runtime")
-}
-
-/// Complete a real WebSocket handshake against `addr`, off the runtime's
-/// workers.
-///
-/// The peer is a plain blocking socket, which is what makes this a transport
-/// barrier rather than an in-process one: the `101` this reads was framed and
-/// written by the server, and the bridge behind it exists by the time the read
-/// returns.
-///
-/// The handshake itself is [`direction_peer`]'s, which registers nothing and
-/// arms nothing — it opens a socket, writes the request, and reads the `101`.
-/// The claim this file makes about holding no controller is untouched by
-/// borrowing it; what stays here is the one thing that is this row's own, which
-/// is running the blocking socket off the runtime's workers.
-async fn upgrade_peer(addr: SocketAddr) -> std::net::TcpStream {
-    tokio::task::spawn_blocking(move || direction_peer(addr, WS_PATH))
-        .await
-        .expect("the handshake worker panicked")
-}
-
-/// Prove the cancelled bridge's peer was left with a transport that ended.
-///
-/// A cancelled server owes the peer no close frame, so what the peer is owed is
-/// the end itself. Read off the runtime for the same reason the handshake was.
-async fn expect_peer_transport_end(mut peer: std::net::TcpStream) {
-    tokio::task::spawn_blocking(move || {
-        peer.set_read_timeout(Some(RESULT_BOUND))
-            .expect("bound the cancelled peer's read");
-        match try_read_ws_frame_raw(&mut peer) {
-            Err(_) => {}
-            Ok(frame) => panic!("a cancelled server still wrote {frame:?} to its peer"),
-        }
-    })
-    .await
-    .expect("the peer's read worker panicked");
 }
 
 /// Serve the same address again and admit one connection over it.
@@ -201,21 +129,23 @@ async fn public_lifecycle_results_hold_with_test_controller_module_unlinked() {
         .expect("bind the cancelled server's listener");
     let addr = listener.local_addr().expect("read the listener's address");
 
-    let (router, mut handoff) = upgrading_router();
+    // The shared parking router: the callback holds nothing once it has handed
+    // its connection over, so its gate decides when it returns. Building the
+    // router arms nothing and registers no controller.
+    let (router, mut handoff) = parking_router(WS_PATH);
     let handle = serve_limited(router, listener);
-    let peer = upgrade_peer(addr).await;
+    // A plain socket through the shared handshake, which registers nothing and
+    // arms nothing: the `101` it reads was framed by the server, so the bridge
+    // behind it exists by the time it returns.
+    let mut peer = upgraded_ws_peer(addr, WS_PATH, "the cancelled server's peer").await;
 
-    let connection = tokio::time::timeout(RESULT_BOUND, handoff.connections.recv())
-        .await
-        .expect("the callback never handed out its connection")
-        .expect("the callback's handoff channel closed");
-    let (sender, mut receiver) = connection.split();
+    let (sender, mut receiver) = handoff.connection().await.split();
 
     // The public command, and nothing else. It returns before anything here
     // reads a result, so what follows is read from a server the caller has
     // already been answered by.
     handle.cancel();
-    drop(handoff.parked.take());
+    drop(handoff.take_gate());
 
     let joined = tokio::time::timeout(RESULT_BOUND, handle.join()).await;
     assert!(
@@ -229,7 +159,7 @@ async fn public_lifecycle_results_hold_with_test_controller_module_unlinked() {
     // terminals rather than one.
     assert_eq!(
         closed_cause(
-            sender.send("after-the-cancellation"),
+            sender.send("after-the-cancellation").await,
             "a send past the cancellation"
         ),
         WsCloseCause::ServerCancelled,
@@ -238,12 +168,15 @@ async fn public_lifecycle_results_hold_with_test_controller_module_unlinked() {
     assert_closed_with(
         receiver
             .recv_timeout(RESULT_BOUND)
+            .await
             .unwrap_or_else(|error| panic!("the receive half never ended: {error}")),
         WsCloseCause::ServerCancelled,
         "the two halves of one connection reported different causes",
     );
     drop((sender, receiver));
 
-    expect_peer_transport_end(peer).await;
+    // A cancelled server owes the peer no close frame, so what the peer is owed
+    // is the end itself: a byte, or a read that never ends, fails here.
+    assert_transport_eof(&mut peer, "the cancelled server's peer").await;
     assert_readmits_under_the_same_limit(addr).await;
 }

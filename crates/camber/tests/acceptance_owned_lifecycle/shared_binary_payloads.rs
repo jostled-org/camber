@@ -9,23 +9,17 @@
 //! handle behind.
 
 #![cfg(feature = "ws")]
-// The allocation oracle installs its own global allocator, and two global
-// allocators do not link. Built only where that probe is, exactly as every other
-// measured row in the suite is.
-#![cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
-
 use crate::common::{
-    AFTER_COMMIT, BEFORE_COMMIT, BEFORE_WRITE, BEFORE_WRITE_EDGE, CLOSE, DirectionTestFixture,
-    FANOUTS, FRAME_BUILT, LARGE_PAYLOAD, PayloadWitness, SMALL_PAYLOAD, SharedPayloadFixture,
-    abortive_direction_row, assert_payload_flat, fill_outbound_behind_the_writer,
-    measure_shared_admission, offer_shared_clones, payload_bytes, read_ws_frame_raw,
-    shared_payload_row, witnessed_payload, write_ws_close_frame,
+    AFTER_COMMIT, BEFORE_COMMIT, BEFORE_WRITE, BEFORE_WRITE_EDGE, DirectionTestFixture, FANOUTS,
+    FRAME_BUILT, LARGE_PAYLOAD, PayloadWitness, SMALL_PAYLOAD, SharedPayloadFixture,
+    abortive_direction_row, close_ws_peer, expect_async_close, fill_outbound_behind_the_writer,
+    offer_shared_clones, on_ws_executors, payload_bytes, shared_payload_row, witnessed_payload,
 };
-use allocation_counter::AllocationInfo;
+#[cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
+use crate::common::{assert_payload_flat, measure_shared_admission};
 use camber::RuntimeError;
 use camber::http::mock::WebSocketDirectionObservation;
 use camber::http::{Bytes, WsCloseCause, WsSender};
-use std::net::TcpStream;
 
 /// The capacity a fanout row's outbound queues are given.
 ///
@@ -65,11 +59,13 @@ const CANCELLED_TAG: u8 = 0x38;
 const BACKPRESSURE_TAG: u8 = 0x39;
 
 // 1.T3
-#[camber::test]
-async fn shared_binary_fanout_delivers_exact_bytes_to_1_2_16_100_peers() {
-    for recipients in FANOUTS {
-        assert_fanout_delivers_exact_bytes(recipients);
-    }
+#[test]
+fn shared_binary_fanout_delivers_exact_bytes_to_1_2_16_100_peers() {
+    on_ws_executors(|| async {
+        for recipients in FANOUTS {
+            assert_fanout_delivers_exact_bytes(recipients).await;
+        }
+    });
 }
 
 /// One payload, cloned into every recipient, survives its caller.
@@ -77,7 +73,7 @@ async fn shared_binary_fanout_delivers_exact_bytes_to_1_2_16_100_peers() {
 /// The original is dropped while one recipient's writer is still held, so the
 /// only thing keeping the backing alive at that point is what the connections
 /// themselves retained.
-fn assert_fanout_delivers_exact_bytes(recipients: usize) {
+async fn assert_fanout_delivers_exact_bytes(recipients: usize) {
     shared_payload_row(FANOUT_BUFFER, recipients, |mut row| async move {
         let expected = payload_bytes(LARGE_PAYLOAD, FANOUT_TAG);
         let (payload, mut witness) = witnessed_payload(&expected, "the fanned-out payload");
@@ -88,6 +84,7 @@ fn assert_fanout_delivers_exact_bytes(recipients: usize) {
         for index in 0..row.recipients() {
             row.sender(index)
                 .send_shared_binary(payload.clone())
+                .await
                 .expect("admit one shared clone");
         }
         drop(payload);
@@ -96,26 +93,66 @@ fn assert_fanout_delivers_exact_bytes(recipients: usize) {
         // caller's own handle — not which recipient is still holding one.
         witness.assert_live("the admitted clones after the original went");
         row.listener().release(BEFORE_WRITE);
-        row.take_peer_frames_from(0, &expected, "the fanned-out payload");
+        row.take_peer_frames_from(0, &expected, "the fanned-out payload")
+            .await;
         row.end_every_connection();
         row.stop_and_join().await;
         witness.assert_released("every completed bridge").await;
-    });
+    })
+    .await;
 }
 
 // 1.T4
-#[camber::test]
-async fn saturated_shared_binary_recipient_does_not_impede_siblings() {
-    shared_payload_row(1, SATURATION_PEERS, |mut row| async move {
+#[cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
+#[test]
+fn saturated_shared_binary_sibling_allocation_stays_payload_flat() {
+    on_ws_executors(|| async {
+        saturated_sibling_row(measure_shared_admission, |small, large| {
+            assert_payload_flat(&small, &large, "sibling admission behind a saturated peer");
+        })
+        .await;
+    });
+}
+
+#[cfg(any(feature = "jemalloc", feature = "mimalloc"))]
+#[test]
+fn saturated_shared_binary_recipient_delivers_to_siblings() {
+    on_ws_executors(|| async {
+        saturated_sibling_row(admit_shared_siblings, |small, large| {
+            assert_eq!([small, large], [SATURATION_PEERS - 1; 2]);
+        })
+        .await;
+    });
+}
+
+/// Admit through the selected adapter; every configuration proves delivery and release.
+async fn saturated_sibling_row<M, A, V>(mut admit: A, verify: V)
+where
+    A: FnMut(&[WsSender], &Bytes) -> M + Send + 'static,
+    V: FnOnce(M, M) + Send + 'static,
+{
+    shared_payload_row(1, SATURATION_PEERS, move |mut row| async move {
         let senders = row.senders();
         assert_saturated(&row, &senders[0]).await;
         let siblings = &senders[1..];
-        row.warm_queues_from(1);
-        let (small, mut small_witness) =
-            admit_and_take(&mut row, siblings, SIBLING_SMALL_TAG, SMALL_PAYLOAD);
-        let (large, mut large_witness) =
-            admit_and_take(&mut row, siblings, SIBLING_LARGE_TAG, LARGE_PAYLOAD);
-        assert_payload_flat(&small, &large, "sibling admission behind a saturated peer");
+        row.warm_queues_from(1).await;
+        let (small, mut small_witness) = admit_and_take(
+            &mut row,
+            siblings,
+            SIBLING_SMALL_TAG,
+            SMALL_PAYLOAD,
+            &mut admit,
+        )
+        .await;
+        let (large, mut large_witness) = admit_and_take(
+            &mut row,
+            siblings,
+            SIBLING_LARGE_TAG,
+            LARGE_PAYLOAD,
+            &mut admit,
+        )
+        .await;
+        verify(small, large);
         // Releasing succeeds only against a checkpoint still paused, so this is
         // the row's proof that the saturated recipient's writer never moved
         // while every sibling delivered.
@@ -126,7 +163,20 @@ async fn saturated_shared_binary_recipient_does_not_impede_siblings() {
         large_witness
             .assert_released("the large sibling payload")
             .await;
-    });
+    })
+    .await;
+}
+
+/// Offer one clone to every sibling and count the immediate admissions. A
+/// refusal fails the row with its error rather than lowering the count.
+#[cfg(any(feature = "jemalloc", feature = "mimalloc"))]
+fn admit_shared_siblings(siblings: &[WsSender], payload: &Bytes) -> usize {
+    for sender in siblings {
+        sender
+            .try_send_shared_binary(payload.clone())
+            .expect("admit one shared clone");
+    }
+    siblings.len()
 }
 
 /// Fill one recipient's capacity-one queue behind its held writer, and require
@@ -143,24 +193,21 @@ async fn assert_saturated(row: &SharedPayloadFixture, parked: &WsSender) {
     );
 }
 
-/// Measure one owner-backed admission to every sibling, and take the exact
-/// bytes it owed each of them.
-///
-/// The witness comes back with the measurement because the row asks two things
-/// of the same payload: what admitting it cost the sibling caller thread, and
-/// whether every handle on it is released once the connections are done.
-fn admit_and_take(
+/// Admit one owner-backed payload, then check the bytes received by every sibling.
+async fn admit_and_take<M>(
     row: &mut SharedPayloadFixture,
     siblings: &[WsSender],
     tag: u8,
     len: usize,
-) -> (AllocationInfo, PayloadWitness) {
+    admit: &mut impl FnMut(&[WsSender], &Bytes) -> M,
+) -> (M, PayloadWitness) {
     let expected = payload_bytes(len, tag);
     let (payload, witness) = witnessed_payload(&expected, "the sibling payload");
-    let measured = measure_shared_admission(siblings, &payload);
+    let admitted = admit(siblings, &payload);
     drop(payload);
-    row.take_peer_frames_from(1, &expected, "the sibling payload");
-    (measured, witness)
+    row.take_peer_frames_from(1, &expected, "the sibling payload")
+        .await;
+    (admitted, witness)
 }
 
 // 1.T5, revised by 4.T4
@@ -168,13 +215,15 @@ fn admit_and_take(
 // Every row states its cause through a public or protocol barrier rather than
 // through whichever event a coordinator turn reached first, and every row still
 // owes the same account of what its cause released.
-#[camber::test]
-async fn websocket_backpressure_payload_and_close_contracts_survive_causal_cutover() {
-    saturated_admission_refusal_row().await;
-    peer_disconnect_release_row().await;
-    receiver_drop_release_row();
-    graceful_shutdown_release_row();
-    forced_cancellation_release_row();
+#[test]
+fn websocket_backpressure_payload_and_close_contracts_survive_causal_cutover() {
+    on_ws_executors(|| async {
+        saturated_admission_refusal_row().await;
+        peer_disconnect_release_row().await;
+        receiver_drop_release_row().await;
+        graceful_shutdown_release_row().await;
+        forced_cancellation_release_row().await;
+    });
 }
 
 /// A bounded queue answers backpressure, the frames it did take still reach the
@@ -193,6 +242,7 @@ async fn saturated_admission_refusal_row() {
         for _ in 0..=TERMINAL_BUFFER {
             row.sender(0)
                 .send_shared_binary(payload.clone())
+                .await
                 .expect("admit one clone into the bounded queue");
         }
         let refused = row.sender(0).try_send_shared_binary(payload.clone());
@@ -204,28 +254,31 @@ async fn saturated_admission_refusal_row() {
         row.listener().wait_paused(BEFORE_WRITE).await;
         row.listener().release(BEFORE_WRITE);
         for _ in 0..=TERMINAL_BUFFER {
-            row.take_peer_frames_from(0, &expected, "an admitted clone");
+            row.take_peer_frames_from(0, &expected, "an admitted clone")
+                .await;
         }
         row.listener().arm(AFTER_COMMIT);
-        write_ws_close_frame(row.client(0).peer());
+        close_ws_peer(row.client(0).peer(), "the saturated peer").await;
         row.listener().wait_paused(AFTER_COMMIT).await;
         row.listener().release(AFTER_COMMIT);
-        expect_peer_close(row.client(0).peer(), "the peer close was never echoed");
+        expect_async_close(
+            row.client(0).peer(),
+            "the echo of the saturated peer's close",
+        )
+        .await;
         row.release_every_half();
         row.end_every_connection();
         row.stop_and_join().await;
         assert_bridge_released(&row.listener().observed(), WsCloseCause::PeerClosed, 0);
         witness.assert_released("the saturated bridge").await;
-    });
+    })
+    .await;
 }
 
 /// A peer whose transport is reset: the converted frame and the queued clone
 /// are both dropped, and the backing goes with them.
 ///
-/// Run on the case's own runtime rather than on a row runtime of its own,
-/// because its stop is the only graceful one there: the three rows below take a
-/// runtime each so they cannot spend one another's aggregate grace, and this
-/// row has nothing to share that grace with.
+/// Each row owns its server's stop deadline on the selected executor.
 async fn peer_disconnect_release_row() {
     abortive_direction_row(TERMINAL_BUFFER, |fixture, peer, connection| async move {
         let (sender, receiver) = connection.split();
@@ -264,7 +317,7 @@ async fn peer_disconnect_release_row() {
 /// finish, so this connection reports why it ended, and the disposition that
 /// follows is the cancelling one its own cause owes. A bridge that let the stop
 /// speak for an open connection would drain both handles to the peer instead.
-fn receiver_drop_release_row() {
+async fn receiver_drop_release_row() {
     shared_payload_row(TERMINAL_BUFFER, 1, |mut row| async move {
         let expected = payload_bytes(SMALL_PAYLOAD, RECEIVER_TAG);
         let mut witness = stage_converted_and_queued(
@@ -294,7 +347,8 @@ fn receiver_drop_release_row() {
             .expect("the owned server completed");
         assert_bridge_released(&row.listener().observed(), WsCloseCause::ReceiverDropped, 1);
         witness.assert_released("the receiver-drop bridge").await;
-    });
+    })
+    .await;
 }
 
 /// A graceful stop keeps the promise a successful shared send was given: the
@@ -314,7 +368,7 @@ fn receiver_drop_release_row() {
 /// admitted frame waits. The release is then staged rather than woken, so the
 /// stop lands in the same turn: whichever of the write side and the graceful
 /// drain reaches the frame first, the peer is owed it and gets it.
-fn graceful_shutdown_release_row() {
+async fn graceful_shutdown_release_row() {
     shared_payload_row(TERMINAL_BUFFER, 1, |mut row| async move {
         let expected = payload_bytes(SMALL_PAYLOAD, SHUTDOWN_TAG);
         let mut witness = stage_converted_and_queued(
@@ -329,10 +383,12 @@ fn graceful_shutdown_release_row() {
         row.listener().wait_paused(BEFORE_WRITE).await;
         row.listener().release_without_waking(BEFORE_WRITE_EDGE);
         row.listener().shutdown_server();
-        row.take_peer_frames_from(0, &expected, "the converted frame");
-        row.take_peer_frames_from(0, &expected, "the queued clone");
-        expect_peer_close(row.client(0).peer(), "a graceful stop sent no close frame");
-        write_ws_close_frame(row.client(0).peer());
+        row.take_peer_frames_from(0, &expected, "the converted frame")
+            .await;
+        row.take_peer_frames_from(0, &expected, "the queued clone")
+            .await;
+        expect_async_close(row.client(0).peer(), "the graceful stop's close").await;
+        close_ws_peer(row.client(0).peer(), "the drained peer").await;
         row.release_every_half();
         row.listener()
             .join_server()
@@ -340,7 +396,8 @@ fn graceful_shutdown_release_row() {
             .expect("the owned server completed");
         assert_bridge_released(&row.listener().observed(), WsCloseCause::ServerShutdown, 0);
         witness.assert_released("the drained bridge").await;
-    });
+    })
+    .await;
 }
 
 /// A cancelled server owes nothing, and lets go of everything.
@@ -348,7 +405,7 @@ fn graceful_shutdown_release_row() {
 /// The held checkpoint is never released as progress: the coordinator drops the
 /// outbound future the moment it selects the cause, and that drop is what has to
 /// release the converted frame.
-fn forced_cancellation_release_row() {
+async fn forced_cancellation_release_row() {
     shared_payload_row(TERMINAL_BUFFER, 1, |row| async move {
         let expected = payload_bytes(SMALL_PAYLOAD, CANCELLED_TAG);
         let mut witness = stage_converted_and_queued(
@@ -367,7 +424,8 @@ fn forced_cancellation_release_row() {
         );
         assert_bridge_released(&row.listener().observed(), WsCloseCause::ServerCancelled, 1);
         witness.assert_released("the cancelled bridge").await;
-    });
+    })
+    .await;
 }
 
 /// Admit two clones of one owner-backed payload and hold the bridge with the
@@ -421,10 +479,4 @@ fn assert_bridge_released(
         observed.permit_released,
         "the {cause:?} bridge kept its connection permit"
     );
-}
-
-/// Require the next frame one peer takes is the protocol close.
-fn expect_peer_close(peer: &mut TcpStream, what: &str) {
-    let (opcode, _) = read_ws_frame_raw(peer);
-    assert_eq!(opcode, CLOSE, "{what}: the peer took opcode {opcode:#x}");
 }

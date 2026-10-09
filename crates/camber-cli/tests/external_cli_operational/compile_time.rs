@@ -1,66 +1,16 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 use std::time::Instant;
 
 use crate::resources::{CleanupWitness, ExternalRun, close_temp_dir_and_emit};
-use crate::support::{FixtureError, run_command};
-
-fn camber_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_camber")
-}
-
-fn camber_crate_path() -> Result<PathBuf, FixtureError> {
-    Ok(Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or_else(|| FixtureError::new("camber-cli manifest has no parent"))?
-        .join("camber"))
-}
-
-fn camber_build_crate_path() -> Result<PathBuf, FixtureError> {
-    Ok(Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or_else(|| FixtureError::new("camber-cli manifest has no parent"))?
-        .join("camber-build"))
-}
-
-fn patch_local_crates(project_dir: &Path) -> Result<(), FixtureError> {
-    let config_dir = project_dir.join(".cargo");
-    std::fs::create_dir_all(&config_dir)?;
-    let patch = format!(
-        "[patch.crates-io]\ncamber = {{ path = \"{}\" }}\ncamber-build = {{ path = \"{}\" }}\n",
-        camber_crate_path()?.display(),
-        camber_build_crate_path()?.display(),
-    );
-    std::fs::write(config_dir.join("config.toml"), patch)?;
-    Ok(())
-}
-
-fn require_success(
-    description: &str,
-    output: crate::support::process::CommandOutput,
-) -> Result<(), FixtureError> {
-    match output.status.success() {
-        true => Ok(()),
-        false => Err(FixtureError::new(format!(
-            "{description}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))),
-    }
-}
+use crate::support::FixtureError;
+use crate::support::generated_project::{camber_new, cargo_succeeds, patch_local_crates};
 
 fn measure_incremental_build(root: &Path, project_name: &str) -> Result<(), FixtureError> {
     let project_dir = root.join(project_name);
 
-    let mut command = Command::new(camber_bin());
-    command
-        .args(["new", project_name, "--template", "http"])
-        .current_dir(root);
-    require_success("camber new failed", run_command(command)?)?;
+    camber_new(root, project_name, "http")?;
     patch_local_crates(&project_dir)?;
-
-    let mut command = Command::new("cargo");
-    command.args(["build"]).current_dir(&project_dir);
-    require_success("initial build failed", run_command(command)?)?;
+    cargo_succeeds(&project_dir, &["build"], "the initial build")?;
 
     let main_rs = project_dir.join("src/main.rs");
     let source = std::fs::read_to_string(&main_rs)?;
@@ -68,11 +18,8 @@ fn measure_incremental_build(root: &Path, project_name: &str) -> Result<(), Fixt
     std::fs::write(&main_rs, modified)?;
 
     let start = Instant::now();
-    let mut command = Command::new("cargo");
-    command.args(["build"]).current_dir(&project_dir);
-    let incremental = run_command(command)?;
+    cargo_succeeds(&project_dir, &["build"], "the incremental build")?;
     let elapsed = start.elapsed();
-    require_success("incremental build failed", incremental)?;
 
     match elapsed.as_secs() < 5 {
         true => Ok(()),

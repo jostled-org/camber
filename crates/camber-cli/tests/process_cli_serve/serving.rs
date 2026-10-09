@@ -5,9 +5,10 @@ use std::time::{Duration, Instant};
 use crate::scripted_upstream::{ForwardedRequest, ScriptedUpstream};
 use crate::support::FixtureError;
 use crate::support::http::{
-    Backend, HttpResponse, connect_unix, read_response, request_unix, status_code, write_request,
+    Backend, HttpResponse, connect_unix, read_response, request_unix, write_request,
 };
-use crate::support::process::{ChildGuard, ReadinessTarget, ReapProbe};
+use crate::support::http_head::status_code;
+use crate::support::process::{ChildGuard, ReadinessTarget, ReapProbe, camber_bin};
 
 /// The declared Step 16 red diagnostic: an overlay fallback forwarded while
 /// the site's health authority held the upstream unhealthy.
@@ -36,11 +37,7 @@ impl ServeFixture {
             format!("listen = \"unix:{}\"\n{config_body}", socket_path.display()),
         )?;
         let readiness = ReadinessTarget::Unix(socket_path.clone());
-        let mut child = ChildGuard::spawn(
-            Path::new(env!("CARGO_BIN_EXE_camber")),
-            &config_path,
-            readiness,
-        )?;
+        let mut child = ChildGuard::spawn(Path::new(camber_bin()), &config_path, readiness)?;
         child.wait_until_ready()?;
         Ok(Self {
             child,

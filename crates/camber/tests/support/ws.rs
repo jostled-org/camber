@@ -10,6 +10,17 @@ pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// mask key.
 const MAX_FRAME_CAPTURE: usize = MAX_FRAME_BYTES + 14;
 
+/// The WebSocket text opcode, as it appears on the wire.
+pub const TEXT: u8 = 0x01;
+/// The WebSocket binary opcode, as it appears on the wire.
+pub const BINARY: u8 = 0x02;
+/// The WebSocket close opcode, as it appears on the wire.
+pub const CLOSE: u8 = 0x08;
+/// The WebSocket ping opcode, as it appears on the wire.
+pub const PING: u8 = 0x09;
+/// The WebSocket pong opcode, as it appears on the wire.
+pub const PONG: u8 = 0x0a;
+
 /// A handshake key Camber accepts. The accept value derived from it is the
 /// WebSocket suite's own subject; every other journey only needs the `101`.
 pub const WS_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -121,7 +132,7 @@ pub fn read_ws_binary_frame(stream: &mut TcpStream) -> Box<[u8]> {
 }
 
 pub fn write_ws_binary_frame(stream: &mut TcpStream, data: &[u8]) {
-    write_masked_frame(stream, 0x02, data);
+    write_masked_frame(stream, BINARY, data);
 }
 
 /// Read one text frame's payload, sealed.
@@ -136,7 +147,7 @@ pub fn read_ws_text_frame(stream: &mut TcpStream) -> Box<str> {
 }
 
 pub fn write_ws_text_frame(stream: &mut TcpStream, text: &str) {
-    write_masked_frame(stream, 0x01, text.as_bytes());
+    write_masked_frame(stream, TEXT, text.as_bytes());
 }
 
 /// Send the masked, empty close frame.
@@ -146,7 +157,7 @@ pub fn write_ws_text_frame(stream: &mut TcpStream, text: &str) {
 /// filled, or that was refused outright, never reached the server — and the
 /// disconnect probes then read a cause on the assumption it did.
 pub fn write_ws_close_frame(stream: &mut TcpStream) {
-    match try_write_raw_frame(stream, &zero_key_frame(0x08, &[])) {
+    match try_write_raw_frame(stream, &zero_key_frame(CLOSE, &[])) {
         Ok(()) => {}
         Err(error) if super::http::is_closed_connection_error(&error) => {}
         Err(error) => panic!("the WebSocket close frame could not be sent: {error}"),
@@ -163,7 +174,7 @@ pub fn write_ws_close_frame(stream: &mut TcpStream) {
 /// A peer that has already gone is accepted, and every other failure is not,
 /// for the reason [`write_ws_close_frame`] gives.
 pub fn write_unmasked_text_frame(stream: &mut TcpStream, text: &str) {
-    let frame = RawFrame::complete(0x01, text.as_bytes()).encode();
+    let frame = RawFrame::complete(TEXT, text.as_bytes()).encode();
     match try_write_raw_frame(stream, &frame) {
         Ok(()) => {}
         Err(error) if super::http::is_closed_connection_error(&error) => {}
@@ -412,22 +423,78 @@ fn with_write_timeout<T>(
 }
 
 /// Send each message a WebSocket peer sends straight back, until the peer
-/// leaves or a send fails.
+/// leaves.
+///
+/// A send refused because the connection ended is the peer leaving, so it ends
+/// the echo cleanly. `WsConn::send` reports exactly that as a broken pipe; any
+/// other error is not a departure and is returned.
 #[cfg(feature = "ws")]
-pub fn echo_until_closed(conn: &mut camber::http::WsConn) {
-    while let Some(message) = conn.recv() {
-        if conn.send(&message).is_err() {
-            break;
+pub async fn echo_until_closed(
+    conn: &mut camber::http::WsConn,
+) -> Result<(), camber::RuntimeError> {
+    while let Some(message) = conn.recv().await {
+        if echo_sent(conn.send(&message).await)?.is_break() {
+            return Ok(());
         }
+    }
+    Ok(())
+}
+
+/// [`echo_until_closed`] for binary messages: send each one straight back
+/// until the peer leaves.
+#[cfg(feature = "ws")]
+pub async fn echo_binary_until_closed(
+    conn: &mut camber::http::WsConn,
+) -> Result<(), camber::RuntimeError> {
+    while let Some(data) = conn.recv_binary().await {
+        if echo_sent(conn.send_binary(&data).await)?.is_break() {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// Read one echo send: continue on success, stop when the peer has left, and
+/// return every other failure.
+#[cfg(feature = "ws")]
+fn echo_sent(
+    sent: Result<(), camber::RuntimeError>,
+) -> Result<std::ops::ControlFlow<()>, camber::RuntimeError> {
+    match sent {
+        Ok(()) => Ok(std::ops::ControlFlow::Continue(())),
+        Err(error) if is_peer_departure(&error) => Ok(std::ops::ControlFlow::Break(())),
+        Err(error) => Err(error),
     }
 }
 
+/// Whether a `WsConn` send failed only because its connection had ended.
+///
+/// The facade maps every closure to a broken pipe and leaves every other error
+/// as it was, so the kind alone separates the two.
+#[cfg(feature = "ws")]
+pub fn is_peer_departure(error: &camber::RuntimeError) -> bool {
+    matches!(error, camber::RuntimeError::Io(io) if io.kind() == io::ErrorKind::BrokenPipe)
+}
+
 /// A WebSocket route that echoes every message until the peer leaves.
+///
+/// Shaped as a route so a registration names it directly. The returned future
+/// captures only the connection, never the borrowed request.
 #[cfg(feature = "ws")]
 pub fn echo_ws(
     _: &camber::http::Request,
     mut conn: camber::http::WsConn,
+) -> impl Future<Output = Result<(), camber::RuntimeError>> + Send + use<> {
+    async move { echo_until_closed(&mut conn).await }
+}
+
+/// Send `text` once on `conn`, then return and end the connection.
+///
+/// The body of a route that greets its peer and leaves.
+#[cfg(feature = "ws")]
+pub async fn send_once(
+    conn: camber::http::WsConn,
+    text: &'static str,
 ) -> Result<(), camber::RuntimeError> {
-    echo_until_closed(&mut conn);
-    Ok(())
+    conn.send(text).await
 }

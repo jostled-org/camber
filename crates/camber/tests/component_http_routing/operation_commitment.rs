@@ -1031,31 +1031,14 @@ fn assert_sse_commitment(row: &SseProducer) {
 /// A real echoing peer rather than an address nothing answers on, because the
 /// accepted proxied row's claim is that a `101` was produced and the bridge
 /// behind it took the transport. A backend that could not be reached would leave
-/// the same status on the wire with nothing behind it.
+/// the same status on the wire with nothing behind it. It echoes through the
+/// same shared route as the direct registrations, so both classes' accepted
+/// rows exercise one session rather than one echoing and one hanging up.
 #[cfg(feature = "ws")]
 fn websocket_backend() -> Router {
     let mut backend = Router::new();
-    backend.ws(UPSTREAM_ECHO, echo_until_closed);
+    backend.ws(UPSTREAM_ECHO, crate::ws_support::echo_ws);
     backend
-}
-
-/// Echo every message back until the peer closes the session.
-///
-/// Shared by the direct routes and the backend behind the proxied ones, so both
-/// classes' accepted rows exercise the same session rather than one echoing and
-/// one hanging up.
-#[cfg(feature = "ws")]
-fn echo_until_closed(
-    _req: &Request,
-    mut conn: camber::http::WsConn,
-) -> Result<(), camber::RuntimeError> {
-    while let Some(message) = conn.recv() {
-        match conn.send(&message) {
-            Ok(()) => {}
-            Err(_gone) => break,
-        }
-    }
-    Ok(())
 }
 
 /// The four upgrade registrations every row below is served through.
@@ -1068,8 +1051,8 @@ fn echo_until_closed(
 fn websocket_routes(mapped: &Journal, backend: SocketAddr) -> Router {
     let upstream = format!("http://{backend}").into_boxed_str();
     let mut router = Router::new();
-    router.ws(DIRECT_WEBSOCKET, echo_until_closed);
-    router.ws(SLOW_DIRECT_WEBSOCKET, echo_until_closed);
+    router.ws(DIRECT_WEBSOCKET, crate::ws_support::echo_ws);
+    router.ws(SLOW_DIRECT_WEBSOCKET, crate::ws_support::echo_ws);
     router.proxy_stream(PROXIED_WEBSOCKET, &upstream);
     router.proxy_stream(SLOW_PROXIED_WEBSOCKET, &upstream);
     stall(

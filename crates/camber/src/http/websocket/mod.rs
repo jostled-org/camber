@@ -1,4 +1,4 @@
-//! The two endpoints of one direct WebSocket, and the compatibility facade
+//! The two endpoints of one direct WebSocket, and the convenience facade
 //! over them.
 //!
 //! A WebSocket has two independent directions, so it has two owners: one
@@ -6,6 +6,7 @@
 //! frame, and any number of `WsSender` clones, which share one bounded outbound
 //! queue. `WsConn` is the callback-facing facade that holds both.
 
+mod deadline;
 mod facade;
 mod message;
 mod receiver;

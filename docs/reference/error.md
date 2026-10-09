@@ -65,9 +65,9 @@ Which of those a server answers with is decided by commit order, not by rank. Ev
 
 `LifecycleParticipant::Exporter` is settlement-only vocabulary. Teardown settles the trace provider completed through `ShutdownOwner::EXPORTER`, whose shutdown is unbounded and hands nothing back, so no aggregate entry is ever recorded against it.
 
-A blocked upgrade callback is the one child a flat server result does not speak for. The upgrade owner records a callback disposition for it: a callback still running at the fixed join deadline raises one WARN event, `camber.websocket.callback.outstanding`, carrying `disposition="outstanding-after-forced-grace"`, and Camber stops claiming it returned. That event and that field are the whole observable form — the record behind them is private to the bridge. The server result still follows the accepted server command, so the callback disposition is an operator event rather than a second result.
+An upgrade callback is the one child a flat server result does not speak for. The upgrade owner polls the callback future and settles it within one fixed deadline. A callback still pending at that deadline is dropped, and the connection raises one WARN event, `camber.websocket.callback.cancelled`, carrying `disposition="cancelled"`. That event and that field are the whole observable form — the record behind them is private to the bridge. The server result still follows the accepted server command, so the callback disposition is an operator event rather than a second result.
 
-What the aggregate cannot claim: Camber's deadlines bound Camber's own waiting and escalation. Cooperative cancellation cannot preempt an async task that never yields, cannot stop application code running on a blocking or OS thread, and cannot prove that an abandoned synchronous callback has returned. A participant Camber could not prove finished is named rather than reported as stopped.
+What the aggregate cannot claim: Camber's deadlines bound Camber's own waiting and escalation. Cooperative cancellation cannot preempt an async task that never yields, cannot stop application code running on a blocking or OS thread, and cannot drop a callback whose poll or destructor blocks its thread. A participant Camber could not prove finished is named rather than reported as stopped.
 
 If the user closure panics, the panic is the answer and nothing replaces it. Teardown still runs in full, the aggregate it produced is emitted as one `lifecycle failures displaced by an unwinding closure` event carrying the recorded count and the rendering of every entry, and the original payload then resumes.
 
@@ -178,14 +178,16 @@ application acts on, and a channel result flattens six answers into one:
   which is the same event carrying the reason for it.
 - `WebSocketClosed` means the connection is over. Every send after that reports
   it, including one that found the queue full.
-- `BlockingInAsyncContext` means the caller asked a current-thread Tokio runtime
-  to wait, which would stop the only thread that could end the wait. It is a
-  scheduling mistake, not a closed connection.
-- `NoRuntime` and `Timeout` separate `WsReceiver::recv_timeout`'s two ways of
-  answering nothing: no Tokio clock to take a deadline from, and a deadline that
-  expired.
+- `NoRuntime` and `Timeout` separate the two ways `WsReceiver::recv_timeout`
+  and `WsConn::recv_timeout` answer nothing: no Tokio clock to take a deadline
+  from, and a deadline that expired. A timeout does not end the connection.
 
-The same two refusals answer a `camber::spawn` issued from inside the callback,
+WebSocket waits are futures. They never report `BlockingInAsyncContext`, and
+they make progress on a current-thread runtime. That variant keeps its meaning
+for the blocking APIs that still use it, such as a blocking `MpscSender::send` on
+a current-thread runtime.
+
+Two refusals answer a `camber::spawn` issued from inside the callback,
 and they keep their ordinary meanings. `ScopeClosed` says the callback's own
 Camber runtime has stopped admitting; `NoRuntime` says the serving path never
 carried one, which is every bare-Tokio connection.

@@ -1,8 +1,8 @@
 --- a/crates/camber/src/http/server_lifecycle/connections.rs
 +++ b/crates/camber/src/http/server_lifecycle/connections.rs
-@@ -552,13 +552,6 @@ impl UpgradeOwner {
-         shutdown: Option<Arc<AggregateShutdown>>,
+@@ -567,13 +567,6 @@ impl UpgradeOwner {
          script: Option<Arc<LifecycleScript>>,
+         retention: Arc<UpgradeRetention>,
      ) -> Self {
 -        LifecycleScript::observe_ownership(
 -            script.as_deref(),
@@ -14,7 +14,7 @@
          Self {
              handle: Some(handle),
              owner,
-@@ -601,6 +594,13 @@ impl UpgradeOwner {
+@@ -634,6 +627,13 @@ impl UpgradeOwner {
          if let Some(shutdown) = self.shutdown.as_ref() {
              shutdown.settle(&ShutdownOwner::UPGRADE, disposition);
          }

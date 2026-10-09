@@ -514,10 +514,7 @@ fn assert_the_references_state_the_same_contract() {
             HTTP_REFERENCE,
             "status, origin, rejection, delivery, connection_end, boundary, and shutdown",
         ),
-        (
-            HTTP_REFERENCE,
-            "CallbackDisposition::OutstandingAfterForcedGrace",
-        ),
+        (HTTP_REFERENCE, "disposition=\"cancelled\""),
         (
             RUNTIME_REFERENCE,
             "root scope, background task, resource, and exporter",

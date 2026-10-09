@@ -11,7 +11,7 @@ use super::super::disconnect::DisconnectSignal;
 use super::super::rejection::Rejected;
 use super::super::server_lifecycle::{ConnectionLifecycle, ConnectionPermit};
 use super::handshake::{WsHandshakeOffer, WsProtocolOffers, WsSelection};
-use super::ownership::{BridgeAttachment, own_upgrade_bridge};
+use super::ownership::{BridgeAttachment, BridgeStart, GatedBridge, own_upgrade_bridge};
 use std::sync::Arc;
 
 /// What a validated handshake hands the bridge that will serve it.
@@ -34,20 +34,25 @@ pub(super) struct WsHandoff {
 }
 
 impl WsHandoff {
-    /// Register the bridge `build_bridge` makes from this handoff's upgrade and
+    /// Register the bridge `launch` starts from this handoff's upgrade and
     /// permit, and return the `101` it earned.
     ///
     /// Both upgrade kinds register here. The offers stay behind while the
     /// bridge takes the rest, so a registration refusal still names what the
-    /// `101` had selected.
-    pub(super) async fn register<F, Fut>(
+    /// `101` had selected. `launch` gets the gate its bridge must wait behind
+    /// and returns that bridge, already spawned behind it.
+    pub(super) async fn register<L>(
         self,
         lifecycle: &ConnectionLifecycle,
-        build_bridge: F,
+        launch: L,
     ) -> Result<hyper::Response<HyperResponseBody>, WsRefusal>
     where
-        F: FnOnce(hyper::upgrade::OnUpgrade, Arc<ConnectionPermit>, BridgeAttachment) -> Fut,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
+        L: FnOnce(
+            hyper::upgrade::OnUpgrade,
+            Arc<ConnectionPermit>,
+            BridgeAttachment,
+            BridgeStart,
+        ) -> GatedBridge,
     {
         let Self {
             on_upgrade,
@@ -57,8 +62,8 @@ impl WsHandoff {
             permit,
             handoff,
         } = self;
-        own_upgrade_bridge(lifecycle, response, &handoff, move |attachment| {
-            build_bridge(on_upgrade, permit, attachment)
+        own_upgrade_bridge(lifecycle, response, &handoff, move |attachment, start| {
+            launch(on_upgrade, permit, attachment, start)
         })
         .await
         .map_err(|rejected| WsRefusal::negotiated(rejected, offers.named(selection)))

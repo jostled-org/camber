@@ -1,18 +1,24 @@
-//! The retained direct-callback child, and the one join deadline it answers to.
+//! The inline direct-callback future, and the one settlement deadline it
+//! answers to.
 //!
-//! A `Router::ws` callback is application code on a blocking worker. Camber
-//! starts it, so Camber keeps its handle: every bridge terminal closes the
-//! endpoints a cooperative callback wakes on, and this file is what the upgrade
-//! owner then waits with. The deadline is absolute from the instant those
-//! endpoints closed. A later server transition may bring it forward and nothing
-//! may push it back, so no amount of escalation buys a blocked callback more
-//! time than the phase it was already under.
+//! A `Router::ws` callback is a future the bridge owns directly. The bridge
+//! polls it beside the transport coordinator, so a pending callback stops
+//! neither the transport nor another connection, and a completed one is never
+//! polled again. Every bridge terminal closes the endpoints a cooperative
+//! callback wakes on, and this file is what the upgrade owner then settles the
+//! callback with. The deadline is absolute from the instant those endpoints
+//! closed. A later server transition may bring it forward and nothing may push
+//! it back, so no amount of escalation buys a pending callback more time than
+//! the phase it was already under.
 //!
-//! Tokio cannot take a blocking thread away, so a callback still in application
-//! code at its deadline is named rather than claimed to have returned. That
-//! naming is the whole disposition: one WARN event, then the upgrade owner
-//! settles and the connection gives its permit back.
+//! A callback still pending at its deadline is dropped where it stands, before
+//! the upgrade owner settles and the connection gives its permit back. That
+//! drop is the whole disposition: one WARN event names it, and the bridge's
+//! completion then proves the callback's captures are gone.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tokio::time::Instant;
 
 use super::super::completion::{ShutdownObservation, optional_label};
@@ -23,13 +29,14 @@ use super::super::websocket::WsCloseCause;
 use super::framing::awaited_abort;
 use crate::lifecycle::FORCED_JOIN_GRACE;
 
-/// How one retained callback ended.
+/// How one inline callback ended.
 #[derive(Clone, Copy, Debug)]
 enum CallbackDisposition {
-    /// The callback returned, unwound, or was already gone when the join ran.
+    /// The callback returned or unwound, and its future has been dropped.
     Completed,
-    /// Application code was still blocked when the join deadline arrived.
-    OutstandingAfterForcedGrace,
+    /// The callback was still pending at its deadline, and the bridge dropped
+    /// its future.
+    Cancelled,
 }
 
 impl CallbackDisposition {
@@ -37,7 +44,59 @@ impl CallbackDisposition {
     const fn label(self) -> &'static str {
         match self {
             Self::Completed => "completed",
-            Self::OutstandingAfterForcedGrace => "outstanding-after-forced-grace",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// One callback future owned inline by its bridge, or the empty place where it
+/// was.
+///
+/// Pinned where the bridge future holds it, so the callback keeps its concrete
+/// type and needs no box. `None` once it has completed or been dropped: setting
+/// the place empty is what drops its captures, and an empty place is never
+/// polled again.
+pub(super) type InlineCallback<'a, F> = Pin<&'a mut Option<F>>;
+
+/// Poll an inline callback once, and drop it in place the moment it completes.
+///
+/// Ready for an empty place too, because a callback that already completed has
+/// nothing left to settle.
+fn poll_callback<F>(callback: &mut InlineCallback<'_, F>, cx: &mut Context<'_>) -> Poll<()>
+where
+    F: Future<Output = ()>,
+{
+    let polled = match callback.as_mut().as_pin_mut() {
+        Some(running) => running.poll(cx),
+        None => return Poll::Ready(()),
+    };
+    match polled {
+        Poll::Ready(()) => {
+            callback.set(None);
+            Poll::Ready(())
+        }
+        Poll::Pending => Poll::Pending,
+    }
+}
+
+/// Drive `bridge` to its answer while polling the callback beside it.
+///
+/// Neither waits for the other. The callback is asked first in each turn, so
+/// what it admitted is visible to the coordinator in that same turn, and its
+/// branch is disabled once it completes. The bridge's answer ends the wait; a
+/// callback still pending then is left for [`settle_callback`].
+pub(super) async fn run_beside<F, B>(mut callback: InlineCallback<'_, F>, bridge: B) -> B::Output
+where
+    F: Future<Output = ()>,
+    B: Future,
+{
+    let mut bridge = std::pin::pin!(bridge);
+    loop {
+        tokio::select! {
+            biased;
+            () = std::future::poll_fn(|cx| poll_callback(&mut callback, cx)),
+                if callback.is_some() => {}
+            answer = &mut bridge => return answer,
         }
     }
 }
@@ -45,23 +104,23 @@ impl CallbackDisposition {
 /// What the server had committed when one bridge woke its callback.
 ///
 /// The same closed vocabulary a completion record's shutdown dimension carries,
-/// read from the same committed stop state: a callback outstanding under a
+/// read from the same committed stop state: a callback cancelled under a
 /// cancellation and an operation finalized under one observed the same server,
 /// and two spellings of that would be two things an operator has to reconcile.
 /// Absence is a peer, direction-owner, or transport terminal with no server
 /// transition behind it.
 type CallbackShutdown = Option<ShutdownObservation>;
 
-/// The one join deadline an upgrade owner fixes for its retained callback.
+/// The one settlement deadline an upgrade owner fixes for its inline callback.
 ///
 /// Fixed at the endpoint close, from the phase committed there, and only ever
 /// brought forward afterwards. Holding the entry transition alongside the
 /// instant is what lets the disposition say which transition set the deadline
 /// rather than which one happened to be committed when the wait ran out.
 ///
-/// Built where the endpoints close rather than where the join waits: a teardown
-/// step between the two spends this grace, and a phase read after it would name
-/// a transition that arrived while the callback was already awake.
+/// Built where the endpoints close rather than where settlement waits: a
+/// teardown step between the two spends this grace, and a phase read after it
+/// would name a transition that arrived while the callback was already awake.
 pub(super) struct CallbackDeadline {
     /// The cause this bridge committed, which every half of it reads.
     cause: WsCloseCause,
@@ -73,9 +132,9 @@ pub(super) struct CallbackDeadline {
     owner: super::super::server_lifecycle::UpgradeIdentity,
     /// The transition committed when the endpoints closed.
     entered: CallbackShutdown,
-    /// The instant this bridge closed the endpoints a blocked callback wakes on.
+    /// The instant this bridge closed the endpoints a pending callback wakes on.
     closed_at: Instant,
-    /// The instant the join gives up at, as it stands now.
+    /// The instant settlement drops a pending callback at, as it stands now.
     at: Instant,
     /// Whether a later cancellation commit brought that instant forward.
     shortened_by_cancel: bool,
@@ -87,10 +146,11 @@ impl CallbackDeadline {
     /// A graceful stop is the one phase that borrows the aggregate: the drain
     /// already owns an expiry, and a callback woken inside it is owed the rest
     /// of that drain and no more, because the fixed grace after it belongs to
-    /// the owner that has to report what this join decided. Every other phase is
-    /// a terminal nothing is draining towards, so the grace runs from the close
-    /// itself. A server with no supervisor over it is the same case as one still
-    /// running, because neither has asked this bridge for anything.
+    /// the owner that has to report what this settlement decided. Every other
+    /// phase is a terminal nothing is draining towards, so the grace runs from
+    /// the close itself. A server with no supervisor over it is the same case
+    /// as one still running, because neither has asked this bridge for
+    /// anything.
     pub(super) fn fixed(
         cause: WsCloseCause,
         owner: super::super::server_lifecycle::UpgradeIdentity,
@@ -178,7 +238,7 @@ impl CallbackDeadline {
     /// The drain row is the one that can end somewhere other than where it
     /// started, and the disposition is what says whether it did: a cancellation
     /// that brought the deadline forward reports that cancellation, and only a
-    /// callback still outstanding at the end reports the aggregate expiry it was
+    /// callback still pending at the end reports the aggregate expiry it was
     /// fixed from running out. A callback that entered a drain and returned
     /// cooperatively expired nothing, so it reports the drain it entered.
     fn shutdown(
@@ -189,11 +249,9 @@ impl CallbackDeadline {
         match (self.entered, self.shortened_by_cancel, disposition) {
             (None, _, _) => ShutdownObservation::committed_now(stop),
             (Some(ShutdownObservation::Graceful), true, _) => Some(ShutdownObservation::Cancelled),
-            (
-                Some(ShutdownObservation::Graceful),
-                false,
-                CallbackDisposition::OutstandingAfterForcedGrace,
-            ) => Some(ShutdownObservation::DeadlineExpired),
+            (Some(ShutdownObservation::Graceful), false, CallbackDisposition::Cancelled) => {
+                Some(ShutdownObservation::DeadlineExpired)
+            }
             (Some(entered), _, _) => Some(entered),
         }
     }
@@ -212,8 +270,8 @@ impl CallbackDeadline {
 ///
 /// The floor is the same grace measured from the close instead. An aggregate
 /// that ran out before this bridge closed the endpoints has no drain left to
-/// lend, and lending it anyway would name a callback outstanding at a deadline
-/// already in the past — before anything asked it to return.
+/// lend, and lending it anyway would cancel a callback at a deadline already in
+/// the past — before anything asked it to return.
 fn entry(closed_at: Instant, reading: &CommittedStopReading) -> (CallbackShutdown, Instant) {
     let entered = ShutdownObservation::committed(reading);
     let floor = closed_at + FORCED_JOIN_GRACE;
@@ -224,52 +282,61 @@ fn entry(closed_at: Instant, reading: &CommittedStopReading) -> (CallbackShutdow
     (entered, at)
 }
 
-/// Join this bridge's retained callback, or name it outstanding, before the
-/// upgrade owner settles.
+/// Let this bridge's inline callback finish, or drop it at its deadline,
+/// before the upgrade owner settles.
 ///
-/// The one place the direct bridge's callback child is disposed of. Everything
-/// the disposition needs is already fixed by the time it runs: the cause this
+/// The one place the direct bridge's callback is disposed of. Everything the
+/// disposition needs is already fixed by the time it runs: the cause this
 /// bridge committed, the instant it closed the callback's endpoints, and the
-/// phase its server had committed by then.
-pub(super) async fn settle_callback(
-    handle: tokio::task::JoinHandle<()>,
+/// phase its server had committed by then. The disposition is published only
+/// after the callback's future is gone, so a record of either kind is a
+/// record of captures already dropped.
+pub(super) async fn settle_callback<F>(
+    callback: InlineCallback<'_, F>,
     deadline: &mut CallbackDeadline,
     stop: Option<&ServerStopState>,
     control: &mut tokio::sync::watch::Receiver<ServerControl>,
     script: Option<&LifecycleScript>,
-) {
-    LifecycleScript::pause_at_upgrade(script, UpgradeOwnerEdge::BeforeCallbackJoin).await;
-    let disposition = join_within(handle, deadline, stop, control, script).await;
+) where
+    F: Future<Output = ()>,
+{
+    LifecycleScript::pause_at_upgrade(script, UpgradeOwnerEdge::BeforeCallbackSettle).await;
+    let disposition = settle_within(callback, deadline, stop, control, script).await;
     let shutdown = deadline.shutdown(stop, disposition);
     match disposition {
         CallbackDisposition::Completed => {}
-        CallbackDisposition::OutstandingAfterForcedGrace => {
-            report_outstanding(deadline.cause, shutdown);
-        }
+        CallbackDisposition::Cancelled => report_cancelled(deadline.cause, shutdown),
     }
     deadline.publish(script, Some(disposition), Some(shutdown));
 }
 
-/// Wait for the callback within the deadline it owns, hearing one escalation.
+/// Poll the callback within the deadline it owns, hearing one escalation.
 ///
-/// The join is polled first every turn, so a callback that returned in the same
-/// turn its deadline arrived reads as the cooperative return it was. The
+/// The callback is polled first every turn, so a callback that returned in the
+/// same turn its deadline arrived reads as the cooperative return it was. At
+/// the deadline its future is dropped here, before this returns. The
 /// escalation arm is watched exactly once: the forced phase commits once, and
 /// an arm that answered the same standing value on every turn would spin.
-async fn join_within(
-    mut handle: tokio::task::JoinHandle<()>,
+async fn settle_within<F>(
+    mut callback: InlineCallback<'_, F>,
     deadline: &mut CallbackDeadline,
     stop: Option<&ServerStopState>,
     control: &mut tokio::sync::watch::Receiver<ServerControl>,
     script: Option<&LifecycleScript>,
-) -> CallbackDisposition {
+) -> CallbackDisposition
+where
+    F: Future<Output = ()>,
+{
     let mut watching = true;
     loop {
         tokio::select! {
             biased;
-            _ = &mut handle => return CallbackDisposition::Completed,
+            () = std::future::poll_fn(|cx| poll_callback(&mut callback, cx)) => {
+                return CallbackDisposition::Completed;
+            }
             () = tokio::time::sleep_until(deadline.at) => {
-                return CallbackDisposition::OutstandingAfterForcedGrace;
+                callback.set(None);
+                return CallbackDisposition::Cancelled;
             }
             () = escalation(control, watching) => {
                 deadline.narrow(stop, script);
@@ -279,10 +346,11 @@ async fn join_within(
     }
 }
 
-/// Wait for the one later transition that may bring a join deadline forward.
+/// Wait for the one later transition that may bring a settlement deadline
+/// forward.
 ///
 /// A caller that has already heard it waits forever instead, which is what
-/// leaves the deadline and the join as the only two answers left.
+/// leaves the deadline and the callback as the only two answers left.
 async fn escalation(control: &mut tokio::sync::watch::Receiver<ServerControl>, watching: bool) {
     match watching {
         true => awaited_abort(control).await,
@@ -301,18 +369,20 @@ fn cancel_commanded(reading: &CommittedStopReading) -> bool {
     reading.commanded && reading.forced_at.is_some()
 }
 
-/// Say that application code is still running, once, before anything settles.
+/// Say that a pending callback was dropped at its deadline, once, before
+/// anything settles.
 ///
 /// The fields are closed and carry no identity: which callback it was is the
 /// application's to know, and a request path or an owner identifier would make
 /// this a per-connection diagnostic rather than the one fact Camber can honestly
-/// state — that it stopped waiting and did not stop the callback.
-fn report_outstanding(cause: WsCloseCause, shutdown: CallbackShutdown) {
+/// state — that the callback did not finish within its grace and its future was
+/// dropped.
+fn report_cancelled(cause: WsCloseCause, shutdown: CallbackShutdown) {
     tracing::warn!(
-        name: "camber.websocket.callback.outstanding",
-        disposition = CallbackDisposition::OutstandingAfterForcedGrace.label(),
+        name: "camber.websocket.callback.cancelled",
+        disposition = CallbackDisposition::Cancelled.label(),
         cause = %cause,
         shutdown = optional_label(shutdown, ShutdownObservation::label),
-        "WebSocket callback outstanding after its forced join grace"
+        "WebSocket callback cancelled at its settlement deadline"
     );
 }

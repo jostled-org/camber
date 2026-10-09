@@ -259,14 +259,14 @@ pub enum UpgradeOwnerEdge {
     /// response. A hold at [`Self::BeforeTransferAcknowledge`] is upstream of
     /// the transfer, so it can prove nothing about it.
     AfterTransferRecorded,
-    /// The bridge has closed its callback's endpoints and fixed the one join
-    /// deadline, and has not started waiting on the callback yet.
+    /// The bridge has closed its callback's endpoints and fixed the one
+    /// settlement deadline, and has not started settling the callback yet.
     ///
     /// The only edge from which a later server transition can be released into
     /// a deadline that is already fixed. A hold before the endpoint close would
     /// change which row of the table the deadline came from; a hold after the
     /// wait began would arrive too late to be a later transition at all.
-    BeforeCallbackJoin,
+    BeforeCallbackSettle,
     /// The upgraded transport's peer closed its half.
     PeerClosed,
 }
@@ -1343,7 +1343,7 @@ pub struct OperationObservation {
 /// queue, polls transport, releases a permit, or chooses a cause.
 #[cfg(feature = "ws")]
 #[derive(Default)]
-struct WebSocketDirectionObservations {
+pub(in crate::http) struct WebSocketDirectionObservations {
     outbound_capacity: AtomicUsize,
     inbound_capacity: AtomicUsize,
     /// Set-once, exactly as the bridge's own terminal state is: a controller
@@ -1366,13 +1366,20 @@ struct WebSocketDirectionObservations {
     inbound_admitted: AtomicUsize,
     inbound_settled: AtomicBool,
     outbound_settled: AtomicBool,
+    pub(in crate::http) outbound_write_pending: AtomicBool,
+    pub(in crate::http) outbound_close_pending: AtomicBool,
+    /// Woken when either pending flag above is set.
+    ///
+    /// The flags are set from inside a transport poll, so a case waiting for
+    /// one has no other edge to wait on and would otherwise spin on the read.
+    transport_pending: tokio::sync::Notify,
     /// Admitted outbound frames the bridge's terminal disposition cancelled.
     ///
     /// Counted where the bridge drops them, so a drain row reports zero and a
     /// cancel row reports what a successful `send` never put on the wire.
     outbound_cancelled: AtomicUsize,
     permit_released: AtomicBool,
-    /// How every retained callback on this listener was disposed of.
+    /// How every inline callback on this listener was disposed of.
     ///
     /// A list rather than one slot, because a listener serves many bridges and
     /// a case reading only the last would report the one that happened to
@@ -1380,14 +1387,15 @@ struct WebSocketDirectionObservations {
     callbacks: Mutex<Vec<WebSocketCallbackObservation>>,
 }
 
-/// One decision a direct bridge published about the callback it retained.
+/// One decision a direct bridge published about the callback it owns.
 ///
 /// Three moments reach this record and no others: the endpoint close that fixes
-/// the join deadline, a later transition that brings that deadline forward, and
-/// the disposition the join ended at. Every value is written by the production
-/// decision it names — nothing here waits, joins, moves a deadline, or chooses
-/// a disposition — and appending rather than overwriting is what lets a case
-/// read the whole history and say the deadline never moved later.
+/// the settlement deadline, a later transition that brings that deadline
+/// forward, and the disposition settlement ended at. Every value is written by
+/// the production decision it names — nothing here waits, settles, moves a
+/// deadline, or chooses a disposition — and appending rather than overwriting
+/// is what lets a case read the whole history and say the deadline never moved
+/// later.
 #[cfg(feature = "ws")]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1405,19 +1413,21 @@ pub struct WebSocketCallbackObservation {
     /// The transition committed when the bridge closed the callback's
     /// endpoints: `none`, `graceful`, `cancelled`, or `deadline-expired`.
     pub entered: &'static str,
-    /// The instant the bridge closed the endpoints a blocked callback wakes on.
+    /// The instant the bridge closed the endpoints a pending callback wakes on.
     pub endpoints_closed_at: tokio::time::Instant,
-    /// The join deadline as it stood when this record was published.
+    /// The settlement deadline as it stood when this record was published.
     pub deadline: tokio::time::Instant,
-    /// How the join ended, or `None` at every record published before it did.
+    /// How settlement ended, or `None` at every record published before it did.
     ///
-    /// `completed` or `outstanding-after-forced-grace`.
+    /// `completed`, once the callback returned or unwound and its future was
+    /// dropped, or `cancelled`, once the bridge dropped a callback still
+    /// pending at its deadline.
     pub disposition: Option<&'static str>,
     /// The transition the disposition reported, or `None` before it.
     ///
     /// `none`, `graceful`, `cancelled`, or `deadline-expired`. Distinct from
     /// [`Self::entered`] for exactly one entry — a local terminal reports
-    /// whatever the server committed while the join was waiting.
+    /// whatever the server committed while settlement was waiting.
     pub shutdown: Option<&'static str>,
 }
 
@@ -1441,6 +1451,10 @@ pub struct WebSocketDirectionObservation {
     pub inbound_admitted: usize,
     pub inbound_settled: bool,
     pub outbound_settled: bool,
+    /// The framed sink returned Pending while flushing an admitted message.
+    pub outbound_write_pending: bool,
+    /// The framed sink returned Pending while closing after a local terminal.
+    pub outbound_close_pending: bool,
     pub outbound_cancelled: usize,
     pub permit_released: bool,
 }
@@ -1761,6 +1775,21 @@ impl LifecycleScript {
     pub(in crate::http) fn count_ws_inbound_admitted(script: Option<&Self>) {
         Self::observe_ws(script, |websocket| {
             websocket.inbound_admitted.fetch_add(1, Ordering::Release);
+        });
+    }
+
+    /// Record an actual pending transport poll without changing its result.
+    ///
+    /// `flag` names which poll it was: a backpressured write, or a close after
+    /// the terminal has committed.
+    #[cfg(feature = "ws")]
+    pub(in crate::http) fn observe_ws_transport_pending(
+        script: Option<&Self>,
+        flag: impl FnOnce(&WebSocketDirectionObservations) -> &AtomicBool,
+    ) {
+        Self::observe_ws(script, |websocket| {
+            flag(websocket).store(true, Ordering::Release);
+            websocket.transport_pending.notify_waiters();
         });
     }
 
@@ -2214,6 +2243,27 @@ impl LifecycleScript {
         MultipartObservation::of(self.multipart(), None, None)
     }
 
+    /// Wait until `flag` reads set, woken by the setter rather than by polling.
+    ///
+    /// The waiter is registered before the read, so a set landing between the
+    /// two still wakes it.
+    #[cfg(feature = "ws")]
+    async fn websocket_transport_pending(
+        &self,
+        flag: impl Fn(&WebSocketDirectionObservations) -> &AtomicBool,
+    ) {
+        let websocket = &self.websocket;
+        loop {
+            let notified = websocket.transport_pending.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            if flag(websocket).load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Stated once here rather than at each controller that reads it, so the
     /// broad observer and the narrow terminal owner cannot answer differently
     /// about one bridge.
@@ -2229,6 +2279,8 @@ impl LifecycleScript {
             inbound_settled: websocket.inbound_settled.load(Ordering::Acquire),
             outbound_settled: websocket.outbound_settled.load(Ordering::Acquire),
             outbound_cancelled: websocket.outbound_cancelled.load(Ordering::Acquire),
+            outbound_write_pending: websocket.outbound_write_pending.load(Ordering::Acquire),
+            outbound_close_pending: websocket.outbound_close_pending.load(Ordering::Acquire),
             permit_released: websocket.permit_released.load(Ordering::Acquire),
         }
     }
@@ -4036,13 +4088,13 @@ owner_local_controller!(
 #[cfg(feature = "ws")]
 impl UpgradeOwnerController {
     /// What this listener's upgrade children decided about the callbacks they
-    /// retained, in the order those decisions were published.
+    /// settled, in the order those decisions were published.
     ///
-    /// Owner-local and read-only: the retained callback is the upgrade's own
+    /// Owner-local and read-only: the inline callback is the upgrade's own
     /// child, so the deadline it fixed, every transition that brought that
-    /// deadline forward, and the disposition its join ended at are all this
-    /// owner's facts. Nothing here joins a callback, moves a deadline, or names
-    /// a disposition.
+    /// deadline forward, and the disposition its settlement ended at are all
+    /// this owner's facts. Nothing here settles a callback, moves a deadline,
+    /// or names a disposition.
     pub fn callbacks(&self) -> Box<[WebSocketCallbackObservation]> {
         self.script
             .websocket
@@ -4111,6 +4163,20 @@ impl WebSocketTerminalController {
     /// What this listener's direct bridges have committed and settled so far.
     pub fn observed(&self) -> WebSocketDirectionObservation {
         self.script.websocket_observed()
+    }
+
+    /// Wait until a bridge on this listener finds its transport write pending.
+    pub async fn outbound_write_pending(&self) {
+        self.script
+            .websocket_transport_pending(|websocket| &websocket.outbound_write_pending)
+            .await;
+    }
+
+    /// Wait until a bridge on this listener finds its transport close pending.
+    pub async fn outbound_close_pending(&self) {
+        self.script
+            .websocket_transport_pending(|websocket| &websocket.outbound_close_pending)
+            .await;
     }
 }
 

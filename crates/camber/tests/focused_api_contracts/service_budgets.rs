@@ -1216,11 +1216,14 @@ const PUBLISHED_CONTRACTS: [(&str, &str); 13] = [
         "context synchronously, before it returns",
     ),
     (RUNTIME_REFERENCE, "One aggregate shutdown deadline"),
-    (RUNTIME_REFERENCE, "abandoned synchronous callback"),
+    (
+        RUNTIME_REFERENCE,
+        "drop a callback whose poll or destructor blocks its thread",
+    ),
     (RUNTIME_REFERENCE, "Cooperative cancellation cannot"),
     (
         ERROR_REFERENCE,
-        "abandoned synchronous callback has returned",
+        "cannot drop a callback whose poll or destructor blocks its thread",
     ),
 ];
 

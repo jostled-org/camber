@@ -19,21 +19,23 @@ use super::super::body::HyperResponseBody;
 use super::super::mock::{
     ConnectionOwnerEdge, LifecycleScript, WebSocketDirectionEdge, WebSocketTerminalEdge,
 };
-use super::super::router::WsHandler;
+use super::super::router::WsLauncher;
 use super::super::server_lifecycle::{ConnectionLifecycle, ConnectionPermit, ServerControl};
 use super::super::server_stop::{ServerStopState, StopPhase};
 use super::super::websocket::{
     TerminalState, WsCloseCause, WsConn, WsMessage, WsReceiver, WsSender,
 };
-use super::callback::{CallbackDeadline, settle_callback};
+use super::bridge_input::WsBridgeInput;
+use super::callback::{CallbackDeadline, run_beside, settle_callback};
 use super::framing::{
     WsError, WsFrameMessage, close_transport, drain_until_close, flush_transport, next_control,
     next_frame, send_close, shutdown_client_transport, until_abort,
 };
 use super::handoff::{WsHandoffOutcome, WsRefusal, prepare_ws_handoff};
 use super::handshake::WsUpgrade;
-use super::ownership::{BridgeAttachment, ClientWs, open_bridge};
+use super::ownership::{BridgeStart, CallbackContext, ClientWs, open_bridge, spawn_gated_bridge};
 use futures_util::stream::{SplitSink, SplitStream};
+use std::future::Future;
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -49,11 +51,28 @@ pub(in crate::http) enum WsDirection {
     Outbound,
 }
 
-/// Admit the client's offer, select its first protocol, spawn background
-/// work, return 101.
+/// Build the shared launch a `Router::ws` registration stores.
+///
+/// Only this closure is erased. The callback factory and the future it returns
+/// keep their concrete types inside it and inside the bridge future each launch
+/// builds, so the connection receives one concrete `GatedBridge` and no erased
+/// callback future.
+pub(in crate::http) fn direct_ws_launcher<H, Fut>(handler: H) -> WsLauncher
+where
+    H: Fn(&Request, WsConn) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), crate::error::RuntimeError>> + Send + 'static,
+{
+    let handler = Arc::new(handler);
+    Arc::new(move |input: WsBridgeInput, start: BridgeStart| {
+        spawn_gated_bridge(start, bridge_ws_handler(input, Arc::clone(&handler)))
+    })
+}
+
+/// Admit the client's offer, select its first protocol, launch the registered
+/// bridge behind its gate, return 101.
 pub(in crate::http) async fn handle_ws_upgrade(
     ws_upgrade: WsUpgrade,
-    handler: WsHandler,
+    launch: WsLauncher,
     req: Request,
     buffer_size: usize,
     lifecycle: &ConnectionLifecycle,
@@ -68,16 +87,16 @@ pub(in crate::http) async fn handle_ws_upgrade(
     // every serving entry point now carries alike.
     let script = lifecycle.script();
     prepared
-        .register(lifecycle, move |on_upgrade, permit, attachment| {
-            bridge_ws_handler(
+        .register(lifecycle, move |on_upgrade, permit, attachment, start| {
+            let input = WsBridgeInput {
                 on_upgrade,
-                handler,
                 req,
                 buffer_size,
                 attachment,
                 script,
                 permit,
-            )
+            };
+            launch(input, start)
         })
         .await
 }
@@ -133,24 +152,30 @@ async fn direct_queues(
     (queues, conn)
 }
 
-async fn bridge_ws_handler(
-    on_upgrade: hyper::upgrade::OnUpgrade,
-    handler: WsHandler,
-    req: Request,
-    buffer_size: usize,
-    attachment: BridgeAttachment,
-    script: Option<Arc<LifecycleScript>>,
-    permit: Arc<ConnectionPermit>,
-) {
-    // Read before the attachment is spent on opening the bridge: what a
-    // callback may admit is decided by which server owns this connection, and
-    // the attachment is what says. The stop state travels for the same reason
-    // and is read at one moment only — the endpoint close that fixes the
-    // retained callback's join deadline.
-    let authority = attachment.callback_runtime();
-    let stop = attachment.callback_stop();
-    let owner = attachment.callback_owner();
-    let opened = open_bridge(on_upgrade, attachment, "WebSocket client upgrade failed").await;
+async fn bridge_ws_handler<H, Fut>(input: WsBridgeInput, handler: Arc<H>)
+where
+    H: Fn(&Request, WsConn) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), crate::error::RuntimeError>> + Send + 'static,
+{
+    let WsBridgeInput {
+        on_upgrade,
+        req,
+        buffer_size,
+        attachment,
+        script,
+        permit,
+    } = input;
+    // Taken before the opening is spent: what a callback may admit is decided
+    // by which server owns this connection, and the attachment is what says.
+    // The stop state travels for the same reason and is read at one moment
+    // only — the endpoint close that fixes the callback's settlement deadline.
+    let (opening, callback_context) = attachment.into_parts();
+    let CallbackContext {
+        runtime: authority,
+        stop,
+        owner,
+    } = callback_context;
+    let opened = open_bridge(on_upgrade, opening, "WebSocket client upgrade failed").await;
     let (mut control, stream) = match opened {
         Some(opened) => opened,
         None => {
@@ -160,40 +185,50 @@ async fn bridge_ws_handler(
     };
     let terminal = Arc::new(TerminalState::default());
     let (queues, conn) = direct_queues(buffer_size, &terminal, script.as_deref()).await;
-    // Retained, not detached. This handle is the whole of the callback's place
-    // in the owner tree: the bridge task is the connection's upgrade child, so
-    // holding the callback here is what puts it beneath that child rather than
-    // beside every task the runtime happens to be carrying.
-    let callback = tokio::task::spawn_blocking(move || {
-        run_ws_callback(&handler, &req, conn, authority);
-    });
-    let mut bridged = run_direct_bridge(
-        &mut control,
+    // Owned here, inline, not spawned. This future is the whole of the
+    // callback's place in the owner tree: the bridge task is the connection's
+    // upgrade child, so holding the callback on its stack is what puts it
+    // beneath that child, and dropping the bridge drops the callback with it.
+    let mut callback = std::pin::pin!(Some(run_ws_callback(handler, req, conn, authority)));
+    let mut bridge = direct_bridge(
         stream,
         queues,
         &terminal,
         stop.as_deref(),
         owner,
         script.as_deref(),
-    )
-    .await;
-    match bridged.transport {
-        Some(mut stream) => shutdown_client_transport(&mut stream).await,
-        None => {}
-    }
-    // Before the permit, and so before this task returns to the upgrade owner
-    // that joins it: an upgrade cannot settle while the callback it started is
-    // neither joined nor named.
-    settle_callback(
-        callback,
-        &mut bridged.deadline,
-        stop.as_deref(),
-        &mut control,
-        script.as_deref(),
-    )
-    .await;
+    );
+    let (cause, mut deadline) = run_beside(callback.as_mut(), bridge.run(&mut control)).await;
+    let mut callback_control = control.clone();
+    // Callback settlement starts before transport cleanup can wait on the peer.
+    // Both finish before permit release and upgrade completion.
+    tokio::join!(
+        bridge.finish(cause, &mut control),
+        settle_callback(
+            callback,
+            &mut deadline,
+            stop.as_deref(),
+            &mut callback_control,
+            script.as_deref(),
+        ),
+    );
     release_permit(permit, script.as_deref());
 }
+
+/// Shut down the transport a direct bridge put back together.
+///
+/// Halves that would not reunite were never one pair, which is a bridge defect
+/// rather than a peer event, so it is reported. Dropping both halves with the
+/// error still closes the socket the shutdown would have.
+async fn shutdown_bridged_transport(transport: Result<ClientWs, ClientWsReuniteError>) {
+    match transport {
+        Ok(mut stream) => shutdown_client_transport(&mut stream).await,
+        Err(error) => tracing::error!(%error, "WebSocket transport halves did not reunite"),
+    }
+}
+
+/// The halves [`DirectBridge::into_transport`] could not put back together.
+type ClientWsReuniteError = futures_util::stream::ReuniteError<ClientWs, WsFrameMessage>;
 
 /// Give this connection's slot back, then say that it is back.
 ///
@@ -208,33 +243,44 @@ fn release_permit(permit: Arc<ConnectionPermit>, script: Option<&LifecycleScript
     LifecycleScript::observe_ws_permit_released(script);
 }
 
-/// Run one blocking `Router::ws` callback under the runtime authority its
-/// serving connection captured.
+/// Run one `Router::ws` callback under the runtime authority its serving
+/// connection captured.
 ///
-/// The guard is scoped to this call alone. A blocking worker is reused, so a
-/// context left behind would hand the next unrelated body a runtime it was
-/// never served under; the guard restores the thread's own context whether the
-/// callback returns or unwinds. The callback is not admitted to that runtime's
-/// root scope — it is given the authority to admit work, not made work itself,
-/// which is what keeps server completion from claiming a callback has exited.
+/// The factory is called and its future polled inside that carried context,
+/// which follows the future across workers and suspensions rather than staying
+/// on whichever thread first polled it. The callback is not admitted to that
+/// runtime's root scope — it is given the authority to admit work, not made
+/// work itself, which is what keeps server completion from claiming a callback
+/// has exited. The request and the factory are released once the future
+/// exists; what the future needs from them it has already taken.
 ///
-/// The panic is reported here rather than carried back through the join. The
-/// upgrade owner joins this task to learn that application code stopped
-/// running, not to learn why, and a callback that unwound has already stopped —
-/// so it settles as the cooperative return it is, and the fault is recorded
-/// where it happened.
-fn run_ws_callback(
-    handler: &WsHandler,
-    req: &Request,
+/// A panic is reported here, from the factory or from any poll, rather than
+/// carried out. The bridge drives this future to learn that application code
+/// stopped, not why, and a callback that unwound has already stopped — so it
+/// completes as the return it is, and the fault is recorded where it happened.
+async fn run_ws_callback<H, Fut>(
+    handler: Arc<H>,
+    req: Request,
     conn: WsConn,
     authority: Option<Arc<crate::runtime_state::RuntimeInner>>,
-) {
-    let _authority = crate::runtime_state::install_carried_runtime(authority);
-    match crate::task::catch_panic(move || handler(req, conn)) {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => report_callback_error(&error),
-        Err(error) => tracing::error!(%error, "WebSocket handler panicked"),
-    }
+) where
+    H: Fn(&Request, WsConn) -> Fut,
+    Fut: Future<Output = Result<(), crate::error::RuntimeError>>,
+{
+    crate::runtime_state::carry_runtime(authority, async move {
+        let started = crate::task::catch_panic(|| handler(&req, conn));
+        drop((req, handler));
+        let outcome = match started {
+            Ok(callback) => crate::task::catch_panic_async(callback).await,
+            Err(panic) => Err(panic),
+        };
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => report_callback_error(&error),
+            Err(error) => tracing::error!(%error, "WebSocket handler panicked"),
+        }
+    })
+    .await;
 }
 
 /// Record one callback's returned error at the level that error deserves.
@@ -257,30 +303,18 @@ fn report_callback_error(error: &crate::error::RuntimeError) {
     }
 }
 
-/// What one direct bridge leaves behind when its terminal has been applied.
-///
-/// The transport is `None` when the two halves could not be put back together,
-/// which leaves nothing to shut down: dropping both closes the same socket the
-/// shutdown would have. The deadline is always present, because every bridge
-/// that ran closed its callback's endpoints on the way out.
-struct BridgedDirect {
-    transport: Option<ClientWs>,
-    deadline: CallbackDeadline,
-}
-
-/// Run one direct bridge to its terminal cause and hand back what settles next.
-async fn run_direct_bridge(
-    control: &mut tokio::sync::watch::Receiver<ServerControl>,
+/// Build the two pumps under their shared terminal owner.
+fn direct_bridge<'a>(
     stream: ClientWs,
     queues: DirectQueues,
-    terminal: &TerminalState,
-    stop: Option<&ServerStopState>,
+    terminal: &'a TerminalState,
+    stop: Option<&'a ServerStopState>,
     owner: super::super::server_lifecycle::UpgradeIdentity,
-    script: Option<&LifecycleScript>,
-) -> BridgedDirect {
+    script: Option<&'a LifecycleScript>,
+) -> DirectBridge<'a> {
     use futures_util::StreamExt;
     let (sink, source) = stream.split();
-    let mut bridge = DirectBridge {
+    DirectBridge {
         inbound: InboundPump {
             source,
             frames: Some(queues.inbound.clone()),
@@ -298,11 +332,6 @@ async fn run_direct_bridge(
         stop,
         owner,
         script,
-    };
-    let deadline = bridge.run(control).await;
-    BridgedDirect {
-        transport: bridge.into_transport(),
-        deadline,
     }
 }
 
@@ -317,7 +346,7 @@ struct DirectBridge<'a> {
     /// connection. This clone is what makes that event visible to the
     /// coordinator without asking the pump.
     ///
-    /// Optional because the settlement releases it: this and the pump's own
+    /// Optional because the endpoint close releases it: this and the pump's own
     /// producer are the receive queue's only two, and letting both go is the
     /// whole of what wakes a receive owner parked on this connection.
     receive_owner: Option<tokio::sync::mpsc::Sender<WsMessage>>,
@@ -329,10 +358,11 @@ struct DirectBridge<'a> {
     send_owners: tokio::sync::mpsc::WeakSender<WsMessage>,
     terminal: &'a TerminalState,
     /// The causal stop state this bridge's cause is committed against, and the
-    /// retained callback's join deadline is fixed from.
+    /// callback's settlement deadline is fixed from.
     ///
     /// Read at two moments and never written: the commit that fixes this
-    /// connection's cause, and the endpoint close that fixes the join deadline.
+    /// connection's cause, and the endpoint close that fixes the settlement
+    /// deadline.
     /// A bridge with no supervisor over it carries `None` and reads it as a
     /// server that has asked for nothing.
     stop: Option<&'a ServerStopState>,
@@ -346,15 +376,12 @@ struct DirectBridge<'a> {
 }
 
 impl DirectBridge<'_> {
-    /// Fix this connection's one cause, then apply what that cause decides.
-    ///
-    /// Answers with the deadline the retained callback settles against, because
-    /// this is the only owner that knows what fixes it: the cause it committed,
-    /// and the instant its settlement closed the callback's endpoints.
+    /// Commit the terminal cause and close the application endpoints.
+    /// Return the callback deadline before waiting on transport cleanup.
     async fn run(
         &mut self,
         control: &mut tokio::sync::watch::Receiver<ServerControl>,
-    ) -> CallbackDeadline {
+    ) -> (WsCloseCause, CallbackDeadline) {
         let offered = self.first_answer(control).await;
         LifecycleScript::pause_at_ws_terminal(self.script, WebSocketTerminalEdge::BeforeCommit)
             .await;
@@ -362,7 +389,7 @@ impl DirectBridge<'_> {
         LifecycleScript::observe_ws_terminal(self.script, cause);
         LifecycleScript::pause_at_ws_terminal(self.script, WebSocketTerminalEdge::AfterCommit)
             .await;
-        self.settle(cause, control).await
+        (cause, self.close_endpoints(cause))
     }
 
     /// The first terminal answer any of this connection's owners gives.
@@ -423,59 +450,45 @@ impl DirectBridge<'_> {
         }
     }
 
-    /// Apply one cause's queue disposition and protocol close to both
-    /// directions.
-    ///
-    /// Both directions' admission closes first, so every application half
-    /// waiting on this connection is woken by a queue whose cause is already
-    /// fixed rather than at the end of a teardown it has no part in. The
-    /// outbound side settles next, so a drained frame reaches the peer ahead of
-    /// the close it was admitted before.
-    ///
-    /// Both steps that write to or wait on the peer are bounded by the server's
-    /// own control watch. A settlement is the answer to the cause this bridge
-    /// committed, and while it runs the server may ask for something stronger;
-    /// a settlement that could not hear that would hold the connection past the
-    /// abort already published to it. The two published settlements sit outside
-    /// that bound, because an interrupted step is still this bridge letting its
-    /// direction go.
-    /// The retained callback's join deadline is fixed the moment both of those
-    /// closes have happened, and answered here. Fixed there rather than where
-    /// the join waits, so a teardown step between the two spends the grace
-    /// instead of extending it, and so the phase it reads is the one this
-    /// bridge woke its callback under.
-    async fn settle(
-        &mut self,
-        cause: WsCloseCause,
-        control: &mut tokio::sync::watch::Receiver<ServerControl>,
-    ) -> CallbackDeadline {
+    /// Close application admission and fix the callback deadline before any
+    /// transport wait. The caller starts callback settlement immediately.
+    fn close_endpoints(&mut self, cause: WsCloseCause) -> CallbackDeadline {
         self.outbound.close_admission();
         self.close_receive_queue();
-        let deadline = CallbackDeadline::fixed(
+        CallbackDeadline::fixed(
             cause,
             self.owner,
             tokio::time::Instant::now(),
             self.stop,
             self.script,
-        );
+        )
+    }
+
+    /// Settle both transport directions while the callback spends its fixed
+    /// deadline independently. Server abort still bounds every peer wait.
+    async fn finish(
+        mut self,
+        cause: WsCloseCause,
+        control: &mut tokio::sync::watch::Receiver<ServerControl>,
+    ) {
         self.outbound
             .apply(outbound_disposition(cause), control)
             .await;
         LifecycleScript::observe_ws_pump_settled(self.script, self.outbound.direction());
         until_abort(control, self.owed_close(cause)).await;
         LifecycleScript::observe_ws_pump_settled(self.script, self.inbound.direction());
-        deadline
+        shutdown_bridged_transport(self.into_transport()).await;
     }
 
     /// Release both producers for the receive queue, and wake whoever is
     /// waiting on it.
     ///
     /// Closing that queue is the only thing that reaches a receive owner parked
-    /// in a blocking receive: it reads this connection's cause once and then
+    /// in a pending receive: it reads this connection's cause once and then
     /// waits on the queue, so a cause published after the wait is one it cannot
     /// see. Done where send admission closes, rather than after the peer-facing
     /// teardown, because a peer that never answers its close would otherwise
-    /// hold an application thread on a connection that has already ended.
+    /// hold an application receive on a connection that has already ended.
     ///
     /// Nothing admits to the queue from here on — the inbound pump's future is
     /// dropped the moment the coordinator answers — so this is the wake and
@@ -508,7 +521,13 @@ impl DirectBridge<'_> {
             }
             WsCloseCause::PeerClosed => flush_transport(&mut self.outbound.sink).await,
             WsCloseCause::ReceiverDropped | WsCloseCause::SendersDropped => {
-                close_transport(&mut self.outbound.sink).await;
+                let close = close_transport(&mut self.outbound.sink);
+                observe_pending(close, || {
+                    LifecycleScript::observe_ws_transport_pending(self.script, |websocket| {
+                        &websocket.outbound_close_pending
+                    })
+                })
+                .await;
             }
         }
     }
@@ -516,11 +535,11 @@ impl DirectBridge<'_> {
     /// Put the two halves of this bridge's transport back together.
     ///
     /// Consuming, because reuniting spends both halves. Both producers for the
-    /// receive queue are already gone by here — the settlement releases them
-    /// where it closes send admission — so nothing a blocked application half
-    /// waits on is left for this step to do.
-    fn into_transport(self) -> Option<ClientWs> {
-        self.outbound.sink.reunite(self.inbound.source).ok()
+    /// receive queue are already gone by here — the endpoint close releases
+    /// them where it closes send admission — so nothing a pending application
+    /// half waits on is left for this step to do.
+    fn into_transport(self) -> Result<ClientWs, ClientWsReuniteError> {
+        self.outbound.sink.reunite(self.inbound.source)
     }
 }
 
@@ -528,8 +547,8 @@ impl DirectBridge<'_> {
 /// sent to.
 ///
 /// A producer already released answers nothing, because there is nothing left
-/// to answer for: the coordinator releases both of them at settlement, and by
-/// then this connection's cause is fixed and no race is running.
+/// to answer for: the coordinator releases both of them at the endpoint close,
+/// and by then this connection's cause is fixed and no race is running.
 ///
 /// A receive owner that left ends the connection, but only while the
 /// application could still be sending into it. When the last send handle has
@@ -786,7 +805,12 @@ impl OutboundPump<'_> {
             Some(message) => self.hand_over(message).await?,
             None => {}
         }
-        self.sink.flush().await
+        observe_pending(self.sink.flush(), || {
+            LifecycleScript::observe_ws_transport_pending(self.script, |websocket| {
+                &websocket.outbound_write_pending
+            })
+        })
+        .await
     }
 
     /// Build one admitted message's transport frame and give it to the sink.
@@ -856,4 +880,17 @@ fn write_outcome(result: Result<(), WsError>) -> ControlFlow<WsCloseCause> {
             ControlFlow::Break(WsCloseCause::PeerDisconnected)
         }
     }
+}
+
+/// Observe real Pending polls without replacing the transport's answer or wake.
+async fn observe_pending<F: Future>(future: F, pending: impl Fn()) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        let polled = future.as_mut().poll(cx);
+        if polled.is_pending() {
+            pending();
+        }
+        polled
+    })
+    .await
 }

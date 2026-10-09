@@ -24,6 +24,9 @@ pub mod temp_support;
 #[path = "support/tls.rs"]
 pub mod tls_support;
 
+#[cfg(feature = "ws")]
+#[path = "focused_api_contracts/async_websocket_api.rs"]
+mod async_websocket_api;
 #[path = "focused_api_contracts/body_admission.rs"]
 mod body_admission;
 #[path = "focused_api_contracts/certificate_management.rs"]
@@ -56,10 +59,15 @@ mod integration_sqs_cutover;
 #[path = "focused_api_contracts/local_integration_delivery.rs"]
 mod local_integration_delivery;
 #[cfg(feature = "nats")]
+#[path = "focused_api_contracts/nats_ack_identity.rs"]
+mod nats_ack_identity;
+#[cfg(feature = "nats")]
 #[path = "focused_api_contracts/nats_acknowledged_api.rs"]
 mod nats_acknowledged_api;
 #[path = "focused_api_contracts/owned_server_api.rs"]
 mod owned_server_api;
+#[path = "focused_api_contracts/probes.rs"]
+mod probes;
 #[path = "focused_api_contracts/public_trait_contracts.rs"]
 mod public_trait_contracts;
 #[path = "focused_api_contracts/published_compatibility.rs"]

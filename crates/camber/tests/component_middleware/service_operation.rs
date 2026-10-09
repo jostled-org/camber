@@ -317,10 +317,19 @@ fn gated_upstream_router(work: &Arc<Work>) -> Router {
 #[cfg(feature = "ws")]
 fn register_upstream_upgrade(upstream: &mut Router, work: &Arc<Work>) {
     let entered = Arc::clone(work);
-    upstream.ws("/ws", move |_req: &Request, _conn: camber::http::WsConn| {
-        entered.enter_gated();
-        Ok(())
+    upstream.ws("/ws", move |_req: &Request, conn: camber::http::WsConn| {
+        gated_upgrade(Arc::clone(&entered), conn)
     });
+}
+
+/// One gated upgrade owner, direct or upstream of the proxied class.
+///
+/// The owner records its entry, then returns. The connection drops when the
+/// owner returns, so the entry is always recorded first.
+#[cfg(feature = "ws")]
+async fn gated_upgrade(work: Arc<Work>, _conn: camber::http::WsConn) -> Result<(), RuntimeError> {
+    work.enter_gated();
+    Ok(())
 }
 
 /// Without the feature, no upgrade class is served and none is registered.
@@ -405,10 +414,7 @@ fn register_upgrades(router: &mut Router, work: &Arc<Work>, backend: &str) {
     let entered = Arc::clone(work);
     router.ws(
         WS_PATH,
-        move |_req: &Request, _conn: camber::http::WsConn| {
-            entered.enter_gated();
-            Ok(())
-        },
+        move |_req: &Request, conn: camber::http::WsConn| gated_upgrade(Arc::clone(&entered), conn),
     );
     router.proxy("/wsproxy", backend);
 }

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(new)* The `advanced` template's WebSocket echo route uses the async
+  `Router::ws` callback and awaits each receive and send.
+- *(context)* `camber context` writes a WebSocket section to `llms.txt`. It
+  shows async callbacks, `split`, and the queue-admission, cancellation,
+  timeout, and filtering rules. Its import block names `WsConn`, `WsMessage`,
+  and `WsReceive`.
+
+### Fixed
+
+- *(new, context)* `camber new` and `camber context` return an I/O error when
+  stdout cannot be written. Before, they panicked.
+
 ## [0.9.0](https://github.com/jostled-org/camber/compare/camber-cli-v0.8.5...camber-cli-v0.9.0) - 2026-10-06
 
 ### Added

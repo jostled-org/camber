@@ -39,7 +39,7 @@ pub fn block_on_detached<F: Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap()
+        .expect("build the detached current-thread runtime")
         .block_on(future)
 }
 

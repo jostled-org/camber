@@ -6,7 +6,7 @@
 
 use camber::mq::sqs::SqsBuilder;
 
-use crate::integration_api::assert_send;
+use crate::probes::assert_send;
 
 #[test]
 fn sqs_public_cutover_contract_exists() {

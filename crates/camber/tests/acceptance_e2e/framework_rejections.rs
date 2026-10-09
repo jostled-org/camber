@@ -388,7 +388,9 @@ fn specialized_routes(router: &mut Router) {
         EVENTS,
         |_req: &Request, _writer: &mut camber::http::SseWriter| Ok(()),
     );
-    router.ws(SOCKET, |_req: &Request, _ws: camber::http::WsConn| Ok(()));
+    router.ws(SOCKET, |_req: &Request, _ws: camber::http::WsConn| async {
+        Ok(())
+    });
     // The upstream is never dialled: the gate refuses first, which is the whole
     // claim. Pointing it at a closed port keeps that true even if it were.
     router.proxy_stream(PROXIED, "http://127.0.0.1:1");
@@ -1388,7 +1390,9 @@ fn register_outcome_routes(router: &mut Router) {
             std::future::ready(Err::<Response, RuntimeError>(common::two_level_failure()))
         });
     }
-    router.ws(METRICS_SOCKET_PATH, |_req: &Request, _ws: WsConn| Ok(()));
+    router.ws(METRICS_SOCKET_PATH, |_req: &Request, _ws: WsConn| async {
+        Ok(())
+    });
 }
 
 /// A table with no rows would drive no journey and still report success.

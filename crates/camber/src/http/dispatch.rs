@@ -13,7 +13,7 @@ use super::stream::StreamResponse;
 pub(super) use super::trie::Handler;
 pub(super) use super::trie::SseHandler;
 #[cfg(feature = "ws")]
-pub(super) use super::trie::WsHandler;
+pub(super) use super::trie::WsLauncher;
 use super::trie::{
     FrozenNode, MultipartRegistration, PATH_SEGMENT_LIMIT, RouteHandler, RouteLookup, Selected,
     split_path_segments,
@@ -284,7 +284,7 @@ pub(super) enum DispatchResult {
     ),
     Sse(SseHandler, Request),
     #[cfg(feature = "ws")]
-    WebSocket(WsHandler, Request),
+    WebSocket(WsLauncher, Request),
     #[cfg(feature = "ws")]
     ProxyWebSocket(Request, Arc<str>, Arc<str>, Arc<ProxyUpstream>),
 }

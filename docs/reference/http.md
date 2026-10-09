@@ -626,18 +626,48 @@ With the `ws` feature, register WebSocket handlers with `router.ws(...)`.
 
 ```rust
 use camber::http::{Request, Router, WsConn};
-use camber::RuntimeError;
 
 let mut router = Router::new();
-router.ws("/chat", |_req: &Request, mut conn: WsConn| -> Result<(), RuntimeError> {
-    while let Some(msg) = conn.recv() {
-        conn.send(&format!("echo: {msg}"))?;
+router.ws("/chat", |_req: &Request, mut conn: WsConn| async move {
+    while let Some(msg) = conn.recv().await {
+        conn.send(&format!("echo: {msg}")).await?;
     }
     Ok(())
 });
 ```
 
-`WsConn` receives with `recv` (text), `recv_binary`, and `recv_message` (the next text or binary message as a `WsMessage`, with ping and pong frames still skipped). Each blocks until a message arrives or the peer closes, and each returns `None` on close. `recv_timeout(duration)` is the bounded form of `recv`: it returns `RuntimeError::Timeout` when no text message or close frame arrives before the deadline. There is no bounded form of `recv_binary` or `recv_message`.
+The handler is an async callback factory. It receives the upgrade request and a
+`WsConn`, and it returns the future that serves the connection. The future must
+be `Send + 'static`. It does not need to be `Sync` or `Unpin`. The factory may
+read the request before it returns. The future cannot borrow `&Request`, so
+anything it needs across an `.await` must move into it as owned data:
+
+```rust
+use camber::http::{Request, Router, WsConn};
+
+let mut router = Router::new();
+router.ws("/rooms/:room", |req: &Request, mut conn: WsConn| {
+    let room = req.param("room").unwrap_or("lobby").to_owned();
+    async move {
+        while let Some(msg) = conn.recv().await {
+            conn.send(&format!("{room}: {msg}")).await?;
+        }
+        Ok(())
+    }
+});
+```
+
+`WsConn` receives with `recv` (text), `recv_binary`, and `recv_message` (the
+next text or binary message as a `WsMessage`, with ping and pong frames still
+skipped). Each is a future that resolves when a message arrives, and each
+resolves to `None` when the connection ends. `recv_timeout(duration)` is the
+bounded form of `recv`. There is no bounded form of `recv_binary` or
+`recv_message` on the facade.
+
+`recv` discards binary messages and `recv_binary` discards text. They discard
+on purpose. If you cancel one of these receives after it discarded a message,
+that message stays discarded. `recv_message` discards nothing, so cancelling it
+loses nothing.
 
 Camber enforces a same-host Origin policy for browser WebSocket upgrades.
 WebSocket upgrades are classified before request-body buffering, so upgrade requests do not hit
@@ -649,6 +679,36 @@ to the WebSocket bridge, which would leave those declared bytes unframed, and th
 go out marked `Connection: close` — the one reply RFC 6455 requires a conforming client to fail the
 handshake over. Every `101` Camber emits carries `Connection: Upgrade`.
 
+### Migrating from synchronous callbacks
+
+WebSocket callbacks and waits are async. This is a breaking change, and there
+is no blocking alternative. To migrate a handler:
+
+1. Return `async move { ... }` from the `router.ws` callback. The block ends in
+   `Ok(())`, as the old body did.
+2. Copy request data out before `async move`. The future cannot hold
+   `&Request`.
+3. Add `.await` to every wait. On `WsSender`: `send`, `send_binary`, and
+   `send_shared_binary`. On `WsReceiver`: `recv` and `recv_timeout`. On
+   `WsConn`: `send`, `send_binary`, `recv`, `recv_timeout`, `recv_binary`, and
+   `recv_message`.
+4. Keep `WsSender::try_send`, `try_send_binary`, and `try_send_shared_binary`,
+   and `WsConn::sender` and `split`, as they are. They do not wait, so they
+   stay synchronous.
+5. Move a sender into async work with `camber::spawn_async`, not into a
+   `camber::spawn` closure. A `camber::spawn` closure cannot await a send.
+6. Do not block the thread inside the callback. Use async I/O. For blocking
+   work, make a channel with `camber::channel::mpsc(1)`, move the sender into
+   a `camber::spawn` closure, and send the result from that closure. In the
+   callback, await `MpscReceiver::recv`. Do not call `JoinHandle::join` in the
+   callback. It blocks the thread.
+
+Current-thread Tokio runtimes now serve WebSockets. A wait no longer returns
+`BlockingInAsyncContext` there. Operators who watched for the WARN event
+`camber.websocket.callback.outstanding` must watch for
+`camber.websocket.callback.cancelled` instead. See
+[Callback settlement](#callback-settlement).
+
 ### Direction ownership
 
 A direct WebSocket has one receive owner and any number of send handles.
@@ -656,41 +716,80 @@ A direct WebSocket has one receive owner and any number of send handles.
 alone. `WsConn::split()` gives up the facade for `(WsSender, WsReceiver)`.
 
 ```rust
-use camber::http::{Request, Router, WsConn, WsReceive};
-use camber::RuntimeError;
+use camber::http::{Request, Router, WsConn, WsMessage, WsReceive};
 
 let mut router = Router::new();
-router.ws("/events", |_req: &Request, conn: WsConn| -> Result<(), RuntimeError> {
+router.ws("/events", |_req: &Request, conn: WsConn| async move {
     let (sender, mut receiver) = conn.split();
     let publisher = sender.clone();
-    camber::spawn(move || publisher.send("welcome"));
+    let welcome = camber::spawn_async(async move { publisher.send("welcome").await });
     loop {
-        match receiver.recv()? {
-            WsReceive::Message(message) => sender.send(&format!("echo: {message:?}"))?,
-            WsReceive::Closed(_cause) => return Ok(()),
+        match receiver.recv().await? {
+            WsReceive::Message(WsMessage::Text(text)) => sender.send(&format!("echo: {text}")).await?,
+            WsReceive::Message(WsMessage::Binary(bytes)) => sender.send_shared_binary(bytes).await?,
+            WsReceive::Closed(_) => return welcome.await?,
         }
     }
 });
 ```
 
 `WsSender` is `Clone + Send + Sync`. `WsReceiver` is `Send`, is not `Clone`, and
-takes `&mut self` on every receive, so one receive runs at a time.
+takes `&mut self` on every receive, so one receive runs at a time. Their futures
+are `Send`, so either half can move into a spawned task.
 
 Both halves keep the connection live. A callback that moves both halves into
 owned application work may return without ending the connection. A callback that
 drops `WsConn`, or that drops the last of its split halves, ends it.
 
+The typed halves report the terminal cause. `WsReceiver::recv` answers
+`WsReceive::Closed(cause)` once the connection ends, and every send after that
+fails with `RuntimeError::WebSocketClosed(cause)`. The `WsConn` facade hides the
+cause: its receives answer `None`, and its sends fail with `Io` of kind
+`BrokenPipe`.
+
 ### Send admission and backpressure
 
 `ws_buffer_size` bounds each direction. Every sender clone enqueues through the
-same outbound queue. `send` returns when the frame enters that queue, not when
+same outbound queue. `send` completes when the frame enters that queue, not when
 its bytes reach the peer — the terminal table below decides whether an admitted
-frame is written or dropped. `try_send` never waits and reports `ChannelFull`
-while the connection is open. Both report `WebSocketClosed(cause)` once it is
-over.
+frame is written or dropped. While the queue is full, `send` waits for a free
+slot. `try_send` never waits and reports `ChannelFull` while the connection is
+open. Both report `WebSocketClosed(cause)` once it is over.
 
 A borrowed binary send copies the slice once, at admission. Cloning a sender
 copies the handle alone; it makes no zero-copy payload claim.
+
+### Cancellation
+
+Every waiting operation is a future, and you can drop one before it completes —
+for example, when another `tokio::select!` branch wins.
+
+- A pending send has admitted nothing. Dropping it drops the payload it was
+  offered and frees its place in line. Nothing enqueues that payload later.
+- A pending typed receive has consumed nothing. Dropping it leaves the message
+  for the next receive, which takes it exactly once. This holds for
+  `WsReceiver::recv`, `WsReceiver::recv_timeout`, and `WsConn::recv_message`.
+- A filtered facade receive (`WsConn::recv`, `recv_binary`, or `recv_timeout`)
+  can discard opposite-kind messages before it is dropped. Cancellation does not
+  restore them.
+
+Once a send completes, the bridge owns the frame. A later terminal cause cannot
+take that success back, and success still does not promise delivery.
+
+### Receive timeouts
+
+`recv_timeout` fixes one Tokio deadline when the future is first polled.
+Re-polling never moves it, and a message the facade skips does not extend it.
+The connection is asked before the clock: a message already queued, or a
+connection that has already ended, answers at once. So a zero `timeout` is an
+immediate check, not a close.
+
+- An expired deadline returns `RuntimeError::Timeout`. The connection stays
+  open, and the next receive can take the next message.
+- A receive that has to wait with no Tokio runtime entered returns
+  `RuntimeError::NoRuntime`. The runtime must enable its time driver.
+
+The untimed waits need no runtime clock.
 
 ### Shared binary payloads
 
@@ -702,10 +801,10 @@ shared pair instead, which takes `Bytes` by value and copies nothing:
 ```rust
 use camber::http::{Bytes, WsSender};
 
-fn broadcast(encoded: Vec<u8>, recipients: &[WsSender]) -> Result<(), camber::RuntimeError> {
+async fn broadcast(encoded: Vec<u8>, recipients: &[WsSender]) -> Result<(), camber::RuntimeError> {
     let payload = Bytes::from(encoded);
     for recipient in recipients {
-        recipient.send_shared_binary(payload.clone())?;
+        recipient.send_shared_binary(payload.clone()).await?;
     }
     Ok(())
 }
@@ -717,16 +816,17 @@ own handle after admission leaves every queued clone valid.
 
 | Operation | Input | Payload cost | Waits |
 |---|---|---|---|
-| `send_binary` | `&[u8]` | one copy per admission | yes |
+| `send_binary` | `&[u8]` | one copy per admission | yes, `.await` |
 | `try_send_binary` | `&[u8]` | one copy per admission | no |
-| `send_shared_binary` | `Bytes` | none — the handle moves | yes |
+| `send_shared_binary` | `Bytes` | none — the handle moves | yes, `.await` |
 | `try_send_shared_binary` | `Bytes` | none — the handle moves | no |
 
 All four report the same results: success means the frame entered this
 connection's bounded queue, `ChannelFull` means a live queue with no free slot,
 and `WebSocketClosed(cause)` means the connection is over. A refused shared send
 drops only the handle it was given; every other clone of that payload is
-untouched.
+untouched. A pending shared send that is dropped releases its handle, as a
+refusal does.
 
 The admitted handle belongs to the connection until its terminal cause decides
 what to do with it. A cause that drains writes the frame; a cause that cancels
@@ -738,17 +838,8 @@ Camber makes no claim about copies the transport or the operating system makes
 while writing each recipient's socket. The guarantee is that Camber creates no
 new payload-sized buffer per recipient.
 
-`send`, `recv`, and `recv_timeout` block. Where they block depends on the
-caller's runtime:
-
-| Caller | Behavior |
-|---|---|
-| No Tokio runtime | waits on the caller's own thread |
-| Multi-thread Tokio | waits through `block_in_place`, so another worker runs |
-| Current-thread Tokio | returns `BlockingInAsyncContext` before any wait |
-
-`recv_timeout` also returns `NoRuntime` when no Tokio clock exists, and `Timeout`
-when its deadline expires.
+Waits suspend the calling task and hold no thread. They make progress on
+current-thread and multi-thread Tokio runtimes alike.
 
 ### Terminal causes
 
@@ -794,8 +885,10 @@ fails there with `WebSocketClosed`.
 
 ### Callback runtime context
 
-The callback runs on the blocking pool. What it may admit through
-`camber::spawn` follows the server that is serving it:
+The callback's factory and its future run inside the runtime context of the
+server that serves the connection. That context holds across every `.await`.
+What the callback may admit through `camber::spawn` or `camber::spawn_async`
+follows that server:
 
 | Serving path | `camber::spawn` in the callback |
 |---|---|
@@ -810,17 +903,22 @@ dropped. A closure holding only the receiver ends the connection with
 
 The callback itself is not a root-scope child. The child it admits is, and
 runtime completion waits for that child. Server completion owns the bridge, its
-two directional pumps, the transport, and the connection permit, and it makes no
-claim about application-owned work the callback started.
+two directional pumps, the transport, the callback future, and the connection
+permit. It makes no claim about application-owned work the callback started.
 
 ### Callback settlement
 
-Camber starts the callback, so it keeps the handle. Every terminal closes the
-endpoints a callback is meant to wake on — the receive queue and send admission
-— and the connection then waits for the callback within one deadline, fixed at
-that close:
+The connection's upgrade task owns the callback future and polls it beside the
+transport. A pending callback stops neither the transport nor another
+connection, and a completed callback is never polled again. A callback that
+returns an error or panics is logged; neither changes the terminal cause.
 
-| What the server had committed when the endpoints closed | The callback join waits until |
+Every terminal closes the endpoints a callback is meant to wake on — the receive
+queue and send admission. The connection then fixes one settlement deadline at
+that close. Transport cleanup and callback settlement spend that one deadline
+together:
+
+| What the server had committed when the endpoints closed | The callback may finish until |
 |---|---|
 | Nothing: a peer, direction-owner, or transport terminal | that close, plus the fixed 100 ms forced-join grace |
 | A graceful stop | the later of the shutdown deadline and that close, plus that same 100 ms |
@@ -829,34 +927,35 @@ that close:
 
 The graceful row takes the later of the two on purpose. A shutdown deadline that
 had already passed at the close would otherwise fix a deadline in the past, and
-the callback would be named outstanding without ever having been waited on.
+the callback would be cancelled without ever having been given time.
 
 A cancellation accepted during a graceful drain brings the deadline forward to
-the grace, measured from the instant the join hears the escalation — not from
-the commit — so a bridge the executor reaches late still gets its whole grace.
-Only a commanded `cancel()` narrows it. An abandoned handle forces the same stop
-but keeps the aggregate's remaining time, because giving that time up is
-something a caller has to ask for. Nothing pushes the deadline back.
+the grace, measured from the instant the settlement hears the escalation — not
+from the commit — so a bridge the executor reaches late still gets its whole
+grace. Only a commanded `cancel()` narrows it. An abandoned handle forces the
+same stop but keeps the aggregate's remaining time, because giving that time up
+is something a caller has to ask for. Nothing pushes the deadline back.
 
-A callback that returns inside its deadline is joined, and Camber says nothing
-about it. Application code still blocked at the deadline is named rather than
-waited on further: the connection emits one WARN event,
-`camber.websocket.callback.outstanding`, carrying
-`disposition="outstanding-after-forced-grace"`, the committed `cause`, and
-`shutdown=none|graceful|cancelled|deadline-expired`. That label is the whole
-observable form of the disposition — the internal
-`CallbackDisposition::OutstandingAfterForcedGrace` is private to the bridge and
-is not a name to look up. `shutdown` says which transition the callback entered
-under, so a callback that entered under a graceful stop and returned
-cooperatively reports `shutdown=graceful`; `deadline-expired` requires the
-callback to have still been outstanding at the deadline. Tokio cannot take a
-blocking thread back, so Camber stops waiting and does not claim the callback
-exited.
+A callback that returns inside its deadline completes, and Camber says nothing
+about it. A callback still pending at the deadline is dropped, and its captures
+are dropped with it, before the upgrade settles. The connection emits one WARN
+event, `camber.websocket.callback.cancelled`, carrying
+`disposition="cancelled"`, the committed `cause`, and
+`shutdown=none|graceful|cancelled|deadline-expired`. That event is the whole
+observable form of the disposition. `shutdown` names the server transition in
+force when the callback was dropped, and `none` means the server had committed
+no stop. A callback that entered a graceful drain and was still
+pending when the drain ran out reports `shutdown=deadline-expired`. One cut
+short by a commanded `cancel()` reports `shutdown=cancelled`.
 
-The connection gives its permit back after that join or that disposition, and
-never before one of them. A blocked callback therefore holds its connection for
-its whole deadline, and a graceful stop waiting on one ends on the shutdown
-deadline it was given — which is the accepted command's own outcome.
+The connection gives its permit back only after the callback has completed or
+been dropped. So a joined server or upgrade proves that its callback futures are
+gone.
+
+The callback must cooperate. Camber drops a pending future, but it cannot
+preempt a poll, a factory call, or a destructor that blocks the thread. Such a
+callback stops its own connection's settlement. The outer lifecycle owner then
+reports that work as unjoined; it does not claim the work stopped.
 
 ## Server-Sent Events
 
@@ -1135,8 +1234,8 @@ whose lifetime is tied to those transport owners after the join returns.
 The boundary is deliberately narrower than arbitrary application execution:
 
 - Tokio cancellation cannot preempt non-yielding async code, so the grace deadline bounds escalation to forced cancellation rather than execution time.
-- Join is not proof that a non-cooperative blocking callback has returned.
-- Join is not proof that a callback has released its callback-held `Request`, handler captures, or callback-side `WsConn`.
+- Join is not proof that code blocking a thread has returned. A WebSocket callback that blocks inside a poll or a destructor is not finished, and the outer lifecycle owner reports it as unjoined.
+- A joined WebSocket bridge does prove that its callback future completed or was dropped, with its captures and its callback-side `WsConn`. Tasks the callback spawned are not part of that proof.
 - Join does not extend runtime teardown or restore a signal watcher after that watcher is gone.
 
 Graceful shutdown lets Hyper finish an in-flight HTTP/1 response, closes

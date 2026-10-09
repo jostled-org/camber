@@ -26,6 +26,37 @@ pub use super::halt::{HaltableListener, send_report, unless_halted, until_peer_c
 /// that reaches it reports failure instead of parking the test binary.
 pub const ASYNC_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub use super::ws::{BINARY, CLOSE, PING, PONG, TEXT};
+
+/// The granularity the runtime's timer rounds a deadline up to.
+///
+/// A sleep does not fire at its own instant but at the first tick at or after
+/// it, so a row that advanced exactly onto a deadline would wait on a timer
+/// that has not been reached. The margin is what crosses that rounding, and it
+/// is why the exactness of a deadline is asserted on the instant production
+/// published rather than on the tick a row happened to stop at.
+pub const TIMER_TICK: Duration = Duration::from_millis(1);
+
+/// The runtime clock, frozen for as long as this lives.
+///
+/// Resumed by `Drop` rather than by the row, so a row that fails while frozen
+/// still hands its teardown a running clock: the teardown's bounds come off
+/// that clock, and a frozen one would advance straight through them.
+pub struct FrozenClock;
+
+impl FrozenClock {
+    pub fn freeze() -> Self {
+        tokio::time::pause();
+        Self
+    }
+}
+
+impl Drop for FrozenClock {
+    fn drop(&mut self) {
+        tokio::time::resume();
+    }
+}
+
 /// The bound a case that watches its server's own stop deadline expire runs
 /// under.
 ///
@@ -224,22 +255,79 @@ pub async fn read_async_ws_frame_or_eof(
     stream: &mut TcpStream,
     context: &str,
 ) -> Option<(u8, Box<[u8]>)> {
-    lifecycle_event(context, async {
-        let mut first = [0_u8; 1];
-        let read = stream
-            .read(&mut first)
-            .await
-            .unwrap_or_else(|error| panic!("{context}: failed reading a frame header: {error}"));
-        if read == 0 {
-            return None;
-        }
-        let frame = try_read_async_frame_rest(stream, first[0])
-            .await
-            .unwrap_or_else(|error| panic!("{context}: failed reading a frame: {error}"));
-        assert!(!frame.masked, "{context}: a server frame was masked");
-        Some((frame.opcode, frame.payload))
-    })
-    .await
+    lifecycle_event(context, try_read_async_ws_frame_or_eof(stream))
+        .await
+        .unwrap_or_else(|error| panic!("{context}: failed reading a frame: {error}"))
+}
+
+pub async fn try_read_async_ws_frame_or_eof(
+    stream: &mut TcpStream,
+) -> io::Result<Option<(u8, Box<[u8]>)>> {
+    let mut first = [0_u8; 1];
+    if stream.read(&mut first).await? == 0 {
+        return Ok(None);
+    }
+    let frame = try_read_async_frame_rest(stream, first[0]).await?;
+    match frame.masked {
+        true => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "a server frame was masked",
+        )),
+        false => Ok(Some((frame.opcode, frame.payload))),
+    }
+}
+
+/// Read a required server frame without blocking its executor.
+pub async fn read_async_ws_frame(stream: &mut TcpStream) -> (u8, Box<[u8]>) {
+    read_async_ws_frame_or_eof(stream, "the direction peer's next frame")
+        .await
+        .expect("the direction peer closed before its next frame")
+}
+
+pub async fn read_async_ws_text_frame(stream: &mut TcpStream) -> Box<str> {
+    let (opcode, payload) = read_async_ws_frame(stream).await;
+    assert_eq!(opcode, TEXT, "the peer received a non-text frame");
+    String::from_utf8(payload.into_vec())
+        .expect("the peer received invalid UTF-8")
+        .into_boxed_str()
+}
+
+pub async fn read_async_ws_binary_frame(stream: &mut TcpStream) -> Box<[u8]> {
+    let (opcode, payload) = read_async_ws_frame(stream).await;
+    assert_eq!(opcode, BINARY, "the peer received a non-binary frame");
+    payload
+}
+
+pub async fn write_async_ws_text_frame(stream: &mut TcpStream, text: &str) {
+    write_async_ws_frame(stream, TEXT, text.as_bytes(), "the peer's text").await;
+}
+
+/// Require the next frame an async peer takes is `expected` as text.
+pub async fn expect_async_text(peer: &mut TcpStream, expected: &str, context: &str) {
+    let frame = read_async_ws_frame_or_eof(peer, context).await;
+    assert_eq!(
+        frame,
+        Some((TEXT, Box::from(expected.as_bytes()))),
+        "{context}: the peer took another frame"
+    );
+}
+
+/// Require the next frame an async peer takes is a close.
+pub async fn expect_async_close(peer: &mut TcpStream, context: &str) {
+    let (opcode, _) = read_async_ws_frame_or_eof(peer, context)
+        .await
+        .unwrap_or_else(|| panic!("{context}: the transport ended without a close frame"));
+    assert_eq!(
+        opcode, CLOSE,
+        "{context}: expected a close frame, got opcode {opcode:#x}"
+    );
+}
+
+/// Read exactly `expected` text frames off the peer, in order.
+pub async fn assert_async_texts_in_order(stream: &mut TcpStream, expected: &[&str]) {
+    for text in expected {
+        expect_async_text(stream, text, "the peer's next admitted text").await;
+    }
 }
 
 /// One frame read off an async transport.
@@ -391,14 +479,8 @@ pub fn assert_refusal_body(body: &[u8], expected: &str, context: &str) {
 /// read, assertion, write, and end-of-stream check, differing only in the words
 /// their failures used. `subject` supplies those words.
 pub async fn assert_graceful_close_then_eof(stream: &mut TcpStream, subject: &str) {
-    let (opcode, _) = read_async_ws_frame_or_eof(stream, &format!("the {subject} close"))
-        .await
-        .unwrap_or_else(|| panic!("{subject}: the transport ended without a close frame"));
-    assert_eq!(
-        opcode, 0x8,
-        "{subject}: expected a close frame, got opcode {opcode:#x}"
-    );
-    write_async_ws_frame(stream, 0x8, &[], &format!("the {subject} close reply")).await;
+    expect_async_close(stream, &format!("the {subject} close")).await;
+    write_async_ws_frame(stream, CLOSE, &[], &format!("the {subject} close reply")).await;
     assert_transport_eof(stream, &format!("the {subject} transport")).await;
 }
 
@@ -411,8 +493,8 @@ pub async fn assert_graceful_close_then_eof(stream: &mut TcpStream, subject: &st
 pub async fn assert_optional_close_then_eof(stream: &mut TcpStream, subject: &str) {
     match read_async_ws_frame_or_eof(stream, &format!("the {subject} close")).await {
         None => {}
-        Some((0x8, _)) => {
-            write_async_ws_frame(stream, 0x8, &[], &format!("the {subject} close reply")).await;
+        Some((CLOSE, _)) => {
+            write_async_ws_frame(stream, CLOSE, &[], &format!("the {subject} close reply")).await;
             assert_transport_eof(stream, &format!("the {subject} transport")).await;
         }
         Some((opcode, payload)) => {
@@ -426,13 +508,11 @@ pub async fn assert_optional_close_then_eof(stream: &mut TcpStream, subject: &st
 /// The liveness half of a transport case: a listener that stopped serving
 /// everything proves nothing about the one connection under test.
 pub async fn assert_http_ok(addr: SocketAddr, path: &str, context: &str) {
-    let mut stream = lifecycle_event(context, TcpStream::connect(addr))
-        .await
-        .unwrap_or_else(|error| panic!("{context}: failed connecting the HTTP probe: {error}"));
-    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    lifecycle_event(context, stream.write_all(request.as_bytes()))
-        .await
-        .unwrap_or_else(|error| panic!("{context}: failed writing the HTTP probe: {error}"));
+    let mut stream = lifecycle_event(
+        context,
+        super::http::request_on_new_peer(addr, path, "close"),
+    )
+    .await;
     let response = read_async_http_head(&mut stream, context).await;
     assert_eq!(
         super::http::status_from_raw(&response),

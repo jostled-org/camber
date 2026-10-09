@@ -21,7 +21,7 @@ use super::framing::{
 };
 use super::handoff::{WsHandoffOutcome, WsRefusal, prepare_ws_handoff};
 use super::handshake::WsUpgrade;
-use super::ownership::{BridgeAttachment, ClientWs, open_bridge};
+use super::ownership::{BridgeAttachment, ClientWs, open_bridge, spawn_gated_bridge};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -59,8 +59,11 @@ pub(in crate::http) async fn handle_proxy_ws(
         WsHandoffOutcome::Refused(refusal) => return Err(refusal),
     };
     prepared
-        .register(lifecycle, move |on_upgrade, permit, attachment| {
-            bridge_ws_proxy(on_upgrade, upgrade, attachment, permit)
+        .register(lifecycle, move |on_upgrade, permit, attachment, start| {
+            spawn_gated_bridge(
+                start,
+                bridge_ws_proxy(on_upgrade, upgrade, attachment, permit),
+            )
         })
         .await
 }
@@ -82,7 +85,7 @@ async fn bridge_ws_proxy(
 ) {
     let opened = open_bridge(
         on_upgrade,
-        attachment,
+        attachment.into_opening(),
         "WebSocket proxy client upgrade failed",
     )
     .await;

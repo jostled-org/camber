@@ -402,15 +402,45 @@ func echo(w http.ResponseWriter, r *http.Request) {
 ### Camber
 
 ```rust
-router.ws("/echo", |_req, mut ws: WsConn| {
-    while let Some(msg) = ws.recv() {
-        ws.send(&msg)?;
+use camber::http::{Router, WsConn};
+
+let mut router = Router::new();
+router.ws("/echo", |_req, mut ws: WsConn| async move {
+    while let Some(msg) = ws.recv().await {
+        ws.send(&msg).await?;
     }
     Ok(())
 });
 ```
 
-No upgrade ceremony. The handler receives a `WsConn` with blocking `recv()` and `send()` methods. Also available: `recv_binary()`, `send_binary()`, and `recv_message()` for mixed text/binary.
+No upgrade ceremony. The handler returns a future that owns a `WsConn`. Its
+`recv()` and `send()` methods are async, so a wait suspends the task the way a
+goroutine parks on a read. Also available: `recv_binary()`, `send_binary()`,
+and `recv_message()` for mixed text and binary.
+
+Read request data before `async move`. The future cannot borrow the request,
+so copy out what it needs:
+
+```rust
+use camber::http::{Router, WsConn};
+
+let mut router = Router::new();
+router.ws("/rooms/:room", |req, mut ws: WsConn| {
+    let room = req.param("room").unwrap_or("lobby").to_owned();
+    async move {
+        while let Some(text) = ws.recv().await {
+            ws.send(&format!("{room}: {text}")).await?;
+        }
+        Ok(())
+    }
+});
+```
+
+A successful `send` means the frame entered a bounded outbound queue, the way a
+buffered Go channel accepts a value. It does not mean the peer received it.
+Dropping a pending send admits nothing. `recv()` skips binary messages, and a
+message it skipped stays skipped if you drop that receive. Do not block the
+thread inside the callback: Camber cannot preempt it.
 
 Requires the `ws` feature flag.
 

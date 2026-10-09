@@ -858,7 +858,7 @@ fn stalled_gate_routes() -> Router {
     #[cfg(feature = "ws")]
     router.ws(
         "/gated-ws",
-        |_req: &Request, _conn: camber::http::WsConn| Ok(()),
+        |_req: &Request, _conn: camber::http::WsConn| async { Ok(()) },
     );
     router.proxy_stream("/gated-proxy", UNDIALLED_UPSTREAM);
     router.multipart(

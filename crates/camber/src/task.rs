@@ -103,11 +103,11 @@ fn recv_task_result<T>(
 
 /// Run a synchronous body, mapping an unwind to `TaskPanicked`.
 ///
-/// Every blocking entry point catches here — the handle-carrying spawn, the
-/// handle-less per-response producer, and the detached WebSocket callback — so
-/// "a panic becomes `TaskPanicked`" has one definition on the blocking side and
-/// only the destination of that error differs. `catch_panic_async` is the same
-/// definition for a future.
+/// Every synchronous entry point catches here — the handle-carrying spawn, the
+/// handle-less per-response producer, and the WebSocket callback factory — so
+/// "a panic becomes `TaskPanicked`" has one definition on the synchronous side
+/// and only the destination of that error differs. `catch_panic_async` is the
+/// same definition for a future.
 pub(crate) fn catch_panic<F, T>(f: F) -> Result<T, RuntimeError>
 where
     F: FnOnce() -> T,
@@ -118,8 +118,9 @@ where
 /// Run a future to completion, mapping an unwind to `TaskPanicked`.
 ///
 /// The async sibling of `catch_panic`. A user-owned `spawn_async` body, a
-/// Camber-owned scope child, and the owned server's supervisor all unwind the
-/// same way and all must report it as the same error, so the
+/// Camber-owned scope child, the external cancellation watcher, an integration
+/// operation's work, a DNS-01 provider call, and a WebSocket callback future
+/// all unwind the same way and all must report it as the same error, so the
 /// `AssertUnwindSafe`/`catch_unwind`/`panic_to_error` sequence has one
 /// definition here instead of one per await site.
 pub(crate) async fn catch_panic_async<F>(f: F) -> Result<F::Output, RuntimeError>
@@ -279,10 +280,7 @@ where
 /// A blocking worker starts with no context of its own, so the runtime `Arc`
 /// the spawner already held is re-installed here and restored on return. It
 /// constructs nothing, so no path can fill runtime absence with a minted
-/// orphan. The other site that writes the `RUNTIME` thread-local outside the
-/// runtime-establishing entry points is the direct WebSocket callback, which
-/// re-installs the runtime its own serving connection captured on exactly the
-/// same terms.
+/// orphan.
 fn run_in_spawner_context<F>(rt: Arc<RuntimeInner>, slot: ScopeSlot, body: F)
 where
     F: FnOnce(),
@@ -772,11 +770,10 @@ fn record_producer_refusal(producer: &'static str, path: &str, error: &RuntimeEr
 /// call total. Off a multi-thread worker the closure runs inline — there is no
 /// other worker to hand anything to.
 ///
-/// Built for the two features that call it: the WebSocket receiver's timed wait
-/// and the DNS-01 provisioner's blocking ACME work. A build with neither has no
-/// blocking closure to hand off, and a function compiled for nobody is one
-/// nothing keeps correct.
-#[cfg(any(feature = "ws", feature = "dns01"))]
+/// Built for the one feature that calls it: the DNS-01 provisioner's blocking
+/// ACME work. A build without it has no blocking closure to hand off, and a
+/// function compiled for nobody is one nothing keeps correct.
+#[cfg(feature = "dns01")]
 pub(crate) fn block_in_place<F, T>(f: F) -> T
 where
     F: FnOnce() -> T,
@@ -799,7 +796,7 @@ where
 /// one.
 ///
 /// Held apart from `block_in_place`, which is total and answers "run this off
-/// the poll path" — and which only the WebSocket and DNS-01 builds compile.
+/// the poll path" — and which only the DNS-01 build compiles.
 /// This one can refuse, and refusing is the point.
 pub(crate) fn wait_blocking<F, T>(wait: F) -> Result<T, RuntimeError>
 where

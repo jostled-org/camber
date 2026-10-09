@@ -47,6 +47,9 @@ mod ws_callbacks;
 #[path = "../support/ws_directions.rs"]
 mod ws_directions;
 #[cfg(feature = "ws")]
+#[path = "../support/ws_executor.rs"]
+mod ws_executor;
+#[cfg(feature = "ws")]
 #[path = "../support/ws_payloads.rs"]
 mod ws_payloads;
 
@@ -73,5 +76,7 @@ pub use ws_async::*;
 pub use ws_callbacks::*;
 #[cfg(feature = "ws")]
 pub use ws_directions::*;
+#[cfg(feature = "ws")]
+pub use ws_executor::*;
 #[cfg(feature = "ws")]
 pub use ws_payloads::*;

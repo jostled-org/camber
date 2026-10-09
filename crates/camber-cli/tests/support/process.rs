@@ -1,6 +1,6 @@
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::FileTypeExt;
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{FileExt, FileTypeExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -25,6 +25,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 type CapturedOutput = (Box<[u8]>, Box<[u8]>);
 
+/// One look at a starting child: the awaited value, a miss that names why it
+/// is not there yet, or a failure that ends the wait.
+enum StartupProbe<T, M> {
+    Ready(T),
+    Pending(M),
+    Failed(Box<str>),
+}
+
 pub struct CommandOutput {
     pub status: ExitStatus,
     pub stdout: Box<[u8]>,
@@ -47,9 +55,14 @@ pub fn run_command(command: Command) -> io::Result<CommandOutput> {
 /// kills it.
 pub const CONFIG_REFUSAL_BOUND: Duration = Duration::from_secs(30);
 
+/// The `camber` binary Cargo built for this test crate.
+pub fn camber_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_camber")
+}
+
 /// `camber serve <config>`, ready for the caller's environment changes.
 pub fn serve_command(config: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_camber"));
+    let mut command = Command::new(camber_bin());
     command.arg("serve").arg(config);
     command
 }
@@ -124,9 +137,7 @@ impl ReapProbe {
     pub fn wait(self) -> Result<ReapedChild, Box<str>> {
         self.receiver
             .recv_timeout(CHILD_EXIT_TIMEOUT)
-            .map_err(|error| {
-                format!("wait for serve child reap completion: {error}").into_boxed_str()
-            })
+            .map_err(|error| format!("wait for child reap completion: {error}").into_boxed_str())
     }
 }
 
@@ -167,16 +178,31 @@ impl OutputCapture {
         Ok(Self { stdout, stderr })
     }
 
-    fn read(&mut self) -> io::Result<CapturedOutput> {
-        let stdout = read_capture(&mut self.stdout)?;
-        let stderr = read_capture(&mut self.stderr)?;
+    fn read(&self) -> io::Result<CapturedOutput> {
+        let stdout = read_from_start(&self.stdout, OUTPUT_CAPTURE_LIMIT)?;
+        let stderr = read_from_start(&self.stderr, OUTPUT_CAPTURE_LIMIT)?;
         Ok((stdout, stderr))
     }
 
-    fn read_bounded(&mut self) -> io::Result<(CapturedOutput, bool, bool)> {
-        let (stdout, stdout_truncated) = read_bounded_capture(&mut self.stdout)?;
-        let (stderr, stderr_truncated) = read_bounded_capture(&mut self.stderr)?;
-        Ok(((stdout, stderr), stdout_truncated, stderr_truncated))
+    /// The rest of the first complete stdout line that starts with `prefix`.
+    fn stdout_line(&self, prefix: &str) -> io::Result<Option<Box<str>>> {
+        let written = read_from_start(&self.stdout, OUTPUT_CAPTURE_LIMIT)?;
+        let text = String::from_utf8_lossy(&written);
+        Ok(text
+            .split_inclusive('\n')
+            .filter(|line| line.ends_with('\n'))
+            .find_map(|line| line.trim_end().strip_prefix(prefix))
+            .map(Box::from))
+    }
+
+    /// The capture, and whether each stream wrote past the capture limit.
+    fn read_bounded(&self) -> io::Result<(CapturedOutput, bool, bool)> {
+        let stdout = read_from_start(&self.stdout, OUTPUT_CAPTURE_LIMIT + 1)?;
+        let stderr = read_from_start(&self.stderr, OUTPUT_CAPTURE_LIMIT + 1)?;
+        let stdout_truncated = stdout.len() > OUTPUT_CAPTURE_LIMIT;
+        let stderr_truncated = stderr.len() > OUTPUT_CAPTURE_LIMIT;
+        let captured = (within_capture_limit(stdout), within_capture_limit(stderr));
+        Ok((captured, stdout_truncated, stderr_truncated))
     }
 }
 
@@ -234,30 +260,87 @@ impl ChildGuard {
             .readiness
             .clone()
             .ok_or("serve readiness target is absent")?;
+        self.poll_startup(
+            timeout,
+            |_| match probe_ready(&readiness) {
+                Ok(()) => StartupProbe::Ready(()),
+                Err(connect_error) => StartupProbe::Pending(connect_error),
+            },
+            |child_id, connect_error| {
+                format!(
+                    "serve child {child_id} did not become ready at {} before timeout; last connect error: {connect_error}",
+                    readiness_name(&readiness)
+                )
+            },
+        )
+    }
+
+    /// Wait until the running child prints a stdout line that starts with
+    /// `prefix`, and return the rest of that line.
+    ///
+    /// The child is shut down and reaped before any failure returns: an exit,
+    /// an unreadable capture, or no announcement before `timeout`.
+    pub fn wait_for_announcement(
+        &mut self,
+        prefix: &str,
+        timeout: Duration,
+    ) -> Result<Box<str>, Box<str>> {
+        self.poll_startup(
+            timeout,
+            |guard| match guard.output.stdout_line(prefix) {
+                Ok(Some(line)) => StartupProbe::Ready(line),
+                Ok(None) => StartupProbe::Pending(()),
+                Err(error) => StartupProbe::Failed(format!("read child stdout: {error}").into()),
+            },
+            |child_id, ()| format!("child {child_id} printed no `{prefix}` line before timeout"),
+        )
+    }
+
+    /// Probe the starting child every poll interval until `probe` is ready.
+    ///
+    /// The child is shut down and reaped before any failure returns: a failed
+    /// probe, an exit, or a miss at `timeout`, which `timed_out` describes.
+    fn poll_startup<T, M, P, D>(
+        &mut self,
+        timeout: Duration,
+        mut probe: P,
+        timed_out: D,
+    ) -> Result<T, Box<str>>
+    where
+        P: FnMut(&Self) -> StartupProbe<T, M>,
+        D: Fn(u32, M) -> String,
+    {
         let deadline = Instant::now() + timeout;
         loop {
-            match self.probe_startup(&readiness, deadline) {
-                Ok(true) => return Ok(()),
-                Ok(false) => {}
-                Err(start_error) => {
-                    return Err(self.cleanup_startup_failure(start_error));
-                }
+            let starting = match probe(self) {
+                StartupProbe::Ready(value) => return Ok(value),
+                StartupProbe::Pending(miss) => self.still_starting(miss, deadline, &timed_out),
+                StartupProbe::Failed(start_error) => Err(start_error),
+            };
+            match starting {
+                Ok(()) => std::thread::sleep(POLL_INTERVAL),
+                Err(start_error) => return Err(self.cleanup_startup_failure(start_error)),
             }
-            std::thread::sleep(POLL_INTERVAL);
         }
     }
 
-    fn probe_startup(
+    /// `Ok` while the child runs and `deadline` has not passed.
+    fn still_starting<M, D>(
         &mut self,
-        readiness: &ReadinessTarget,
+        miss: M,
         deadline: Instant,
-    ) -> Result<bool, Box<str>> {
-        let connect_error = match probe_ready(readiness) {
-            Ok(()) => return Ok(true),
-            Err(error) => error,
-        };
-        self.check_startup_state(connect_error, deadline)
-            .map(|()| false)
+        timed_out: &D,
+    ) -> Result<(), Box<str>>
+    where
+        D: Fn(u32, M) -> String,
+    {
+        let child = self.child.as_mut().ok_or("child is not owned")?;
+        match child.try_wait() {
+            Ok(Some(status)) => Err(self.exited_message(status).into_boxed_str()),
+            Ok(None) if Instant::now() < deadline => Ok(()),
+            Ok(None) => Err(timed_out(child.id(), miss).into_boxed_str()),
+            Err(error) => Err(format!("inspect child: {error}").into_boxed_str()),
+        }
     }
 
     fn cleanup_startup_failure(&mut self, start_error: Box<str>) -> Box<str> {
@@ -269,35 +352,14 @@ impl ChildGuard {
         }
     }
 
-    fn check_startup_state(
-        &mut self,
-        connect_error: io::Error,
-        deadline: Instant,
-    ) -> Result<(), Box<str>> {
-        let child = self.child.as_mut().ok_or("serve child is not owned")?;
-        match child.try_wait() {
-            Ok(Some(status)) => Err(self.exited_message(status).into_boxed_str()),
-            Ok(None) if Instant::now() < deadline => Ok(()),
-            Ok(None) => Err(format!(
-                "serve child {} did not become ready at {} before timeout; last connect error: {connect_error}",
-                child.id(),
-                self.readiness
-                    .as_ref()
-                    .map_or_else(|| "<absent>".into(), readiness_name)
-            )
-            .into_boxed_str()),
-            Err(error) => Err(format!("inspect serve child: {error}").into_boxed_str()),
-        }
-    }
-
-    fn exited_message(&mut self, status: ExitStatus) -> String {
+    fn exited_message(&self, status: ExitStatus) -> String {
         match self.output.read() {
             Ok((_, stderr)) => {
                 let stderr = String::from_utf8_lossy(&stderr);
-                format!("serve child exited with {status}: {stderr}")
+                format!("child exited with {status}: {stderr}")
             }
             Err(error) => {
-                format!("serve child exited with {status}; output capture failed: {error}")
+                format!("child exited with {status}; output capture failed: {error}")
             }
         }
     }
@@ -355,7 +417,7 @@ impl ChildGuard {
                     kind,
                 )
             }),
-            None => return Err(io::Error::other("serve child is not owned")),
+            None => return Err(io::Error::other("child is not owned")),
         };
         let (reaped, kind) = result?;
         self.child.take();
@@ -439,7 +501,6 @@ where
         None => release(child)?,
     }
     let status = wait_for_exit(child, Instant::now() + CHILD_EXIT_TIMEOUT)?;
-    let _ = child.kill();
     Ok((status, TerminationKind::NaturalExitAfterObservation))
 }
 
@@ -451,29 +512,37 @@ fn wait_for_exit(child: &mut Child, deadline: Instant) -> io::Result<ExitStatus>
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!("serve child {} was not reaped before deadline", child.id()),
+                    format!("child {} was not reaped before deadline", child.id()),
                 ));
             }
         }
     }
 }
 
-fn read_capture(file: &mut File) -> io::Result<Box<[u8]>> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut captured = Vec::new();
-    file.take(OUTPUT_CAPTURE_LIMIT as u64)
-        .read_to_end(&mut captured)?;
-    Ok(captured.into_boxed_slice())
+/// Up to `limit` bytes the child has written, read at explicit offsets.
+///
+/// The capture shares one file offset with a running child, so a seek here
+/// would move where the child writes next.
+fn read_from_start(file: &File, limit: usize) -> io::Result<Box<[u8]>> {
+    let mut written = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    while written.len() < limit {
+        match file.read_at(&mut chunk, written.len() as u64) {
+            Ok(0) => break,
+            Ok(count) => written.extend_from_slice(&chunk[..count]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    written.truncate(limit);
+    Ok(written.into_boxed_slice())
 }
 
-fn read_bounded_capture(file: &mut File) -> io::Result<(Box<[u8]>, bool)> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut captured = Vec::new();
-    file.take((OUTPUT_CAPTURE_LIMIT + 1) as u64)
-        .read_to_end(&mut captured)?;
-    let truncated = captured.len() > OUTPUT_CAPTURE_LIMIT;
-    captured.truncate(OUTPUT_CAPTURE_LIMIT);
-    Ok((captured.into_boxed_slice(), truncated))
+fn within_capture_limit(captured: Box<[u8]>) -> Box<[u8]> {
+    match captured.len() > OUTPUT_CAPTURE_LIMIT {
+        true => captured[..OUTPUT_CAPTURE_LIMIT].into(),
+        false => captured,
+    }
 }
 
 fn probe_ready(readiness: &ReadinessTarget) -> io::Result<()> {

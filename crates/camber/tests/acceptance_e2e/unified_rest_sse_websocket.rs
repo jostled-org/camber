@@ -1,18 +1,15 @@
 #![cfg(feature = "ws")]
 
-use crate::common;
-#[path = "../support/ws_frame_io.rs"]
-mod ws_frame_io;
-#[path = "../support/ws_text_helpers.rs"]
-mod ws_text_helpers;
+use crate::common::{
+    self, read_until_double_crlf, read_ws_text_frame, start_upgrade, write_ws_close_frame,
+    write_ws_text_frame,
+};
 
-use camber::http::{self, Request, Response, Router, SseWriter, WsConn};
+use camber::http::{self, Request, Response, Router, SseWriter};
 use camber::runtime;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::time::Duration;
-use ws_frame_io::read_until_double_crlf;
-use ws_text_helpers::{read_ws_text_frame, write_ws_close_frame, write_ws_text_frame};
 
 fn unified_protocol_router() -> Router {
     let mut router = Router::new();
@@ -29,14 +26,7 @@ fn unified_protocol_router() -> Router {
         }
         Ok(())
     });
-    router.ws("/ws", |_req: &Request, mut conn: WsConn| {
-        while let Some(msg) = conn.recv() {
-            if conn.send(&msg).is_err() {
-                break;
-            }
-        }
-        Ok(())
-    });
+    router.ws("/ws", common::echo_ws);
     router
 }
 
@@ -105,23 +95,7 @@ fn assert_sse_journey(addr: std::net::SocketAddr) -> BufReader<TcpStream> {
 
 /// Returns the WebSocket socket so the caller decides when it closes.
 fn assert_websocket_journey(addr: std::net::SocketAddr) -> TcpStream {
-    let mut ws_stream = TcpStream::connect(addr).unwrap();
-    ws_stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-
-    let key = "dGhlIHNhbXBsZSBub25jZQ==";
-    let upgrade_req = format!(
-        "GET /ws HTTP/1.1\r\n\
-         Host: localhost\r\n\
-         Upgrade: websocket\r\n\
-         Connection: Upgrade\r\n\
-         Sec-WebSocket-Key: {key}\r\n\
-         Sec-WebSocket-Version: 13\r\n\
-         \r\n"
-    );
-    ws_stream.write_all(upgrade_req.as_bytes()).unwrap();
-
+    let mut ws_stream = start_upgrade(addr, "/ws");
     let ws_resp = read_until_double_crlf(&mut ws_stream);
     assert_eq!(
         crate::http::status_from_raw(&ws_resp),

@@ -26,84 +26,88 @@ pub(super) type ClientWs =
     tokio_tungstenite::WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>;
 
 /// What an owned server contributes to a bridge it is about to register.
+///
+/// Two parts, because the two bridges share only one of them: every bridge
+/// opens through [`BridgeOpening`], and only a direct bridge runs the callback
+/// [`CallbackContext`] is for.
 pub(super) struct BridgeAttachment {
+    opening: BridgeOpening,
+    callback: CallbackContext,
+}
+
+/// What every bridge spends on opening: the control watch it stops on, and
+/// the gate that says whether its `101` reached the wire.
+///
+/// A field added here reaches both bridges through [`open_bridge`], so neither
+/// can forget it.
+pub(super) struct BridgeOpening {
     control: tokio::sync::watch::Receiver<ServerControl>,
     dispatch: super::super::server_lifecycle::UpgradeDispatchGate,
+}
+
+/// What a direct bridge's inline callback inherits from its connection.
+///
+/// Moved out whole, before the opening is spent: every value is the
+/// connection's existing shared handle, so the callback takes it rather than a
+/// copy.
+pub(super) struct CallbackContext {
     /// The Camber runtime this connection is served under, if it is served
     /// under one.
     ///
     /// Carried by value because the launch below crosses a bare `tokio::spawn`,
     /// which no task-local follows. It is the runtime's existing shared
     /// authority — the same `Arc` task admission reads — not a second one
-    /// minted here.
-    callback_runtime: Option<Arc<crate::runtime_state::RuntimeInner>>,
+    /// minted here. Captured on the connection task, which is the whole of the
+    /// contract's suppression rule: a server with no Camber runtime over it —
+    /// bare-Tokio serving — carries `None` here, and its callback cannot pick
+    /// up another server's context from the thread that polls it.
+    pub(super) runtime: Option<Arc<crate::runtime_state::RuntimeInner>>,
     /// The causal stop state this connection's server commits its control facts
     /// into.
     ///
     /// Carried for the same reason as the runtime authority above: the bridge
-    /// runs past a bare `tokio::spawn`, and the phase a retained callback's
-    /// join deadline is fixed from has to be the one the server committed, not
+    /// runs past a bare `tokio::spawn`, and the phase an inline callback's
+    /// settlement deadline is fixed from has to be the one the server committed, not
     /// the one a watch notification happened to have delivered.
-    callback_stop: Option<Arc<super::super::server_stop::ServerStopState>>,
+    pub(super) stop: Option<Arc<super::super::server_stop::ServerStopState>>,
     /// The place in the owner tree this bridge will be taken as.
     ///
     /// Handed down rather than looked up, for the same reason as the two above:
     /// the connection minted it before it offered the bridge a place, so a
     /// bridge names the child its parent recorded rather than one it invented
     /// for itself after the fact.
-    callback_owner: super::super::server_lifecycle::UpgradeIdentity,
+    pub(super) owner: super::super::server_lifecycle::UpgradeIdentity,
 }
 
 impl BridgeAttachment {
-    /// The runtime authority a callback served under this attachment inherits.
-    ///
-    /// Read from the attachment rather than looked up where the callback runs,
-    /// which is the whole of the contract's suppression rule: the capture
-    /// happened on the connection task, so a server with no Camber runtime over
-    /// it — bare-Tokio serving — carries `None` here, and its callback cannot
-    /// pick up a blocking worker's leftover context by accident.
-    pub(super) fn callback_runtime(&self) -> Option<Arc<crate::runtime_state::RuntimeInner>> {
-        self.callback_runtime.clone()
+    /// Give up the attachment for its two parts.
+    pub(super) fn into_parts(self) -> (BridgeOpening, CallbackContext) {
+        (self.opening, self.callback)
     }
 
-    /// The committed stop phase a retained callback's join deadline reads.
+    /// Give up the attachment for the opening alone.
     ///
-    /// Read from the attachment for the same reason the authority above is:
-    /// this is the connection's own server, taken where the connection still
-    /// owns the context, rather than whatever a bridge could look up later.
-    pub(super) fn callback_stop(&self) -> Option<Arc<super::super::server_stop::ServerStopState>> {
-        self.callback_stop.clone()
-    }
-
-    /// The connection and upgrade a callback started here belongs to.
-    pub(super) fn callback_owner(&self) -> super::super::server_lifecycle::UpgradeIdentity {
-        self.callback_owner
-    }
-
-    /// Spread an attachment over the parts a bridge holds separately.
-    ///
-    /// Stated once, beside the struct, so a field added here reaches both
-    /// bridges. Split at each bridge instead, a bridge that forgot the new
-    /// field would still compile because the parts are independent values.
-    fn split(
-        attachment: Self,
-    ) -> (
-        tokio::sync::watch::Receiver<ServerControl>,
-        super::super::server_lifecycle::UpgradeDispatchGate,
-    ) {
-        // Every field is named, including the one this spread does not carry:
-        // the callback authority is read from the whole attachment before it is
-        // spent, so a `..` here would also swallow the next field somebody adds.
-        let Self {
-            control,
-            dispatch,
-            callback_runtime: _,
-            callback_stop: _,
-            callback_owner: _,
-        } = attachment;
-        (control, dispatch)
+    /// For a bridge that runs no application callback: the callback context is
+    /// released here, unread.
+    pub(super) fn into_opening(self) -> BridgeOpening {
+        self.opening
     }
 }
+
+/// The gate one launched bridge waits behind until its connection admits it.
+///
+/// Handed to every launch rather than created by one, so the only sender is
+/// the registration below: no launch can open its own gate, and a bridge whose
+/// registration was refused never starts. The receiver is private, so only
+/// [`spawn_gated_bridge`] can wait on it.
+pub(in crate::http) struct BridgeStart(tokio::sync::oneshot::Receiver<()>);
+
+/// One bridge task, spawned waiting behind its [`BridgeStart`].
+///
+/// The handle is private and [`spawn_gated_bridge`] is the only constructor,
+/// so a launch cannot hand its connection a task that starts before admission.
+#[must_use = "a dropped bridge detaches its task from the connection that must own it"]
+pub(in crate::http) struct GatedBridge(tokio::task::JoinHandle<()>);
 
 /// Give the bridge to its connection, then resolve the response lifetime to
 /// match.
@@ -112,15 +116,18 @@ impl BridgeAttachment {
 /// only once it has. A connection that cannot take one refuses the upgrade
 /// instead of launching work no owner holds. Every upgrade kind routes through
 /// here, so a new one inherits the rule instead of restating it.
-pub(super) async fn own_upgrade_bridge<F, Fut>(
+///
+/// `launch` returns a [`GatedBridge`], which only exists already waiting
+/// behind `start`, so a bridge keeps its own future type all the way into its
+/// task: nothing here erases the future it runs.
+pub(super) async fn own_upgrade_bridge<L>(
     lifecycle: &ConnectionLifecycle,
     response: hyper::Response<HyperResponseBody>,
     handoff: &DisconnectSignal,
-    build_bridge: F,
+    launch: L,
 ) -> Result<hyper::Response<HyperResponseBody>, Rejected>
 where
-    F: FnOnce(BridgeAttachment) -> Fut,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
+    L: FnOnce(BridgeAttachment, BridgeStart) -> GatedBridge,
 {
     let admission = match lifecycle.upgrade_admission() {
         Some(admission) => admission,
@@ -130,15 +137,19 @@ where
     // owner of this runtime's context: the launch below is a bare
     // `tokio::spawn`, and no task-local crosses it.
     let attachment = BridgeAttachment {
-        control: admission.control(),
-        dispatch: admission.dispatch_gate(),
-        callback_runtime: crate::runtime_state::try_current_runtime(),
-        callback_stop: lifecycle.stop(),
-        callback_owner: admission.owner(),
+        opening: BridgeOpening {
+            control: admission.control(),
+            dispatch: admission.dispatch_gate(),
+        },
+        callback: CallbackContext {
+            runtime: crate::runtime_state::try_current_runtime(),
+            stop: lifecycle.stop(),
+            owner: admission.owner(),
+        },
     };
     let (gate, start) = tokio::sync::oneshot::channel();
-    let handle = spawn_gated_bridge(start, build_bridge(attachment));
-    complete_upgrade_transfer(admission, handle, gate, response, handoff).await
+    let bridge = launch(attachment, BridgeStart(start));
+    complete_upgrade_transfer(admission, bridge, gate, response, handoff).await
 }
 
 /// Resolve the response lifetime at a successful `101` handoff.
@@ -155,19 +166,22 @@ fn commit_upgrade(
     response
 }
 
-fn spawn_gated_bridge<F>(
-    start: tokio::sync::oneshot::Receiver<()>,
-    bridge: F,
-) -> tokio::task::JoinHandle<()>
+/// Spawn one bridge that runs only once its registration opens `start`.
+///
+/// A launch must return a [`GatedBridge`], and this is its only constructor,
+/// so the type guarantees no bridge kind starts before its connection admits
+/// it. A gate dropped unopened ends the task without polling the bridge.
+pub(super) fn spawn_gated_bridge<F>(start: BridgeStart, bridge: F) -> GatedBridge
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    tokio::spawn(async move {
+    let BridgeStart(start) = start;
+    GatedBridge(tokio::spawn(async move {
         match start.await {
             Ok(()) => bridge.await,
             Err(_) => {}
         }
-    })
+    }))
 }
 
 /// Offer the bridge to the connection that serves this request, committing the
@@ -177,11 +191,12 @@ where
 /// owns its own completion, so only the admitted arm resolves the handoff.
 async fn complete_upgrade_transfer(
     admission: UpgradeAdmission,
-    handle: tokio::task::JoinHandle<()>,
+    bridge: GatedBridge,
     gate: tokio::sync::oneshot::Sender<()>,
     response: hyper::Response<HyperResponseBody>,
     handoff: &DisconnectSignal,
 ) -> Result<hyper::Response<HyperResponseBody>, Rejected> {
+    let GatedBridge(handle) = bridge;
     match admission.submit(handle).await {
         UpgradeRegistration::Admitted => release_admitted_bridge(gate, response, handoff),
         UpgradeRegistration::Rejected => Err(Rejected::upgrade_registration_refused()),
@@ -265,8 +280,8 @@ async fn commit_dispatch(
 /// client transport it frames over.
 type OpenBridge = (tokio::sync::watch::Receiver<ServerControl>, ClientWs);
 
-/// Open a bridge: spread the attachment, take over the client transport, and
-/// wait for the `101` to reach the wire.
+/// Open a bridge: spend its opening, take over the client transport, and wait
+/// for the `101` to reach the wire.
 ///
 /// The sequence, not the steps, is what a third bridge would get wrong — every
 /// step below is already shared — so the sequence is written once. `None` is
@@ -275,10 +290,10 @@ type OpenBridge = (tokio::sync::watch::Receiver<ServerControl>, ClientWs);
 /// caller to do, because both have already logged or shut the transport down.
 pub(super) async fn open_bridge(
     on_upgrade: hyper::upgrade::OnUpgrade,
-    attachment: BridgeAttachment,
+    opening: BridgeOpening,
     context: &str,
 ) -> Option<OpenBridge> {
-    let (control, dispatch) = BridgeAttachment::split(attachment);
+    let BridgeOpening { control, dispatch } = opening;
     let mut stream = upgrade_client_ws(on_upgrade, context).await?;
     match commit_dispatch(dispatch, &mut stream).await {
         ControlFlow::Break(()) => None,

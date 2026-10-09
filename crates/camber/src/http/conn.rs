@@ -735,7 +735,7 @@ async fn serve_upgrade_handoff<C>(
     control: &mut tokio::sync::watch::Receiver<ServerControl>,
     upgrade_transport: &mut super::server_lifecycle::UpgradeTransportOwner,
     transport: &mut OwnedTransport,
-    retention: &super::server_lifecycle::UpgradeRetention,
+    retention: &Arc<super::server_lifecycle::UpgradeRetention>,
 ) -> ConnectionFlow
 where
     C: HyperConnection,
@@ -748,7 +748,10 @@ where
     // an answer outstanding for the rest of its life — and only the transferred
     // path has a join that says when it is over.
     retention.hold();
-    let upgrade = match upgrade_transport.accept(handoff, peer_closed).await {
+    let upgrade = match upgrade_transport
+        .accept(handoff, peer_closed, retention)
+        .await
+    {
         Some(upgrade) => upgrade,
         None => return ConnectionFlow::Serving,
     };

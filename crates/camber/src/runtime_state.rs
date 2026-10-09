@@ -1361,21 +1361,6 @@ pub(crate) fn install_runtime(inner: Arc<RuntimeInner>) -> RuntimeContextGuard {
     RuntimeContextGuard { previous }
 }
 
-/// Install a captured runtime context on this thread for as long as the guard
-/// lives.
-///
-/// The synchronous counterpart of [`carry_runtime`], for a caller that runs a
-/// blocking body rather than awaiting a future. Absence propagates the same
-/// way: a captured `None` installs nothing and leaves the thread's own context
-/// exactly as it found it, so no path fills runtime absence by minting one.
-#[cfg(feature = "ws")]
-#[must_use = "the carried context is installed only while the returned guard lives"]
-pub(crate) fn install_carried_runtime(
-    context: Option<Arc<RuntimeInner>>,
-) -> Option<RuntimeContextGuard> {
-    context.map(install_runtime)
-}
-
 /// Scope runtime context to a future so it follows that future across workers.
 pub(crate) async fn scope_runtime<F>(inner: Arc<RuntimeInner>, future: F) -> F::Output
 where

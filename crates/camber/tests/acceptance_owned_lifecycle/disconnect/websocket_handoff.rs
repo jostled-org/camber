@@ -27,8 +27,8 @@ use camber::http::{DisconnectCause, DisconnectSignal, Request, Router, WsConn};
 use camber::runtime;
 use std::future::IntoFuture;
 use std::net::TcpStream;
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::time::Instant;
 
 /// The route whose upgrade succeeds.
 const WS_PATH: &str = "/ws";
@@ -53,8 +53,6 @@ enum AfterClose {
     /// The peer never closed within the bound, so no cause read after it would
     /// belong to the close this observation is named for.
     PeerNeverClosed,
-    /// Receiving from the upgraded transport failed before its peer closed.
-    ReceiveFailed(Box<str>),
 }
 
 /// Register a WebSocket route that reads its signal only after the upgraded
@@ -67,27 +65,29 @@ fn route_ws_after_close(router: &mut Router, path: &str) -> Receiver<AfterClose>
     let (report, causes) = relay::<AfterClose>();
     router.ws(path, move |req: &Request, mut conn: WsConn| {
         let signal = req.on_disconnect();
-        // A drain that expired instead of reaching the close is reported as
-        // its own outcome: the cause read after it would be the one the
-        // handoff established, which is what this probe must not assume.
-        report.send(match drain_until_close(&mut conn) {
-            Ok(()) => cause_after_close(&signal),
-            Err(RuntimeError::Timeout) => AfterClose::PeerNeverClosed,
-            Err(error) => AfterClose::ReceiveFailed(error.to_string().into_boxed_str()),
-        });
-        Ok(())
+        let report = Arc::clone(&report);
+        async move {
+            // A drain that expired instead of reaching the close is reported
+            // as its own outcome: the cause read after it would be the one the
+            // handoff established, which is what this probe must not assume.
+            report.send(match drain_until_close(&mut conn).await {
+                Ok(()) => cause_after_close(&signal).await,
+                Err(_) => AfterClose::PeerNeverClosed,
+            });
+            Ok::<(), RuntimeError>(())
+        }
     });
     causes
 }
 
 /// Read the terminal cause from inside the bridge, bounded.
 ///
-/// An unresolved signal must fail the case that asked, not park the blocking
-/// thread this runs on.
-fn cause_after_close(signal: &DisconnectSignal) -> AfterClose {
-    match try_bounded(signal.cancelled()) {
-        Some(cause) => AfterClose::Resolved(cause),
-        None => AfterClose::Unresolved,
+/// An unresolved signal must fail the case that asked, not park the callback
+/// that reads it.
+async fn cause_after_close(signal: &DisconnectSignal) -> AfterClose {
+    match tokio::time::timeout(BOUND, signal.cancelled()).await {
+        Ok(cause) => AfterClose::Resolved(cause),
+        Err(_) => AfterClose::Unresolved,
     }
 }
 
@@ -97,24 +97,19 @@ fn cause_after_close(signal: &DisconnectSignal) -> AfterClose {
 /// its request short of the handler, so reaching the drain at all would already
 /// have failed an earlier assertion.
 fn route_ws_until_close(router: &mut Router, path: &str) {
-    router.ws(path, |_req: &Request, mut conn: WsConn| {
+    router.ws(path, |_req: &Request, mut conn: WsConn| async move {
         drain_until_close(&mut conn)
+            .await
+            .map_err(|_| RuntimeError::Timeout)
     });
 }
 
 /// Read the upgraded peer until it closes, bounded.
 ///
-/// Every receive gets only what remains of one deadline. A peer that keeps
-/// sending cannot renew the budget, and a silent peer cannot park the handler
-/// beyond it.
-fn drain_until_close(conn: &mut WsConn) -> Result<(), RuntimeError> {
-    let deadline = Instant::now() + BOUND;
-    loop {
-        match conn.recv_timeout(deadline.saturating_duration_since(Instant::now()))? {
-            Some(_) => {}
-            None => return Ok(()),
-        }
-    }
+/// One deadline over the whole drain. A peer that keeps sending cannot renew
+/// the budget, and a silent peer cannot park the handler beyond it.
+async fn drain_until_close(conn: &mut WsConn) -> Result<(), tokio::time::error::Elapsed> {
+    tokio::time::timeout(BOUND, crate::common::drain_until_closed(conn)).await
 }
 
 /// What one committed upgrade reported, in the order it was observed.

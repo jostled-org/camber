@@ -15,10 +15,10 @@
 #![cfg(feature = "ws")]
 
 use std::future::Future;
-use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::net::TcpStream;
 
 // The allocation oracle installs its own global allocator, and two global
 // allocators do not link. Every item that reaches the probe is built only where
@@ -28,12 +28,17 @@ use allocation_counter::AllocationInfo;
 #[cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
 use camber::RuntimeError;
 use camber::http::{Bytes, WsReceiver, WsSender};
+#[cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
+use futures_util::FutureExt;
+#[cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
+use std::task::Poll;
 
-use super::http::is_closed_connection_error;
-use super::ws::try_read_ws_frame_raw;
-use super::ws_async::lifecycle_event;
+use super::http::{is_closed_connection_error, serve_router_with_policy};
+use super::ws_async::{
+    BINARY, CLOSE, lifecycle_event, read_async_ws_frame_or_eof, try_read_async_ws_frame_or_eof,
+};
 use super::ws_directions::{
-    CLOSE, DIRECTION_PATH, DirectionHandoff, DirectionTestFixture, direction_router,
+    DIRECTION_PATH, DirectionHandoff, DirectionTestFixture, direction_router,
 };
 
 /// The small payload every calibrated row measures against.
@@ -300,7 +305,7 @@ impl SharedPayloadFixture {
     /// connection rather than per payload byte, so leaving it in would land it
     /// on whichever payload size ran first and turn the comparison below into a
     /// claim about ordering.
-    pub fn warm_queues_from(&mut self, first: usize) {
+    pub async fn warm_queues_from(&mut self, first: usize) {
         let warmed = payload_bytes(SMALL_PAYLOAD, WARM_TAG);
         let payload = Bytes::copy_from_slice(&warmed);
         for client in &self.clients[first..] {
@@ -309,7 +314,8 @@ impl SharedPayloadFixture {
                 .try_send_shared_binary(payload.clone())
                 .expect("admit the warming frame");
         }
-        self.take_peer_frames_from(first, &warmed, "the warming frame");
+        self.take_peer_frames_from(first, &warmed, "the warming frame")
+            .await;
     }
 
     /// Read one binary frame from every recipient from `first`, and require its
@@ -318,17 +324,16 @@ impl SharedPayloadFixture {
     /// The range has to hold a recipient. A row that named one past its own
     /// fanout, or that read after giving up its connections, would otherwise
     /// take no frame at all and report that as delivery.
-    pub fn take_peer_frames_from(&mut self, first: usize, expected: &[u8], what: &str) {
+    pub async fn take_peer_frames_from(&mut self, first: usize, expected: &[u8], what: &str) {
         assert!(
             first < self.clients.len(),
             "{what}: the row holds no recipient at or past {first}"
         );
         for (offset, client) in self.clients[first..].iter_mut().enumerate() {
             let recipient = first + offset;
-            let (opcode, payload) =
-                try_read_ws_frame_raw(&mut client.peer).unwrap_or_else(|error| {
-                    panic!("{what}: recipient {recipient}'s read answered {error}")
-                });
+            let (opcode, payload) = read_async_ws_frame_or_eof(&mut client.peer, what)
+                .await
+                .unwrap_or_else(|| panic!("{what}: recipient {recipient} closed before its frame"));
             assert_eq!(
                 opcode, BINARY,
                 "{what}: recipient {recipient} took opcode {opcode:#x}"
@@ -369,19 +374,15 @@ impl SharedPayloadFixture {
     }
 }
 
-/// The WebSocket binary opcode, as it appears on the wire.
-const BINARY: u8 = 0x02;
-
 /// The payload a warming admission carries.
 const WARM_TAG: u8 = 0x11;
 
-/// The aggregate shutdown grace a `#[camber::test]` runtime establishes.
+/// The shutdown bound each row's own server policy sets.
 ///
-/// Named because every row below runs under a runtime of its own and has to
-/// stop its server under the same bound the case runtime would have given it.
+/// Each row applies it to its own server, independent of the executor.
 const ROW_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// The pre-head wait a `#[camber::test]` runtime establishes.
+/// The same finite header wait the test runtime uses.
 const ROW_HEADER_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Serve one capacity-`buffer` direct route, connect `recipients` real peers,
@@ -392,37 +393,8 @@ const ROW_HEADER_TIMEOUT: Duration = Duration::from_millis(100);
 /// row that opened its own would be the second place a leaked peer, half, or
 /// checkpoint could hide.
 ///
-/// Each row runs on a thread and a runtime of its own, and that is not an
-/// optimisation. The aggregate shutdown deadline is minted by the first graceful
-/// transition anywhere in a runtime and is never restarted, so rows sharing one
-/// runtime share one grace: the second stops under whatever the first left of
-/// it, and a later one under none of it at all — a `Timeout` that reports the
-/// row before it rather than the claim being made. A case that runs several of
-/// these in sequence is the ordinary shape here, so the isolation belongs to the
-/// runner rather than to each case that remembers to ask for it.
-pub fn shared_payload_row<C, Fut>(buffer: usize, recipients: usize, case: C)
-where
-    C: FnOnce(SharedPayloadFixture) -> Fut + Send + 'static,
-    Fut: Future<Output = ()>,
-{
-    let row = std::thread::spawn(move || {
-        camber::runtime::builder()
-            .header_timeout(ROW_HEADER_TIMEOUT)
-            .shutdown_timeout(ROW_SHUTDOWN_TIMEOUT)
-            .run(|| camber::runtime::block_on(serve_shared_payload_row(buffer, recipients, case)))
-            .expect("the shared-payload row runtime failed");
-    });
-    // Resumed rather than reported: the row's own assertion is the failure, and
-    // a join that only said "the row panicked" would replace it with a sentence
-    // naming neither the claim nor the value it got.
-    match row.join() {
-        Ok(()) => {}
-        Err(unwound) => std::panic::resume_unwind(unwound),
-    }
-}
-
-/// One shared-payload row, inside the runtime that owns its stop.
-async fn serve_shared_payload_row<C, Fut>(buffer: usize, recipients: usize, case: C)
+/// The caller selects the executor. Each server owns its own stop deadline.
+pub async fn shared_payload_row<C, Fut>(buffer: usize, recipients: usize, case: C)
 where
     C: FnOnce(SharedPayloadFixture) -> Fut,
     Fut: Future<Output = ()>,
@@ -430,8 +402,15 @@ where
     let (router, mut handoff) = direction_router(DIRECTION_PATH, buffer);
     DirectionTestFixture::run(
         |listener| {
-            camber::http::serve_background(listener, router)
-                .expect("owned server requires a Tokio runtime")
+            serve_router_with_policy(
+                listener,
+                router,
+                camber::http::ServerPolicy::default()
+                    .header_timeout(ROW_HEADER_TIMEOUT)
+                    .expect("finite header timeout")
+                    .shutdown_timeout(ROW_SHUTDOWN_TIMEOUT)
+                    .expect("finite shutdown timeout"),
+            )
         },
         |listener| async move {
             listener.hold_callbacks(handoff.take_gate());
@@ -452,7 +431,7 @@ async fn connect_clients(
 ) -> Box<[SharedPayloadClient]> {
     let mut clients = Vec::with_capacity(recipients);
     for _ in 0..recipients {
-        let peer = listener.connect(DIRECTION_PATH);
+        let peer = listener.connect_async(DIRECTION_PATH).await;
         let (sender, receiver) = handoff.connection().await.split();
         clients.push(SharedPayloadClient {
             peer,
@@ -463,54 +442,147 @@ async fn connect_clients(
     clients.into_boxed_slice()
 }
 
-/// Clone one shared payload into every sender given, measuring only this
-/// thread's own allocation.
+/// Which shipped admission one measured window runs through.
 #[cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
-pub fn measure_shared_admission(senders: &[WsSender], payload: &Bytes) -> AllocationInfo {
-    measure_admission(senders, "shared", |sender| {
-        sender.try_send_shared_binary(payload.clone())
-    })
+#[derive(Clone, Copy)]
+pub enum Admission {
+    /// `try_send_shared_binary`, which takes one `Bytes` handle by value.
+    Shared,
+    /// `send_shared_binary`, polled to its admission inside the window.
+    SharedWaiting,
+    /// `try_send_binary`, which copies the borrowed slice once at admission.
+    ///
+    /// The copied control, and a shipped operation rather than a synthetic
+    /// one: a control a test wrote could drift from what an application
+    /// actually pays.
+    Borrowed,
+    /// `send_binary`, which copies the same way when it is first polled.
+    BorrowedWaiting,
 }
 
-/// The same window through the shipped borrowed-slice admission.
-///
-/// The copied control, and a shipped operation rather than a synthetic one: a
-/// control a test wrote could drift from what an application actually pays.
 #[cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
-pub fn measure_borrowed_admission(senders: &[WsSender], payload: &[u8]) -> AllocationInfo {
-    measure_admission(senders, "borrowed", |sender| {
-        sender.try_send_binary(payload)
-    })
+impl Admission {
+    /// The name a failed comparison or a failed window reports this admission
+    /// under.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::SharedWaiting => "shared waiting",
+            Self::Borrowed => "borrowed",
+            Self::BorrowedWaiting => "borrowed waiting",
+        }
+    }
+
+    /// Whether this admission hands over shared storage rather than copying a
+    /// borrowed slice.
+    pub const fn shares(self) -> bool {
+        matches!(self, Self::Shared | Self::SharedWaiting)
+    }
+
+    /// Whether this admission is the waiting send, polled to its admission.
+    const fn waits(self) -> bool {
+        matches!(self, Self::SharedWaiting | Self::BorrowedWaiting)
+    }
+
+    /// Admit `payload` to every sender given this way, measuring only this
+    /// thread's own allocation.
+    ///
+    /// A shared admission is handed one `Bytes` built before the window opens,
+    /// so the window measures the clones and not the copy that made them.
+    pub fn measure(self, senders: &[WsSender], payload: &[u8]) -> AllocationInfo {
+        match self {
+            Self::Shared | Self::SharedWaiting => {
+                self.measure_shared(senders, &Bytes::copy_from_slice(payload))
+            }
+            Self::Borrowed => measure_admission(senders, self.label(), |sender| {
+                Poll::Ready(sender.try_send_binary(payload))
+            }),
+            Self::BorrowedWaiting => measure_admission(senders, self.label(), |sender| {
+                admitted_now(sender.send_binary(payload))
+            }),
+        }
+    }
+
+    /// Clone one shared payload into every sender given, through the immediate
+    /// or the waiting shared send.
+    ///
+    /// A waiting future is built and polled inside the window, on this thread,
+    /// so what it costs to admit is measured and not only what it costs to
+    /// construct. The row establishes capacity first, so one poll admits; a send
+    /// that waited is reported rather than measured.
+    fn measure_shared(self, senders: &[WsSender], payload: &Bytes) -> AllocationInfo {
+        match self.waits() {
+            true => measure_admission(senders, self.label(), |sender| {
+                admitted_now(sender.send_shared_binary(payload.clone()))
+            }),
+            false => measure_admission(senders, self.label(), |sender| {
+                Poll::Ready(sender.try_send_shared_binary(payload.clone()))
+            }),
+        }
+    }
+}
+
+/// Clone one caller-owned shared payload into every sender given, measuring
+/// only this thread's own allocation.
+///
+/// The payload is the caller's own rather than one built here, so a row can
+/// witness the very backing the window admitted.
+#[cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
+pub fn measure_shared_admission(senders: &[WsSender], payload: &Bytes) -> AllocationInfo {
+    Admission::Shared.measure_shared(senders, payload)
+}
+
+/// Poll one waiting send once, and answer what that poll decided.
+///
+/// One poll with a no-op waker, because the window has already established
+/// capacity: an admission that needs a second poll is a send that waited, and
+/// a waker registered for it would be bookkeeping the row did not ask about.
+///
+/// Unconstrained, because the window runs inside the row's runtime task: a
+/// hundred admissions in one poll spend Tokio's cooperative budget, and the
+/// queue would then answer `Pending` with a free slot — a yield the row's own
+/// loop forced, not a wait for capacity.
+#[cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
+fn admitted_now(
+    send: impl std::future::Future<Output = Result<(), RuntimeError>>,
+) -> Poll<Result<(), RuntimeError>> {
+    tokio::task::unconstrained(send)
+        .now_or_never()
+        .map_or(Poll::Pending, Poll::Ready)
 }
 
 /// One admission window, taken over every sender given.
 ///
-/// A refusal is carried out of the window rather than asserted inside it:
-/// formatting an assertion allocates, and an assertion here would measure the
-/// harness instead of the admission. Building the error itself allocates
-/// nothing, so the row still reports which refusal it met. The measurement is
-/// thread-local, so the transport workers writing these frames cannot reach it.
+/// A refusal or a wait is carried out of the window rather than asserted
+/// inside it: formatting an assertion allocates, and an assertion here would
+/// measure the harness instead of the admission. Building the error itself
+/// allocates nothing, so the row still reports which refusal it met. The
+/// measurement is thread-local, so the transport workers writing these frames
+/// cannot reach it.
 #[cfg(not(any(feature = "jemalloc", feature = "mimalloc")))]
 fn measure_admission(
     senders: &[WsSender],
     kind: &str,
-    mut admit: impl FnMut(&WsSender) -> Result<(), RuntimeError>,
+    mut admit: impl FnMut(&WsSender) -> Poll<Result<(), RuntimeError>>,
 ) -> AllocationInfo {
     assert_probe_calibrated();
-    let mut refusal = None;
+    let mut unadmitted = None;
     let measured = allocation_counter::measure(|| {
         for sender in senders {
             match admit(sender) {
-                Ok(()) => {}
-                Err(error) => refusal = refusal.take().or(Some(error)),
+                Poll::Ready(Ok(())) => {}
+                other => unadmitted = unadmitted.take().or(Some(other)),
             }
         }
     });
-    match refusal {
-        Some(error) => {
+    match unadmitted {
+        Some(Poll::Ready(Err(error))) => {
             panic!("a {kind} admission was refused inside the measured window: {error}")
         }
-        None => {}
+        Some(Poll::Pending) => {
+            panic!("a {kind} admission waited inside the measured window, so it admitted nothing")
+        }
+        Some(Poll::Ready(Ok(()))) | None => {}
     }
     measured
 }
@@ -637,29 +709,33 @@ pub fn assert_payload_bytes(taken: &[u8], expected: &[u8], what: &str) {
 ///
 /// The end itself has to arrive: a read that expired is a bridge that neither
 /// wrote nor let go, which is exactly the retention these rows exist to catch.
-pub fn assert_no_further_payload(peer: &mut TcpStream, what: &str) {
+pub async fn assert_no_further_payload(peer: &mut TcpStream, what: &str) {
     let mut closes = 0_usize;
     let ended = loop {
-        match try_read_ws_frame_raw(peer) {
+        match lifecycle_event(what, try_read_async_ws_frame_or_eof(peer)).await {
             // One close is what an ending bridge owes this peer. A second is a
             // transport that keeps answering, and reading on would trade this
             // row's deadline for the binary's.
-            Ok((CLOSE, _)) => closes += 1,
-            Ok((opcode, payload)) => {
+            Ok(Some((CLOSE, _))) => closes += 1,
+            Ok(Some((opcode, payload))) => {
                 panic!(
                     "{what}: the peer took opcode {opcode:#x} with {} bytes",
                     payload.len()
                 )
             }
+            Ok(None) => return,
             Err(error) => break error,
         }
         assert!(closes < 2, "{what}: the peer took {closes} close frames");
     };
-    match ended.kind() {
-        std::io::ErrorKind::UnexpectedEof => {}
-        _ if is_closed_connection_error(&ended) => {}
-        kind => {
-            panic!("{what}: the peer's transport answered {kind:?} rather than ending: {ended}")
-        }
+    // A clean end of stream is `Ok(None)` above. What reaches here is a reset
+    // transport, which also ends it, or a truncated or malformed frame, which
+    // does not.
+    match is_closed_connection_error(&ended) {
+        true => {}
+        false => panic!(
+            "{what}: the peer's transport answered {:?} rather than ending: {ended}",
+            ended.kind()
+        ),
     }
 }

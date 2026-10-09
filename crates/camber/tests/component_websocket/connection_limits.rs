@@ -5,6 +5,8 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use camber::RuntimeError;
+#[cfg(feature = "ws")]
+use camber::http::HostRouter;
 use camber::http::mock::{
     ConnectionOwnerEdge, ScopedConnectionOwner, ServerStopEdge, connection_owner,
 };
@@ -12,8 +14,6 @@ use camber::http::mock::{
 use camber::http::mock::{ScopedSupervisedRegistration, UpgradeOwnerEdge, supervised_registration};
 #[cfg(not(feature = "ws"))]
 use camber::http::mock::{ScopedSupervisorSelection, supervisor_selection};
-#[cfg(feature = "ws")]
-use camber::http::{HostRouter, WsConn};
 use camber::http::{Request, Response, Router};
 #[cfg(feature = "ws")]
 use std::future::{Future, IntoFuture};
@@ -87,12 +87,7 @@ fn dispatch_channel() -> (Sender<()>, Receiver<()>) {
 #[cfg(feature = "ws")]
 fn direct_ws_router(dispatched: Sender<()>) -> Router {
     let mut router = Router::new();
-    router.ws("/ws", |_req: &Request, mut conn: WsConn| {
-        while let Some(message) = conn.recv() {
-            conn.send(&message)?;
-        }
-        Ok(())
-    });
+    router.ws("/ws", common::echo_ws);
     router.get("/second", move |_req: &Request| {
         let dispatched = dispatched.clone();
         async move {
@@ -120,12 +115,7 @@ fn proxy_ws_router(backend_addr: SocketAddr, dispatched: Sender<()>) -> Router {
 #[cfg(feature = "ws")]
 fn spawn_ws_backend() -> SocketAddr {
     let mut backend = Router::new();
-    backend.ws("/echo", |_req: &Request, mut conn: WsConn| {
-        while let Some(message) = conn.recv() {
-            conn.send(&message)?;
-        }
-        Ok(())
-    });
+    backend.ws("/echo", common::echo_ws);
     common::spawn_server(backend)
 }
 
@@ -212,28 +202,32 @@ fn read_ws_frame(stream: &mut impl Read) -> (u8, Vec<u8>) {
 
 #[cfg(feature = "ws")]
 fn assert_ws_echo(stream: &mut (impl Read + Write)) {
-    write_ws_frame(stream, 0x1, b"permit-held");
+    write_ws_frame(stream, common::TEXT, b"permit-held");
     let (opcode, payload) = read_ws_frame(stream);
-    assert_eq!(opcode, 0x1, "expected WebSocket text frame");
+    assert_eq!(opcode, common::TEXT, "expected WebSocket text frame");
     assert_eq!(payload, b"permit-held");
 }
 
 #[cfg(feature = "ws")]
 fn complete_client_initiated_close(stream: &mut (impl Read + Write)) {
-    write_ws_frame(stream, 0x8, &[]);
+    write_ws_frame(stream, common::CLOSE, &[]);
     let (opcode, _) = read_ws_frame(stream);
-    assert_eq!(opcode, 0x8, "expected WebSocket close response");
+    assert_eq!(opcode, common::CLOSE, "expected WebSocket close response");
 }
 
 #[cfg(feature = "ws")]
 fn receive_server_initiated_close(stream: &mut (impl Read + Write)) {
     let (opcode, _) = read_ws_frame(stream);
-    assert_eq!(opcode, 0x8, "expected graceful WebSocket close frame");
+    assert_eq!(
+        opcode,
+        common::CLOSE,
+        "expected graceful WebSocket close frame"
+    );
 }
 
 #[cfg(feature = "ws")]
 fn acknowledge_server_close(stream: &mut impl Write) {
-    write_ws_frame(stream, 0x8, &[]);
+    write_ws_frame(stream, common::CLOSE, &[]);
 }
 
 fn plain_stream(addr: SocketAddr) -> TcpStream {
@@ -508,14 +502,18 @@ fn connection_limit_blocks_third_connection_until_slot_frees() {
 
             // Open two keep-alive connections and hold them open.
             let mut conn1 = TcpStream::connect(addr).expect("connect 1");
-            conn1.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            conn1
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set the read timeout");
             let req_keepalive = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
             conn1.write_all(req_keepalive.as_bytes()).unwrap();
             let s1 = read_status(&mut conn1);
             assert_eq!(s1, 200);
 
             let mut conn2 = TcpStream::connect(addr).expect("connect 2");
-            conn2.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            conn2
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set the read timeout");
             conn2.write_all(req_keepalive.as_bytes()).unwrap();
             let s2 = read_status(&mut conn2);
             assert_eq!(s2, 200);
@@ -524,7 +522,7 @@ fn connection_limit_blocks_third_connection_until_slot_frees() {
             let mut conn3 = TcpStream::connect(addr).expect("connect 3");
             conn3
                 .set_read_timeout(Some(Duration::from_millis(300)))
-                .ok();
+                .expect("set the read timeout");
             send_request(&mut conn3, "/hello");
             let result = {
                 let mut buf = [0u8; 1];
@@ -540,7 +538,9 @@ fn connection_limit_blocks_third_connection_until_slot_frees() {
             drop(conn1);
 
             // Now the third connection should complete.
-            conn3.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            conn3
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set the read timeout");
             let s3 = read_status(&mut conn3);
             assert_eq!(s3, 200);
 
@@ -571,7 +571,9 @@ fn connection_limit_releases_slot_after_connection_exit() {
             // Open one connection, complete a request, then close it.
             {
                 let mut conn1 = TcpStream::connect(addr).expect("connect 1");
-                conn1.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                conn1
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set the read timeout");
                 send_request(&mut conn1, "/hello");
                 let s1 = read_status(&mut conn1);
                 assert_eq!(s1, 200);
@@ -580,7 +582,9 @@ fn connection_limit_releases_slot_after_connection_exit() {
 
             // Second connection should succeed.
             let mut conn2 = TcpStream::connect(addr).expect("connect 2");
-            conn2.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            conn2
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set the read timeout");
             send_request(&mut conn2, "/hello");
             let s2 = read_status(&mut conn2);
             assert_eq!(s2, 200);

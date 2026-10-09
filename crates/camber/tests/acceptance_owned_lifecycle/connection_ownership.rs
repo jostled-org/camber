@@ -15,11 +15,11 @@ use std::time::Duration;
 use camber::http::mock::{
     ConnectionOwnershipEvent, ConnectionOwnershipObservation, ScopedOwnerTree, owner_tree,
 };
-use camber::http::{Request, Response, Router, WsConn};
+use camber::http::{Request, Response, Router};
 use camber::runtime;
 
 use crate::common::{
-    assert_address_reused, await_live, registered_connections, upgraded_ws_peer,
+    assert_address_reused, await_live, drain_ws, registered_connections, upgraded_ws_peer,
     wait_until_paused_within,
 };
 
@@ -39,10 +39,7 @@ fn owner_tree_router() -> Router {
     router.get(ANSWER_ROUTE, |_request: &Request| async {
         Response::text(200, "answered")
     });
-    router.ws(SOCKET_ROUTE, |_request: &Request, mut conn: WsConn| {
-        while conn.recv().is_some() {}
-        Ok(())
-    });
+    router.ws(SOCKET_ROUTE, drain_ws);
     router
 }
 

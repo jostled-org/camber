@@ -27,10 +27,10 @@ check_package_tree() {
     local -a files=()
     tree=$(pedant_tree "${mode}") || return 64
     while IFS= read -r file; do
-        files+=("${file}")
-    done < <(git ls-files "crates/${package}/${tree}")
+        [ -f "${file}" ] && files+=("${file}")
+    done < <(git ls-files --cached --others --exclude-standard --deduplicate "crates/${package}/${tree}")
     [ "${#files[@]}" -gt 0 ] || {
-        printf 'ERROR: no tracked %s files for %s\n' "${mode}" "${package}" >&2
+        printf 'ERROR: no %s files for %s\n' "${mode}" "${package}" >&2
         return 1
     }
     pedant check --format github "${files[@]}"

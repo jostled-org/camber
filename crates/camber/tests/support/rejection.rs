@@ -349,14 +349,18 @@ pub fn unrepresentable_handler(
 /// nothing: what every row that names it asserts is that the count stayed at
 /// zero, so a refusal decided before any `101` was committed. Two roots wrote
 /// it.
+///
+/// The count is taken in the factory, before any future exists, because entry
+/// into the factory is the moment a refused upgrade must never reach.
 #[cfg(feature = "ws")]
 pub fn counting_ws_handler(
     entries: &Arc<AtomicUsize>,
-) -> impl Fn(&Request, WsConn) -> Result<(), RuntimeError> + Send + Sync + 'static {
+) -> impl Fn(&Request, WsConn) -> std::future::Ready<Result<(), RuntimeError>> + Send + Sync + 'static
+{
     let entries = Arc::clone(entries);
     move |_request: &Request, _socket: WsConn| {
         entries.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        std::future::ready(Ok(()))
     }
 }
 

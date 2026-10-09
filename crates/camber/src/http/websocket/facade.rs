@@ -1,18 +1,24 @@
 use bytes::Bytes;
 use std::ops::ControlFlow;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use super::deadline::ReceiveDeadline;
 use super::message::{WsMessage, WsReceive};
 use super::receiver::WsReceiver;
 use super::sender::WsSender;
 use crate::RuntimeError;
 
-/// Bidirectional WebSocket connection for sync handler code.
+/// Bidirectional WebSocket connection for async callback code.
 ///
-/// The compatibility facade over the connection's two real owners. Its receive
-/// methods still answer `None` for every way a connection can end, and its
-/// sends still report a closed connection as a broken pipe, so code written
-/// against it keeps working unchanged.
+/// The convenience facade over the connection's two real owners. Its receive
+/// methods answer `None` for every way a connection can end, and its sends
+/// report a closed connection as a broken pipe. Callers that need the cause
+/// use the typed endpoints from [`Self::split`].
+///
+/// Every waiting method is a future. The text and binary receives discard the
+/// opposite message kind on purpose, and a discarded message stays discarded
+/// when the receive is cancelled afterwards. [`Self::recv_message`] discards
+/// nothing, so cancelling it loses nothing.
 ///
 /// [`Self::sender`] hands out an independent send capability without giving up
 /// the receive owner. [`Self::split`] gives up the facade and makes both owners
@@ -53,58 +59,56 @@ impl WsConn {
 
     /// Receive the next text message. Returns `None` when the connection ends.
     /// Skips binary messages.
-    pub fn recv(&mut self) -> Option<Box<str>> {
-        end_on_refusal(self.classified(text_answer, WsReceiver::recv))
+    pub async fn recv(&mut self) -> Option<Box<str>> {
+        self.classified(text_answer).await
     }
 
     /// Receive the next text message within `timeout`.
     ///
     /// Returns `Ok(None)` when the connection ends and skips binary messages
-    /// like [`Self::recv`]. The deadline covers the whole call, not each
-    /// skipped message.
+    /// like [`Self::recv`]. The deadline is fixed once, when the future is first
+    /// polled, and covers the whole call: a skipped message does not extend it.
     ///
     /// # Errors
     ///
     /// Returns [`RuntimeError::Timeout`] when no text message arrives and the
-    /// connection has not ended before the deadline.
-    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Box<str>>, RuntimeError> {
-        let deadline = Instant::now() + timeout;
-        self.classified(text_answer, move |receiver: &mut WsReceiver| {
-            receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        })
+    /// connection has not ended before the deadline, and
+    /// [`RuntimeError::NoRuntime`] when the call has to wait with no Tokio
+    /// runtime entered.
+    pub async fn recv_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<Box<str>>, RuntimeError> {
+        ReceiveDeadline::after(timeout)
+            .bound(self.classified(text_answer))
+            .await
     }
 
     /// Receive the next binary message. Returns `None` when the connection
     /// ends. Skips text messages.
-    pub fn recv_binary(&mut self) -> Option<Bytes> {
-        end_on_refusal(self.classified(binary_answer, WsReceiver::recv))
+    pub async fn recv_binary(&mut self) -> Option<Bytes> {
+        self.classified(binary_answer).await
     }
 
     /// Receive the next text or binary message. Returns `None` when the
     /// connection ends.
-    pub fn recv_message(&mut self) -> Option<WsMessage> {
-        end_on_refusal(self.classified(any_answer, WsReceiver::recv))
+    pub async fn recv_message(&mut self) -> Option<WsMessage> {
+        self.classified(any_answer).await
     }
 
     /// Take receives until one classifier settles on an answer.
     ///
     /// The loop every receiver on this facade runs, written once: a classifier
     /// that skips a message keeps the loop going, and one that settles ends it
-    /// with what it decided. `next` is what the loop asks for each message —
-    /// the blocking receive for the untimed methods, a receive bounded by the
-    /// caller's remaining deadline for the timed one — which is the only thing
-    /// those methods ever differed in.
-    fn classified<T, N>(
+    /// with what it decided. A timed caller wraps this whole loop in its one
+    /// deadline, so skipping cannot restart it.
+    async fn classified<T>(
         &mut self,
         answer: fn(WsReceive) -> ControlFlow<Option<T>>,
-        mut next: N,
-    ) -> Result<Option<T>, RuntimeError>
-    where
-        N: FnMut(&mut WsReceiver) -> Result<WsReceive, RuntimeError>,
-    {
+    ) -> Option<T> {
         loop {
-            match answer(next(&mut self.receiver)?) {
-                ControlFlow::Break(received) => return Ok(received),
+            match answer(self.receiver.next_receive().await) {
+                ControlFlow::Break(received) => return received,
                 ControlFlow::Continue(()) => {}
             }
         }
@@ -121,8 +125,8 @@ impl WsConn {
     /// Returns [`RuntimeError::Io`] with [`std::io::ErrorKind::BrokenPipe`]
     /// once the connection has ended. Use [`Self::sender`] and
     /// [`WsSender::send`] when the cause matters.
-    pub fn send(&self, text: &str) -> Result<(), RuntimeError> {
-        closed_as_broken_pipe(self.sender.send(text))
+    pub async fn send(&self, text: &str) -> Result<(), RuntimeError> {
+        closed_as_broken_pipe(self.sender.send(text).await)
     }
 
     /// Send a binary message to the peer.
@@ -130,8 +134,8 @@ impl WsConn {
     /// # Errors
     ///
     /// The same as [`Self::send`].
-    pub fn send_binary(&self, data: &[u8]) -> Result<(), RuntimeError> {
-        closed_as_broken_pipe(self.sender.send_binary(data))
+    pub async fn send_binary(&self, data: &[u8]) -> Result<(), RuntimeError> {
+        closed_as_broken_pipe(self.sender.send_binary(data).await)
     }
 }
 
@@ -140,7 +144,7 @@ impl WsConn {
 /// `Break` settles the receive — with the payload, or with `None` for the end
 /// of the connection. `Continue` is the skip a caller applies to a payload kind
 /// it did not ask for. Stating it once per payload kind is what keeps the
-/// blocking and the timed receiver from drifting apart.
+/// untimed and the timed receiver from drifting apart.
 fn text_answer(received: WsReceive) -> ControlFlow<Option<Box<str>>> {
     match received {
         WsReceive::Message(WsMessage::Text(text)) => ControlFlow::Break(Some(text)),
@@ -166,31 +170,10 @@ fn any_answer(received: WsReceive) -> ControlFlow<Option<WsMessage>> {
     }
 }
 
-/// End an infallible receive, recording the one refusal it cannot report.
-///
-/// These methods answer `None` for every way a connection can end, so a refused
-/// receive has no other answer to give. It is not the same event, though: a
-/// blocking call refused by a current-thread runtime is the caller's own
-/// scheduling mistake, which `closed_as_broken_pipe` refuses to hide on the send
-/// side for the same reason. Unrecorded it would read as an ordinary close — the
-/// callback returns, the receive owner drops, and the connection ends as
-/// `ReceiverDropped` with nothing anywhere naming the misuse. Error level: this
-/// is a program that cannot receive on the runtime it is running on.
-fn end_on_refusal<T>(outcome: Result<Option<T>, RuntimeError>) -> Option<T> {
-    match outcome {
-        Ok(received) => received,
-        Err(error) => {
-            tracing::error!(%error, "WebSocket receive refused; reporting the connection as ended");
-            None
-        }
-    }
-}
-
 /// Map a typed closure back to the broken pipe this facade has always reported.
 ///
-/// Only the closure is remapped. A blocking call refused by a current-thread
-/// runtime is the caller's own scheduling mistake, not a connection that ended,
-/// and reporting it as a broken pipe would hide it.
+/// Only the closure is remapped. Any other error is not a connection that
+/// ended, and reporting it as a broken pipe would hide it.
 fn closed_as_broken_pipe(outcome: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
     match outcome {
         Err(RuntimeError::WebSocketClosed(_)) => Err(RuntimeError::Io(std::io::Error::new(

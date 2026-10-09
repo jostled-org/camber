@@ -515,12 +515,12 @@ fn websocket_proxy_handles_client_close() {
         .run(|| {
             // Backend: sends 3 messages then waits
             let mut backend = Router::new();
-            backend.ws("/chat", |_: &Request, mut conn: WsConn| {
-                conn.send("one")?;
-                conn.send("two")?;
-                conn.send("three")?;
+            backend.ws("/chat", |_: &Request, mut conn: WsConn| async move {
+                conn.send("one").await?;
+                conn.send("two").await?;
+                conn.send("three").await?;
                 // Wait for client to close
-                let _ = conn.recv();
+                conn.recv().await;
                 Ok(())
             });
             let backend_addr = common::spawn_server(backend);
@@ -602,8 +602,7 @@ fn websocket_proxy_rejects_cross_host_origin_before_upstream_upgrade() {
             // Backend: WebSocket echo server
             let mut backend = Router::new();
             backend.ws("/echo", |_: &Request, conn: WsConn| {
-                conn.send("should not reach")?;
-                Ok(())
+                common::send_once(conn, "should not reach")
             });
             let backend_addr = common::spawn_server(backend);
 
@@ -645,8 +644,8 @@ fn ws_proxy_strips_spoofed_forwarded_headers() {
                     .headers()
                     .find(|(name, _)| name.eq_ignore_ascii_case("x-end-to-end"))
                     .map_or("missing", |(_, value)| value);
-                conn.send(&format!("{}|{control}", ws_leak_report(&leaked)))?;
-                Ok(())
+                let report = format!("{}|{control}", ws_leak_report(&leaked)).into_boxed_str();
+                async move { conn.send(&report).await }
             });
             let backend_addr = common::spawn_server(backend);
 

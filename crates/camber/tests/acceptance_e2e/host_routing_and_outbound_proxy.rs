@@ -1,18 +1,13 @@
 #![cfg(feature = "ws")]
 
-use crate::common;
-#[path = "../support/ws_frame_io.rs"]
-mod ws_frame_io;
-#[path = "../support/ws_text_helpers.rs"]
-mod ws_text_helpers;
+use crate::common::{
+    self, read_until_double_crlf, read_ws_text_frame, start_upgrade, write_ws_close_frame,
+    write_ws_text_frame,
+};
 
-use camber::http::{self, Request, Response, Router, WsConn};
+use camber::http::{self, Request, Response, Router};
 use camber::runtime;
-use std::io::Write;
-use std::net::TcpStream;
 use std::time::Duration;
-use ws_frame_io::read_until_double_crlf;
-use ws_text_helpers::{read_ws_text_frame, write_ws_close_frame, write_ws_text_frame};
 
 use common::spawn_host_server;
 
@@ -124,14 +119,7 @@ fn e2e_websocket_proxy_still_works() {
         .run(|| {
             // Backend: WebSocket echo server
             let mut backend = Router::new();
-            backend.ws("/echo", |_req: &Request, mut conn: WsConn| {
-                while let Some(msg) = conn.recv() {
-                    if conn.send(&msg).is_err() {
-                        break;
-                    }
-                }
-                Ok(())
-            });
+            backend.ws("/echo", common::echo_ws);
             let backend_addr = common::spawn_server(backend);
 
             // Proxy forwarding to backend
@@ -140,25 +128,13 @@ fn e2e_websocket_proxy_still_works() {
             let proxy_addr = common::spawn_server(proxy);
 
             // Client: WebSocket handshake through proxy
-            let mut stream = TcpStream::connect(proxy_addr).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-
-            let key = "dGhlIHNhbXBsZSBub25jZQ==";
-            let upgrade_req = format!(
-                "GET /ws/echo HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: {key}\r\n\
-             Sec-WebSocket-Version: 13\r\n\
-             \r\n"
-            );
-            stream.write_all(upgrade_req.as_bytes()).unwrap();
-
+            let mut stream = start_upgrade(proxy_addr, "/ws/echo");
             let resp = read_until_double_crlf(&mut stream);
-            assert_eq!(crate::http::status_from_raw(&resp), 101, "response: {resp}");
+            assert_eq!(
+                crate::http::status_from_raw(&resp),
+                101,
+                "expected 101 switching protocols: {resp}"
+            );
 
             // Send messages, receive echoes
             let messages = ["hello", "world", "v08"];

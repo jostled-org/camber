@@ -30,7 +30,7 @@ use super::BufferConfig;
 #[cfg(feature = "grpc")]
 pub use super::dispatch::GrpcRouter;
 #[cfg(feature = "ws")]
-pub(super) use super::dispatch::WsHandler;
+pub(super) use super::dispatch::WsLauncher;
 pub(super) use super::dispatch::{
     DispatchResult, FrozenRouter, GateCheck, Handler, ServerDispatch, SseHandler,
 };
@@ -514,32 +514,54 @@ impl Router {
 
     /// Register a WebSocket handler for the given path.
     ///
-    /// The handler is synchronous and runs on the blocking pool. It receives the
-    /// upgrade request and a [`WsConn`], the compatibility facade over the
-    /// connection's two real owners.
+    /// The handler is an async callback factory. It receives the upgrade
+    /// request and a [`WsConn`], the convenience facade over the connection's
+    /// two real owners, and returns the future that serves the connection. The
+    /// factory may read the request before it returns; anything the future
+    /// needs across an `.await` must be moved into it as owned state. The future
+    /// must be `Send`, but need not be `Sync` or `Unpin`.
+    ///
+    /// ```rust,no_run
+    /// # use camber::http::Router;
+    /// let mut router = Router::new();
+    /// router.ws("/echo", |_req, mut conn| async move {
+    ///     while let Some(text) = conn.recv().await {
+    ///         conn.send(&text).await?;
+    ///     }
+    ///     Ok(())
+    /// });
+    /// ```
     ///
     /// # Ownership
     ///
-    /// [`WsConn::sender`] hands out a `Clone + Send + Sync` send handle without
-    /// giving up the receive owner; [`WsConn::split`] gives up the facade for
-    /// both. Both halves keep the connection live, so a handler that moves them
-    /// into owned application work may return without ending it. A handler that
-    /// drops the connection, or the last of its halves, ends it.
+    /// The connection's upgrade task owns the callback future and polls it
+    /// beside the transport, so a pending callback stops neither the transport
+    /// nor another connection. [`WsConn::sender`] hands out a
+    /// `Clone + Send + Sync` send handle without giving up the receive owner;
+    /// [`WsConn::split`] gives up the facade for both. Both halves keep the
+    /// connection live, so a handler that moves them into owned application work
+    /// may return without ending it. A handler that drops the connection, or the
+    /// last of its halves, ends it.
     ///
-    /// # Blocking
+    /// Once the connection ends, the callback has a fixed grace to finish. A
+    /// callback still pending at that deadline is dropped before the upgrade
+    /// settles. Callback code must cooperate: Camber cannot preempt a poll, a
+    /// factory call, or a destructor that blocks the thread.
     ///
-    /// Sends and receives block. Each asks the connection before it asks the
-    /// runtime, so one that has already ended answers with its cause on every
-    /// flavor. A call that still has to wait waits on the calling thread off a
-    /// runtime, waits through `block_in_place` on a multi-thread Tokio runtime,
-    /// and returns [`RuntimeError::BlockingInAsyncContext`] on a current-thread
-    /// runtime rather than wait.
+    /// # Waiting
     ///
-    /// [`WsReceiver::recv_timeout`](crate::http::WsReceiver::recv_timeout) needs
-    /// a Tokio clock for its deadline. Off a runtime it reports
-    /// [`RuntimeError::NoRuntime`](crate::RuntimeError::NoRuntime) instead of
-    /// waiting untimed, and an expired deadline reports
-    /// [`RuntimeError::Timeout`](crate::RuntimeError::Timeout).
+    /// Sends and receives are futures that suspend the calling task. They make
+    /// progress on current-thread and multi-thread Tokio runtimes alike, and
+    /// the untimed ones need no runtime clock. Dropping a pending send admits
+    /// nothing; dropping a pending typed receive consumes nothing.
+    ///
+    /// [`WsReceiver::recv_timeout`](crate::http::WsReceiver::recv_timeout) fixes
+    /// one Tokio deadline when first polled. A receive that has to wait with no
+    /// runtime entered reports
+    /// [`RuntimeError::NoRuntime`](crate::RuntimeError::NoRuntime), and an
+    /// expired deadline reports
+    /// [`RuntimeError::Timeout`](crate::RuntimeError::Timeout) without ending
+    /// the connection.
     ///
     /// A successful send means the frame entered the connection's bounded
     /// outbound queue, not that its bytes reached the peer. Once the connection
@@ -551,24 +573,27 @@ impl Router {
     /// # Runtime authority
     ///
     /// A handler served under a Camber runtime may admit work with
-    /// [`camber::spawn`](crate::spawn); that child belongs to runtime
-    /// completion, and a spawn issued after root admission closes is refused
-    /// with [`RuntimeError::ScopeClosed`]. Synchronous serving is such a path —
-    /// it carries the runtime its terminal call captured — as is an owned server
+    /// [`camber::spawn`](crate::spawn) from its factory or its future, across
+    /// any suspension; that child belongs to runtime completion, and a spawn
+    /// issued after root admission closes is refused with
+    /// [`RuntimeError::ScopeClosed`]. Synchronous serving is such a path — it
+    /// carries the runtime its terminal call captured — as is an owned server
     /// started inside a Camber runtime. Only a bare-Tokio owned server refuses
     /// with [`RuntimeError::NoRuntime`], and a refused closure never runs. The
-    /// handler itself is never a root-scope child, and server completion makes
-    /// no claim that it has returned.
+    /// handler itself is never a root-scope child. Server completion means its
+    /// callback future has completed or been dropped. Only a callback that
+    /// blocks its thread inside a poll, the factory call, or a destructor can
+    /// hold completion until it yields.
     #[cfg(feature = "ws")]
-    pub fn ws(
-        &mut self,
-        path: &str,
-        handler: impl Fn(&Request, WsConn) -> Result<(), RuntimeError> + Send + Sync + 'static,
-    ) {
+    pub fn ws<F, Fut>(&mut self, path: &str, handler: F)
+    where
+        F: Fn(&Request, WsConn) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
+    {
         self.root.insert_route(
             Method::Get,
             path,
-            RouteHandler::WebSocket(Arc::new(handler)),
+            RouteHandler::WebSocket(super::ws_proxy::direct_ws_launcher(handler)),
         );
     }
 

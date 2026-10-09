@@ -16,6 +16,9 @@ use common::*;
 #[path = "support/fixture_contracts.rs"]
 mod fixture_contracts;
 
+#[cfg(feature = "ws")]
+#[path = "acceptance_owned_lifecycle/async_websocket.rs"]
+mod async_websocket;
 #[path = "acceptance_owned_lifecycle/background_serving.rs"]
 mod background_serving;
 #[cfg(feature = "ws")]
@@ -84,6 +87,9 @@ mod service_budgets;
 #[cfg(feature = "ws")]
 #[path = "acceptance_owned_lifecycle/shared_binary_payloads.rs"]
 mod shared_binary_payloads;
+#[cfg(feature = "ws")]
+#[path = "acceptance_owned_lifecycle/spawn_probe.rs"]
+mod spawn_probe;
 #[path = "acceptance_owned_lifecycle/sqs_accounts.rs"]
 mod sqs_accounts;
 #[path = "acceptance_owned_lifecycle/sqs_close.rs"]

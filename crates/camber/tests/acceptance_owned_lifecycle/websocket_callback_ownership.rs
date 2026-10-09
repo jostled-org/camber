@@ -1,45 +1,50 @@
-//! Daemon-live proof that a retained callback is a child of its upgrade owner,
-//! and that nothing above it settles until that child is joined or named.
+//! Daemon-live proof that an async callback is part of its upgrade owner, and
+//! that its captured state is gone before anything above it settles.
 //!
 //! Every row runs a real background server over a real loopback peer and reads
-//! only what production published. The ordering claims are read at the barrier
-//! production itself writes: a released permit, a settled upgrade, and a settled
-//! connection are each checked against the callback record that was already in
-//! place when they arrived, so a row cannot pass by observing two facts that
-//! merely both happened.
+//! only what production published. The callback future captures a drop witness:
+//! a value whose `Drop` records what the listener had published at that
+//! instant. So the ordering claim is read at the destruction itself rather than
+//! inferred afterwards — a witness that saw its permit back, its upgrade
+//! settled, or its own disposition published was dropped too late, whatever the
+//! row reads once everything has finished.
 //!
-//! The whole file runs inside one private child process. The peer-only row
-//! leaves a real blocking callback parked in application code that Camber has
-//! deliberately stopped waiting for, and no test process can take that thread
-//! back. The child says its assertions passed while that callback is still
-//! there, and the parent reaps it.
+//! The whole file runs inside one private child process. The cancelled-callback
+//! event is a process-wide WARN with no identity on it, so a capture in a shared
+//! test binary would count the cancellations of every other row beside it. The
+//! child exits once its rows pass: nothing here outlives its bridge any more.
 
 #![cfg(feature = "ws")]
 
 use std::net::SocketAddr;
-use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use camber::RuntimeError;
 use camber::http::mock::{
-    ConnectionOwnershipEvent, ConnectionOwnershipObservation, ScopedRetainedCallback,
-    WebSocketCallbackObservation, retained_callback,
+    ConnectionOwnershipEvent, ScopedRetainedCallback, UpgradeOwnerController, UpgradeOwnerEdge,
+    WebSocketCallbackObservation,
 };
-use camber::http::{Request, Router, ServerHandle, WsConn};
+use camber::http::{Request, Router, ServerHandle, WsCloseCause, WsConn, WsReceiver, WsSender};
 
 use crate::common::{
-    TraceCapture, assert_address_reused, assert_callbacks_own, await_live, callback_gate,
-    capture_events, close_ws_peer, contain_in_child, park_until_released, published_callbacks,
-    transferred_upgrades, upgraded_ws_peer,
+    CallbackPark, CallbackRelease, DropWitnesses, Observers, RetainedCallbackListener, TEXT,
+    TraceCapture, abortive_upgraded_ws_peer, assert_address_reused, assert_callbacks_own,
+    assert_cancelled_fields, assert_graceful_close_then_eof, assert_received_text,
+    assert_refusal_body_then_eof, await_committed_stop, await_live, bounded_receive, callback_gate,
+    capture_events, close_ws_peer, drain_until_closed, expect_async_text, lifecycle_event,
+    on_ws_executors, only_event, park_until_released, published_callbacks, read_async_http_head,
+    run_in_child, settled_callbacks, settled_count, stall_callback_transport, start_ws_upgrade,
+    status_from_raw, transferred_child, transferred_upgrades, upgraded_ws_peer,
+    write_async_ws_frame,
 };
 
 /// The private mode this file's one child runs under.
 const CHILD_MODE: &str = "websocket-callback-ownership";
 
 /// What the child prints once every row has passed.
-const ASSERTIONS_COMPLETE: &str = "CALLBACK_OWNERSHIP_ROWS_COMPLETE";
+const ASSERTIONS_COMPLETE: &str = "CALLBACK_SETTLEMENT_ROWS_COMPLETE";
 
-/// How long the parent waits for that marker, and for the reap that follows.
+/// How long the parent waits for that marker and the child's exit.
 const CHILD_BOUND: Duration = Duration::from_secs(60);
 
 /// How long one live observation has before the row fails.
@@ -55,30 +60,102 @@ const DRAIN_BOUND: Duration = Duration::from_millis(300);
 /// The route every row offers its bridge on.
 const SOCKET_ROUTE: &str = "/ws";
 
-/// The one WARN event an outstanding callback publishes.
-const OUTSTANDING_EVENT: &str = "name=camber.websocket.callback.outstanding";
+/// The one WARN event a callback dropped at its deadline publishes.
+const CANCELLED_EVENT: &str = "name=camber.websocket.callback.cancelled";
 
-/// Whether a row's callback answers the endpoints its bridge closes.
-#[derive(Clone, Copy, Eq, PartialEq)]
+/// The message a row's peer resumes its callback with.
+const RESUME: &str = "resume-the-callback";
+
+/// What one row's callback does with the connection it is given.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Callback {
+    /// It answers one message and returns.
+    Returns,
+    /// It takes one message and returns an error.
+    Errors,
+    /// Its factory panics before any future exists.
+    FactoryPanics,
+    /// It takes one message and then panics.
+    PanicsAfterSuspension,
     /// It reads until its receive queue closes, then returns.
-    Cooperative,
-    /// It parks in application code and never answers anything.
+    Drains,
+    /// It suspends on a gate nothing in Camber can open.
     Parked,
+    /// It hands both halves to the row and returns.
+    Escapes,
+    /// It releases both endpoints to the row but stays pending on unrelated work.
+    EscapesAndParks,
 }
 
-/// A router whose one bridge answers `callback`.
-fn callback_router(callback: Callback, parked: &Arc<Mutex<Receiver<()>>>) -> Router {
-    let parked = Arc::clone(parked);
+/// What a row's callback needs beyond its connection.
+#[derive(Clone)]
+struct CallbackParts {
+    callback: Callback,
+    parked: CallbackPark,
+    escaped: tokio::sync::mpsc::Sender<(WsSender, WsReceiver)>,
+}
+
+/// A router whose one bridge runs `parts.callback` with a witness captured.
+fn callback_router(parts: CallbackParts, witnesses: DropWitnesses) -> Router {
     let mut router = Router::new();
-    router.ws(SOCKET_ROUTE, move |_request: &Request, mut conn: WsConn| {
-        match callback {
-            Callback::Cooperative => while conn.recv().is_some() {},
-            Callback::Parked => park_until_released(&parked),
+    router.ws(SOCKET_ROUTE, move |_request: &Request, conn: WsConn| {
+        let witness = witnesses.enter();
+        // The connection and the witness are both the factory's own locals
+        // here, so the unwind is what drops them.
+        if parts.callback == Callback::FactoryPanics {
+            panic!("the callback factory panicked")
         }
-        Ok(())
+        let parts = parts.clone();
+        async move {
+            let _witness = witness;
+            run_callback(parts, conn).await
+        }
     });
     router
+}
+
+/// The body every non-panicking factory's future runs.
+async fn run_callback(parts: CallbackParts, mut conn: WsConn) -> Result<(), RuntimeError> {
+    match parts.callback {
+        Callback::Returns => {
+            let message = conn.recv().await.ok_or(RuntimeError::ChannelClosed)?;
+            conn.send(&message).await
+        }
+        Callback::Errors => {
+            conn.recv().await;
+            Err(RuntimeError::InvalidArgument(
+                "the callback refused its peer's message".into(),
+            ))
+        }
+        Callback::PanicsAfterSuspension => {
+            conn.recv().await;
+            panic!("the callback panicked after its suspension")
+        }
+        Callback::Drains => {
+            drain_until_closed(&mut conn).await;
+            Ok(())
+        }
+        Callback::Parked => {
+            park_until_released(&parts.parked).await;
+            Ok(())
+        }
+        Callback::Escapes => escape(&parts, conn).await,
+        Callback::EscapesAndParks => {
+            escape(&parts, conn).await?;
+            park_until_released(&parts.parked).await;
+            Ok(())
+        }
+        Callback::FactoryPanics => unreachable!("the factory panicked before building a future"),
+    }
+}
+
+/// Hand both halves of `conn` to the row.
+async fn escape(parts: &CallbackParts, conn: WsConn) -> Result<(), RuntimeError> {
+    parts
+        .escaped
+        .send(conn.split())
+        .await
+        .map_err(|_| RuntimeError::ChannelClosed)
 }
 
 /// One row's server: a real listener, an observer over it, and its handle.
@@ -86,82 +163,82 @@ struct LiveServer {
     addr: SocketAddr,
     controller: ScopedRetainedCallback,
     handle: ServerHandle,
+    witnesses: DropWitnesses,
+    escaped: tokio::sync::mpsc::Receiver<(WsSender, WsReceiver)>,
+    /// The release end of the gate a parked callback waits on.
+    ///
+    /// Held for the whole row and dropped with it: nothing a row asks of its
+    /// server may be answered by this gate opening.
+    _parked: CallbackRelease,
 }
 
-fn live_server(callback: Callback, parked: &Arc<Mutex<Receiver<()>>>) -> LiveServer {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the callback fixture");
-    listener
-        .set_nonblocking(true)
-        .expect("the callback fixture's listener takes a Tokio reactor");
-    let listener =
-        tokio::net::TcpListener::from_std(listener).expect("adopt the callback fixture's listener");
-    let addr = listener.local_addr().expect("read the fixture's address");
-    let controller = retained_callback(addr).expect("register the callback observer");
-    let policy = camber::http::ServerPolicy::default()
-        .shutdown_timeout(DRAIN_BOUND)
-        .expect("a positive drain bound");
-    let handle = camber::http::server(callback_router(callback, parked))
-        .policy(policy)
-        .serve_background(listener)
-        .expect("the callback fixture requires a Tokio runtime");
+async fn live_server(callback: Callback) -> LiveServer {
+    let bound = RetainedCallbackListener::bind().await;
+    let witnesses = DropWitnesses::new(Observers::of(&bound.controller));
+    let (release, parked) = callback_gate();
+    let (escaped_tx, escaped) = tokio::sync::mpsc::channel(2);
+    let parts = CallbackParts {
+        callback,
+        parked,
+        escaped: escaped_tx,
+    };
+    let (addr, controller, handle) =
+        bound.serve(callback_router(parts, witnesses.clone()), DRAIN_BOUND);
     LiveServer {
         addr,
         controller,
         handle,
+        witnesses,
+        escaped,
+        _parked: release,
     }
 }
 
-/// The one upgrade a single-connection row's connection took as its child.
-fn transferred_child(observed: &ConnectionOwnershipObservation, context: &str) -> (u64, u64) {
-    let transferred = transferred_upgrades(observed);
-    assert_eq!(
-        transferred.len(),
-        1,
-        "{context}: exactly one upgrade transfer was expected: {transferred:?}"
-    );
-    transferred[0]
+impl LiveServer {
+    /// Take the two halves an escaping callback handed out, bounded.
+    async fn escaped_halves(&mut self, context: &str) -> (WsSender, WsReceiver) {
+        lifecycle_event(context, self.escaped.recv())
+            .await
+            .unwrap_or_else(|| panic!("{context}: the callback never handed its halves out"))
+    }
 }
 
-/// The records that carry a settled disposition.
-fn settled_callbacks(controller: &ScopedRetainedCallback) -> Box<[WebSocketCallbackObservation]> {
-    published_callbacks(controller)
-        .iter()
-        .copied()
-        .filter(|decided| decided.disposition.is_some())
-        .collect()
-}
-
-/// Assert every record this listener published names `owner`.
+/// Require that every witness went before anything it must precede was
+/// published.
 ///
-/// The parent half of Invariant 5, read from two writers: the connection
-/// recorded the transfer, the bridge recorded the callback, and a callback that
-/// sits beneath a different upgrade — or beneath none — disagrees here.
-fn assert_owned_by(controller: &ScopedRetainedCallback, owner: (u64, u64), context: &str) {
-    assert_callbacks_own(&published_callbacks(controller), owner, context);
-}
-
-/// The callback disposition this listener published, if one has been.
-fn disposition(controller: &ScopedRetainedCallback) -> Option<WebSocketCallbackObservation> {
-    settled_callbacks(controller).first().copied()
-}
-
-/// Require a disposition to be in place already, at a barrier that follows it.
-///
-/// The ordering claim of Invariant 8, read the one way that is not two
-/// independent observations: production publishes the disposition and only then
-/// performs `barrier`, so a `barrier` that is visible with no disposition
-/// behind it is the violation itself.
-fn assert_disposition_precedes(
-    controller: &ScopedRetainedCallback,
-    barrier: &str,
+/// `earlier` holds, per witness in the order they went, how many upgrade
+/// settlements and dispositions other connections may already have published.
+/// A single-connection row passes one zero. `permit_open` is whether the permit
+/// is still this row's to see: the listener records one flag for every bridge,
+/// so a row with a second connection cannot read it per callback.
+fn assert_dropped_first(
+    witnesses: &DropWitnesses,
+    earlier: &[usize],
+    permit_open: bool,
     context: &str,
-) -> WebSocketCallbackObservation {
-    disposition(controller).unwrap_or_else(|| {
-        panic!(
-            "{context}: {barrier} without the callback having been joined or named: {:?}",
-            published_callbacks(controller)
-        )
-    })
+) {
+    let dropped = witnesses.dropped();
+    assert_eq!(
+        dropped.len(),
+        earlier.len(),
+        "{context}: {} callback captures were expected to be dropped: {dropped:?}",
+        earlier.len()
+    );
+    for (at, earlier) in dropped.iter().zip(earlier) {
+        assert_eq!(
+            (at.upgrades_settled, at.dispositions),
+            (*earlier, *earlier),
+            "{context}: a callback's captures outlived its upgrade's settlement or its own disposition: {at:?}"
+        );
+        assert!(
+            !permit_open || !at.permit_released,
+            "{context}: the connection permit came back while the callback's captures were alive: {at:?}"
+        );
+        assert_ne!(
+            at.phase, "finished",
+            "{context}: the server finished while the callback's captures were alive: {at:?}"
+        );
+    }
 }
 
 /// What one row expects its callback to have settled as.
@@ -170,24 +247,22 @@ struct Expected {
     /// The closed set of transitions this row's disposition may name.
     ///
     /// One name wherever a barrier fixes it. The escalation row is the one that
-    /// has none: a cooperative callback that has already returned is joined
+    /// has none: a cooperative callback that has already returned completes
     /// before the abort it raced is ever heard, so the drain it entered under
-    /// and the cancellation that overtook it are both truthful answers. The
-    /// exact table lives in 3.T1, which holds the join at its own edge and can
-    /// fix the order; here the result set is closed and the cleanup below is
-    /// identical for either member of it.
+    /// and the cancellation that overtook it are both truthful answers.
     shutdown: &'static [&'static str],
-    outstanding_event: bool,
+    /// The cause the bridge committed, which no callback outcome may rewrite.
+    cause: WsCloseCause,
 }
 
-/// Drive one row's shared assertions from the peer terminal to address reuse.
+/// Drive one single-connection row's shared assertions from the permit to
+/// address reuse.
 ///
-/// Every row ends the same way and differs only in what it asked the server for
-/// before it got here, so the ordering claims are stated once: the permit comes
-/// back after the disposition, the upgrade settles under the connection that
-/// transferred it, the connection settles after its child, and the address is
-/// bindable again.
-async fn assert_callback_bounds_settlement(
+/// Every row ends the same way and differs only in what it asked for before it
+/// got here: the callback's captures went before the permit, the upgrade, and
+/// its own disposition; the disposition names the right owner and transition;
+/// the cause is the bridge's; and the address is bindable again.
+async fn assert_settled_before_completion(
     server: LiveServer,
     capture: &TraceCapture,
     expected: &Expected,
@@ -200,43 +275,72 @@ async fn assert_callback_bounds_settlement(
         &format!("{context}: the connection permit never came back"),
     )
     .await;
-    let settled = assert_disposition_precedes(controller, "the permit came back", context);
     assert_eq!(
-        settled.disposition,
-        Some(expected.disposition),
-        "{context}: the callback settled as something else: {settled:?}"
+        server.witnesses.entered(),
+        1,
+        "{context}: the factory was not entered exactly once"
     );
-    let named = settled
+    assert_dropped_first(&server.witnesses, &[0], true, context);
+    let settled = assert_settled_once_as(controller, expected.disposition, context);
+    let named = settled[0]
         .shutdown
         .unwrap_or_else(|| panic!("{context}: the disposition named no transition: {settled:?}"));
     assert!(
         expected.shutdown.contains(&named),
-        "{context}: the disposition named a transition outside this row's result set {:?}: {settled:?}",
+        "{context}: the disposition named {named}, outside {:?}",
         expected.shutdown
     );
-
-    let (connection, upgrade) = transferred_child(&controller.connections.observed(), context);
-    assert_owned_by(controller, (connection, upgrade), context);
-    let settled_in_time = tokio::time::timeout(LIVE_BOUND, async {
-        while !controller.connections.observed().contains(
-            ConnectionOwnershipEvent::ConnectionUpgradeSettled {
-                connection,
-                upgrade,
-            },
-        ) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .is_ok();
-    assert!(
-        settled_in_time,
-        "{context}: the upgrade child never settled under its connection: events={:?} callbacks={:?} stop={:?}",
-        controller.connections.observed().events,
-        controller.upgrades.callbacks(),
-        controller.stop.observed(),
+    let owner = transferred_child(controller, context);
+    assert_callbacks_own(&published_callbacks(controller), owner, context);
+    await_upgrade_and_connection_settled(controller, owner, context).await;
+    assert_eq!(
+        controller.terminals.observed().terminal,
+        Some(expected.cause),
+        "{context}: the callback's outcome rewrote the bridge's cause"
     );
-    assert_disposition_precedes(controller, "the upgrade settled", context);
+    assert_cancelled_event(capture, expected, named, context);
+    stop_and_reuse(server, context).await;
+}
+
+/// Require exactly one settled callback on this listener, settled as
+/// `disposition`, and hand the settled records back.
+fn assert_settled_once_as(
+    controller: &ScopedRetainedCallback,
+    disposition: &'static str,
+    context: &str,
+) -> Box<[WebSocketCallbackObservation]> {
+    let settled = settled_callbacks(&published_callbacks(controller));
+    assert_eq!(
+        settled
+            .iter()
+            .map(|record| record.disposition)
+            .collect::<Box<[_]>>(),
+        Box::from([Some(disposition)]),
+        "{context}: the callback settled as something else: {settled:?}"
+    );
+    settled
+}
+
+/// Wait for one upgrade to settle under its connection, and the connection
+/// under its server.
+async fn await_upgrade_and_connection_settled(
+    controller: &ScopedRetainedCallback,
+    (connection, upgrade): (u64, u64),
+    context: &str,
+) {
+    await_live(
+        || {
+            controller.connections.observed().contains(
+                ConnectionOwnershipEvent::ConnectionUpgradeSettled {
+                    connection,
+                    upgrade,
+                },
+            )
+        },
+        LIVE_BOUND,
+        &format!("{context}: the upgrade child never settled under its connection"),
+    )
+    .await;
     await_live(
         || {
             controller
@@ -248,100 +352,241 @@ async fn assert_callback_bounds_settlement(
         &format!("{context}: the connection never settled"),
     )
     .await;
-    assert_disposition_precedes(controller, "the connection settled", context);
+}
 
+/// Require the cancelled event exactly when the row's disposition is
+/// `cancelled`, and with that disposition's own fields.
+fn assert_cancelled_event(
+    capture: &TraceCapture,
+    expected: &Expected,
+    shutdown: &str,
+    context: &str,
+) {
+    let cancelled = expected.disposition == "cancelled";
     assert_eq!(
-        capture.recorded(&[OUTSTANDING_EVENT]),
-        expected.outstanding_event,
-        "{context}: the outstanding event's presence is not what this row owes: {:?}",
+        capture.recorded(&[CANCELLED_EVENT]),
+        cancelled,
+        "{context}: the cancelled event's presence is not what this row owes: {:?}",
         capture.events()
     );
-    if expected.outstanding_event {
-        // Checked against the transition the record named rather than against
-        // the row's set, so the event and the observation have to agree about
-        // the one callback they both describe.
-        assert_outstanding_fields(capture, named, context);
+    if cancelled {
+        let events = capture.events();
+        let event = only_event(&events, CANCELLED_EVENT, context);
+        assert_cancelled_fields(event, expected.cause, shutdown, context);
     }
-
-    stop_and_reuse(server, context).await;
 }
 
 /// End one row's server, and require the address it served on back.
 ///
-/// The last two steps every row takes, and the only ones that are the same
-/// whichever claim the row made: the server is cancelled rather than drained
-/// because the claim is already established by the time this runs, and the
-/// address is the one fact an out-of-process observer could still check.
+/// The server is cancelled rather than drained because the claim is already
+/// established by the time this runs, and the address is the one fact an
+/// out-of-process observer could still check. Whichever stop the row committed
+/// first keeps its result, so the join may answer any stop result — but it must
+/// answer within the bound, and never with a fault.
 async fn stop_and_reuse(server: LiveServer, context: &str) {
     let addr = server.addr;
     server.handle.cancel();
-    let _stopped = tokio::time::timeout(LIVE_BOUND, server.handle).await;
+    let stopped = tokio::time::timeout(LIVE_BOUND, server.handle)
+        .await
+        .unwrap_or_else(|_| panic!("{context}: the cancelled server never joined"));
+    assert!(
+        matches!(
+            stopped,
+            Ok(()) | Err(RuntimeError::Cancelled | RuntimeError::Timeout)
+        ),
+        "{context}: the server joined with a fault rather than a stop result: {stopped:?}"
+    );
     assert_address_reused(addr, context).await;
 }
 
-/// Assert the closed fields of the one outstanding event a row published.
-fn assert_outstanding_fields(capture: &TraceCapture, shutdown: &str, context: &str) {
-    let events = capture.events();
-    let event = crate::common::only_event(&events, OUTSTANDING_EVENT, context);
-    crate::common::assert_field_value(
-        event,
-        "disposition",
-        "outstanding-after-forced-grace",
-        context,
-    );
-    crate::common::assert_field_value(event, "shutdown", shutdown, context);
-    assert!(
-        crate::common::field_value(event, "cause").is_some(),
-        "{context}: the event names no committed cause: {event}"
-    );
+/// Resume a callback suspended in its receive.
+async fn resume(peer: &mut tokio::net::TcpStream, context: &str) {
+    write_async_ws_frame(peer, TEXT, RESUME.as_bytes(), context).await;
 }
 
-/// Row: a peer terminal on a running server, answered by a callback that never
-/// answers anything.
+/// The single-connection row every callback outcome shares: upgrade, resume,
+/// let the callback end on its own, and answer the close its connection owes.
 ///
-/// The only row whose callback is genuinely retained past its deadline, and the
-/// only one that needs the containment this file runs under. A running server
-/// has opened no forced window of its own, so the join's deadline is the only
-/// bound in play and the disposition is the contract rather than a race.
-async fn peer_terminal_outstanding_callback() {
-    let context = "the live peer-only row";
-    let (_gate, parked) = callback_gate();
-    let capture = capture_events(OUTSTANDING_EVENT);
-    let server = live_server(Callback::Parked, &parked);
+/// The cause is the facade's last owner going with the callback, whatever the
+/// callback returned: an error and a panic are reported, never committed.
+async fn callback_outcome_row(callback: Callback, context: &str) {
+    let capture = capture_events(CANCELLED_EVENT);
+    let server = live_server(callback).await;
     let mut peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
-    close_ws_peer(&mut peer, context).await;
-    assert_callback_bounds_settlement(
+    if callback != Callback::FactoryPanics {
+        resume(&mut peer, context).await
+    }
+    if callback == Callback::Returns {
+        expect_async_text(&mut peer, RESUME, context).await
+    }
+    assert_graceful_close_then_eof(&mut peer, context).await;
+    assert_settled_before_completion(
         server,
         &capture,
         &Expected {
-            disposition: "outstanding-after-forced-grace",
+            disposition: "completed",
             shutdown: &["none"],
-            outstanding_event: true,
+            cause: WsCloseCause::SendersDropped,
         },
         context,
     )
     .await;
 }
 
-/// Row: a cooperative callback on a peer terminal.
-///
-/// The negative half of the row above, on the same transport path: a callback
-/// that reads its closed receive queue and returns settles as a completion, and
-/// Camber says nothing about it.
-async fn peer_terminal_cooperative_callback() {
-    let context = "the live cooperative row";
-    let (_gate, parked) = callback_gate();
-    let capture = capture_events(OUTSTANDING_EVENT);
-    let server = live_server(Callback::Cooperative, &parked);
+/// Rows: a normal return, a returned error, a factory panic, and a future panic
+/// after a real suspension.
+async fn callback_outcomes_settle_alike() {
+    callback_outcome_row(Callback::Returns, "the live return row").await;
+    callback_outcome_row(Callback::Errors, "the live returned-error row").await;
+    callback_outcome_row(Callback::FactoryPanics, "the live factory-panic row").await;
+    callback_outcome_row(
+        Callback::PanicsAfterSuspension,
+        "the live suspended-panic row",
+    )
+    .await;
+}
+
+/// Row: the peer closes, and a cooperative callback reads that and returns.
+async fn peer_close_row() {
+    let context = "the live peer-close row";
+    let capture = capture_events(CANCELLED_EVENT);
+    let server = live_server(Callback::Drains).await;
     let mut peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
     close_ws_peer(&mut peer, context).await;
-    assert_callback_bounds_settlement(
+    assert_settled_before_completion(
         server,
         &capture,
         &Expected {
             disposition: "completed",
             shutdown: &["none"],
-            outstanding_event: false,
+            cause: WsCloseCause::PeerClosed,
+        },
+        context,
+    )
+    .await;
+}
+
+/// Row: the peer's transport is reset, and the callback reads that and returns.
+async fn peer_reset_row() {
+    let context = "the live peer-reset row";
+    let capture = capture_events(CANCELLED_EVENT);
+    let server = live_server(Callback::Drains).await;
+    let peer = abortive_upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
+    drop(peer);
+    assert_settled_before_completion(
+        server,
+        &capture,
+        &Expected {
+            disposition: "completed",
+            shutdown: &["none"],
+            cause: WsCloseCause::PeerDisconnected,
+        },
+        context,
+    )
+    .await;
+}
+
+/// Row: the callback hands its halves out and parks, and the row drops the
+/// receive half behind a stalled write.
+///
+/// The dropped receiver is a local terminal, and the stalled write keeps the
+/// transport's close pending. The parked callback is cancelled in that window,
+/// so its captures and its disposition must both precede the permit and the
+/// inbound settlement the pending transport still holds.
+async fn stalled_local_terminal_row() {
+    let context = "the live stalled-local-terminal row";
+    let capture = capture_events(CANCELLED_EVENT);
+    let mut server = live_server(Callback::EscapesAndParks).await;
+    let peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
+    let (sender, receiver) = server.escaped_halves(context).await;
+    stall_callback_transport(&sender, receiver, &server.controller, context).await;
+    await_live(
+        || server.witnesses.dropped_count() != 0,
+        LIVE_BOUND,
+        &format!("{context}: the parked callback's captures were never dropped"),
+    )
+    .await;
+    assert_dropped_first(&server.witnesses, &[0], true, context);
+    let terminals = server.controller.terminals.observed();
+    assert!(
+        !terminals.permit_released,
+        "{context}: pending transport released its permit"
+    );
+    assert!(
+        !terminals.inbound_settled,
+        "{context}: pending close finished early"
+    );
+    assert_eq!(
+        server.controller.stop.observed().phase,
+        "running",
+        "{context}: the server left its running phase without a stop"
+    );
+    await_live(
+        || settled_count(&published_callbacks(&server.controller)) != 0,
+        LIVE_BOUND,
+        &format!("{context}: the dropped callback never published its disposition"),
+    )
+    .await;
+    assert_settled_once_as(&server.controller, "cancelled", context);
+    drop((sender, peer));
+    assert_settled_before_completion(
+        server,
+        &capture,
+        &Expected {
+            disposition: "cancelled",
+            shutdown: &["none"],
+            cause: WsCloseCause::ReceiverDropped,
+        },
+        context,
+    )
+    .await;
+}
+
+/// Row: a graceful stop the peer answers, and a callback that returns once its
+/// receive queue closes.
+async fn graceful_completion_row() {
+    let context = "the live graceful row";
+    let capture = capture_events(CANCELLED_EVENT);
+    let server = live_server(Callback::Drains).await;
+    let mut peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
+    server.handle.shutdown();
+    assert_graceful_close_then_eof(&mut peer, context).await;
+    assert_settled_before_completion(
+        server,
+        &capture,
+        &Expected {
+            disposition: "completed",
+            shutdown: &["graceful"],
+            cause: WsCloseCause::ServerShutdown,
+        },
+        context,
+    )
+    .await;
+}
+
+/// Row: a graceful stop whose silent peer runs the drain out, under a callback
+/// that is still suspended at the expiry.
+///
+/// The one row whose callback is dropped where it stands. The drain is
+/// committed before the bridge closes the callback's endpoints, so the deadline
+/// it fixes is the aggregate expiry, and a callback still pending there is the
+/// one that ran it out.
+async fn silent_peer_at_graceful_expiry_row() {
+    let context = "the live drain-expiry row";
+    let capture = capture_events(CANCELLED_EVENT);
+    let server = live_server(Callback::Parked).await;
+    // Held open and deliberately silent: the bridge owes this peer a close
+    // handshake, and a peer that never answers is what makes the drain expire.
+    let _peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
+    server.handle.shutdown();
+    await_committed_stop(&server.controller.stop, context).await;
+    assert_settled_before_completion(
+        server,
+        &capture,
+        &Expected {
+            disposition: "cancelled",
+            shutdown: &["deadline-expired"],
+            cause: WsCloseCause::ServerShutdown,
         },
         context,
     )
@@ -350,27 +595,24 @@ async fn peer_terminal_cooperative_callback() {
 
 /// Row: a cancellation that reaches the bridge before any other transition.
 ///
-/// The callback is cooperative here on purpose. A cancelled server opens its
-/// own forced window at the commit, and the join's window opens a few
-/// microseconds later at the endpoint close; both round to the same timer tick,
-/// so an outstanding disposition on this path would be reporting which owner
-/// the scheduler reached first. What is deterministic — and what this row
-/// asserts — is that the join happens, that it names the transition it entered
-/// under, and that nothing above it settles first.
-async fn cancel_first_transition() {
-    let context = "the live cancel-first row";
-    let (_gate, parked) = callback_gate();
-    let capture = capture_events(OUTSTANDING_EVENT);
-    let server = live_server(Callback::Cooperative, &parked);
+/// The callback is cooperative here on purpose. A cancelled server arms its own
+/// forced deadline when it commits, and the callback's opens a moment later at
+/// the endpoint close; both round to the same timer tick, so a pending callback
+/// on this path would report which owner the scheduler reached first. The
+/// parent-abort row below owns the case where the server's deadline wins.
+async fn forced_cancellation_row() {
+    let context = "the live cancel row";
+    let capture = capture_events(CANCELLED_EVENT);
+    let server = live_server(Callback::Drains).await;
     let _peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
     server.handle.cancel();
-    assert_callback_bounds_settlement(
+    assert_settled_before_completion(
         server,
         &capture,
         &Expected {
             disposition: "completed",
             shutdown: &["cancelled"],
-            outstanding_event: false,
+            cause: WsCloseCause::ServerCancelled,
         },
         context,
     )
@@ -378,124 +620,92 @@ async fn cancel_first_transition() {
 }
 
 /// Row: a graceful stop escalated to a cancellation before its drain expires.
-async fn graceful_to_cancel_transition() {
+async fn graceful_to_cancel_row() {
     let context = "the live graceful-to-cancel row";
-    let (_gate, parked) = callback_gate();
-    let capture = capture_events(OUTSTANDING_EVENT);
-    let server = live_server(Callback::Cooperative, &parked);
+    let capture = capture_events(CANCELLED_EVENT);
+    let server = live_server(Callback::Drains).await;
     let _peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
     server.handle.shutdown();
+    // The bridge's own commit, not only the server's: a cancellation that
+    // reached the bridge first would be the cause instead of the escalation.
+    let terminals = &server.controller.terminals;
     await_live(
-        || server.controller.stop.observed().phase != "running",
+        || terminals.observed().terminal.is_some(),
         LIVE_BOUND,
-        &format!("{context}: the graceful phase never committed"),
+        &format!("{context}: the bridge never committed the graceful stop"),
     )
     .await;
     server.handle.cancel();
-    assert_callback_bounds_settlement(
+    assert_settled_before_completion(
         server,
         &capture,
         &Expected {
             disposition: "completed",
             shutdown: &["cancelled", "graceful"],
-            outstanding_event: false,
+            cause: WsCloseCause::ServerShutdown,
         },
         context,
     )
     .await;
 }
 
-/// Row: a graceful stop whose drain runs out against a peer that never answers
-/// the close it was sent.
+/// Row: the connection that owns a still-pending callback is taken away by its
+/// parent.
 ///
-/// The transition is `graceful`, not the expiry the server went on to reach.
-/// The bridge gives its callback's endpoints up when the drain commits, so the
-/// entry is fixed there, and a callback that returned cooperatively expired
-/// nothing: it reports the drain it entered under. The peer's silence decides
-/// how the *server* ends, and this file makes no claim about that — the one
-/// entry that reports an expiry is the row that was still outstanding at it.
-async fn timeout_first_transition() {
-    let context = "the live timeout-first row";
-    let (_gate, parked) = callback_gate();
-    let capture = capture_events(OUTSTANDING_EVENT);
-    let server = live_server(Callback::Cooperative, &parked);
-    // Held open and deliberately silent: the bridge owes this peer a close
-    // handshake, and a peer that never answers is what makes the drain expire
-    // rather than complete.
+/// The bridge is held where it would begin settling, so its own deadline can
+/// never drop the callback. Only the cancelled server's forced deadline can end
+/// this connection, and it ends it by aborting the task the callback lives in.
+/// That abort is the whole disposition: the callback goes with its bridge, and
+/// nothing publishes a settlement it never reached.
+async fn parent_abort_row() {
+    let context = "the live parent-abort row";
+    let capture = capture_events(CANCELLED_EVENT);
+    let server = live_server(Callback::Parked).await;
     let _peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
-    server.handle.shutdown();
-    assert_callback_bounds_settlement(
-        server,
-        &capture,
-        &Expected {
-            disposition: "completed",
-            shutdown: &["graceful"],
-            outstanding_event: false,
-        },
+    server
+        .controller
+        .upgrades
+        .pause_once(UpgradeOwnerEdge::BeforeCallbackSettle)
+        .expect("arm the bridge's settlement edge");
+    server.handle.cancel();
+    lifecycle_event(
         context,
+        server
+            .controller
+            .upgrades
+            .wait_until_paused(UpgradeOwnerEdge::BeforeCallbackSettle),
     )
-    .await;
-}
-
-/// Row: a callback that entered under a drain and was still there at the expiry
-/// the drain fixed for it.
-///
-/// The fourth member of the closed `ShutdownObservation` vocabulary, and the
-/// only entry that reaches it. `deadline-expired` is not what a drain that ran
-/// out reports — the row above shows a drain running out and still reporting
-/// the transition its callback entered under. It is what a callback reports
-/// when the aggregate expiry it borrowed is the thing that ended its own join,
-/// so it takes a callback that never returns and a server that has committed
-/// the drain that lends it that expiry.
-///
-/// The second row whose callback is genuinely retained past its deadline, and
-/// the second reason this file runs under containment. It is ordered ahead of
-/// the peer-only row rather than after it so the one outstanding event each of
-/// them owes stays one: a capture opened before this row would see two.
-async fn drain_deadline_outstanding_callback() {
-    let context = "the live drain-expiry row";
-    let (_gate, parked) = callback_gate();
-    let capture = capture_events(OUTSTANDING_EVENT);
-    let server = live_server(Callback::Parked, &parked);
-    let _peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
-    server.handle.shutdown();
-    // The entry is fixed when the bridge gives the callback's endpoints up, from
-    // whatever the server has committed by then, so the drain has to be
-    // committed first. Closing before it would fix the entry on a running
-    // server, which is the peer-only row's `none` rather than this row's claim.
-    await_live(
-        || server.controller.stop.observed().phase == "graceful",
-        LIVE_BOUND,
-        &format!("{context}: the graceful phase never committed"),
-    )
-    .await;
-    assert_callback_bounds_settlement(
-        server,
-        &capture,
-        &Expected {
-            disposition: "outstanding-after-forced-grace",
-            shutdown: &["deadline-expired"],
-            outstanding_event: true,
-        },
-        context,
-    )
-    .await;
+    .await
+    .expect("the bridge reaches its settlement edge");
+    let completed = lifecycle_event(context, server.handle.join()).await;
+    assert!(
+        matches!(completed, Err(RuntimeError::Cancelled)),
+        "{context}: a cancelled server completed as {completed:?}"
+    );
+    assert_dropped_first(&server.witnesses, &[0], false, context);
+    let published = published_callbacks(&server.controller);
+    assert_eq!(
+        settled_count(&published),
+        0,
+        "{context}: a callback taken away with its bridge published a settlement: {published:?}"
+    );
+    assert!(
+        !capture.recorded(&[CANCELLED_EVENT]),
+        "{context}: the parent's abort was reported as a deadline cancellation"
+    );
+    assert_address_reused(server.addr, context).await;
 }
 
 /// Row: two live upgrades on one server, each with a callback of its own.
 ///
-/// The uniqueness half of Invariant 5, which no single-connection row can see.
-/// With one upgrade in play, a record naming the wrong parent and a record
-/// naming the right one read identically; with two, a callback claimed by both
-/// upgrades leaves one of them owning none, and a callback naming an upgrade
-/// nothing transferred leaves both owning none. Each peer closes its own
-/// connection, so the two dispositions are two, and the mapping between them
-/// and the two transfers has to be one-to-one.
-async fn distinct_upgrades_keep_distinct_callbacks() {
+/// The uniqueness half of the ownership claim, which no single-connection row
+/// can see. Each peer closes in turn, so each callback's captures must go while
+/// only the other's upgrade has settled, and the two settled records map
+/// one-to-one onto the two transfers.
+async fn distinct_upgrades_row() {
     let context = "the live two-upgrade row";
-    let (_gate, parked) = callback_gate();
-    let capture = capture_events(OUTSTANDING_EVENT);
-    let server = live_server(Callback::Cooperative, &parked);
+    let capture = capture_events(CANCELLED_EVENT);
+    let server = live_server(Callback::Drains).await;
     let mut first = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
     let mut second = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
     let controller = &server.controller;
@@ -505,32 +715,26 @@ async fn distinct_upgrades_keep_distinct_callbacks() {
         &format!("{context}: both upgrades were never transferred to a connection"),
     )
     .await;
-    close_ws_peer(&mut first, context).await;
-    close_ws_peer(&mut second, context).await;
-
     let transferred = transferred_upgrades(&controller.connections.observed());
-    await_live(
-        || {
-            transferred.iter().all(|(connection, upgrade)| {
-                controller.connections.observed().contains(
-                    ConnectionOwnershipEvent::ConnectionUpgradeSettled {
-                        connection: *connection,
-                        upgrade: *upgrade,
-                    },
-                )
-            })
-        },
-        LIVE_BOUND,
-        &format!("{context}: both upgrade children never settled under their connections"),
-    )
-    .await;
+    for (index, peer) in [&mut first, &mut second].into_iter().enumerate() {
+        close_ws_peer(peer, context).await;
+        await_live(
+            || settled_count(&published_callbacks(controller)) > index,
+            LIVE_BOUND,
+            &format!("{context}: peer {index}'s callback never settled"),
+        )
+        .await;
+    }
+    for owner in transferred.iter() {
+        await_upgrade_and_connection_settled(controller, *owner, context).await;
+    }
+    assert_dropped_first(&server.witnesses, &[0, 1], false, context);
     assert_one_callback_per_upgrade(controller, &transferred, context);
     assert!(
-        !capture.recorded(&[OUTSTANDING_EVENT]),
-        "{context}: a cooperative callback published the outstanding event: {:?}",
+        !capture.recorded(&[CANCELLED_EVENT]),
+        "{context}: a cooperative callback was cancelled: {:?}",
         capture.events()
     );
-
     stop_and_reuse(server, context).await;
 }
 
@@ -553,7 +757,7 @@ fn assert_one_callback_per_upgrade(
         UPGRADES,
         "{context}: this row needs {UPGRADES} transferred upgrades: {transferred:?}"
     );
-    let settled = settled_callbacks(controller);
+    let settled = settled_callbacks(&published_callbacks(controller));
     assert_eq!(
         settled.len(),
         UPGRADES,
@@ -571,55 +775,160 @@ fn assert_one_callback_per_upgrade(
     }
 }
 
-/// Run one row on a runtime of its own.
+/// Row: a callback that moves both halves into application work and returns.
+///
+/// Its captures go at its return while the connection lives on in the row's
+/// hands. The halves still carry a frame each way, and only letting go of them
+/// ends the connection — for the cause that release owes, not one the
+/// callback's return committed.
+async fn escaped_endpoints_row() {
+    let context = "the live escaped-endpoints row";
+    let capture = capture_events(CANCELLED_EVENT);
+    let mut server = live_server(Callback::Escapes).await;
+    let mut peer = upgraded_ws_peer(server.addr, SOCKET_ROUTE, context).await;
+    let (sender, mut receiver) = server.escaped_halves(context).await;
+    await_live(
+        || server.witnesses.dropped_count() == 1,
+        LIVE_BOUND,
+        &format!("{context}: the returned callback's captures were never dropped"),
+    )
+    .await;
+    assert_eq!(
+        server.controller.terminals.observed().terminal,
+        None,
+        "{context}: the callback's return ended the connection its halves still hold"
+    );
+    sender
+        .send(RESUME)
+        .await
+        .expect("a returned callback's sender still admits");
+    expect_async_text(&mut peer, RESUME, context).await;
+    resume(&mut peer, context).await;
+    assert_received_text(
+        bounded_receive(&mut receiver, context).await,
+        RESUME,
+        context,
+    );
+    drop((sender, receiver));
+    assert_graceful_close_then_eof(&mut peer, context).await;
+    assert_settled_before_completion(
+        server,
+        &capture,
+        &Expected {
+            disposition: "completed",
+            shutdown: &["none"],
+            cause: WsCloseCause::SendersDropped,
+        },
+        context,
+    )
+    .await;
+}
+
+/// Row: an upgrade the stopping server refuses before it acknowledges it.
+///
+/// The registration is held short of its acknowledgement until the graceful
+/// phase is committed, so the connection answers it with a refusal instead of a
+/// `101`. A refused upgrade starts no application code, so the factory is never
+/// entered and there is no future to drop.
+async fn rejected_registration_row() {
+    let context = "the live rejected-registration row";
+    let server = live_server(Callback::Drains).await;
+    let upgrades = &server.controller.upgrades;
+    for edge in [
+        UpgradeOwnerEdge::AfterHandoffSubmitted,
+        UpgradeOwnerEdge::BeforeTransferAcknowledge,
+    ] {
+        upgrades
+            .pause_once(edge)
+            .expect("arm the registration edge");
+    }
+    let mut pending = start_ws_upgrade(server.addr, SOCKET_ROUTE, context).await;
+    hold_unacknowledged(upgrades, context).await;
+    server.handle.shutdown();
+    await_committed_stop(&server.controller.stop, context).await;
+    upgrades
+        .release(UpgradeOwnerEdge::BeforeTransferAcknowledge)
+        .expect("release the held registration into the stop");
+    let head = read_async_http_head(&mut pending, context).await;
+    assert_eq!(
+        status_from_raw(&head),
+        503,
+        "{context}: the stopping server answered {head}"
+    );
+    assert_refusal_body_then_eof(&mut pending, "service unavailable", context).await;
+    assert_eq!(
+        server.witnesses.entered(),
+        0,
+        "{context}: a refused upgrade entered the callback factory"
+    );
+    assert_eq!(
+        server.witnesses.dropped_count(),
+        0,
+        "{context}: a refused upgrade dropped callback state it should never have built"
+    );
+    let addr = server.addr;
+    let completed = lifecycle_event(context, server.handle.join()).await;
+    assert!(
+        completed.is_ok(),
+        "{context}: the stopping server completed as {completed:?}"
+    );
+    assert_address_reused(addr, context).await;
+}
+
+/// Let the registration reach the channel, then hold it before it is
+/// acknowledged.
+async fn hold_unacknowledged(upgrades: &UpgradeOwnerController, context: &str) {
+    lifecycle_event(
+        context,
+        upgrades.wait_until_paused(UpgradeOwnerEdge::AfterHandoffSubmitted),
+    )
+    .await
+    .expect("the registration reaches the channel");
+    upgrades
+        .release(UpgradeOwnerEdge::AfterHandoffSubmitted)
+        .expect("release the submitted registration");
+    lifecycle_event(
+        context,
+        upgrades.wait_until_paused(UpgradeOwnerEdge::BeforeTransferAcknowledge),
+    )
+    .await
+    .expect("the registration reaches its acknowledgement edge");
+}
+
+/// Every row, in the child that isolates their events, each on runtimes of its
+/// own.
 ///
 /// A runtime per row, because a row stops its server: two rows sharing one
 /// would have the first row's forced abort deciding the second row's deadlines.
-fn row<F>(body: F)
-where
-    F: AsyncFnOnce(),
-{
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("the callback rows need a Tokio runtime");
-    runtime.block_on(body());
-}
-
-/// Every row, in the child that contains them.
 fn run_rows() {
-    row(peer_terminal_cooperative_callback);
-    row(distinct_upgrades_keep_distinct_callbacks);
-    row(cancel_first_transition);
-    row(graceful_to_cancel_transition);
-    row(timeout_first_transition);
-    // Last, because these are the rows that leave the callbacks this child is
-    // contained for. Each owes exactly one outstanding event, and a capture is
-    // fed everything published after it was opened, so neither may run before a
-    // row that counts them.
-    row(drain_deadline_outstanding_callback);
-    row(peer_terminal_outstanding_callback);
+    on_ws_executors(callback_outcomes_settle_alike);
+    on_ws_executors(peer_close_row);
+    on_ws_executors(peer_reset_row);
+    on_ws_executors(stalled_local_terminal_row);
+    on_ws_executors(graceful_completion_row);
+    on_ws_executors(silent_peer_at_graceful_expiry_row);
+    on_ws_executors(forced_cancellation_row);
+    on_ws_executors(graceful_to_cancel_row);
+    on_ws_executors(distinct_upgrades_row);
+    on_ws_executors(escaped_endpoints_row);
+    on_ws_executors(rejected_registration_row);
+    on_ws_executors(parent_abort_row);
 }
 
-// 3.T2 — Invariants 5, 7, and 8: the retained callback is a child of the
-// upgrade owner its connection transferred, and neither the upgrade nor the
-// connection settles — and no permit comes back — until that callback is joined
-// or its bounded outstanding disposition is emitted.
+// async-first-websockets 2.T6 — Invariants 8 and 11: a callback's captured
+// state is dropped before its upgrade settles, its permit comes back, its
+// disposition is published, or its server finishes, on every path that ends
+// it. A refused upgrade never enters the factory at all.
 //
 // Parentage is read from two independent writers: the connection records the
 // transfer, the bridge records the callback under the identity it was built
-// with, and the two have to agree. The two-upgrade row is what closes the
-// uniqueness half — with one upgrade in play a misattributed callback is
+// with, and the two have to agree. The two-upgrade row closes the uniqueness
+// half — with one upgrade in play a misattributed callback is
 // indistinguishable from a correct one.
-//
-// Daemon-live over real transports, with process isolation. The peer-only row
-// leaves a real blocking callback behind on purpose, so the child reports its
-// assertions while that callback is still parked and the parent reaps it. The
-// kill is cleanup, never evidence: it happens only after the marker arrives.
 #[test]
-fn callback_join_and_disposition_matrix_crosses_real_transport_boundaries() {
-    contain_in_child(
-        "websocket_callback_ownership::callback_join_and_disposition_matrix_crosses_real_transport_boundaries",
+fn async_callback_settlement_drops_state_before_upgrade_completion() {
+    run_in_child(
+        "websocket_callback_ownership::async_callback_settlement_drops_state_before_upgrade_completion",
         CHILD_MODE,
         ASSERTIONS_COMPLETE,
         CHILD_BOUND,

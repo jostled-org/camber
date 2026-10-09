@@ -164,7 +164,7 @@ pub(super) async fn until_abort<F>(
 
 /// Wait for the one escalation that overrides whatever a bridge is waiting on.
 ///
-/// Spelled once, because the teardown step and the retained callback's join
+/// Spelled once, because the teardown step and the callback's settlement
 /// both stop for it: two predicates over one watch are two definitions of what
 /// counts as an abort, and the two owners would eventually disagree.
 pub(super) async fn awaited_abort(control: &mut tokio::sync::watch::Receiver<ServerControl>) {

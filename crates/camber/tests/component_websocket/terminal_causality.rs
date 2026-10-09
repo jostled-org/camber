@@ -9,10 +9,10 @@
 #![cfg(feature = "ws")]
 
 use crate::common::{
-    AFTER_COMMIT, BEFORE_COMMIT, DIRECTION_DEADLINE, DirectionTestFixture, abortive_direction_row,
-    assert_closed_with, closed_cause,
+    AFTER_COMMIT, BEFORE_COMMIT, DirectionTestFixture, abortive_direction_row, assert_closed_with,
+    bounded_receive, closed_cause,
 };
-use camber::http::{WsCloseCause, WsReceive, WsReceiver, WsSender};
+use camber::http::{WsCloseCause, WsReceiver, WsSender};
 
 // 4.T1
 #[camber::test]
@@ -36,9 +36,9 @@ async fn committed_peer_cause_survives_a_later_cancellation() {
         fixture.wait_paused(AFTER_COMMIT).await;
         assert_committed(&fixture, WsCloseCause::PeerDisconnected);
         fixture.cancel_server();
-        assert_send_reports(&sender, WsCloseCause::PeerDisconnected);
+        assert_send_reports(&sender, WsCloseCause::PeerDisconnected).await;
         fixture.release(AFTER_COMMIT);
-        assert_receive_reports(&mut receiver, WsCloseCause::PeerDisconnected);
+        assert_receive_reports(&mut receiver, WsCloseCause::PeerDisconnected).await;
         drop((sender, receiver));
         assert_committed(&fixture, WsCloseCause::PeerDisconnected);
     })
@@ -64,9 +64,9 @@ async fn accepted_cancellation_overtakes_an_uncommitted_peer_cause() {
         fixture.release(BEFORE_COMMIT);
         fixture.wait_paused(AFTER_COMMIT).await;
         assert_committed(&fixture, WsCloseCause::ServerCancelled);
-        assert_send_reports(&sender, WsCloseCause::ServerCancelled);
+        assert_send_reports(&sender, WsCloseCause::ServerCancelled).await;
         fixture.release(AFTER_COMMIT);
-        assert_receive_reports(&mut receiver, WsCloseCause::ServerCancelled);
+        assert_receive_reports(&mut receiver, WsCloseCause::ServerCancelled).await;
         drop((sender, receiver));
         assert_committed(&fixture, WsCloseCause::ServerCancelled);
     })
@@ -93,18 +93,22 @@ fn assert_committed(fixture: &DirectionTestFixture, expected: WsCloseCause) {
 /// state directly while a receive is answered through the queue the settlement
 /// closes — so this is the half that can be asked while the bridge is still
 /// held at its commit edge.
-fn assert_send_reports(sender: &WsSender, expected: WsCloseCause) {
+async fn assert_send_reports(sender: &WsSender, expected: WsCloseCause) {
     assert_eq!(
-        closed_cause(sender.send("after the cause was fixed"), "the send half"),
+        closed_cause(
+            sender.send("after the cause was fixed").await,
+            "the send half"
+        ),
         expected,
         "the send half reported another cause"
     );
 }
 
 /// The receive half reports the same committed cause.
-fn assert_receive_reports(receiver: &mut WsReceiver, expected: WsCloseCause) {
-    let received: WsReceive = receiver
-        .recv_timeout(DIRECTION_DEADLINE)
-        .expect("the receive half answered nothing before its bound");
-    assert_closed_with(received, expected, "the receive half");
+async fn assert_receive_reports(receiver: &mut WsReceiver, expected: WsCloseCause) {
+    assert_closed_with(
+        bounded_receive(receiver, "the receive half").await,
+        expected,
+        "the receive half",
+    );
 }

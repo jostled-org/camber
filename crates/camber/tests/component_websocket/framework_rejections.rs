@@ -612,7 +612,7 @@ fn websocket_mapper_cannot_commit_handoff_and_required_version_wins() {
 /// A router whose WebSocket handler fails only after its `101` is committed.
 fn post_commitment_router(calls: &Arc<AtomicUsize>) -> Router {
     let mut router = Router::new();
-    router.ws(SOCKET, |_req: &Request, _ws: WsConn| {
+    router.ws(SOCKET, |_req: &Request, _ws: WsConn| async {
         Err(RuntimeError::Http(
             "handler failed after the upgrade".into(),
         ))

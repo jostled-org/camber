@@ -205,7 +205,7 @@ after every join or abandonment decision has been taken — see
 
 That deadline bounds Camber's own waiting and escalation. Cooperative cancellation cannot
 preempt an async task that never yields, stop application code running on a blocking or OS
-thread, or prove that an abandoned synchronous callback has returned. A participant Camber
+thread, or drop a callback whose poll or destructor blocks its thread. A participant Camber
 could not prove finished is named in the returned aggregate rather than reported stopped.
 
 `otel_endpoint(url)` installs the OTLP exporter as the global tracing subscriber.
@@ -266,17 +266,17 @@ directions and its callback. A connection permit is released by the
 connection owner that holds it, after both children have settled — so a permit
 outstanding past a join is a bug, not a race.
 
-An upgrade's blocking callback is the one child Camber cannot force. Every
-bridge terminal closes the callback-facing endpoints so a cooperative callback
-wakes, and the upgrade owner holds one join deadline for it that a later server
-transition may shorten but never restart. A callback still blocked at that
-deadline is reported through one WARN event,
-`camber.websocket.callback.outstanding`, carrying
-`disposition="outstanding-after-forced-grace"`. Grep for that event and that
-field: the `CallbackDisposition::OutstandingAfterForcedGrace` record behind them
-is private to the bridge and is not a name to look up. Camber stops claiming the
-callback returned, and the public server result still follows the accepted
-server command.
+An upgrade's callback is a future the upgrade owns and polls beside the
+transport. Every bridge terminal closes the callback-facing endpoints so a
+cooperative callback wakes, and the upgrade owner holds one settlement deadline
+for it that a later server transition may shorten but never restart. A callback
+still pending at that deadline is dropped before the upgrade settles. The
+connection reports the drop through one WARN event,
+`camber.websocket.callback.cancelled`, carrying `disposition="cancelled"`. A
+joined upgrade therefore proves its callback completed or was dropped. Camber
+cannot preempt a callback that blocks its thread inside a poll, a factory call,
+or a destructor; that callback holds its own settlement until it yields. The
+public server result still follows the accepted server command.
 
 ### Constructor Context
 

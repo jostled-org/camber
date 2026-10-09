@@ -1,6 +1,7 @@
 use std::process::Command;
 
 use crate::resources::{CleanupCompletion, CleanupWitness, ExternalRun};
+use crate::support::generated_project::workspace_root;
 use crate::support::{FixtureError, run_command};
 
 #[derive(Clone, Copy)]
@@ -146,14 +147,6 @@ fn inspection_reports_absence(stderr: &[u8]) -> bool {
     stderr.contains("no such image") || stderr.contains("no such object")
 }
 
-fn project_root() -> Result<&'static std::path::Path, FixtureError> {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or_else(|| FixtureError::new("camber-cli manifest has no parent"))?
-        .parent()
-        .ok_or_else(|| FixtureError::new("workspace root is absent"))
-}
-
 fn build_image(project_root: &std::path::Path, image: &str) -> Result<(), FixtureError> {
     match project_root.join("Dockerfile").exists() {
         true => {}
@@ -179,7 +172,7 @@ pub fn run_dockerfile_build() -> Result<(), FixtureError> {
     let run = ExternalRun::from_environment()?;
     let witness = CleanupWitness::from_environment()?;
     let mut image = DockerImageGuard::new(run, DockerOperations, witness);
-    let execution = project_root().and_then(|root| build_image(root, image.image()));
+    let execution = workspace_root().and_then(|root| build_image(root, image.image()));
 
     image.cleanup()?;
     execution

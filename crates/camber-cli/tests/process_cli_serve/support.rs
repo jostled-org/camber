@@ -2,6 +2,8 @@
 mod error;
 #[path = "../support/http.rs"]
 pub mod http;
+#[path = "../support/http_head.rs"]
+pub mod http_head;
 #[path = "../support/process.rs"]
 pub mod process;
 

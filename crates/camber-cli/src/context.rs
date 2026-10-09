@@ -1,5 +1,5 @@
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 
 pub const LLMS_TXT: &str = r#"# Camber API Reference
 # A Rust runtime for IO-bound services. Async handlers on a Tokio core.
@@ -11,6 +11,7 @@ use camber::http::{self, Request, Response, Router};
 use camber::{spawn, JoinHandle, RuntimeError};
 use camber::channel;
 use camber::runtime::RuntimeBuilder;
+use camber::http::{WsConn, WsMessage, WsReceive}; // feature = "ws"
 ```
 
 ## Entry Points
@@ -151,17 +152,51 @@ router.get("/user", |req: &Request| async {
 });
 ```
 
-## Feature-Gated APIs
+## WebSocket (feature = "ws")
 
 ```rust
-// WebSocket (feature = "ws")
-router.ws("/chat", |req, mut conn: WsConn| {
-    while let Some(msg) = conn.recv() {
-        conn.send(&msg)?;
+// The callback returns a future. Every wait is awaited.
+router.ws("/chat", |_req, mut conn: WsConn| async move {
+    while let Some(msg) = conn.recv().await {
+        conn.send(&msg).await?;
     }
     Ok(())
 });
 
+// Read request data before `async move`. The future cannot borrow `&Request`.
+router.ws("/rooms/:room", |req, conn: WsConn| {
+    let room = req.param("room").unwrap_or("lobby").to_owned();
+    async move {
+        let (sender, mut receiver) = conn.split();
+        loop {
+            match receiver.recv().await? {
+                WsReceive::Message(WsMessage::Text(text)) => {
+                    sender.send(&format!("{room}: {text}")).await?;
+                }
+                WsReceive::Message(WsMessage::Binary(_)) => {}
+                WsReceive::Closed(_) => return Ok(()),
+            }
+        }
+    }
+});
+```
+
+- A successful send means the frame entered the bounded outbound queue. It does
+  not mean the peer received it.
+- Dropping a pending send admits nothing. Dropping a pending typed receive
+  consumes nothing.
+- After the connection ends, `WsReceiver::recv` answers `WsReceive::Closed(cause)`
+  and `WsSender` sends fail with `RuntimeError::WebSocketClosed(cause)`. The
+  `WsConn` facade answers `None` and a broken pipe instead.
+- `recv_timeout` fixes one deadline. Expiry returns `RuntimeError::Timeout` and
+  the connection stays open.
+- `WsConn::recv` skips binary messages and `recv_binary` skips text. A skipped
+  message stays skipped when the receive is cancelled.
+- Never block the thread in a callback. Camber cannot preempt a blocking poll.
+
+## Other Feature-Gated APIs
+
+```rust
 // gRPC (feature = "grpc")
 router.grpc(GrpcRouter::new().add_service(my_service));
 ```
@@ -176,6 +211,5 @@ router.grpc(GrpcRouter::new().add_service(my_service));
 
 pub fn run() -> io::Result<()> {
     fs::write("llms.txt", LLMS_TXT)?;
-    println!("Wrote llms.txt");
-    Ok(())
+    writeln!(io::stdout().lock(), "Wrote llms.txt")
 }

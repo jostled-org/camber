@@ -11,6 +11,10 @@ pub mod docker_support;
 mod external_contracts;
 #[path = "process_cli_tooling/scaffolding.rs"]
 mod scaffolding;
+#[path = "process_cli_tooling/websocket_examples.rs"]
+mod websocket_examples;
+#[path = "process_cli_tooling/websocket_peer.rs"]
+mod websocket_peer;
 
 #[path = "external_cli_operational/resources.rs"]
 pub mod resources;

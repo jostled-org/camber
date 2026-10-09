@@ -153,27 +153,38 @@ For gRPC and `proxy_stream`, middleware acts as a request gate before streaming 
 ## WebSocket & SSE
 
 ```rust
-router.ws("/chat", |req, mut conn: WsConn| {
-    while let Some(msg) = conn.recv() {
-        conn.send(&format!("echo: {msg}"))?;
+use camber::http::{Router, WsConn};
+
+let mut router = Router::new();
+router.ws("/chat", |_req, mut conn: WsConn| async move {
+    while let Some(msg) = conn.recv().await {
+        conn.send(&format!("echo: {msg}")).await?;
     }
     Ok(())
 });
 ```
 
+A WebSocket callback returns a future, and every wait is a `.await`. The future
+cannot borrow the request, so copy out owned data before `async move`.
+
 `conn.sender()` hands out a `Clone + Send + Sync` send handle without giving up
 the receive owner, and `conn.split()` gives up the facade for both halves. Work
 that holds both halves keeps the connection live after the callback returns.
-Sends are admitted to a bounded queue rather than written to the peer, and both
-halves read the same terminal cause. See
+A send succeeds when its frame enters a bounded queue, not when the peer gets
+it, and both halves read the same terminal cause. See
 [docs/reference/http.md](docs/reference/http.md#direction-ownership).
 
 To broadcast one binary payload, build it once and clone the handle:
 
 ```rust
-let payload = Bytes::from(encoded);
-for recipient in recipients {
-    recipient.send_shared_binary(payload.clone())?;
+use camber::http::{Bytes, WsSender};
+
+async fn broadcast(encoded: Vec<u8>, recipients: &[WsSender]) -> Result<(), camber::RuntimeError> {
+    let payload = Bytes::from(encoded);
+    for recipient in recipients {
+        recipient.send_shared_binary(payload.clone()).await?;
+    }
+    Ok(())
 }
 ```
 
@@ -182,6 +193,11 @@ nothing, so a hundred recipients cost one allocation. `send_binary(&[u8])` and
 `try_send_binary(&[u8])` stay the borrowed-slice convenience and copy once at
 admission. See
 [docs/reference/http.md](docs/reference/http.md#shared-binary-payloads).
+
+Upgrading from a release with synchronous WebSocket callbacks is a breaking
+change. Return `async move { ... }` from the callback and add `.await` to every
+`send` and `recv`. There is no blocking alternative. See
+[docs/reference/http.md](docs/reference/http.md#migrating-from-synchronous-callbacks).
 
 ```rust
 router.get_sse("/events", |_req, sse| {

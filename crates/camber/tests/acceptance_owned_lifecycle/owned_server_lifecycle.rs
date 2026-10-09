@@ -870,12 +870,7 @@ async fn admitted_tls_transport_keeps_owner_pending_until_release() {
 
 #[cfg(feature = "ws")]
 fn attach_drain_ws(router: &mut Router) {
-    use camber::http::WsConn;
-
-    router.ws("/ws", |_request: &Request, mut connection: WsConn| {
-        while connection.recv().is_some() {}
-        Ok(())
-    });
+    router.ws("/ws", common::drain_ws);
 }
 
 #[cfg(feature = "ws")]
@@ -3409,9 +3404,9 @@ fn configured_background_captures_sse_and_websocket_buffers() {
                     router = router.ws_buffer_size(5);
                     router.ws(
                         "/buffered-ws",
-                        |_request: &Request, mut connection: WsConn| {
-                            if let Some(message) = connection.recv() {
-                                connection.send(&message)?;
+                        |_request: &Request, mut connection: WsConn| async move {
+                            if let Some(message) = connection.recv().await {
+                                connection.send(&message).await?;
                             }
                             Ok(())
                         },
