@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/jostled-org/camber/compare/camber-build-v0.7.0...camber-build-v0.8.0) - 2026-10-09
+
+### Added
+
+- [**breaking**] implement async-first-websockets
+
 ## [0.7.0](https://github.com/jostled-org/camber/compare/camber-build-v0.6.1...camber-build-v0.7.0) - 2026-10-06
 
 ### Added
