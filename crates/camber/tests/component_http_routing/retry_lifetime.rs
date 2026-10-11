@@ -621,6 +621,14 @@ async fn assert_each_timer_names_itself() {
     for phase in FIRST_ATTEMPT {
         assert_first_attempt_ends_at(
             phase,
+            http::client().request_timeout(INNER_BOUND),
+            INNER_BOUND,
+            Ending::AttemptTimeout,
+            &format!("attempt timer at {phase:?} with default transport bounds"),
+        )
+        .await;
+        assert_first_attempt_ends_at(
+            phase,
             operation_client(0, CROSSED_BACKOFF).request_timeout(INNER_BOUND),
             INNER_BOUND,
             Ending::AttemptTimeout,
