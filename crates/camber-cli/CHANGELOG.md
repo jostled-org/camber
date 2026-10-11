@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/jostled-org/camber/compare/camber-cli-v0.11.0...camber-cli-v0.11.1) - 2026-10-11
+
+### Other
+
+- updated the following local packages: camber
+
 ## [0.11.0](https://github.com/jostled-org/camber/compare/camber-cli-v0.10.0...camber-cli-v0.11.0) - 2026-10-11
 
 ### Added
