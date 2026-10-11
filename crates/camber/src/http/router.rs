@@ -260,10 +260,14 @@ impl Router {
     /// router's rejection policy instead of becoming a response nothing can
     /// classify.
     ///
-    /// ```ignore
-    /// router.use_middleware(|req, next| async move {
-    ///     let resp = next.call(req).await;
-    ///     resp.with_header("X-Custom", "value")
+    /// ```no_run
+    /// let mut router = camber::http::Router::new();
+    /// router.use_middleware(|req, next| {
+    ///     let response = next.call(req);
+    ///     async move {
+    ///         let resp = response.await;
+    ///         resp.with_header("X-Custom", "value")
+    ///     }
     /// });
     /// ```
     pub fn use_middleware<F, Fut, R>(&mut self, mw: F)

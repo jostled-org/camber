@@ -488,7 +488,7 @@ is not a cost.
 
 Read cookies from requests and set them on responses:
 
-```rust
+```rust,no_run
 use camber::http::{CookieOptions, Request, Response, SameSite};
 
 router.get("/session", |req: &Request| {
@@ -500,7 +500,8 @@ router.get("/session", |req: &Request| {
             .secure()
             .http_only();
 
-        Response::text(200, &session)?.set_cookie_with("session", "abc123", &opts)
+        let response = Response::text(200, &session)?;
+        Ok(response.set_cookie_with("session", "abc123", &opts))
     }
 });
 ```
@@ -509,13 +510,16 @@ router.get("/session", |req: &Request| {
 
 `req.multipart()` parses buffered `multipart/form-data` bodies into parts. Use it for uploads where full buffering is acceptable.
 
-```rust
-router.post("/upload", |req| async {
-    let multipart = req.multipart()?;
-    for part in multipart.parts() {
-        save(part.filename(), part.data());
+```rust,no_run
+router.post("/upload", |req| {
+    let multipart = req.multipart();
+    async move {
+        let multipart = multipart?;
+        for part in multipart.parts() {
+            camber::tracing::info!(filename = ?part.filename(), bytes = part.data().len(), "received upload");
+        }
+        Response::text(200, "uploaded")
     }
-    Response::text(200, "uploaded")?
 });
 ```
 
@@ -1332,15 +1336,18 @@ router.use_middleware(|req, next| {
     let has_auth = req
         .headers()
         .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
+    let response = has_auth.then(|| next.call(req));
     async move {
-        match has_auth {
-            true => Ok(next.call(req).await),
-            false => Response::text(401, "unauthorized"),
+        match response {
+            Some(response) => Ok(response.await),
+            None => Response::text(401, "unauthorized"),
         }
     }
 });
 router.grpc(grpc);
 ```
+
+This example checks header presence only. Validate the credentials before calling `next.call(req)` in an application.
 
 Middleware acts as a gate: it sees the request headers but not the gRPC response body, which
 streams directly from tonic.

@@ -32,20 +32,28 @@ runtime::run(|| { ... }) -> Result<T, RuntimeError>
 
 ## Handler Signature
 
-```rust
+```rust,no_run
 // All handlers are async — closure returns a future
-router.get("/path", |req: &Request| async { Response::text(200, "ok") });
+router.get("/path", |_req: &Request| async { Response::text(200, "ok") });
+```
 
-// Named function form
-fn handler(req: &Request) -> impl Future<Output = Response> {
-    async { Response::text(200, "ok") }
+```rust,no_run
+use std::future::Future;
+
+// Named function form: constructors already return Result.
+fn handler(req: &Request) -> impl Future<Output = Result<Response, RuntimeError>> + use<> {
+    let path = req.path().to_owned();
+    async move { Response::text(200, &path) }
 }
 
-// Handlers can return Result for automatic error mapping
-fn handler(req: &Request) -> impl Future<Output = Result<Response, RuntimeError>> {
-    async { Ok(Response::text(200, "ok")) }
+fn routes() -> Router {
+    let mut router = Router::new();
+    router.get("/path", handler);
+    router
 }
+```
 
+```rust,no_run
 // With path params — clone/extract before async block
 router.get("/users/:id", |req: &Request| {
     let id = req.param("id").unwrap_or("missing").to_owned();
@@ -62,7 +70,7 @@ req.param("id")                  -> Option<&str>   // Path parameter :id
 req.query("page")                -> Option<&str>   // Query string value
 req.query_all("tag")             -> impl Iterator   // All values for key
 req.form("email")                -> Option<&str>   // Form field
-req.header("Authorization")      -> via headers()
+req.header("Authorization")      -> Option<&str>
 req.headers()                    -> impl Iterator<Item = (&str, &str)>
 req.body()                       -> &str           // UTF-8 body
 req.body_bytes()                 -> &[u8]          // Raw bytes
@@ -96,13 +104,18 @@ router.use_middleware(logger);                      // async middleware
 
 ## Middleware
 
-```rust
-// All middleware is async — next.call(req) returns a future
-router.use_middleware(|req: &Request, next: Next| async move {
+```rust,no_run
+// Construct the downstream future before returning the async block.
+router.use_middleware(|req: &Request, next| {
     let start = std::time::Instant::now();
-    let resp = next.call(req).await;
-    println!("{} {} {}ms", req.method(), req.path(), start.elapsed().as_millis());
-    resp
+    let method = req.method().to_owned();
+    let path = req.path().to_owned();
+    let response = next.call(req);
+    async move {
+        let resp = response.await;
+        camber::tracing::info!("{} {} {}ms", method, path, start.elapsed().as_millis());
+        resp
+    }
 });
 
 // First registered = outermost. Can short-circuit by not calling next.
@@ -174,7 +187,7 @@ Response::text(200, upstream.text()?)
 
 ## Error Handling
 
-```rust
+```rust,no_run
 // RuntimeError variants: Io, ChannelClosed, Timeout, Cancelled,
 //   TaskPanicked, Client, Http, BadRequest, Database, Tls
 // Use ? operator for propagation. BadRequest maps to 400 in handlers.
@@ -182,9 +195,12 @@ Response::text(200, upstream.text()?)
 // A handler that propagates it answers 500.
 
 // Handler returning Result — async closure form
-router.get("/user", |req: &Request| async {
-    let user: User = req.json()?;  // BadRequest on parse failure
-    Ok(Response::json(200, &user))
+router.post("/numbers", |req: &Request| {
+    let numbers = req.json::<Vec<u64>>();
+    async move {
+        let numbers = numbers?; // MalformedBody on parse failure
+        Response::json(200, &numbers)
+    }
 });
 ```
 

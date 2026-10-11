@@ -9,10 +9,10 @@ mod context;
 pub mod docker_support;
 #[path = "process_cli_tooling/external_contracts.rs"]
 mod external_contracts;
+#[path = "process_cli_tooling/public_examples.rs"]
+mod public_examples;
 #[path = "process_cli_tooling/scaffolding.rs"]
 mod scaffolding;
-#[path = "process_cli_tooling/websocket_examples.rs"]
-mod websocket_examples;
 #[path = "process_cli_tooling/websocket_peer.rs"]
 mod websocket_peer;
 

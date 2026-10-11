@@ -34,14 +34,17 @@ func getUser(w http.ResponseWriter, r *http.Request) {
 
 ### Camber
 
-```rust
+```rust,no_run
 fn main() -> Result<(), RuntimeError> {
     let mut router = Router::new();
     router.get("/hello", |_req| async { Response::text(200, "Hello, world!") });
-    router.get("/users/:id", |req| async move {
-        match req.param("id") {
-            Some(id) => Response::text(200, &format!("User {id}")),
-            None => Response::text(400, "missing id"),
+    router.get("/users/:id", |req| {
+        let id = req.param("id").map(str::to_owned);
+        async move {
+            match id {
+                Some(id) => Response::text(200, &format!("User {id}")),
+                None => Response::text(400, "missing id"),
+            }
         }
     });
     http::serve("0.0.0.0:8080", router)
@@ -221,9 +224,10 @@ let mut router = Router::new();
 router.use_middleware(|req, next| {
     let method = req.method().to_owned();
     let path = req.path().to_owned();
+    let response = next.call(req);
     async move {
         tracing::info!("{} {}", method, path);
-        next.call(req).await
+        response.await
     }
 });
 
@@ -231,8 +235,8 @@ router.get("/hello", hello);
 http::serve("0.0.0.0:8080", router)
 ```
 
-Middleware registered first wraps all later middleware. Call `next.call(req).await` to continue the chain, or return early to short-circuit.
-If you need request data after `.await`, copy owned values out of `req` before entering `async move`.
+Middleware registered first wraps all later middleware. Call `next.call(req)` before `async move`, then await its future inside.
+Copy request data before returning the future. To refuse a request, return a response without calling `next.call(req)`.
 
 ### CORS
 
@@ -330,16 +334,19 @@ func upload(w http.ResponseWriter, r *http.Request) {
 
 ### Camber
 
-```rust
-router.post("/upload", |req| async move {
-    let mp = req.multipart()?;
-    for part in mp.parts() {
-        let name = part.name();
-        let filename = part.filename().unwrap_or("(none)");
-        let size = part.data().len();
-        tracing::info!("field={name} file={filename} size={size}");
+```rust,no_run
+router.post("/upload", |req| {
+    let multipart = req.multipart();
+    async move {
+        let mp = multipart?;
+        for part in mp.parts() {
+            let name = part.name();
+            let filename = part.filename().unwrap_or("(none)");
+            let size = part.data().len();
+            tracing::info!("field={name} file={filename} size={size}");
+        }
+        Response::text(200, "uploaded")
     }
-    Ok(Response::text(200, "uploaded"))
 });
 ```
 
@@ -532,9 +539,12 @@ func getUser(w http.ResponseWriter, r *http.Request) {
 ### Camber
 
 ```rust
-router.post("/users", |req| async move {
-    let user: User = req.json()?; // MalformedBody on parse failure
-    Ok(Response::json(200, &user))
+router.post("/users", |req| {
+    let user = req.json::<User>();
+    async move {
+        let user = user?; // MalformedBody on parse failure
+        Response::json(200, &user)
+    }
 });
 ```
 
@@ -550,5 +560,5 @@ router.post("/users", |req| async move {
 ## What Changes
 
 - **Compile times are slower.** Incremental rebuilds are 2-3 seconds. Clean builds take longer. The tradeoff: once it compiles, it works.
-- **Ownership is new.** You'll hit borrow checker errors. Camber minimizes this by keeping handlers simple (async closures that take a `Request` and return `Response`), but you'll learn ownership eventually. That's the point.
+- **Ownership is explicit.** A handler borrows `Request` during its call and returns an owned future. Parse or copy request data before `async move`.
 - **The ecosystem is different.** Go's `net/http` is standard library. Camber is a runtime built on Tokio. The Rust ecosystem is fragmented but powerful.

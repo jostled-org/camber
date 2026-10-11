@@ -43,17 +43,20 @@ async fn get_user(Path(id): Path<u64>) -> Json<User> {
 
 ### Camber
 
-```rust
+```rust,no_run
 use camber::RuntimeError;
 use camber::http::{self, Request, Response, Router};
 
 fn main() -> Result<(), RuntimeError> {
     let mut router = Router::new();
     router.get("/hello", |_req| async { Response::text(200, "Hello, world!") });
-    router.get("/users/:id", |req| async move {
-        match req.param("id") {
-            Some(id) => Response::text(200, &format!("User {id}")),
-            None => Response::text(400, "missing id"),
+    router.get("/users/:id", |req| {
+        let id = req.param("id").map(str::to_owned);
+        async move {
+            match id {
+                Some(id) => Response::text(200, &format!("User {id}")),
+                None => Response::text(400, "missing id"),
+            }
         }
     });
     http::serve("0.0.0.0:8080", router)
@@ -75,7 +78,7 @@ For exact method names and type behavior, use the reference docs. This table is 
 | `tokio::spawn` (async) | `camber::spawn_async` | Async future on Tokio runtime. Returns `AsyncJoinHandle<T>` (`.await` or `.cancel()`) |
 | `tokio::sync::mpsc` | `camber::channel` | Crossbeam underneath, supports `select!` |
 | `tokio::select!` | `camber::select!` | Same macro pattern, backed by crossbeam |
-| `axum::Router` | `camber::http::Router` | Method chaining: `.get()`, `.post()`, `.proxy()` |
+| `axum::Router` | `camber::http::Router` | Register routes on `&mut self`; `.get()`, `.post()`, and `.proxy()` return `()` |
 | `async fn handler` | `router.get(path, \|req\| async { ... })` | Async closures, no extractors, no `Pin<Box<dyn Future>>` ceremony |
 | `axum::extract::State` | Closure capture | Move shared state into handler closures. No extractor needed |
 | `axum::extract::Path` | `req.param("id")` | Returns `Option<&str>` |
@@ -207,15 +210,16 @@ router.use_middleware(|req, next| {
     let method = req.method().to_owned();
     let path = req.path().to_owned();
     let start = std::time::Instant::now();
+    let response = next.call(req);
     async move {
-        let resp = next.call(req).await;
+        let resp = response.await;
         tracing::info!("{} {} {}ms", method, path, start.elapsed().as_millis());
         resp
     }
 });
 ```
 
-If you only need request data before `.await`, reading directly from `req` is fine. If you need to log or inspect it after `.await`, move owned data into the future first as shown above.
+Read request data and call `next.call(req)` before `async move`. Only owned data and the returned downstream future enter the async block.
 
 ## Extractors and State
 
@@ -248,32 +252,32 @@ let app = Router::new()
 ### Camber
 
 ```rust
+use camber::{RuntimeError, runtime};
 use camber::http::{Request, Response, Router};
 use sqlx::PgPool;
 
 fn main() -> Result<(), camber::RuntimeError> {
-    let pool = runtime::block_on(PgPool::connect(&db_url))?;
+    runtime::run(|| {
+        let pool = runtime::block_on(PgPool::connect("postgres://localhost/mydb"))
+            .map_err(|error| RuntimeError::Database(error.to_string().into_boxed_str()))?;
 
-    let mut router = Router::new();
+        let mut router = Router::new();
+        router.get("/users/:id", move |req| {
+            let id = req.param("id").map(str::to_owned);
+            let db = pool.clone();
+            async move {
+                let id = id.ok_or_else(|| RuntimeError::BadRequest("missing id".into()))?;
+                let rows = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+                    .bind(id)
+                    .fetch_all(&db)
+                    .await
+                    .map_err(|error| RuntimeError::Database(error.to_string().into_boxed_str()))?;
+                Response::json(200, &rows)
+            }
+        });
 
-    let db = pool.clone();
-    router.get("/users/:id", move |req| async move {
-        let id = match req.param("id") {
-            Some(id) => id.to_owned(),
-            None => return Response::text(400, "missing id"),
-        };
-        let rows = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-            .bind(id)
-            .fetch_all(&db)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => return Response::text(500, &e.to_string()),
-        };
-        Response::text(200, &format!("{rows:?}"))
-    });
-
-    camber::http::serve("0.0.0.0:8080", router)
+        camber::http::serve("0.0.0.0:8080", router)
+    })?
 }
 ```
 
@@ -398,9 +402,11 @@ async fn create_user(Json(user): Json<CreateUser>) -> impl IntoResponse {
 use camber::http::validate;
 
 router.use_middleware(validate::json::<CreateUser>());
-router.post("/users", |req| async move {
-    let user: CreateUser = req.json().unwrap(); // safe — middleware already validated
-    // ...
+router.post("/users", |req| {
+    let user = req.json::<CreateUser>();
+    async move {
+        Response::json(201, &user?)
+    }
 });
 ```
 
@@ -575,7 +581,8 @@ router.get("/data", |_req| async {
 });
 ```
 
-All handlers are async. The closure receives a `Request` and returns an async block. Use `.await` freely inside the block. Handlers can return `Response` or `Result<Response, RuntimeError>` for `?` propagation.
+All handlers return futures. The closure receives `&Request`; parse or copy its data before returning `async move`.
+The future returns `Response` or `Result<Response, RuntimeError>`. Use the latter for `?` propagation.
 
 ## OpenTelemetry Tracing
 
@@ -636,17 +643,20 @@ use sqlx::PgPool;
 let pool = PgPool::connect("postgres://localhost/mydb").await?;
 
 let db = pool.clone();
-router.get("/users/:id", move |req| async move {
+router.get("/users/:id", move |req| {
     let id = req
         .param("id")
-        .ok_or(RuntimeError::BadRequest("missing id".into()))?
-        .to_owned();
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-        .bind(id)
-        .fetch_one(&db)
-        .await
-        .map_err(|e| RuntimeError::Io(e.to_string().into()))?;
-    Ok(Response::json(200, &user)?)
+        .map(str::to_owned)
+        .ok_or_else(|| RuntimeError::BadRequest("missing id".into()));
+    let db = db.clone();
+    async move {
+        let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+            .bind(id?)
+            .fetch_one(&db)
+            .await
+            .map_err(|error| RuntimeError::Database(error.to_string().into_boxed_str()))?;
+        Response::json(200, &user)
+    }
 });
 ```
 
@@ -672,16 +682,18 @@ async fn fallible() -> Result<Json<Data>, AppError> {
 
 ### Camber
 
-```rust
-// Handlers can return Response directly
-router.get("/data", |req| async move {
-    Response::json(200, &data)
+```rust,no_run
+// Response constructors return Result<Response, RuntimeError>.
+router.get("/data", |_req| async {
+    Response::json(200, &[1, 2, 3])
 });
 
-// Or return Result<Response, RuntimeError> — the error reaches rejection policy
-router.get("/fallible", |req| async move {
-    let data = fetch().await?;
-    Ok(Response::json(200, &data))
+// Parse before the async block; propagate errors inside it.
+router.post("/numbers", |req| {
+    let numbers = req.json::<Vec<u64>>();
+    async move {
+        Response::json(200, &numbers?)
+    }
 });
 ```
 

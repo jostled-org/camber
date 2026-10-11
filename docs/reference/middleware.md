@@ -6,7 +6,7 @@ Camber middleware wraps route handlers in registration order.
 
 - The first middleware registered is the outermost wrapper.
 - Middleware receives `(&Request, Next)`.
-- Continue the chain with `next.call(req).await`.
+- Call `next.call(req)` before the async block, then await the returned future inside it.
 - Short-circuit by returning a response directly.
 - Answer with a `Response` or with `Result<Response, RuntimeError>`. A failure reaches the router's rejection policy instead of becoming a response nothing can classify.
 
@@ -14,15 +14,16 @@ For normal HTTP handlers, middleware wraps the full owned request/response path.
 For gRPC, `proxy_stream(...)`, WebSocket upgrades, SSE, and internal routes, middleware may run as
 a request gate before the streaming or head-only transport path begins.
 
-```rust
+```rust,no_run
 use camber::http::{Request, Router};
 
 let mut router = Router::new();
 router.use_middleware(|req, next| {
     let method = req.method().to_owned();
     let path = req.path().to_owned();
+    let response = next.call(req);
     async move {
-        let resp = next.call(req).await;
+        let resp = response.await;
         tracing::info!("{} {} -> {}", method, path, resp.status());
         resp
     }
@@ -31,17 +32,19 @@ router.use_middleware(|req, next| {
 
 ## Ownership Rule
 
-The same ownership rule as handlers applies here: if you need request data after `.await`, move owned values into the async block first.
+Neither `req` nor `next` can escape into the returned future. Copy request data and construct the downstream future before `async move`.
+For an authorization gate, call `next.call(req)` only after authorization succeeds.
 
 ```rust
 use camber::http::Response;
 
 router.use_middleware(|req, next| {
     let authorized = req.header("authorization").is_some_and(valid);
+    let response = authorized.then(|| next.call(req));
     async move {
-        match authorized {
-            true => Ok(next.call(req).await),
-            false => Response::text(401, "unauthorized"),
+        match response {
+            Some(response) => Ok(response.await),
+            None => Response::text(401, "unauthorized"),
         }
     }
 });

@@ -136,16 +136,17 @@ use camber::http::Response;
 
 router.use_middleware(|req, next| {
     let authorized = req.header("authorization").is_some_and(valid);
+    let response = authorized.then(|| next.call(req));
     async move {
-        match authorized {
-            true => Ok(next.call(req).await),
-            false => Response::text(401, "unauthorized"),
+        match response {
+            Some(response) => Ok(response.await),
+            None => Response::text(401, "unauthorized"),
         }
     }
 });
 ```
 
-If middleware needs request data after `.await`, copy out owned data before entering `async move`.
+Copy request data before `async move`. Call `next.call(req)` before the async block, and only after authorization succeeds; await its returned future inside.
 
 For normal HTTP handlers, middleware wraps the full owned `Request` and `Response`.
 For gRPC and `proxy_stream`, middleware acts as a request gate before streaming begins.
@@ -268,13 +269,16 @@ let resp = Response::text(200, "ok")?.set_cookie("session_id", "abc123");
 
 ## File Uploads
 
-```rust
-router.post("/upload", |req| async {
-    let multipart = req.multipart()?;
-    for part in multipart.parts() {
-        save(part.filename(), part.data());
+```rust,no_run
+router.post("/upload", |req| {
+    let multipart = req.multipart();
+    async move {
+        let multipart = multipart?;
+        for part in multipart.parts() {
+            camber::tracing::info!(filename = ?part.filename(), bytes = part.data().len(), "received upload");
+        }
+        Response::text(200, "uploaded")
     }
-    Response::text(200, "uploaded")?
 });
 ```
 
