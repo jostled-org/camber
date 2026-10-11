@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/jostled-org/camber/compare/camber-build-v0.8.0...camber-build-v0.9.0) - 2026-10-11
+
+### Added
+
+- [**breaking**] implement outbound-http-requests
+
 ## [0.8.0](https://github.com/jostled-org/camber/compare/camber-build-v0.7.0...camber-build-v0.8.0) - 2026-10-09
 
 ### Added
