@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/jostled-org/camber/compare/camber-v0.12.0...camber-v0.13.0) - 2026-10-11
+
+### Added
+
+- [**breaking**] implement outbound-http-requests
+
+### Other
+
+- *(http)* make client timeout proof deterministic
+
 ### Breaking changes
 
 - *(client)* Outbound HTTP calls fail with `RuntimeError::Client(ClientError)`.
