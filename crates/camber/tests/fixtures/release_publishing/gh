@@ -1,23 +1,90 @@
 #!/bin/bash
 set -eu
 [ "${GH_STATUS:-0}" = 0 ] || exit "$GH_STATUS"
+
+respond() {
+    local status="$1" body="$2"
+    [ "$include" = 0 ] || printf 'HTTP/2.0 %s Fixture\r\nContent-Type: application/json\r\n\r\n' "$status"
+    printf '%s\n' "$body"
+    [ "$status" -lt 400 ] && return 0
+    printf 'HTTP %s: fixture API failure\n' "$status" >&2
+    exit 1
+}
+
+lookup_release() {
+    local tag="${endpoint##*/}"
+    printf 'lookup %s\n' "$tag" >>"$FIXTURE_LOG"
+    if [ "$tag" = camber-macros-v0.7.0 ]; then
+        case "${LOOKUP_FAILURE:-}" in
+            transport) printf 'fixture connection failed\n' >&2; exit 42 ;;
+            malformed) respond 200 'not-json'; return ;;
+            wrong-tag) respond 200 '{"tag_name":"wrong","draft":false}'; return ;;
+            draft) respond 200 "{\"tag_name\":\"$tag\",\"draft\":true}"; return ;;
+            401|403|429|500) respond "$LOOKUP_FAILURE" '{"message":"fixture failure"}' ;;
+        esac
+        if [ "${MISSING_RELEASE:-0}" = 1 ] && [ ! -f "${FIXTURE_STATE}.release" ]; then
+            respond 404 '{"message":"Not Found"}'
+        fi
+    fi
+    respond 200 "{\"tag_name\":\"$tag\",\"draft\":false}"
+}
+
+create_release() {
+    local tag
+    tag=$(jq -er '.tag_name' "$input")
+    printf 'create %s\n' "$tag" >>"$FIXTURE_LOG"
+    jq -e --arg tag "$tag" '.name == $tag and .draft == false and .make_latest == "false"' "$input" >/dev/null
+    jq -e '.body | startswith("\n") and contains("Macro changes.") and (contains("\\n") | not)' "$input" >/dev/null
+    jq -r '.body' "$input" >>"$FIXTURE_LOG"
+    case "${CREATE_RESULT:-}" in
+        transport) printf 'fixture connection failed\n' >&2; exit 42 ;;
+        forbidden) respond 403 '{"message":"Forbidden"}' ;;
+        invalid) respond 422 '{"errors":[{"resource":"Release","field":"name","code":"invalid"}]}' ;;
+        duplicate|duplicate-missing)
+            [ "$CREATE_RESULT" != duplicate ] || touch "${FIXTURE_STATE}.release"
+            respond 422 '{"errors":[{"resource":"Release","field":"tag_name","code":"already_exists"}]}'
+            ;;
+    esac
+    if [ "${MISSING_RELEASE:-0}" != 1 ] || [ -f "${FIXTURE_STATE}.release" ]; then
+        respond 422 '{"errors":[{"resource":"Release","field":"tag_name","code":"already_exists"}]}'
+    fi
+    touch "${FIXTURE_STATE}.release"
+    case "${CREATE_RESULT:-}" in
+        malformed) respond 201 'not-json' ;;
+        wrong-tag) respond 201 '{"tag_name":"wrong","draft":false}' ;;
+        *) respond 201 "{\"tag_name\":\"$tag\",\"draft\":false}" ;;
+    esac
+}
+
 case "$*" in
-    *'/commits/'*'/pulls') printf '%s\n' "${PR_RESPONSE:-[]}" ;;
-    *'/releases/tags/'*)
-        if [[ "$2" = */camber-macros-v0.7.0 ]] && [ "${MISSING_RELEASE:-0}" = 1 ] && [ ! -f "${FIXTURE_STATE}.release" ]; then exit 44; fi
-        printf '{"tag_name":"%s"}\n' "${2##*/}"
-        ;;
+    *'/commits/'*'/pulls') printf '%s\n' "${PR_RESPONSE:-[]}"; exit 0 ;;
     *'/releases?per_page=100')
-        if [ "${MISSING_RELEASE:-0}" = 1 ]; then printf '[[{"tag_name":"camber-v0.12.0"}]]\n'; exit 0; fi
+        printf 'list releases\n' >>"$FIXTURE_LOG"
+        if [ "${MISSING_RELEASE:-0}" = 1 ] || [ "${STALE_RELEASE_LIST:-0}" = 1 ]; then printf '[[{"tag_name":"camber-v0.12.0"}]]\n'; exit 0; fi
         printf '[[{"tag_name":"camber-v0.12.0"},{"tag_name":"camber-macros-v0.7.0"}]]\n'
+        exit 0
         ;;
     'release create '*)
-        printf '%s\n' "$*" >>"$FIXTURE_LOG"
-        while [ "$#" -gt 0 ]; do
-            if [ "$1" = --notes-file ]; then cat "$2" >>"$FIXTURE_LOG"; fi
-            shift
-        done
-        touch "${FIXTURE_STATE}.release"
+        printf 'HTTP 422: Release.tag_name already exists\n' >&2
+        exit 1
         ;;
+esac
+
+include=0
+method=GET
+input=''
+endpoint=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --include) include=1 ;;
+        --method) method="$2"; shift ;;
+        --input) input="$2"; shift ;;
+        repos/*) endpoint="$1" ;;
+    esac
+    shift
+done
+case "$method:$endpoint" in
+    GET:*/releases/tags/*) lookup_release ;;
+    POST:*/releases) create_release ;;
     *) exit 99 ;;
 esac

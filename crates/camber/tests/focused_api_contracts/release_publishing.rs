@@ -180,10 +180,87 @@ fn release_publish_recovers_a_tag_without_a_github_release() {
     let run = run_script(&repo, PUBLISH, &values);
     assert_eq!(run.status, 0, "{}", run.output);
     let log = calls(&repo);
-    assert!(log.contains("release create camber-macros-v0.7.0 --verify-tag"));
+    assert!(log.contains("create camber-macros-v0.7.0"));
     assert!(log.contains("Macro changes."));
     assert!(!log.contains("-p camber-macros"));
     repo.close();
+}
+
+#[test]
+fn release_recovery_uses_tag_lookup_when_the_list_is_stale() {
+    let repo = release_repo();
+    let run = run_script(&repo, PUBLISH, &[("STALE_RELEASE_LIST", "1")]);
+    assert_eq!(run.status, 0, "{}", run.output);
+    let log = calls(&repo);
+    assert!(log.contains("lookup camber-macros-v0.7.0"));
+    assert!(!log.contains("list releases"));
+    assert!(!log.contains("create camber-"));
+    repo.close();
+}
+
+#[test]
+fn release_recovery_preserves_lookup_failures_without_creating() {
+    for failure in [
+        "401",
+        "403",
+        "429",
+        "500",
+        "transport",
+        "malformed",
+        "wrong-tag",
+        "draft",
+    ] {
+        let repo = release_repo();
+        let run = run_script(&repo, PUBLISH, &[("LOOKUP_FAILURE", failure)]);
+        assert_ne!(run.status, 0, "{failure}: {}", run.output);
+        if failure == "transport" {
+            assert_eq!(run.status, 42, "{}", run.output);
+        }
+        assert!(!calls(&repo).contains("create camber-"), "{failure}");
+        repo.close();
+    }
+}
+
+#[test]
+fn release_recovery_confirms_duplicates_and_preserves_create_failures() {
+    for result in [
+        "duplicate",
+        "duplicate-missing",
+        "invalid",
+        "forbidden",
+        "transport",
+        "malformed",
+        "wrong-tag",
+    ] {
+        let repo = release_repo();
+        let values = [("MISSING_RELEASE", "1"), ("CREATE_RESULT", result)];
+        let run = run_script(&repo, PUBLISH, &values);
+        assert_eq!(
+            run.status == 0,
+            result == "duplicate",
+            "{result}: {}",
+            run.output
+        );
+        if result == "transport" {
+            assert_eq!(run.status, 42, "{}", run.output);
+        }
+        let log = calls(&repo);
+        assert_eq!(
+            log.matches("create camber-macros-v0.7.0").count(),
+            1,
+            "{result}"
+        );
+        let lookups = match result {
+            "duplicate" | "duplicate-missing" => 2,
+            _ => 1,
+        };
+        assert_eq!(
+            log.matches("lookup camber-macros-v0.7.0").count(),
+            lookups,
+            "{result}"
+        );
+        repo.close();
+    }
 }
 
 fn pr_response(repo: &FixtureRepo) -> serde_json::Value {

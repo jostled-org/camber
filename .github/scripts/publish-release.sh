@@ -78,21 +78,76 @@ check_published_source() {
     return 1
 }
 
+# Keep HTTP failures distinct from command failures and JSON validation.
+github_release_request() {
+    local command_status=0 status
+    gh api --include "$@" >"${release_temp}/github-response" \
+        2>"${release_temp}/github-error" || command_status=$?
+    status=$(sed -n '1s/^HTTP\/[^ ]* \([0-9][0-9][0-9]\).*$/\1/p' "${release_temp}/github-response") || return $?
+    case "${status}:${command_status}" in
+        2[0-9][0-9]:0|4[0-9][0-9]:1|5[0-9][0-9]:1) ;;
+        *)
+            cat "${release_temp}/github-error" >&2
+            printf 'ERROR: GitHub release request did not return a usable HTTP response\n' >&2
+            [ "${command_status}" -ne 0 ] || return 1
+            return "${command_status}"
+            ;;
+    esac
+    sed '1,/^[[:space:]]*$/d' "${release_temp}/github-response" >"${release_temp}/github-body" || return $?
+    printf '%s\n' "${status}"
+}
+
+validate_github_release() {
+    jq -e --arg tag "$1" '.tag_name == $tag and .draft == false' \
+        "${release_temp}/github-body" >/dev/null && return 0
+    printf 'ERROR: GitHub did not confirm a published release for %s\n' "$1" >&2
+    return 1
+}
+
+github_release_state() {
+    local tag="$1" status
+    status=$(github_release_request --method GET "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}") || return $?
+    case "${status}" in
+        200) validate_github_release "${tag}" || return $?; printf 'present\n' ;;
+        404) printf 'absent\n' ;;
+        *) printf 'ERROR: release lookup for %s returned HTTP %s\n' "${tag}" "${status}" >&2; return 1 ;;
+    esac
+}
+
+create_github_release() {
+    local tag="$1" status state
+    jq -n --arg tag "${tag}" --rawfile notes "${release_temp}/notes" \
+        '{tag_name: $tag, name: $tag, body: $notes, draft: false, make_latest: "false"}' \
+        >"${release_temp}/github-create" || return $?
+    status=$(github_release_request --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+        --input "${release_temp}/github-create") || return $?
+    case "${status}" in
+        201) validate_github_release "${tag}"; return $? ;;
+        422)
+            if jq -e 'any(.errors[]?; .resource == "Release" and .field == "tag_name" and .code == "already_exists")' \
+                "${release_temp}/github-body" >/dev/null; then
+                state=$(github_release_state "${tag}") || return $?
+                [ "${state}" != present ] || return 0
+            fi
+            ;;
+    esac
+    printf 'ERROR: release creation for %s returned HTTP %s without a confirmed release\n' "${tag}" "${status}" >&2
+    return 1
+}
+
 # release-plz skips existing tags, even when GitHub release creation failed.
 recover_github_release() {
-    local name="$1" version="$2" tag="$3" manifest
-    if jq -e --arg tag "${tag}" 'any(.[]; .tag_name == $tag)' "${release_temp}/releases" >/dev/null; then
-        return 0
-    fi
+    local name="$1" version="$2" tag="$3" manifest state
+    state=$(github_release_state "${tag}") || return $?
+    [ "${state}" != present ] || return 0
     manifest=$(jq -er --arg name "${name}" '.packages[] | select(.name == $name) | .manifest_path' \
         "${release_temp}/metadata") || return $?
-    jq -eRs --arg version "${version}" '
+    jq -erRs --arg version "${version}" '
         ("\n" + .) | split("\n## [") | map(select(startswith($version + "]")))
         | if length != 1 then error("release changelog section is missing") else .[0] end
         | split("\n") | .[1:] | join("\n")
     ' "${manifest%/*}/CHANGELOG.md" >"${release_temp}/notes" || return $?
-    gh release create "${tag}" --verify-tag --repo "${GITHUB_REPOSITORY}" \
-        --title "${tag}" --latest=false --notes-file "${release_temp}/notes"
+    create_github_release "${tag}"
 }
 
 cargo metadata --format-version 1 --no-deps --locked >"${release_temp}/metadata"
@@ -130,14 +185,10 @@ while IFS=$'\t' read -r name version; do
 done <<<"${packages}"
 
 release-plz release --config "${RELEASE_CONFIG}" --git-token "${GITHUB_TOKEN}"
-gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-    | jq -e 'add | if type == "array" then . else error("invalid release list") end' \
-    >"${release_temp}/releases"
 while IFS=$'\t' read -r name version; do
     tag="${name}-v${version}"
     # API-created tags are remote-only until fetched into this checkout.
     git fetch --no-tags origin "refs/tags/${tag}:refs/tags/${tag}"
     check_published_source "${name}" "${version}" "${tag}"
     recover_github_release "${name}" "${version}" "${tag}"
-    gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" >/dev/null
 done <<<"${packages}"
