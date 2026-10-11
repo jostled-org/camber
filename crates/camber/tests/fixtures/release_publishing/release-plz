@@ -2,8 +2,14 @@
 set -eu
 printf 'release-plz %s\n' "$*" >>"$FIXTURE_LOG"
 [ "${RELEASE_STATUS:-0}" = 0 ] || exit "$RELEASE_STATUS"
+remote=$(git remote get-url origin)
+git --git-dir="$remote" fetch --quiet "$RELEASE_SOURCE" "$FIXTURE_SHA"
 for tag in camber-v0.12.0 camber-macros-v0.7.0; do
-    if ! git rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1; then
-        git tag "$tag"
+    [ "${RELEASE_TAG_MODE:-}" != missing ] || continue
+    if ! git --git-dir="$remote" rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1; then
+        git --git-dir="$remote" tag "$tag" "${RELEASE_TAG_SHA:-$FIXTURE_SHA}"
     fi
 done
+if [ "${RELEASE_TAG_MODE:-}" = unfetchable ]; then
+    git remote set-url origin "${FIXTURE_STATE}.absent-remote"
+fi

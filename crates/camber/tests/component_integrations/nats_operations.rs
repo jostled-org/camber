@@ -784,6 +784,7 @@ fn connect_with_no_server_answer_times_out() -> Row {
 fn default_payload_maximum_refuses_before_copy() -> Row {
     let peer = NatsPeer::start();
     let builder = nats::builder(&peer.url());
+    let control = peer.control();
     let outcome = runtime::builder().run(move || -> Row {
         let connection = settled("connect", builder.connect())?;
         let over = vec![0_u8; DEFAULT_MAX_MESSAGE_BYTES + 1];
@@ -799,12 +800,20 @@ fn default_payload_maximum_refuses_before_copy() -> Row {
             row_bounded("publish", connection.publish("over", &over))?,
             limit_exceeded(IntegrationOperation::Publish),
         )?;
+        control.wait_for("the default-maximum publication", ROW_BOUND, |log| {
+            !log.published.is_empty()
+        })?;
         expect_ok("close", row_bounded("close", connection.close())?)
     });
     let verdict = clean_run(outcome).and_then(|()| {
+        let log =
+            peer.control()
+                .wait_for("the peer observed client closure", ROW_BOUND, |log| {
+                    log.closed == 1
+                })?;
         expect_eq(
             "published commands",
-            peer.control().log().published,
+            log.published,
             vec![(Box::from("max"), DEFAULT_MAX_MESSAGE_BYTES)],
         )
     });

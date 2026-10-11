@@ -31,6 +31,10 @@ fn release_repo() -> FixtureRepo {
     repo.write_executable("bin/sleep", b"#!/bin/bash\nexit 0\n");
     std::os::unix::fs::symlink(ambient_executable("git"), repo.path().join("bin/git")).unwrap();
     repo.commit("release source");
+    let remote = repo.outside("remote.git");
+    let remote = remote.to_str().unwrap();
+    repo.git(&["clone", "--bare", ".", remote]);
+    repo.git(&["remote", "add", "origin", remote]);
     repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
     repo
 }
@@ -73,7 +77,37 @@ fn release_publish_accepts_warning_text_and_confirms_before_tagging() {
     assert!(log.contains("publish --locked --registry crates-io -p camber -p camber-macros"));
     assert!(log.find("publish ").unwrap() < log.find("release-plz release").unwrap());
     assert!(log.contains("confirm camber-macros"));
+    for tag in ["camber-v0.12.0", "camber-macros-v0.7.0"] {
+        let tagged = repo.git(&["rev-parse", &format!("refs/tags/{tag}^{{commit}}")]);
+        assert_eq!(tagged.output, repo.git(&["rev-parse", "HEAD"]).output);
+    }
+    let retry = run_script(&repo, PUBLISH, &[]);
+    assert_eq!(retry.status, 0, "{}", retry.output);
+    assert_eq!(calls(&repo).matches("publish --locked").count(), 1);
     repo.close();
+}
+
+#[test]
+fn release_publish_rejects_missing_unfetchable_or_wrong_remote_tags() {
+    for (mode, diagnostic) in [
+        ("missing", "couldn't find remote ref"),
+        ("unfetchable", "does not appear to be a git repository"),
+        ("wrong", "does not match the published crate source"),
+    ] {
+        let repo = release_repo();
+        let old = repo.git(&["rev-parse", "HEAD"]).output;
+        repo.write("next-release", b"next release\n");
+        repo.commit("next release");
+        let values = match mode {
+            "wrong" => ("RELEASE_TAG_SHA", old.trim()),
+            _ => ("RELEASE_TAG_MODE", mode),
+        };
+        let run = run_script(&repo, PUBLISH, &[values]);
+        assert_ne!(run.status, 0, "{mode}: {}", run.output);
+        assert!(run.output.contains(diagnostic), "{mode}: {}", run.output);
+        assert!(calls(&repo).contains("release-plz release"), "{mode}");
+        repo.close();
+    }
 }
 
 #[test]

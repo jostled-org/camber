@@ -134,7 +134,10 @@ gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
     | jq -e 'add | if type == "array" then . else error("invalid release list") end' \
     >"${release_temp}/releases"
 while IFS=$'\t' read -r name version; do
-    git rev-parse --verify "refs/tags/${name}-v${version}^{commit}" >/dev/null
-    recover_github_release "${name}" "${version}" "${name}-v${version}"
-    gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${name}-v${version}" >/dev/null
+    tag="${name}-v${version}"
+    # API-created tags are remote-only until fetched into this checkout.
+    git fetch --no-tags origin "refs/tags/${tag}:refs/tags/${tag}"
+    check_published_source "${name}" "${version}" "${tag}"
+    recover_github_release "${name}" "${version}" "${tag}"
+    gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" >/dev/null
 done <<<"${packages}"
