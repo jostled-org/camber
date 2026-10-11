@@ -77,16 +77,33 @@
 //!
 //! async fn fetch() -> Result<(), RuntimeError> {
 //!     let client = http::client()
+//!         .total_timeout(Duration::from_secs(20))
 //!         .connect_timeout(Duration::from_secs(5))
 //!         .request_timeout(Duration::from_secs(10))
 //!         .response_idle_timeout(Duration::from_secs(2))
 //!         .retries(3)
-//!         .backoff(Duration::from_millis(100))
-//!         .retry_timeout(Duration::from_secs(20));
+//!         .backoff(Duration::from_millis(100));
 //!
 //!     let response = client.get("https://example.com/health").await?;
 //!     let _status = response.status();
 //!     Ok(())
+//! }
+//! ```
+//!
+//! Every call returns a [`self::ClientResponse`]: the whole body, collected
+//! under the client's response maximum, and the headers as the peer sent
+//! them. It is not a server [`self::Response`]. Every status is a response,
+//! and decoding is explicit:
+//!
+//! ```rust,no_run
+//! use camber::RuntimeError;
+//! use camber::http::{self, Response};
+//!
+//! async fn forward() -> Result<Response, RuntimeError> {
+//!     let upstream = http::get("https://example.com/data")
+//!         .await?
+//!         .error_for_status()?;
+//!     Response::text(200, upstream.text()?)
 //! }
 //! ```
 //!
@@ -192,8 +209,9 @@ pub use boundary::{ByteBoundary, DeadlineBoundary};
 /// usable API.
 pub use bytes::Bytes;
 pub use client::{
-    ClientBuilder, client, delete, delete_with_body, get, head, options, patch, patch_form,
-    patch_json, post, post_form, post_json, put, put_form, put_json,
+    Client, ClientDecode, ClientError, ClientInput, ClientRedirect, ClientRequest, ClientResponse,
+    ClientTimeout, RedirectPolicy, RetryPolicy, client, delete, delete_with_body, get, head,
+    options, patch, patch_form, patch_json, post, post_form, post_json, put, put_form, put_json,
 };
 pub use cookie::{CookieOptions, SameSite};
 pub use disconnect::{DisconnectCause, DisconnectSignal};

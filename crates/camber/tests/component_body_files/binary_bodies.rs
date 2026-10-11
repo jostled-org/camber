@@ -1,5 +1,6 @@
 use crate::runtime_support as common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::{RuntimeError, runtime};
 use std::time::Duration;
@@ -42,11 +43,11 @@ async fn handler_body_text_is_backward_compatible() {
     });
     let addr = common::spawn_server(router);
 
-    let resp = http::post(&format!("http://{addr}/echo"), "hello world")
+    let resp: ClientResponse = http::post(&format!("http://{addr}/echo"), "hello world")
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hello world");
+    assert_eq!(resp.text().unwrap(), "hello world");
 
     runtime::request_shutdown();
 }
@@ -84,11 +85,12 @@ async fn json_parsing_works_with_bytes_model() {
     });
     let addr = common::spawn_server(router);
 
-    let resp = http::post_json(&format!("http://{addr}/parse"), r#"{"name":"camber"}"#)
-        .await
-        .unwrap();
+    let resp: ClientResponse =
+        http::post_json(&format!("http://{addr}/parse"), r#"{"name":"camber"}"#)
+            .await
+            .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "camber");
+    assert_eq!(resp.text().unwrap(), "camber");
 
     runtime::request_shutdown();
 }

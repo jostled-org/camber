@@ -1,5 +1,6 @@
 use crate::runtime_support as common;
 use camber::RuntimeError;
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router, rate_limit};
 use camber::runtime;
 use std::time::Duration;
@@ -26,7 +27,7 @@ async fn rate_limit_extreme_token_counts_do_not_overflow_refill() {
     });
     let addr = common::spawn_server(router);
 
-    let response = http::get(&format!("http://{addr}/limited")).await.unwrap();
+    let response: ClientResponse = http::get(&format!("http://{addr}/limited")).await.unwrap();
     assert_eq!(response.status(), 200);
     runtime::request_shutdown();
 }

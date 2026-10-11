@@ -17,6 +17,7 @@ use crate::header_properties::CONNECTION_NAMED_LEAK;
 use crate::retry_upstream::{RunnableDriver, settle_wakeups, within_watchdog};
 use crate::ws_backend_script::{BackendEvent, BackendScript, ScriptedWsBackend};
 use camber::RuntimeError;
+use camber::http::ClientResponse;
 use camber::http::mock::{
     ConnectionOwnerEdge, ScopedFaultedRegistration, ScopedUpgradeOwner, UpgradeOwnerEdge,
     connection_owner, faulted_registration, registration_selection, upgrade_owner,
@@ -568,10 +569,10 @@ fn websocket_proxy_coexists_with_http_proxy() {
             let proxy_addr = common::spawn_server(proxy);
 
             // HTTP GET through proxy
-            let resp =
+            let resp: ClientResponse =
                 common::block_on(http::get(&format!("http://{proxy_addr}/api/hello"))).unwrap();
             assert_eq!(resp.status(), 200);
-            assert_eq!(resp.body(), "http-ok");
+            assert_eq!(resp.text().unwrap(), "http-ok");
 
             // WebSocket upgrade through same proxy prefix
             let mut stream = TcpStream::connect(proxy_addr).unwrap();

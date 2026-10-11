@@ -222,7 +222,7 @@ async fn fan_out_handler(
         let url = Arc::clone(url);
         handles.push(camber::spawn_async(async move {
             let resp = camber::http::get(&url).await?;
-            Ok(resp.body().to_owned())
+            resp.text().map(str::to_owned)
         }));
     }
 

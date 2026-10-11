@@ -1,4 +1,5 @@
 use crate::common::{BOUND, probe_paused_window, run_in_child, spawn_server_ready};
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime_test_support::{RuntimeCheckpoint, runtime_schedule};
 use camber::{RuntimeError, runtime, spawn};
@@ -67,9 +68,9 @@ async fn spawn_inside_handler_does_not_deadlock() {
             let request_counter = Arc::clone(&counter);
             let url = format!("http://{}/compute", server.local_addr());
             camber::spawn_async(async move {
-                let response = http::get(&url).await.unwrap();
+                let response: ClientResponse = http::get(&url).await.unwrap();
                 assert_eq!(response.status(), 200);
-                assert_eq!(response.body(), "computed");
+                assert_eq!(response.text().unwrap(), "computed");
                 request_counter.fetch_add(1, Ordering::SeqCst);
             })
         })

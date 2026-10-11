@@ -1,5 +1,7 @@
 use crate::runtime_support as common;
 
+use camber::RuntimeError;
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 use std::io::{Read, Write};
@@ -14,9 +16,9 @@ async fn router_dispatches_to_matching_handler() {
 
     let addr = common::spawn_server(router);
 
-    let resp = http::get(&format!("http://{addr}/hello")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/hello")).await.unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "Hello, world!");
+    assert_eq!(resp.text().unwrap(), "Hello, world!");
 
     runtime::request_shutdown();
 }
@@ -26,7 +28,7 @@ async fn router_returns_404_for_unknown_path() {
     let router = Router::new();
     let addr = common::spawn_server(router);
 
-    let resp = http::get(&format!("http://{addr}/nope")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/nope")).await.unwrap();
     assert_eq!(resp.status(), 404);
 
     runtime::request_shutdown();
@@ -138,19 +140,20 @@ async fn router_handler_makes_outbound_call() {
     router.get("/proxy", move |_req: &Request| {
         let url = backend_url.clone();
         async move {
-            match http::get(&url).await {
-                Ok(resp) => Response::text(200, resp.body()),
+            let fetched: Result<ClientResponse, RuntimeError> = http::get(&url).await;
+            match fetched {
+                Ok(resp) => Response::text(200, resp.text()?),
                 Err(_) => Response::text(502, "upstream error"),
             }
         }
     });
     let main_addr = common::spawn_server(router);
 
-    let resp = http::get(&format!("http://{main_addr}/proxy"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/proxy"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert!(resp.body().contains("backend-data"));
+    assert!(resp.text().unwrap().contains("backend-data"));
 
     runtime::request_shutdown();
 }
@@ -167,15 +170,15 @@ async fn dispatch_parameterless_route_returns_correct_handler() {
 
     let addr = common::spawn_server(router);
 
-    let resp = http::get(&format!("http://{addr}/health")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/health")).await.unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "healthy");
+    assert_eq!(resp.text().unwrap(), "healthy");
 
-    let resp = http::post(&format!("http://{addr}/submit"), "")
+    let resp: ClientResponse = http::post(&format!("http://{addr}/submit"), "")
         .await
         .unwrap();
     assert_eq!(resp.status(), 201);
-    assert_eq!(resp.body(), "submitted");
+    assert_eq!(resp.text().unwrap(), "submitted");
 
     runtime::request_shutdown();
 }
@@ -192,9 +195,9 @@ async fn sorted_static_children_match_correctly() {
     let addr = common::spawn_server(router);
 
     for path in ["a", "b", "c", "z"] {
-        let resp = http::get(&format!("http://{addr}/{path}")).await.unwrap();
+        let resp: ClientResponse = http::get(&format!("http://{addr}/{path}")).await.unwrap();
         assert_eq!(resp.status(), 200);
-        assert_eq!(resp.body(), path);
+        assert_eq!(resp.text().unwrap(), path);
     }
 
     runtime::request_shutdown();
@@ -212,15 +215,15 @@ async fn method_indexed_lookup_returns_correct_handler() {
 
     let addr = common::spawn_server(router);
 
-    let resp = http::get(&format!("http://{addr}/item")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/item")).await.unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "get-item");
+    assert_eq!(resp.text().unwrap(), "get-item");
 
-    let resp = http::post(&format!("http://{addr}/item"), "")
+    let resp: ClientResponse = http::post(&format!("http://{addr}/item"), "")
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "post-item");
+    assert_eq!(resp.text().unwrap(), "post-item");
 
     runtime::request_shutdown();
 }

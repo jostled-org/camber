@@ -1,6 +1,7 @@
 use crate::common;
 
 use camber::circuit_breaker;
+use camber::http::ClientResponse;
 use camber::http::{self, Router};
 use camber::{Resource, RuntimeError, runtime};
 use std::sync::Arc;
@@ -214,9 +215,14 @@ fn circuit_breaker_composes_with_runtime() {
         .resource(cb)
         .run(|| {
             let addr = common::spawn_server(Router::new());
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
             assert_eq!(resp.status(), 200);
-            assert!(resp.body().contains(r#""runtime-db":{"status":"ok"}"#));
+            assert!(
+                resp.text()
+                    .unwrap()
+                    .contains(r#""runtime-db":{"status":"ok"}"#)
+            );
             runtime::request_shutdown();
         })
         .unwrap();

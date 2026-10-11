@@ -1,5 +1,6 @@
 use crate::runtime_support as common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 use std::future::Future;
@@ -21,19 +22,18 @@ async fn middleware_closure_runs_with_standard_boxing() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/hello")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/hello")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hello");
+    assert_eq!(resp.text().unwrap(), "hello");
 
     let has_mw = resp
         .headers()
-        .iter()
-        .any(|(k, v)| k.eq_ignore_ascii_case("x-async-mw") && v.as_ref() == "works");
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-async-mw") && v == b"works");
     assert!(
         has_mw,
         "missing X-Async-MW header, got: {:?}",
-        resp.headers()
+        resp.headers().collect::<Vec<_>>()
     );
 
     runtime::request_shutdown();
@@ -53,16 +53,19 @@ async fn async_middleware_wraps_handler() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/hello")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/hello")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hello");
+    assert_eq!(resp.text().unwrap(), "hello");
 
     let has_mw = resp
         .headers()
-        .iter()
-        .any(|(k, v)| k.eq_ignore_ascii_case("x-mw") && v.as_ref() == "present");
-    assert!(has_mw, "missing X-MW header, got: {:?}", resp.headers());
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-mw") && v == b"present");
+    assert!(
+        has_mw,
+        "missing X-MW header, got: {:?}",
+        resp.headers().collect::<Vec<_>>()
+    );
 
     runtime::request_shutdown();
 }
@@ -87,7 +90,7 @@ async fn async_middleware_short_circuits() {
     let addr = common::spawn_server(router);
 
     // No Authorization header → 401
-    let resp = http::get(&format!("http://{addr}/protected"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/protected"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 401);
@@ -121,19 +124,18 @@ async fn middleware_modifies_response() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/hello")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/hello")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "ok");
+    assert_eq!(resp.text().unwrap(), "ok");
 
     let has_request_id = resp
         .headers()
-        .iter()
-        .any(|(k, v)| k.eq_ignore_ascii_case("x-request-id") && v.as_ref() == "abc-123");
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-request-id") && v == b"abc-123");
     assert!(
         has_request_id,
         "missing X-Request-Id header, got: {:?}",
-        resp.headers()
+        resp.headers().collect::<Vec<_>>()
     );
 
     runtime::request_shutdown();
@@ -157,15 +159,14 @@ async fn middleware_ordering_preserved() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/order")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/order")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
 
     let order_headers: Vec<&str> = resp
         .headers()
-        .iter()
         .filter(|(k, _)| k.eq_ignore_ascii_case("x-order"))
-        .map(|(_, v)| v.as_ref())
+        .map(|(_, v)| std::str::from_utf8(v).unwrap())
         .collect();
 
     assert!(

@@ -18,6 +18,7 @@
 
 use crate::common;
 
+use camber::http::ClientResponse;
 use camber::http::{Request, Response, Router};
 use camber::runtime;
 use std::time::Duration;
@@ -75,13 +76,13 @@ fn assert_profiling_endpoint_returns_flamegraph() {
             let addr = server.local_addr();
 
             // Request a 1-second CPU profile
-            let resp = common::block_on(camber::http::get(&format!(
+            let resp: ClientResponse = common::block_on(camber::http::get(&format!(
                 "http://{addr}/debug/pprof/cpu?seconds=1"
             )))
             .unwrap();
             assert_eq!(resp.status(), 200);
 
-            let body = resp.body();
+            let body = resp.text().unwrap();
             assert!(
                 !body.is_empty(),
                 "expected non-empty flamegraph SVG, got empty body"

@@ -8,6 +8,7 @@ use crate::trace_capture;
 
 use camber::__private::DEFAULT_STATIC_FILE_LIMIT;
 use camber::RuntimeError;
+use camber::http::ClientResponse;
 use camber::http::mock::{self, BlockingWorkerEdge};
 use camber::http::{ByteBoundary, Router};
 use camber::runtime;
@@ -271,14 +272,14 @@ async fn assert_routed_rows_apply_the_registered_ceiling() {
     let addr = common::spawn_server(router);
 
     let recorded = trace_capture::capture_events("raw_path=/bounded/asset.txt");
-    let refused = camber::http::get(&format!("http://{addr}/bounded/asset.txt"))
+    let refused: ClientResponse = camber::http::get(&format!("http://{addr}/bounded/asset.txt"))
         .await
         .unwrap();
     assert_eq!(refused.status(), 500);
     assert!(
-        !refused.body().contains(GROWN),
+        !refused.text().unwrap().contains(GROWN),
         "no crossing byte reaches the peer: {}",
-        refused.body(),
+        refused.text().unwrap(),
     );
     assert_eq!(
         frozen_ceiling(&root.controller),
@@ -287,22 +288,23 @@ async fn assert_routed_rows_apply_the_registered_ceiling() {
     );
     assert_the_crossing_reached_the_operator(&recorded);
 
-    let opted_out = camber::http::get(&format!("http://{addr}/unbounded/asset.txt"))
-        .await
-        .unwrap();
+    let opted_out: ClientResponse =
+        camber::http::get(&format!("http://{addr}/unbounded/asset.txt"))
+            .await
+            .unwrap();
     assert_eq!(opted_out.status(), 200);
-    assert_eq!(opted_out.body(), GROWN);
+    assert_eq!(opted_out.text().unwrap(), GROWN);
     assert_eq!(
         frozen_ceiling(&root.controller),
         UNBOUNDED,
         "only the named routed opt-out reads under no maximum at all",
     );
 
-    let defaulted = camber::http::get(&format!("http://{addr}/default/asset.txt"))
+    let defaulted: ClientResponse = camber::http::get(&format!("http://{addr}/default/asset.txt"))
         .await
         .unwrap();
     assert_eq!(defaulted.status(), 200);
-    assert_eq!(defaulted.body(), GROWN);
+    assert_eq!(defaulted.text().unwrap(), GROWN);
     assert_eq!(
         frozen_ceiling(&root.controller),
         DEFAULT_STATIC_FILE_LIMIT,

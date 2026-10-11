@@ -126,20 +126,42 @@ impl Recorded {
     }
 }
 
+/// How far the counter and the duration family each moved for one row's
+/// whole label set.
+fn deltas(before: &Recorded, after: &Recorded, expected: &Expected<'_>) -> (u64, u64) {
+    let status = expected.status_label();
+    let labels = expected.labels(&status);
+    (
+        super::metrics_scrape::delta(&before.completions, &after.completions, &labels),
+        super::metrics_scrape::delta(&before.durations, &after.durations, &labels),
+    )
+}
+
+/// Whether both instruments hold this row's record.
+///
+/// The predicate of a wait, so it asserts nothing. One record is two writes,
+/// and the exporter renders the counters before the duration family. A scrape
+/// taken while the record is written can therefore hold one instrument's
+/// sample and not the other's. Once both have moved the record is whole, and
+/// [`moved`] asserts their agreement on the scrape taken after the wait.
+pub fn recorded(before: &Recorded, after: &Recorded, expected: &Expected<'_>) -> bool {
+    let (counted, timed) = deltas(before, after, expected);
+    counted >= 1 && timed >= 1
+}
+
 /// How far both instruments moved for one row's whole label set.
 ///
 /// Stated as one number because the two have to agree: a counter that moved
 /// while the duration family did not is a completion recorded under a label set
 /// no operator can read a latency for.
 pub fn moved(before: &Recorded, after: &Recorded, expected: &Expected<'_>) -> u64 {
-    let status = expected.status_label();
-    let labels = expected.labels(&status);
-    let counted = super::metrics_scrape::delta(&before.completions, &after.completions, &labels);
-    let timed = super::metrics_scrape::delta(&before.durations, &after.durations, &labels);
+    let (counted, timed) = deltas(before, after, expected);
     assert_eq!(
-        counted, timed,
-        "{}: the counter and the duration family disagree about {labels:?}",
+        counted,
+        timed,
+        "{}: the counter and the duration family disagree about {:?}",
         expected.label,
+        expected.labels(&expected.status_label()),
     );
     counted
 }

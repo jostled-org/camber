@@ -5,6 +5,8 @@ use crate::common::{
     write_ws_text_frame,
 };
 
+use camber::RuntimeError;
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 use std::time::Duration;
@@ -88,8 +90,9 @@ async fn e2e_handler_outbound_with_reqwest() {
     main.get("/fetch", move |_req: &Request| {
         let backend_url = backend_url.clone();
         async move {
-            match http::get(&backend_url).await {
-                Ok(resp) => Response::text(200, resp.body()),
+            let fetched: Result<ClientResponse, RuntimeError> = http::get(&backend_url).await;
+            match fetched {
+                Ok(resp) => Response::text(200, resp.text()?),
                 Err(e) => Response::text(502, &format!("fetch failed: {e}")),
             }
         }
@@ -97,11 +100,11 @@ async fn e2e_handler_outbound_with_reqwest() {
     let main_addr = common::spawn_server(main);
 
     // Client hits server, gets upstream data via handler
-    let resp = http::get(&format!("http://{main_addr}/fetch"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/fetch"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "upstream-data");
+    assert_eq!(resp.text().unwrap(), "upstream-data");
 
     runtime::request_shutdown();
 }

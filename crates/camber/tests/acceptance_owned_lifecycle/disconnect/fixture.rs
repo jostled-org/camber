@@ -115,7 +115,7 @@ where
 /// releases the pause even when the wait expired — a pause left armed with
 /// nobody to release it wedges the drain, and a wedged drain is a hung test
 /// rather than a failing one.
-pub(super) fn with_drained_server<T, F>(
+pub(crate) fn with_drained_server<T, F>(
     connection_limit: Option<usize>,
     router: Router,
     body: F,

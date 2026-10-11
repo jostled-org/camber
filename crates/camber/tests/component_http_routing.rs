@@ -1,10 +1,13 @@
 #[path = "support/deterministic.rs"]
 pub mod deterministic;
+#[path = "support/error_chain.rs"]
+pub mod error_chain;
 #[path = "support/halt.rs"]
 pub mod halt;
 #[path = "support/http.rs"]
 pub mod http;
-// Mounted for the private child 4.T4 reads its global capture in.
+// Mounted for the private child the connect-retry rows read their global
+// capture in.
 #[path = "support/process.rs"]
 pub mod process;
 #[path = "support/rejection.rs"]
@@ -17,8 +20,14 @@ pub mod runtime_support;
 pub mod streaming_multipart;
 #[path = "support/temp.rs"]
 pub mod temp;
+// Mounted for the untrusted certificate the client-failure TLS peer presents.
+#[path = "support/tls.rs"]
+pub mod tls_support;
 #[path = "support/trace_capture.rs"]
 pub mod trace_capture;
+// Mounted for the TLS peer the client-failure and retry rows refuse.
+#[path = "support/untrusted_tls.rs"]
+pub mod untrusted_tls;
 #[cfg(feature = "ws")]
 #[path = "support/ws.rs"]
 pub mod ws_support;
@@ -31,8 +40,16 @@ mod audit_http_rate_limit;
 mod body_admission;
 #[path = "component_http_routing/bounded_client.rs"]
 mod bounded_client;
+#[path = "component_http_routing/client_failures.rs"]
+mod client_failures;
 #[path = "component_http_routing/client_methods.rs"]
 mod client_methods;
+#[path = "component_http_routing/client_redirects.rs"]
+mod client_redirects;
+#[path = "component_http_routing/client_request.rs"]
+mod client_request;
+#[path = "component_http_routing/client_response.rs"]
+mod client_response;
 #[path = "component_http_routing/client_timeouts.rs"]
 mod client_timeouts;
 #[path = "component_http_routing/connection_persistence.rs"]

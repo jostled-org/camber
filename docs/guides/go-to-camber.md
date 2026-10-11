@@ -165,6 +165,11 @@ let resp = http::patch("https://api.example.com/items/1", &partial).await?;
 
 All methods are first-class. No `NewRequest` / `Do` ceremony.
 
+Each call returns a `ClientResponse` with the whole body already read, so
+there is no `resp.Body.Close()`. Read it with `resp.text()?`,
+`resp.json::<T>()?`, or `resp.body_bytes()`. A 4xx or 5xx status is a
+response, as in Go; `resp.error_for_status()?` converts it to an error.
+
 ### HTTP Client with Retries
 
 In Go, retry logic requires a custom `RoundTripper` or a third-party library like `hashicorp/go-retryablehttp`. Camber has it built in.

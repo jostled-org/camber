@@ -5,6 +5,7 @@ use crate::common::{
     write_ws_text_frame,
 };
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router, SseWriter};
 use camber::runtime;
 use std::io::{BufRead, BufReader, Write};
@@ -31,17 +32,16 @@ fn unified_protocol_router() -> Router {
 }
 
 async fn assert_rest_journey(addr: std::net::SocketAddr) {
-    let response = http::get(&format!("http://{addr}/hello")).await.unwrap();
+    let response: ClientResponse = http::get(&format!("http://{addr}/hello")).await.unwrap();
     assert_eq!(response.status(), 200);
-    assert_eq!(response.body(), "hello");
+    assert_eq!(response.text().unwrap(), "hello");
     let has_server_header = response
         .headers()
-        .iter()
-        .any(|(k, v)| k.eq_ignore_ascii_case("x-server") && v.as_ref() == "camber");
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-server") && v == b"camber");
     assert!(
         has_server_header,
         "missing X-Server header on REST response, got: {:?}",
-        response.headers()
+        response.headers().collect::<Vec<_>>()
     );
 }
 

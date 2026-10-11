@@ -46,7 +46,7 @@ fn main() -> Result<(), RuntimeError> {
 
     router.get("/proxy", |_req: &Request| async {
         match http::get("https://httpbin.org/get").await {
-            Ok(resp) => Response::text(200, resp.body()),
+            Ok(resp) => Response::text(200, resp.text()?),
             Err(_) => Response::text(502, "upstream error"),
         }
     });

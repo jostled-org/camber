@@ -103,6 +103,43 @@ pub fn abortive_tcp_socket() -> tokio::net::TcpSocket {
     socket
 }
 
+/// A loopback listener that nothing accepts on.
+///
+/// A call that must send nothing is given its address. An empty backlog after
+/// the call proves that the call dialed nothing.
+pub struct UndialedListener(std::net::TcpListener);
+
+impl UndialedListener {
+    pub fn bind() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        listener
+            .set_nonblocking(true)
+            .expect("a listener that reports an empty backlog");
+        Self(listener)
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.0.local_addr().expect("the listener's address")
+    }
+
+    /// Require that no connection reached the listener.
+    pub fn assert_undialed(&self, context: &str) {
+        let dialed = self.0.accept();
+        assert!(
+            matches!(&dialed, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "{context}: the call dialed its target: {dialed:?}"
+        );
+    }
+}
+
+/// A loopback destination with no listening service.
+///
+/// Binding port zero selects an ephemeral port; it does not claim port zero.
+/// This avoids both port reuse and a non-listening socket that can stall dials.
+pub fn refused_loopback_addr() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 0))
+}
+
 /// Poll `attempt` every [`POLL_INTERVAL`] until it produces a value, giving up
 /// at `bound`.
 ///

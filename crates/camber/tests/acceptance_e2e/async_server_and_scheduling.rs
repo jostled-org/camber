@@ -1,5 +1,6 @@
 use crate::common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 use std::future::Future;
@@ -81,9 +82,9 @@ async fn e2e_async_server() {
     assert_concurrent_async_responses(&results, elapsed);
 
     // Sync-style handler works alongside async
-    let sync_resp = http::get(&format!("http://{addr}/sync")).await.unwrap();
+    let sync_resp: ClientResponse = http::get(&format!("http://{addr}/sync")).await.unwrap();
     assert_eq!(sync_resp.status(), 200);
-    assert_eq!(sync_resp.body(), "sync");
+    assert_eq!(sync_resp.text().unwrap(), "sync");
 
     assert_scheduled_events(&mut scheduled_rx).await;
     schedule_handle.cancel();

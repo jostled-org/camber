@@ -2,6 +2,7 @@
 
 use crate::common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router, otel};
 use camber::runtime;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,10 +37,10 @@ async fn otel_middleware_creates_span_for_request() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/hello")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/hello")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "ok");
+    assert_eq!(resp.text().unwrap(), "ok");
 
     runtime::request_shutdown();
 }
@@ -143,10 +144,11 @@ fn otel_generates_span_id_for_async_handler() {
 
             let addr = common::spawn_server(router);
             // Send without traceparent — middleware should generate one
-            let resp = common::block_on(http::get(&format!("http://{addr}/trace"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/trace"))).unwrap();
 
             assert_eq!(resp.status(), 200);
-            let body = resp.body();
+            let body = resp.text().unwrap();
             // Generated traceparent: 00-{32hex}-{16hex}-{2hex} = 55 chars
             assert_eq!(body.len(), 55, "expected 55-char traceparent, got: {body}");
             assert!(
@@ -199,7 +201,8 @@ fn otel_disabled_has_zero_overhead() {
             });
             let addr = common::spawn_server(router);
 
-            let resp = common::block_on(http::get(&format!("http://{addr}/proxy"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/proxy"))).unwrap();
             assert_eq!(resp.status(), 200);
 
             // Upstream should NOT have received a traceparent header

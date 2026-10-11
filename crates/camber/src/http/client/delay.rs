@@ -1,8 +1,8 @@
-//! How long a retry sequence waits before its next attempt.
+//! How long an operation waits before its next attempt.
 //!
 //! Pure arithmetic over values: the wall clock a `Retry-After` date is read
 //! against and the jitter sample a backoff adds are inputs, so every answer is
-//! exact for its inputs. The delays are unclipped; the sequence that waits
+//! exact for its inputs. The delays are unclipped; the operation that waits
 //! clips each one to its own deadline.
 
 use std::time::{Duration, SystemTime};

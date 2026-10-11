@@ -221,7 +221,43 @@ let resp = http::delete("https://api.example.com/items/1").await?;
 let resp = http::patch_json("https://api.example.com/items/1", &body).await?;
 
 let resp = http::client().retries(3).get("https://flaky-api.example.com/data").await?;
+
+// A call returns a ClientResponse. Decoding and status conversion are explicit.
+let item: Item = resp.error_for_status()?.json()?;
+
+// Describe one request: any method, your headers, typed JSON, its own limits.
+let client = http::client();
+let answer: ProviderAnswer = client
+    .request("POST", "https://provider.example/v1/answers")?
+    .sensitive_header("authorization", &authorization)?
+    .json(&payload)?
+    .response_limit(1_048_576)?
+    .send()
+    .await?
+    .error_for_status()?
+    .json()?;
+
+// A handler builds its own Response from an upstream answer.
+router.get("/status", |_req| async {
+    let upstream = http::get("https://api.example.com/status").await?;
+    Response::text(upstream.status(), upstream.text()?)
+});
 ```
+
+- One `total_timeout` bounds the whole call: every attempt, redirect, delay,
+  and the final body. Runtime shutdown and a dropped call end it too.
+- The response maximum counts retained body bytes. The default is eight MiB.
+- Redirects are off by default. `RedirectPolicy::SameOrigin` follows a
+  redirect only to the origin the call began at.
+- Retries repeat only `GET`, `HEAD`, `OPTIONS`, `PUT`, and `DELETE`.
+  `RetryPolicy::Replayable` permits one request's replay. You are responsible
+  for the duplicate.
+- Camber does not check the address a host resolves to. It gives no
+  protection against server-side request forgery. Send only to URLs you trust.
+- Each started call records one `http.client.completed` tracing event. The
+  event holds no path, query, header value, or body.
+
+See the [HTTP Client Reference](docs/reference/client.md).
 
 ## Cookies
 

@@ -136,14 +136,50 @@ let resp = http::post_json("https://api.example.com/data", json_str).await?;
 let resp = http::client()
     .connect_timeout(Duration::from_secs(5))
     .get("https://api.example.com/data").await?;
+
+// Any method, your own headers, typed JSON, and a per-request response maximum
+let client = http::client();
+let resp = client
+    .request("POST", "https://api.example.com/data")?
+    .sensitive_header("authorization", &token)?
+    .json(&payload)?
+    .response_limit(1_048_576)?
+    .send().await?;
+
+// Redirects are not followed: a 3xx is returned as the response.
+// .redirect_policy(RedirectPolicy::SameOrigin { max_hops }) follows one
+// only to the origin the call began at. Camber does not check the address a
+// host resolves to, so send only to URLs you trust.
+// total_timeout (default 30s) bounds the whole call, with or without retries.
+// Retries repeat only GET, HEAD, OPTIONS, PUT, and DELETE.
+// .retry_policy(RetryPolicy::Replayable) permits one request's replay.
+// With the otel feature a call sends the handler's traceparent.
+// .trace_context(false) on a request sends none.
+// Each started call records one `http.client.completed` tracing event.
+// Every call returns a ClientResponse, not a server Response
+resp.status()                    -> u16
+resp.header("content-type")      -> Option<&[u8]>  // first value, raw bytes
+resp.headers()                   -> impl Iterator<Item = (&str, &[u8])>
+resp.body_bytes()                -> &[u8]          // bytes as the peer sent them
+resp.text()?                     -> &str           // strict UTF-8
+resp.json::<T>()?                -> T              // ignores Content-Type
+resp.error_for_status()?         -> ClientResponse // Err for 400-599
+resp.into_body()                 -> Bytes
+
+// A 4xx or 5xx is a response until error_for_status converts it.
+// A handler builds its own Response from an upstream answer:
+let upstream = http::get(&url).await?;
+Response::text(200, upstream.text()?)
 ```
 
 ## Error Handling
 
 ```rust
 // RuntimeError variants: Io, ChannelClosed, Timeout, Cancelled,
-//   TaskPanicked, Http, BadRequest, Database, Tls
+//   TaskPanicked, Client, Http, BadRequest, Database, Tls
 // Use ? operator for propagation. BadRequest maps to 400 in handlers.
+// An outbound call fails with RuntimeError::Client(ClientError).
+// A handler that propagates it answers 500.
 
 // Handler returning Result — async closure form
 router.get("/user", |req: &Request| async {

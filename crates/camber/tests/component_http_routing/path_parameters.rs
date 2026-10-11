@@ -1,6 +1,7 @@
 use crate::runtime_support as common;
 
 use crate::deterministic::{DeterministicCase, DeterministicGenerator};
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 use std::collections::BTreeSet;
@@ -219,12 +220,17 @@ async fn assert_route_answers(
     route: &GeneratedRoute,
 ) {
     let context = format!("{case} category={} path={}", route.category, route.path);
-    let response = http::get(&format!("http://{}{}", server.local_addr(), route.path))
-        .await
-        .unwrap();
+    let response: ClientResponse =
+        http::get(&format!("http://{}{}", server.local_addr(), route.path))
+            .await
+            .unwrap();
 
     assert_eq!(response.status(), 200, "{context}");
-    assert_eq!(response.body(), route.expected.as_ref(), "{context}");
+    assert_eq!(
+        response.text().unwrap(),
+        route.expected.as_ref(),
+        "{context}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -268,10 +274,10 @@ async fn route_extracts_single_path_param() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/users/42")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/users/42")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "42");
+    assert_eq!(resp.text().unwrap(), "42");
 
     runtime::request_shutdown();
 }
@@ -286,12 +292,12 @@ async fn route_extracts_multiple_path_params() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/users/7/posts/99"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/users/7/posts/99"))
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "7:99");
+    assert_eq!(resp.text().unwrap(), "7:99");
 
     runtime::request_shutdown();
 }
@@ -305,12 +311,12 @@ async fn dispatch_wildcard_route_captures_remainder() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/files/a/b/c"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/files/a/b/c"))
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "a/b/c");
+    assert_eq!(resp.text().unwrap(), "a/b/c");
 
     runtime::request_shutdown();
 }
@@ -336,13 +342,14 @@ async fn blank_name_path_param_answers_while_blank_query_name_does_not() {
     let server = crate::http::spawn_server_ready(router, Duration::from_secs(2)).unwrap();
     let probe = server.cleanup_probe();
 
-    let response = http::get(&format!("http://{}/users/42?=blank", server.local_addr()))
-        .await
-        .unwrap();
+    let response: ClientResponse =
+        http::get(&format!("http://{}/users/42?=blank", server.local_addr()))
+            .await
+            .unwrap();
 
     assert_eq!(response.status(), 200);
     assert_eq!(
-        response.body(),
+        response.text().unwrap(),
         "42:absent",
         "the bare `:` capture still answers a blank name; the blank query key does not"
     );
@@ -369,13 +376,13 @@ async fn static_routes_still_match_exactly() {
 
     let addr = common::spawn_server(router);
 
-    let resp_static = http::get(&format!("http://{addr}/users/me")).await.unwrap();
+    let resp_static: ClientResponse = http::get(&format!("http://{addr}/users/me")).await.unwrap();
     assert_eq!(resp_static.status(), 200);
-    assert_eq!(resp_static.body(), "me-handler");
+    assert_eq!(resp_static.text().unwrap(), "me-handler");
 
-    let resp_param = http::get(&format!("http://{addr}/users/42")).await.unwrap();
+    let resp_param: ClientResponse = http::get(&format!("http://{addr}/users/42")).await.unwrap();
     assert_eq!(resp_param.status(), 200);
-    assert_eq!(resp_param.body(), "42");
+    assert_eq!(resp_param.text().unwrap(), "42");
 
     runtime::request_shutdown();
 }
@@ -395,8 +402,10 @@ async fn structurally_identical_routes_keep_their_own_capture_names() {
     let server = crate::http::spawn_server_ready(router, Duration::from_secs(2)).unwrap();
     let base = format!("http://{}/accounts/acme", server.local_addr());
 
-    assert_eq!(http::get(&base).await.unwrap().body(), "acme");
-    assert_eq!(http::post(&base, "").await.unwrap().body(), "acme");
+    let fetched: ClientResponse = http::get(&base).await.unwrap();
+    assert_eq!(fetched.text().unwrap(), "acme");
+    let posted: ClientResponse = http::post(&base, "").await.unwrap();
+    assert_eq!(posted.text().unwrap(), "acme");
 
     server.shutdown_bounded(Duration::from_secs(2)).unwrap();
 }

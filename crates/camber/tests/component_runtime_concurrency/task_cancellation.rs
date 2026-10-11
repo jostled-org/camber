@@ -1,3 +1,4 @@
+use camber::http::ClientResponse;
 use camber::{RuntimeError, channel, runtime, spawn};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,7 +31,7 @@ fn cancel_before_task_starts_io() {
         let handle = spawn(move || -> Result<(), RuntimeError> {
             started_tx.send(()).unwrap();
             release_rx.recv().unwrap();
-            tokio::task::block_in_place(|| {
+            tokio::task::block_in_place(|| -> Result<ClientResponse, RuntimeError> {
                 tokio::runtime::Handle::current().block_on(camber::http::get("http://127.0.0.1:1"))
             })?;
             Ok(())

@@ -7,6 +7,183 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- *(client)* Outbound HTTP calls fail with `RuntimeError::Client(ClientError)`.
+  `ClientError`, `ClientInput`, `ClientTimeout`, `ClientRedirect`, and
+  `ClientDecode` are closed enums exported from `camber::http`. Match on the
+  category instead of `RuntimeError::Http`, `RuntimeError::Timeout`, or
+  `RuntimeError::LimitExceeded(ByteBoundary::ClientResponse)`:
+  - a refused connection is `ClientError::Connect`;
+  - a DNS failure is `ClientError::Dns`;
+  - a TLS failure with a Rustls cause is `ClientError::Tls`;
+  - an operation past its total is
+    `ClientError::Timeout(ClientTimeout::Operation)`, and an attempt past
+    `request_timeout` is `ClientError::Timeout(ClientTimeout::Attempt)`;
+  - an expired connect or response-idle timer is
+    `ClientError::Timeout(ClientTimeout::Transport)`;
+  - a response above its maximum is `ClientError::ResponseTooLarge { limit }`;
+  - a client that cannot be constructed is `ClientError::Configuration`;
+  - any other send or read failure is `ClientError::Transport`.
+- *(client)* Outbound HTTP calls return `ClientResponse`, exported from
+  `camber::http`, instead of the server `Response`. This applies to every free
+  function and every `Client` verb:
+  - replace `resp.body()` with `resp.text()?`, which is strict UTF-8, or with
+    `resp.body_bytes()`;
+  - `resp.headers()` is an iterator of `(&str, &[u8])` and
+    `resp.header(name)` returns the first value. A header value keeps its raw
+    bytes, and a non-text value is no longer an empty string;
+  - `resp.json::<T>()?` decodes the body without reading `Content-Type`, and
+    `resp.into_body()` takes the body as `Bytes`;
+  - `resp.error_for_status()?` converts a 400–599 status into
+    `ClientError::Status`. A call still returns every status as a response;
+  - `ClientResponse` does not implement `IntoResponse`. A handler that
+    forwards an upstream answer builds its own `Response`.
+- *(client)* The client never decodes a response body. Reqwest's gzip,
+  Brotli, deflate, and Zstandard decoding are disabled explicitly, so another
+  crate that enables one of those Reqwest features cannot change the returned
+  bytes.
+- *(client)* `ClientBuilder` is renamed `Client`. `http::client()` returns a
+  `Client` that is ready to send, and the old name is not exported. Its other
+  configuration methods keep their names. `retry_timeout` and
+  `retry_unsafe_methods` are replaced as the entries below describe, and each
+  verb method returns `ClientResponse`.
+- *(client)* The client does not follow redirects by default. A 3xx answer is
+  returned as the response, with its `Location` header and its body, and
+  nothing is sent to the place it names. This applies to the free functions
+  and to every `Client` that does not set a `RedirectPolicy`. The client sends
+  no `Referer` header.
+- *(client)* A target is validated before any send. It must be an absolute
+  `http` or `https` URL with a host and without a user name or password. Any
+  other target fails with
+  `ClientError::InvalidRequest(ClientInput::Url)` instead of a transport
+  error, and a URL fragment is removed.
+- *(client)* `Client::total_timeout` replaces `retry_timeout`. It bounds one
+  whole operation: every attempt, every delay between attempts, and the final
+  response body. It defaults to 30 seconds and applies to every call:
+  - a call with zero retries now has this deadline too. Before, only its
+    attempt timers bounded it;
+  - an operation past it fails with
+    `ClientError::Timeout(ClientTimeout::Operation)` instead of
+    `RuntimeError::DeadlineExceeded(DeadlineBoundary::ClientRetry)`. No
+    outbound call returns that boundary now;
+  - no write to the response budget removes it, including
+    `TransferBudget::unbounded()`;
+  - the deadline starts when the call is first polled, not when it is made.
+- *(client)* The client owns the attempt timer. Reqwest's whole-request
+  timeout is no longer set. The timer runs from the send through the end of
+  the response body, and an attempt past `request_timeout` fails with
+  `ClientError::Timeout(ClientTimeout::Attempt)`. `ClientTimeout::Transport`
+  is the connect or response-idle timer only.
+- *(client)* Replay permission belongs to one request. `RetryPolicy`, exported
+  from `camber::http`, is `Never`, `Idempotent`, or `Replayable`, and
+  `ClientRequest::retry_policy` sets it. `ClientBuilder::retry_unsafe_methods`
+  is removed:
+  - the default is `Idempotent`. With retries configured, `PUT` and `DELETE`
+    are now sent again after a transient outcome. Before, only `GET`, `HEAD`,
+    and `OPTIONS` were. Use `RetryPolicy::Never` to send such a request once;
+  - `POST`, `PATCH`, and every extension method are sent again only under
+    `RetryPolicy::Replayable` on that request. The verb conveniences use the
+    default policy, so replace `client.retry_unsafe_methods(true).post(..)`
+    with `client.request("POST", url)?.retry_policy(RetryPolicy::Replayable)`;
+  - `Replayable` permits a retry after a connection that closed or timed out
+    before the response head, not only after a connect failure or a transient
+    status. No outcome proves the peer did no work, so set it only where a
+    duplicate is acceptable;
+  - a DNS failure and a TLS failure are never retried, for any method.
+- *(client)* Runtime shutdown ends a call with zero retries. A pending attempt
+  returns `RuntimeError::Cancelled`. Before, only a call with configured
+  retries observed shutdown.
+- *(client)* A call polled outside a Tokio executor returns
+  `RuntimeError::NoRuntime` and sends nothing.
+- *(client)* `connect_timeout` and `backoff` clamp a value above thirty years
+  to thirty years, as every other duration setter does.
+- *(mock)* A mocked outbound call returns `ClientResponse` and obeys the
+  request's response maximum. A mock body above it fails with
+  `ClientError::ResponseTooLarge { limit }`. A request is validated before a
+  mock answers it. A method-specific mock answers exactly its method, and a
+  method-agnostic mock answers any method, including an extension method.
+- *(client)* Client errors are redacted. A `ClientError` holds no URL, header
+  value, body, or transport error text, and it has no source. A handler that
+  returns one answers the fixed `500` internal-service rejection, and the
+  operator record carries the category.
+- *(client)* The retry debug events name the method label, the host, and the
+  failure category. They no longer hold the full URL or the transport error
+  text. The new redirect debug event follows the same rule. An extension
+  method is recorded as `OTHER`.
+- *(client, otel)* A call reads the task's trace context once, at its first
+  poll. Every retry and every followed redirect of that call sends the same
+  `traceparent`. Before, each send read the context again.
+
+### Added
+
+- *(client)* `RedirectPolicy`, exported from `camber::http`, is `None` or
+  `SameOrigin { max_hops }`. `Client::redirect_policy` sets the default for a
+  client's requests, and `ClientRequest::redirect_policy` sets it for one
+  request. The default is `None`. Under `SameOrigin`:
+  - a 301, 302, 303, 307, or 308 answer with one `Location` is followed only
+    to the scheme, host, and port the call began at. Another origin fails with
+    `ClientError::Redirect(ClientRedirect::OriginChanged)` before anything is
+    sent to it. Camber does not remove credentials and send anyway, and it
+    does not check the address a permitted host resolves to;
+  - a repeated or malformed `Location`, or one with a user name or password,
+    fails with `ClientRedirect::InvalidLocation`. An answer with no `Location` is
+    returned as the response;
+  - a 301 or 302 is followed for `GET` and `HEAD`. A 303 is followed as a
+    `GET` with no body and no `Content-Type`, and a `HEAD` stays a `HEAD`. A
+    307 or 308 repeats the method and the body for `GET`, `HEAD`, `OPTIONS`,
+    `PUT`, and `DELETE`, and for any method under `RetryPolicy::Replayable`.
+    Every other case fails with `ClientRedirect::UnsafeMethod`.
+    `RetryPolicy::Never` does not stop a redirect;
+  - a redirect past `max_hops` fails with `ClientRedirect::HopLimit`. Each
+    redirect spends one hop and each retry spends one retry, and neither
+    returns the other. A retry repeats the request the last redirect led to,
+    not the first request;
+  - every followed redirect runs under the same `total_timeout`. A redirect
+    answer is released unread before the next send.
+- *(client)* `ClientRequest::retries(count)` replaces the client's retry count
+  for one request. The default count stays zero.
+- *(client)* Each started outbound operation records one `INFO` tracing event
+  named `http.client.completed`, when the call returns or when its pending
+  future is dropped:
+  - the fields are `method`, `host`, `status`, `elapsed_ms`, `attempts`,
+    `redirects`, and `outcome`;
+  - `outcome` is `response`, `configuration`, `no-runtime`, `invalid-request`,
+    `dns`, `connect`, `tls`, `transport`, `timeout`, `redirect`,
+    `response-too-large`, `cancelled`, or `abandoned`;
+  - `status` is the final response head, `unknown` for a status above 599, or
+    `none`. `host` is the host the call began at, and it is in no metric
+    label;
+  - the event holds no path, query, header value, body, or transport error
+    text;
+  - a builder refusal and a future that is never polled record no event.
+    `text`, `json`, and `error_for_status` record none either.
+- *(client, otel)* `ClientRequest::trace_context(enabled)` controls the
+  automatic `traceparent` for one request. The default is `true`. `false`
+  sends none. A `traceparent` set with `header` is sent unchanged under either
+  setting.
+- *(client)* `Client::request(method, url)` describes one request and returns
+  a `ClientRequest`, exported from `camber::http`. It accepts any HTTP method
+  token except `CONNECT`, in the case it is written:
+  - `header` and `sensitive_header` set application headers. A name replaces
+    its earlier value without regard to case. Transport-owned headers are
+    refused. `Authorization`, `Cookie`, and every name set through
+    `sensitive_header` stay marked sensitive;
+  - `body` replaces the body with bytes, and `json` serializes a value once
+    and sets `Content-Type: application/json`;
+  - `response_limit` replaces the response maximum for that request only;
+  - `deadline` sets an absolute `std::time::Instant` ceiling for that
+    request's operation. It can end the operation before `total_timeout` and
+    cannot extend it. A deadline already in the past sends nothing;
+  - `send` runs the request. Every verb method and free function sends through
+    the same description.
+- *(client)* A transport setting written to a client that has already sent
+  takes effect on its next request. `connect_timeout`,
+  `response_idle_timeout`, and `response_budget` discard the cached transport.
+- *(client)* Invalid request input fails before any send with
+  `ClientError::InvalidRequest(ClientInput)`, and a value that does not
+  serialize fails with `ClientError::Encode`.
+
 ## [0.12.0](https://github.com/jostled-org/camber/compare/camber-v0.11.1...camber-v0.12.0) - 2026-10-09
 
 ### Added

@@ -1,5 +1,8 @@
 use crate::runtime_support as common;
 
+use camber::http::ClientError;
+use camber::http::ClientResponse;
+use camber::http::ClientTimeout;
 use camber::http::{self, Request, Response, Router, mock};
 use camber::{RuntimeError, runtime};
 use std::sync::Arc;
@@ -14,14 +17,14 @@ async fn client_builder_sends_requests_without_build_step() {
     });
     let upstream_addr = common::spawn_server(backend);
 
-    let resp = http::client()
+    let resp: ClientResponse = http::client()
         .retries(1)
         .get(&format!("http://{upstream_addr}/data"))
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "from upstream");
+    assert_eq!(resp.text().unwrap(), "from upstream");
 
     runtime::request_shutdown();
 }
@@ -41,17 +44,19 @@ async fn http_get_is_async() {
     proxy.get("/proxy", move |_req: &Request| {
         let url = Arc::clone(&url);
         async move {
-            let resp = http::get(&url).await?;
-            Response::text(resp.status(), resp.body()) as Result<Response, RuntimeError>
+            // The outbound answer is not an inbound response: the handler
+            // chooses the status and body it forwards.
+            let fetched: ClientResponse = http::get(&url).await?;
+            Response::text(fetched.status(), fetched.text()?) as Result<Response, RuntimeError>
         }
     });
     let proxy_addr = common::spawn_server(proxy);
 
-    let resp = http::get(&format!("http://{proxy_addr}/proxy"))
+    let resp: ClientResponse = http::get(&format!("http://{proxy_addr}/proxy"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hello from upstream");
+    assert_eq!(resp.text().unwrap(), "hello from upstream");
 
     runtime::request_shutdown();
 }
@@ -70,17 +75,17 @@ async fn http_post_is_async() {
     proxy.post("/proxy", move |_req: &Request| {
         let url = Arc::clone(&url);
         async move {
-            let resp = http::post(&url, "async body").await?;
-            Response::text(resp.status(), resp.body()) as Result<Response, RuntimeError>
+            let fetched: ClientResponse = http::post(&url, "async body").await?;
+            Response::text(fetched.status(), fetched.text()?) as Result<Response, RuntimeError>
         }
     });
     let proxy_addr = common::spawn_server(proxy);
 
-    let resp = http::post(&format!("http://{proxy_addr}/proxy"), "")
+    let resp: ClientResponse = http::post(&format!("http://{proxy_addr}/proxy"), "")
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "async body");
+    assert_eq!(resp.text().unwrap(), "async body");
 
     runtime::request_shutdown();
 }
@@ -102,14 +107,14 @@ async fn client_builder_retries_async() {
     });
     let upstream_addr = common::spawn_server(backend);
 
-    let resp = http::client()
+    let resp: ClientResponse = http::client()
         .retries(3)
         .backoff(Duration::from_millis(10))
         .get(&format!("http://{upstream_addr}/flaky"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "recovered");
+    assert_eq!(resp.text().unwrap(), "recovered");
     assert!(call_count.load(std::sync::atomic::Ordering::SeqCst) >= 3);
 
     runtime::request_shutdown();
@@ -125,9 +130,9 @@ async fn client_get_returns_response() {
     });
     let addr = common::spawn_server(backend);
 
-    let resp = http::get(&format!("http://{addr}/hello")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/hello")).await.unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hello");
+    assert_eq!(resp.text().unwrap(), "hello");
 
     runtime::request_shutdown();
 }
@@ -141,11 +146,11 @@ async fn client_post_returns_response() {
     });
     let addr = common::spawn_server(backend);
 
-    let resp = http::post(&format!("http://{addr}/echo"), "data")
+    let resp: ClientResponse = http::post(&format!("http://{addr}/echo"), "data")
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "data");
+    assert_eq!(resp.text().unwrap(), "data");
 
     runtime::request_shutdown();
 }
@@ -163,11 +168,11 @@ async fn client_post_json_sets_content_type() {
     });
     let addr = common::spawn_server(backend);
 
-    let resp = http::post_json(&format!("http://{addr}/check-ct"), "{}")
+    let resp: ClientResponse = http::post_json(&format!("http://{addr}/check-ct"), "{}")
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "application/json");
+    assert_eq!(resp.text().unwrap(), "application/json");
 
     runtime::request_shutdown();
 }
@@ -181,15 +186,15 @@ async fn client_builder_timeout() {
     });
     let addr = common::spawn_server(backend);
 
-    let result = http::client()
+    let result: Result<ClientResponse, RuntimeError> = http::client()
         .request_timeout(Duration::from_millis(100))
         .get(&format!("http://{addr}/slow"))
         .await;
 
     match result {
-        Err(RuntimeError::Timeout) => {}
-        Err(e) => panic!("expected Timeout error, got: {e}"),
-        Ok(_) => panic!("expected Timeout error, got Ok"),
+        Err(RuntimeError::Client(ClientError::Timeout(ClientTimeout::Attempt))) => {}
+        Err(e) => panic!("expected the attempt timeout, got: {e}"),
+        Ok(_) => panic!("expected the attempt timeout, got Ok"),
     }
 
     runtime::request_shutdown();
@@ -205,13 +210,13 @@ async fn client_builder_reuses_built_client() {
 
     let builder = http::client().request_timeout(Duration::from_secs(5));
 
-    let resp1 = builder.get(&format!("http://{addr}/ping")).await.unwrap();
+    let resp1: ClientResponse = builder.get(&format!("http://{addr}/ping")).await.unwrap();
     assert_eq!(resp1.status(), 200);
-    assert_eq!(resp1.body(), "pong");
+    assert_eq!(resp1.text().unwrap(), "pong");
 
-    let resp2 = builder.get(&format!("http://{addr}/ping")).await.unwrap();
+    let resp2: ClientResponse = builder.get(&format!("http://{addr}/ping")).await.unwrap();
     assert_eq!(resp2.status(), 200);
-    assert_eq!(resp2.body(), "pong");
+    assert_eq!(resp2.text().unwrap(), "pong");
 
     runtime::request_shutdown();
 }
@@ -225,11 +230,11 @@ async fn client_put_sends_body_and_returns_response() {
     });
     let addr = common::spawn_server(backend);
 
-    let resp = http::put(&format!("http://{addr}/resource"), "payload")
+    let resp: ClientResponse = http::put(&format!("http://{addr}/resource"), "payload")
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "payload");
+    assert_eq!(resp.text().unwrap(), "payload");
 
     runtime::request_shutdown();
 }
@@ -240,7 +245,7 @@ async fn client_delete_sends_request() {
     backend.delete("/resource", |_req: &Request| async { Response::empty(204) });
     let addr = common::spawn_server(backend);
 
-    let resp = http::delete(&format!("http://{addr}/resource"))
+    let resp: ClientResponse = http::delete(&format!("http://{addr}/resource"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 204);
@@ -257,11 +262,11 @@ async fn client_patch_sends_body() {
     });
     let addr = common::spawn_server(backend);
 
-    let resp = http::patch(&format!("http://{addr}/resource"), "partial update")
+    let resp: ClientResponse = http::patch(&format!("http://{addr}/resource"), "partial update")
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "partial update");
+    assert_eq!(resp.text().unwrap(), "partial update");
 
     runtime::request_shutdown();
 }
@@ -274,15 +279,14 @@ async fn client_head_returns_headers_without_body() {
     });
     let addr = common::spawn_server(backend);
 
-    let resp = http::head(&format!("http://{addr}/resource"))
+    let resp: ClientResponse = http::head(&format!("http://{addr}/resource"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert!(resp.body().is_empty());
+    assert!(resp.body_bytes().is_empty());
     assert!(
         resp.headers()
-            .iter()
-            .any(|(k, v)| k.as_ref() == "x-custom" && v.as_ref() == "present")
+            .any(|(k, v)| k == "x-custom" && v == b"present")
     );
 
     runtime::request_shutdown();
@@ -296,14 +300,13 @@ async fn client_options_returns_allowed_methods() {
     });
     let addr = common::spawn_server(backend);
 
-    let resp = http::options(&format!("http://{addr}/resource"))
+    let resp: ClientResponse = http::options(&format!("http://{addr}/resource"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert!(
         resp.headers()
-            .iter()
-            .any(|(k, v)| k.as_ref() == "allow" && v.as_ref() == "GET, POST, OPTIONS")
+            .any(|(k, v)| k == "allow" && v == b"GET, POST, OPTIONS")
     );
 
     runtime::request_shutdown();
@@ -319,12 +322,12 @@ async fn client_builder_put_with_custom_timeout() {
     let addr = common::spawn_server(backend);
 
     let builder = http::client().request_timeout(Duration::from_secs(5));
-    let resp = builder
+    let resp: ClientResponse = builder
         .put(&format!("http://{addr}/resource"), "builder body")
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "builder body");
+    assert_eq!(resp.text().unwrap(), "builder body");
 
     runtime::request_shutdown();
 }
@@ -334,9 +337,9 @@ async fn client_mock_still_works() {
     let mock = mock::http("http://mock.test/api")
         .returns(Response::text(200, "mocked").expect("valid status"));
 
-    let resp = http::get("http://mock.test/api").await.unwrap();
+    let resp: ClientResponse = http::get("http://mock.test/api").await.unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "mocked");
+    assert_eq!(resp.text().unwrap(), "mocked");
     mock.assert_called_once();
 
     runtime::request_shutdown();

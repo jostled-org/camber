@@ -17,6 +17,7 @@ The variants cluster into a few stable buckets:
 - unparseable request payloads: `MalformedBody`, `Multipart`
 - request payloads Camber refused to keep reading: `RequestBodyLimit`, `RequestBodyUnreadable`
 - transport failures: `Http`, `Tls`
+- outbound HTTP client failures: `Client(ClientError)`
 - managed integration failures: `Integration(Arc<IntegrationError>)`
 - direct WebSocket termination: `WebSocketClosed` (behind the `ws` feature)
 - application-supplied: `Database`
@@ -256,12 +257,58 @@ Two request boundaries reach a served peer today:
   the selected download `TransferBudget`, not to the request. Classified as
   `RequestTimeout`, answered `408`, with the same unread-payload disposition.
 
-One client boundary bounds more than one attempt:
+One client boundary is kept for consumers that match or record it:
 
-- `ClientRetry` — an outbound client call with configured retries outlived its
-  `retry_timeout`. The deadline is fixed at call entry and covers every
-  attempt, every delay, and the final response body. The attempt in flight is
-  dropped and no attempt starts after it.
+- `ClientRetry` — no outbound call returns it now. An operation that outlives
+  its `total_timeout` returns
+  `RuntimeError::Client(ClientError::Timeout(ClientTimeout::Operation))`. The
+  member and its `client_retry` label stay.
+
+## Outbound Client Failures
+
+A failed outbound call returns `RuntimeError::Client(ClientError)`.
+`ClientError` and its nested enums are closed. Each value is a category or a
+number. None holds a URL, a header value, a body, or transport error text, and
+`source()` is always `None`.
+
+| `ClientError` | Meaning |
+| --- | --- |
+| `Configuration` | The underlying client could not be constructed |
+| `InvalidRequest(ClientInput)` | `Method`, `Url`, `Header`, `ReservedHeader`, `Body`, or `ResponseLimit` was refused before any send |
+| `Encode` | Request JSON serialization failed |
+| `Dns` | The target name did not resolve |
+| `Connect` | The connection was not established, with no more specific typed cause |
+| `Tls` | A Rustls error identifies a TLS validation or protocol failure |
+| `Transport` | Any other send or response-read failure, including a truncated body |
+| `Timeout(ClientTimeout)` | `Operation`, `Attempt`, or `Transport` expired |
+| `Redirect(ClientRedirect)` | `InvalidLocation`, `OriginChanged`, `HopLimit`, or `UnsafeMethod` |
+| `Status(u16)` | An explicit status conversion rejected a 400–599 status |
+| `Decode(ClientDecode)` | `Utf8` or `Json` decoding of a completed response failed |
+| `ResponseTooLarge { limit }` | The response declared or delivered more than `limit` bytes |
+
+Classification reads typed facts, not text. Camber owns two timers, and each
+names itself. `Timeout(ClientTimeout::Operation)` is the whole operation: every
+attempt, every delay, and the final body, under `total_timeout` or the
+request's earlier `deadline`. `Timeout(ClientTimeout::Attempt)` is one attempt
+under `request_timeout`, from its send through the end of its body. A connect
+or response-idle timer that expires returns
+`Timeout(ClientTimeout::Transport)`: Reqwest does not say which one expired, so
+Camber does not claim it. A handshake failure with no Rustls cause stays
+`Connect` or `Transport`.
+
+A handler that propagates one with `?` answers the fixed `500`
+`InternalService` rejection. An upstream status in `Status` is never the status
+the inbound peer receives. The operator record carries the category.
+
+`Cancelled` keeps its shared meaning: runtime shutdown ended the operation.
+`NoRuntime` keeps its meaning too: the call was polled outside a Tokio
+executor, and nothing was sent.
+
+Each started operation also records one `http.client.completed` event. Its
+`outcome` field names the category without the nested value: every `Timeout`
+is `timeout`, and every `Redirect` is `redirect`. `Encode`, `Status`, and
+`Decode` end no operation, so no event records them. See the
+[client reference](client.md#completion-event) for the fields.
 
 ## Configured Byte Maximums
 
@@ -270,14 +317,11 @@ idea: the closed name of the maximum a policy configured, so an operator reads
 which ceiling to widen rather than that something was too big. It is what a
 buffered collection reports when it refuses to keep reading.
 
-Four boundaries are reachable today. Each is collected under the same checked
+Three boundaries are reachable today. Each is collected under the same checked
 rule: a length the source declares above the maximum is refused before anything
 is allocated, an undeclared payload is counted chunk by chunk, the crossing chunk
 is dropped rather than retained, and nothing is read after it.
 
-- `ClientResponse` — an outbound response declared or delivered more bytes than
-  the client's response maximum admits.
-  `ClientBuilder::unbounded_response` is the only way to remove the maximum.
 - `ProxyBufferedResponse` — a buffered proxy route's upstream declared or
   delivered more bytes than the maximum that route froze. The peer is answered
   `502` with no upstream text in it; the boundary reaches the operator record
@@ -295,6 +339,11 @@ is dropped rather than retained, and nothing is read after it.
 
 `RequestBodyLimit` stays separate. It is the served side of the same rule, and
 it answers a peer rather than a caller.
+
+An outbound client response is collected under the same rule. Its crossing
+reports `Client(ClientError::ResponseTooLarge { limit })`, not `LimitExceeded`.
+`Client::unbounded_response`, or a `TransferBudget` with no maximum given to
+`Client::response_budget`, removes that maximum.
 
 A request that ends because the server was cancelled, because its aggregate
 shutdown deadline expired, or because the peer had already gone invokes no

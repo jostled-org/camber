@@ -130,7 +130,15 @@ let resp = http::delete("https://api.example.com/items/1").await?;
 let resp = http::patch("https://api.example.com/items/1", &partial).await?;
 ```
 
-No client builder, no `.send()`. Each method is a single async call.
+No client builder, no `.send()`. Each method is a single async call. For
+another method, your own headers, or a per-request response maximum, describe
+the request with `http::client().request(method, url)?` and end it with
+`.send().await?`.
+
+Each call returns a `ClientResponse` with the whole body already collected.
+`resp.text()?`, `resp.json::<T>()?`, and `resp.error_for_status()?` are
+synchronous and local, where reqwest's `text()` and `json()` are async reads.
+Automatic decompression is off: a compressed answer returns its encoded bytes.
 
 ## HTTP Client with Retries
 
@@ -598,7 +606,7 @@ use camber::http::otel;
 router.use_middleware(otel::tracing());
 ```
 
-Extracts W3C `traceparent` from incoming requests, generates span IDs, propagates context to outbound `http::get`/`http::post` calls automatically. Configure the OTLP exporter endpoint on the `RuntimeBuilder`.
+Extracts W3C `traceparent` from incoming requests, generates span IDs, propagates context to outbound `http::get`/`http::post` calls automatically. Use `ClientRequest::trace_context(false)` to withhold it from one call. Configure the OTLP exporter endpoint on the `RuntimeBuilder`.
 
 ## Database
 

@@ -1,5 +1,6 @@
 use crate::runtime_support as common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 
@@ -14,14 +15,14 @@ fn form_extracts_field_from_post_body() {
             });
 
             let addr = common::spawn_server(router);
-            let resp = common::block_on(http::post_form(
+            let resp: ClientResponse = common::block_on(http::post_form(
                 &format!("http://{addr}/login"),
                 "username=alice&password=secret",
             ))
             .unwrap();
 
             assert_eq!(resp.status(), 200);
-            assert_eq!(resp.body(), "alice");
+            assert_eq!(resp.text().unwrap(), "alice");
 
             runtime::request_shutdown();
         })
@@ -39,14 +40,14 @@ fn form_returns_none_when_missing() {
             });
 
             let addr = common::spawn_server(router);
-            let resp = common::block_on(http::post_form(
+            let resp: ClientResponse = common::block_on(http::post_form(
                 &format!("http://{addr}/login"),
                 "username=alice",
             ))
             .unwrap();
 
             assert_eq!(resp.status(), 200);
-            assert_eq!(resp.body(), "none");
+            assert_eq!(resp.text().unwrap(), "none");
 
             runtime::request_shutdown();
         })
@@ -64,14 +65,14 @@ fn form_decodes_percent_encoding() {
             });
 
             let addr = common::spawn_server(router);
-            let resp = common::block_on(http::post_form(
+            let resp: ClientResponse = common::block_on(http::post_form(
                 &format!("http://{addr}/submit"),
                 "message=hello%20world%21",
             ))
             .unwrap();
 
             assert_eq!(resp.status(), 200);
-            assert_eq!(resp.body(), "hello world!");
+            assert_eq!(resp.text().unwrap(), "hello world!");
 
             runtime::request_shutdown();
         })

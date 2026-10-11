@@ -33,6 +33,18 @@ Camber keeps the choice small:
 
 Verbosity runs from `Error` through `Trace`.
 
+## Outbound HTTP Telemetry
+
+Each started outbound HTTP operation emits one `INFO` event named
+`http.client.completed`, when the call returns or when its pending future is
+dropped. Its fields are the method label, the initial host, the final status,
+the elapsed milliseconds, the attempt and redirect counts, and a closed
+outcome. The URL path and query, header values, and bodies appear in no client
+event. The client adds no metric.
+
+See [Completion Event](client.md#completion-event) for the fields and the
+outcomes.
+
 ## Integration Telemetry
 
 NATS, SQS, and DNS-01 report operation results through `tracing` and `metrics`.

@@ -1,5 +1,6 @@
 use crate::common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 
@@ -20,7 +21,7 @@ fn tracing_logs_request_lifecycle() {
 
             let addr = common::spawn_server(router);
 
-            let resp =
+            let resp: ClientResponse =
                 common::block_on(http::get(&format!("http://{addr}/tracing-lifecycle"))).unwrap();
             assert_eq!(resp.status(), 200);
 
@@ -53,11 +54,11 @@ async fn tracing_disabled_by_default() {
 
     let addr = common::spawn_server(router);
 
-    let resp = http::get(&format!("http://{addr}/tracing-default"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/tracing-default"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hello");
+    assert_eq!(resp.text().unwrap(), "hello");
 
     assert!(
         captured.is_empty(),

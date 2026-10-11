@@ -1,3 +1,4 @@
+use camber::http::Client;
 use camber::http::{CookieOptions, HostRouter, Method, Request, Response, Router};
 
 #[test]
@@ -131,9 +132,9 @@ fn all_public_types_implement_debug() {
     let host_router = HostRouter::new();
     let _ = format!("{host_router:?}");
 
-    // ClientBuilder
-    let cb = camber::http::client();
-    let _ = format!("{cb:?}");
+    // Client
+    let client: Client = camber::http::client();
+    let _ = format!("{client:?}");
 
     // CookieOptions
     let co = CookieOptions::new();

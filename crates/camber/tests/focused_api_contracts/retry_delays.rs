@@ -1,16 +1,23 @@
-//! 4.T1 and 4.T3: the pure decisions one retried call is delayed and replayed
-//! by.
+//! 4.T1 and 4.T3, with the typed half of outbound 5.T1: the pure decisions one
+//! retried call is delayed and replayed by.
 //!
 //! Every helper here is the production function itself, reached through the
 //! doc-hidden `__private` surface. The wall clock is an input and so is the
 //! jitter sample, so every row states its exact answer rather than a range an
-//! elapsed clock or a random draw happened to land in.
+//! elapsed clock or a random draw happened to land in. The replay decision
+//! reads a real Reqwest failure, a method, and the request's own permission.
 
+use crate::client_failures;
 use crate::deterministic::DeterministicGenerator;
 
 use camber::__private::{
-    client_retry_after_delay, client_retry_backoff, client_retryable_transport,
+    client_error_projection, client_retry_after_delay, client_retry_backoff,
+    client_retryable_transport,
 };
+use camber::http::ClientError;
+use camber::http::ClientRedirect;
+use camber::http::ClientTimeout;
+use camber::http::RetryPolicy;
 use reqwest::Method;
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -368,22 +375,32 @@ fn assert_generated_backoff_rows() {
     }
 }
 
-/// How many leading [`METHODS`] a replay cannot duplicate an effect of.
-const SAFE_METHOD_COUNT: usize = 3;
+/// How many leading [`methods`] are idempotent.
+const IDEMPOTENT_METHOD_COUNT: usize = 5;
 
-/// Every method the public client offers, safe ones first.
-const METHODS: [Method; 7] = [
-    Method::GET,
-    Method::HEAD,
-    Method::OPTIONS,
-    Method::POST,
-    Method::PUT,
-    Method::PATCH,
-    Method::DELETE,
-];
+/// Every method the public client offers, the idempotent ones first, then an
+/// extension token.
+fn methods() -> [Method; 8] {
+    [
+        Method::GET,
+        Method::HEAD,
+        Method::OPTIONS,
+        Method::PUT,
+        Method::DELETE,
+        Method::POST,
+        Method::PATCH,
+        Method::from_bytes(b"PURGE").unwrap(),
+    ]
+}
 
-/// The URL no service listens on: port zero is never a listener's address.
-const REFUSED_URL: &str = "http://127.0.0.1:0/";
+/// The path each failing send names. A raw failure prints its URL, so the
+/// projection rows in `client_failures` read these as secrets.
+pub(crate) const REFUSED_PATH_SECRET: &str = "refused-path-sentinel-6b1f";
+pub(crate) const AMBIGUOUS_PATH_SECRET: &str = "ambiguous-path-sentinel-d470";
+pub(crate) const UNTRUSTED_PATH_SECRET: &str = "untrusted-path-sentinel-93ce";
+
+/// The origin no service listens on: port zero is never a listener's address.
+const REFUSED_ORIGIN: &str = "http://127.0.0.1:0";
 
 /// A plain Reqwest client with its own resend policy off, so each error below
 /// is the first and only send's.
@@ -403,15 +420,17 @@ fn send_error(sent: reqwest::Result<reqwest::Response>, answered: &str) -> reqwe
 }
 
 /// The error a send to a refused loopback port reports.
-async fn refused_connect_error() -> reqwest::Error {
-    send_error(
-        direct_client().post(REFUSED_URL).body("post").send().await,
-        "a refused port answered",
-    )
+pub(crate) async fn refused_connect_error() -> reqwest::Error {
+    let sent = direct_client()
+        .post(format!("{REFUSED_ORIGIN}/{REFUSED_PATH_SECRET}"))
+        .body("post")
+        .send()
+        .await;
+    send_error(sent, "a refused port answered")
 }
 
-/// The real-time bound on the ambiguous peer's head read. It bounds fixture
-/// failure only.
+/// The real-time bound on the ambiguous peer's head read and on the untrusted
+/// peer's handshake. It bounds fixture failure only.
 const PEER_HEAD_BOUND: Duration = Duration::from_secs(10);
 
 /// Read one request head and a body prefix, then close without answering.
@@ -431,12 +450,12 @@ fn read_then_close(listener: std::net::TcpListener) {
 }
 
 /// The error a send reports when its accepted request is closed unanswered.
-async fn ambiguous_transport_error() -> reqwest::Error {
+pub(crate) async fn ambiguous_transport_error() -> reqwest::Error {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let peer = tokio::task::spawn_blocking(move || read_then_close(listener));
     let sent = direct_client()
-        .post(format!("http://{addr}/ambiguous"))
+        .post(format!("http://{addr}/{AMBIGUOUS_PATH_SECRET}"))
         .body("post")
         .send()
         .await;
@@ -445,71 +464,146 @@ async fn ambiguous_transport_error() -> reqwest::Error {
     send_error(sent, "an unanswered request returned")
 }
 
-/// The error a request that could never be built reports.
-async fn builder_error() -> reqwest::Error {
-    send_error(
-        direct_client().get("http://[::1").send().await,
-        "an unparseable URL returned",
-    )
+/// The error a send reports when the peer presents a certificate no trust
+/// store holds.
+///
+/// The certificate names the loopback address the client dials, so only the
+/// issuer is refused. The peer must see its handshake fail, or the error the
+/// row classifies is not a validation failure.
+pub(crate) async fn untrusted_tls_error() -> reqwest::Error {
+    let (cert_pem, key_pem) = crate::tls_support::generate_cert_with_san("127.0.0.1");
+    let acceptor = tokio_rustls::TlsAcceptor::from(crate::tls_support::build_server_config(
+        &cert_pem, &key_pem,
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        acceptor.accept(stream).await.is_err()
+    });
+    let sent = direct_client()
+        .get(format!("https://{addr}/{UNTRUSTED_PATH_SECRET}"))
+        .send()
+        .await;
+    let handshake_failed = match tokio::time::timeout(PEER_HEAD_BOUND, peer).await {
+        Ok(joined) => joined.unwrap(),
+        Err(_) => panic!("untrusted TLS peer: no handshake ended within {PEER_HEAD_BOUND:?}"),
+    };
+    crate::http::assert_address_reused(addr, "untrusted TLS peer").await;
+    assert!(
+        handshake_failed,
+        "the client completed a handshake with a certificate nothing trusts"
+    );
+    send_error(sent, "an untrusted peer answered")
 }
 
-/// Whether the configured policy should replay one failed send.
+/// Every replay permission one decision is asked under.
+const PERMISSIONS: [RetryPolicy; 3] = [
+    RetryPolicy::Never,
+    RetryPolicy::Idempotent,
+    RetryPolicy::Replayable,
+];
+
+/// Whether `policy` lets `method` be sent again at all.
 ///
-/// A connect-stage failure proves no connection was made, so it is replay
-/// evidence for every method once unsafe retry is enabled. An ambiguous
-/// failure is evidence only for a method whose replay duplicates nothing. A
-/// builder failure repeats itself, so it is evidence for nothing.
+/// The row's own oracle. The match has no wildcard arm, so a new permission
+/// fails to compile until its answer is written here.
+fn permits(policy: RetryPolicy, method: &Method) -> bool {
+    match policy {
+        RetryPolicy::Never => false,
+        RetryPolicy::Idempotent => methods()[..IDEMPOTENT_METHOD_COUNT].contains(method),
+        RetryPolicy::Replayable => true,
+    }
+}
+
+/// One failed send, by the category the production projection gives it.
+///
+/// A refused dial, a request closed unanswered, and an expired transport timer
+/// are transient: another send may succeed, so a permitted request is sent
+/// again. The client cannot tell how far the unanswered request got, so the
+/// method's permission is the only authority for repeating it. A failure of
+/// the description repeats itself. A name that does not resolve, a certificate
+/// nothing trusts, and a spent redirect allowance are terminal under every
+/// permission.
 #[derive(Clone, Copy, Debug)]
 enum Failure {
     Connect,
     Ambiguous,
     Builder,
+    Dns,
+    Tls,
+    TransportTimeout,
+    Redirect,
 }
 
 impl Failure {
-    fn replayable(self, method: &Method, opt_in: bool) -> bool {
-        let safe = METHODS[..SAFE_METHOD_COUNT].contains(method);
+    fn category(self) -> ClientError {
         match self {
-            Self::Connect => safe || opt_in,
-            Self::Ambiguous => safe,
-            Self::Builder => false,
+            Self::Connect => ClientError::Connect,
+            Self::Ambiguous => ClientError::Transport,
+            Self::Builder => ClientError::Configuration,
+            Self::Dns => ClientError::Dns,
+            Self::Tls => ClientError::Tls,
+            Self::TransportTimeout => ClientError::Timeout(ClientTimeout::Transport),
+            Self::Redirect => ClientError::Redirect(ClientRedirect::HopLimit),
+        }
+    }
+
+    fn transient(self) -> bool {
+        match self {
+            Self::Connect | Self::Ambiguous | Self::TransportTimeout => true,
+            Self::Builder | Self::Dns | Self::Tls | Self::Redirect => false,
         }
     }
 }
 
+/// Require the fixture failure's category, then every method and permission's
+/// decision for it.
 fn assert_decisions(failure: Failure, error: &reqwest::Error) {
-    for method in &METHODS {
-        for opt_in in [false, true] {
+    assert_eq!(
+        client_error_projection(error),
+        failure.category(),
+        "{failure:?} fixture failure was projected differently: {error:?}"
+    );
+    for method in &methods() {
+        for policy in PERMISSIONS {
             assert_eq!(
-                client_retryable_transport(error, method, opt_in),
-                failure.replayable(method, opt_in),
-                "{failure:?} failure, {method} (opt_in={opt_in})"
+                client_retryable_transport(error, method, policy),
+                failure.transient() && permits(policy, method),
+                "{failure:?} failure, {method} under {policy:?}"
             );
         }
     }
 }
 
-/// 4.T3
-#[tokio::test]
-async fn connect_evidence_is_the_only_unsafe_transport_retry() {
-    let refused = refused_connect_error().await;
-    assert!(
-        refused.is_connect() && !refused.is_builder(),
-        "a refused port did not report a connect failure: {refused:?}"
-    );
-    assert_decisions(Failure::Connect, &refused);
+/// 4.T3, revised for request-local permission, and the typed half of outbound
+/// 5.T1: the permission and the failure's category decide a repeat together.
+///
+/// Four failures come from fixtures that drive a runtime of their own, so they
+/// are built before the row's runtime starts.
+#[test]
+fn replay_permission_decides_each_transport_failure() {
+    let unresolved = client_failures::resolution_failure();
+    let unbuilt = client_failures::target_failure();
+    let timed_out = client_failures::connect_timeout_failure();
+    let redirected = client_failures::redirect_failure();
+    let (refused, ambiguous, untrusted) = client_failures::local_runtime().block_on(async {
+        (
+            refused_connect_error().await,
+            ambiguous_transport_error().await,
+            untrusted_tls_error().await,
+        )
+    });
 
-    let ambiguous = ambiguous_transport_error().await;
-    assert!(
-        !ambiguous.is_connect() && !ambiguous.is_builder() && !ambiguous.is_redirect(),
-        "an accepted, unanswered request did not report an ambiguous transport failure: {ambiguous:?}"
-    );
-    assert_decisions(Failure::Ambiguous, &ambiguous);
-
-    let unbuilt = builder_error().await;
-    assert!(
-        unbuilt.is_builder(),
-        "an unparseable URL did not report a builder failure: {unbuilt:?}"
-    );
-    assert_decisions(Failure::Builder, &unbuilt);
+    for (failure, error) in [
+        (Failure::Connect, refused),
+        (Failure::Ambiguous, ambiguous),
+        (Failure::Builder, unbuilt),
+        (Failure::Dns, unresolved),
+        (Failure::Tls, untrusted),
+        (Failure::TransportTimeout, timed_out),
+        (Failure::Redirect, redirected),
+    ] {
+        assert_decisions(failure, &error);
+    }
 }

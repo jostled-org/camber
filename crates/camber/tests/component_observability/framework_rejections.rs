@@ -10,6 +10,8 @@
 use crate::common;
 use crate::leaky_source::LeakySource;
 
+use camber::http::ClientError;
+use camber::http::ClientResponse;
 use camber::http::{Next, Rejection, RejectionContext, Request, Response, Router};
 use camber::runtime;
 use camber::runtime_test_support::IntegrationErrorDriver;
@@ -250,26 +252,99 @@ fn nested_integration_failure() -> RuntimeError {
     RuntimeError::Io(std::io::Error::other(AppFailure(sdk_integration_error())))
 }
 
-/// One integration failure a handler returns, and the chain text it must keep.
+/// The path segment the refused outbound call's target carries.
+const OUTBOUND_PATH_SECRET: &str = "outbound-path-sentinel-6a2f";
+
+/// The query value the refused outbound call's target carries.
+const OUTBOUND_QUERY_SECRET: &str = "outbound-query-sentinel-e81b";
+
+/// The target of the refused outbound call, on the address that refuses it.
+fn refused_outbound_url(refused: SocketAddr) -> String {
+    format!("http://{refused}/{OUTBOUND_PATH_SECRET}?token={OUTBOUND_QUERY_SECRET}")
+}
+
+/// Where one sealed row's handler gets the failure it returns.
+#[derive(Clone, Copy)]
+enum Producer {
+    /// The handler builds the failure and returns it.
+    Returned(fn() -> RuntimeError),
+    /// The handler awaits a real outbound call to a refusing address and
+    /// propagates its failure with `?`.
+    RefusedOutboundCall,
+}
+
+impl Producer {
+    /// Run the producer as one handler turn.
+    async fn produce(self, refused_url: Arc<str>) -> Result<Response, RuntimeError> {
+        match self {
+            Self::Returned(failure) => Err(failure()),
+            Self::RefusedOutboundCall => {
+                let answered: ClientResponse = camber::http::get(&refused_url).await?;
+                Response::text(
+                    200,
+                    &format!("the refused call answered {}", answered.status()),
+                )
+            }
+        }
+    }
+
+    /// The chain text the operator's record must keep.
+    ///
+    /// The outbound row keeps the safe client error itself, as the runtime
+    /// error prints it.
+    fn kept(self, integration: &'static [&'static str]) -> Box<[Box<str>]> {
+        match self {
+            Self::Returned(_) => integration
+                .iter()
+                .map(|text| Box::<str>::from(*text))
+                .collect(),
+            Self::RefusedOutboundCall => Box::new([RuntimeError::Client(ClientError::Connect)
+                .to_string()
+                .into_boxed_str()]),
+        }
+    }
+
+    /// Everything the failure's origin carried that no record may repeat.
+    fn private(self, refused: SocketAddr) -> Box<[Box<str>]> {
+        match self {
+            Self::Returned(_) => Box::new([Box::<str>::from(SDK_SECRET)]),
+            Self::RefusedOutboundCall => Box::new([
+                Box::<str>::from(OUTBOUND_PATH_SECRET),
+                Box::<str>::from(OUTBOUND_QUERY_SECRET),
+                refused.to_string().into_boxed_str(),
+            ]),
+        }
+    }
+}
+
+/// One failure a handler returns, and the chain text it must keep.
 struct SealedRow {
     label: &'static str,
     path: &'static str,
-    failure: fn() -> RuntimeError,
+    producer: Producer,
+    /// The integration chain text a returned failure keeps. Empty for the
+    /// outbound row, whose kept text is the client error's own rendering.
     kept: &'static [&'static str],
 }
 
-const SEALED_ROWS: [SealedRow; 2] = [
+const SEALED_ROWS: [SealedRow; 3] = [
     SealedRow {
         label: "direct integration failure",
         path: "/rejection-integration-direct",
-        failure: direct_integration_failure,
+        producer: Producer::Returned(direct_integration_failure),
         kept: &["integration nats publish failed"],
     },
     SealedRow {
         label: "nested integration failure",
         path: "/rejection-integration-nested",
-        failure: nested_integration_failure,
+        producer: Producer::Returned(nested_integration_failure),
         kept: &["order submission failed", "integration nats publish failed"],
+    },
+    SealedRow {
+        label: "refused outbound call",
+        path: "/rejection-outbound-refused",
+        producer: Producer::RefusedOutboundCall,
+        kept: &[],
     },
 ];
 
@@ -285,11 +360,14 @@ fn rejection_event_chain_stops_at_the_integration_error() {
     common::test_runtime()
         .with_tracing()
         .run(|| {
+            let refused_addr = common::refused_loopback_addr();
+            let refused_url: Arc<str> = refused_outbound_url(refused_addr).into();
             let mut router = Router::new();
             for row in &SEALED_ROWS {
-                let failure = row.failure;
+                let producer = row.producer;
+                let refused_url = Arc::clone(&refused_url);
                 router.get(row.path, move |_req: &Request| {
-                    std::future::ready(Err::<Response, RuntimeError>(failure()))
+                    producer.produce(Arc::clone(&refused_url))
                 });
             }
             let addr = common::spawn_server(router);
@@ -300,18 +378,30 @@ fn rejection_event_chain_stops_at_the_integration_error() {
                     .unwrap_or_else(|error| {
                         panic!("{}: the request did not complete: {error}", row.label)
                     });
+                let private = row.producer.private(refused_addr);
                 assert_eq!(response.status, 500, "{}: wire status", row.label);
-                assert_no_private_text(&response, &[SDK_SECRET], row.label);
+                assert_eq!(
+                    response.text().as_ref(),
+                    common::REDACTED_BODY,
+                    "{}: wire body",
+                    row.label
+                );
+                assert_no_private_text(&response, &private, row.label);
 
                 let events = capture.events();
                 let event = only_event(&events, REJECTION_MESSAGE, row.label);
+                let kept = row.producer.kept(row.kept);
+                let kept: Box<[&str]> = kept.iter().map(|text| &**text).collect();
+                assert_field_value(event, "status", "500", row.label);
                 assert_field_value(event, "kind", "internal_service", row.label);
-                assert_causes_in_field(event, row.kept, row.label);
-                assert!(
-                    !event.contains(SDK_SECRET),
-                    "{}: the chain walked into the integration's source: {event}",
-                    row.label
-                );
+                assert_causes_in_field(event, &kept, row.label);
+                for secret in private.iter() {
+                    assert!(
+                        !event.contains(&**secret),
+                        "{}: the operator's record repeats {secret:?}: {event}",
+                        row.label
+                    );
+                }
                 rows += 1;
             }
             assert_eq!(rows, SEALED_ROWS.len(), "every declared sealed row ran");
@@ -321,25 +411,75 @@ fn rejection_event_chain_stops_at_the_integration_error() {
         .expect("the fixture runtime ran to completion");
 }
 
-// ── An integration failure a middleware frame returns ──────────────
+// ── A dependency failure a middleware frame returns ────────────────
 
-/// The route whose guarding frame refuses with an integration failure.
-const FRAME_INTEGRATION_PATH: &str = "/rejection-integration-frame";
+/// Everything private the integration frame's failure carried, as a peer or
+/// mapper could see it.
+///
+/// The integration error's own operator rendering is private here too: the
+/// peer and the mapper read only the fixed internal-service text.
+fn integration_frame_private(_refused: SocketAddr) -> Box<[Box<str>]> {
+    Box::new([
+        Box::<str>::from(SDK_SECRET),
+        sdk_failure().to_string().into_boxed_str(),
+        sdk_integration_error().to_string().into_boxed_str(),
+    ])
+}
 
-/// The origin the recording mapper files the frame's refusal under.
-const FRAME_POLICY: &str = "integration frame";
+/// Everything private the outbound frame's failure carried, as a peer or
+/// mapper could see it.
+///
+/// The client error's own operator rendering is private here too, for the
+/// reason the integration error's is.
+fn outbound_frame_private(refused: SocketAddr) -> Box<[Box<str>]> {
+    Producer::RefusedOutboundCall
+        .private(refused)
+        .into_iter()
+        .chain(Producer::RefusedOutboundCall.kept(&[]))
+        .collect()
+}
 
-/// Refuse the one route with an integration failure, before the terminal runs.
+/// One dependency failure a middleware frame returns before the terminal runs.
 ///
 /// A middleware frame's own failures classify under the middleware category.
-/// An integration failure does not: it is Camber's internal-service refusal
-/// from every producer, and this frame is the producer whose default differs.
-fn integration_refusing_frame(router: &mut Router) {
+/// A dependency failure does not: it is Camber's internal-service refusal from
+/// every producer, and a frame is the producer whose default differs.
+struct FrameRow {
+    label: &'static str,
+    path: &'static str,
+    /// The origin the recording mapper files the frame's refusal under.
+    policy: &'static str,
+    producer: Producer,
+    /// The integration chain text a returned failure keeps, as in [`SealedRow`].
+    kept: &'static [&'static str],
+    /// What neither the peer nor the mapper may be shown.
+    private: fn(SocketAddr) -> Box<[Box<str>]>,
+}
+
+const INTEGRATION_FRAME: FrameRow = FrameRow {
+    label: "integration frame",
+    path: "/rejection-integration-frame",
+    policy: "integration frame",
+    producer: Producer::Returned(direct_integration_failure),
+    kept: &["integration nats publish failed"],
+    private: integration_frame_private,
+};
+
+const OUTBOUND_FRAME: FrameRow = FrameRow {
+    label: "outbound frame",
+    path: "/rejection-outbound-frame",
+    policy: "outbound frame",
+    producer: Producer::RefusedOutboundCall,
+    kept: &[],
+    private: outbound_frame_private,
+};
+
+/// Refuse the row's one route with its producer's failure, before the terminal
+/// runs.
+fn refusing_frame(router: &mut Router, row: &'static FrameRow, refused_url: Arc<str>) {
     router.use_middleware(
-        |req: &Request, next: Next| match req.path() == FRAME_INTEGRATION_PATH {
-            true => Either::Left(std::future::ready(Err::<Response, RuntimeError>(
-                direct_integration_failure(),
-            ))),
+        move |req: &Request, next: Next| match req.path() == row.path {
+            true => Either::Left(row.producer.produce(Arc::clone(&refused_url))),
             false => {
                 let entered = next.call(req);
                 Either::Right(async move { Ok(entered.await) })
@@ -348,53 +488,52 @@ fn integration_refusing_frame(router: &mut Router) {
     );
 }
 
-/// Everything private the frame's failure carried, as a peer or mapper could see it.
-///
-/// The integration error's own operator rendering is private here too: the
-/// peer and the mapper read only the fixed internal-service text.
-fn frame_private_text() -> [String; 3] {
-    [
-        SDK_SECRET.to_owned(),
-        sdk_failure().to_string(),
-        sdk_integration_error().to_string(),
-    ]
-}
-
 /// Assert the operator saw one internal-service refusal and one completion.
-fn assert_frame_events(capture: &common::TraceCapture, request_id: &str) {
-    let label = "integration frame outcome";
+fn assert_frame_events(
+    row: &FrameRow,
+    capture: &common::TraceCapture,
+    request_id: &str,
+    refused: SocketAddr,
+) {
+    let label = row.label;
     let events = capture.events();
     let rejected = only_event(&events, REJECTION_MESSAGE, label);
     assert_field_value(rejected, "status", "500", label);
     assert_field_value(rejected, "kind", "internal_service", label);
     assert_field_value(rejected, "request_id", request_id, label);
-    assert_causes_in_field(rejected, &["integration nats publish failed"], label);
-    assert!(
-        !rejected.contains(SDK_SECRET),
-        "{label}: the chain walked into the integration's source: {rejected}"
-    );
+    let kept = row.producer.kept(row.kept);
+    let kept: Box<[&str]> = kept.iter().map(|text| &**text).collect();
+    assert_causes_in_field(rejected, &kept, label);
+    for secret in row.producer.private(refused).iter() {
+        assert!(
+            !rejected.contains(&**secret),
+            "{label}: the operator's record repeats {secret:?}: {rejected}"
+        );
+    }
     let completed = only_event(&events, COMPLETION_MESSAGE, label);
     assert_field_value(completed, "status", "500", label);
     assert_field_value(completed, "request_id", request_id, label);
 }
 
-#[test]
-fn middleware_integration_failure_is_an_internal_service_refusal() {
-    let capture = common::capture_events(FRAME_INTEGRATION_PATH);
+/// Serve the row's route behind its refusing frame and read every record of
+/// the one refusal: the wire, the mapper, and the operator's events.
+fn assert_frame_refusal(row: &'static FrameRow) {
+    let capture = common::capture_events(row.path);
 
     common::test_runtime()
         .with_tracing()
         .run(|| {
             let journal = common::journal();
             let handled = Arc::new(AtomicUsize::new(0));
+            let refused_addr = common::refused_loopback_addr();
             let mut router = Router::new();
-            integration_refusing_frame(&mut router);
+            refusing_frame(&mut router, row, refused_outbound_url(refused_addr).into());
             let calls = Arc::clone(&handled);
-            router.get(FRAME_INTEGRATION_PATH, move |_req: &Request| {
+            router.get(row.path, move |_req: &Request| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 std::future::ready(Response::text(200, "the frame let this through"))
             });
-            let recorder = common::recording_mapper(&journal, FRAME_POLICY);
+            let recorder = common::recording_mapper(&journal, row.policy);
             let router = router.rejection_mapper(
                 move |rejection: &Rejection, context: &RejectionContext| {
                     common::naming(recorder(rejection, context), context)
@@ -402,17 +541,18 @@ fn middleware_integration_failure_is_an_internal_service_refusal() {
             );
             let addr = common::spawn_server(router);
 
-            let label = "integration frame peer";
-            let response =
-                common::request(addr, "GET", FRAME_INTEGRATION_PATH, &[], &[], WIRE_TIMEOUT)
-                    .expect("the frame's refused request completed");
+            let label = row.label;
+            let response = common::request(addr, "GET", row.path, &[], &[], WIRE_TIMEOUT)
+                .unwrap_or_else(|error| {
+                    panic!("{label}: the frame's refused request did not complete: {error}")
+                });
             assert_eq!(response.status, 500, "{label}: wire status");
             assert_eq!(
                 response.text().as_ref(),
                 common::REDACTED_BODY,
                 "{label}: wire body"
             );
-            let private = frame_private_text();
+            let private = (row.private)(refused_addr);
             assert_no_private_text(&response, &private, label);
             assert_eq!(
                 handled.load(Ordering::SeqCst),
@@ -420,18 +560,26 @@ fn middleware_integration_failure_is_an_internal_service_refusal() {
                 "{label}: the frame refused before the terminal ran"
             );
 
-            common::assert_mapped_internal_refusal(
-                &journal,
-                FRAME_POLICY,
-                &private,
-                "integration frame mapper",
-            );
+            common::assert_mapped_internal_refusal(&journal, row.policy, &private, label);
             let request_id = common::request_id_of(&response, label);
-            assert_frame_events(&capture, &request_id);
+            assert_frame_events(row, &capture, &request_id, refused_addr);
 
             runtime::request_shutdown();
         })
         .expect("the fixture runtime ran to completion");
+}
+
+#[test]
+fn middleware_integration_failure_is_an_internal_service_refusal() {
+    assert_frame_refusal(&INTEGRATION_FRAME);
+}
+
+/// The frame awaits a real outbound call to a refusing address and propagates
+/// its failure with `?`, so the refusal read here is the one the client's own
+/// projection produced.
+#[test]
+fn middleware_client_failure_is_an_internal_service_refusal() {
+    assert_frame_refusal(&OUTBOUND_FRAME);
 }
 
 // ── The status the peer was actually given ─────────────────────────

@@ -1,3 +1,4 @@
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::{RuntimeError, runtime, spawn};
 #[camber::test]
@@ -22,8 +23,9 @@ async fn full_server_with_routing_and_outbound_calls() {
     router.get("/proxy", move |_req: &Request| {
         let backend_url = backend_url.clone();
         async move {
-            match http::get(&backend_url).await {
-                Ok(resp) => Response::text(200, resp.body()),
+            let fetched: Result<ClientResponse, RuntimeError> = http::get(&backend_url).await;
+            match fetched {
+                Ok(resp) => Response::text(200, resp.text()?),
                 Err(_) => Response::text(502, "upstream error"),
             }
         }
@@ -33,23 +35,23 @@ async fn full_server_with_routing_and_outbound_calls() {
     spawn(move || -> Result<(), RuntimeError> { http::serve_listener(main_listener, router) });
 
     // Client tests
-    let hello = http::get(&format!("http://{main_addr}/hello"))
+    let hello: ClientResponse = http::get(&format!("http://{main_addr}/hello"))
         .await
         .unwrap();
     assert_eq!(hello.status(), 200);
-    assert_eq!(hello.body(), "Hello, world!");
+    assert_eq!(hello.text().unwrap(), "Hello, world!");
 
-    let proxy = http::get(&format!("http://{main_addr}/proxy"))
+    let proxy: ClientResponse = http::get(&format!("http://{main_addr}/proxy"))
         .await
         .unwrap();
     assert_eq!(proxy.status(), 200);
     assert!(
-        proxy.body().contains("data-from-backend"),
+        proxy.text().unwrap().contains("data-from-backend"),
         "expected backend data, got: {}",
-        proxy.body()
+        proxy.text().unwrap()
     );
 
-    let not_found = http::get(&format!("http://{main_addr}/unknown"))
+    let not_found: ClientResponse = http::get(&format!("http://{main_addr}/unknown"))
         .await
         .unwrap();
     assert_eq!(not_found.status(), 404);

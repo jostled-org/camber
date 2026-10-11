@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
+use camber::http::ClientResponse;
 use camber::http::{Request, Response, Router};
 use camber::{RuntimeError, runtime};
 use futures_util::FutureExt;
@@ -110,7 +111,7 @@ async fn http1_and_http2_same_port() {
     router.get("/hello", |_: &Request| async { Response::text(200, "hi") });
     let addr = runtime_support::spawn_server(router);
 
-    let response = bounded(
+    let response: ClientResponse = bounded(
         camber::http::get(&format!("http://{addr}/hello")),
         PROTOCOL_TIMEOUT,
         "the HTTP/1.1 request",
@@ -118,7 +119,7 @@ async fn http1_and_http2_same_port() {
     .await
     .unwrap();
     assert_eq!(response.status(), 200);
-    assert_eq!(response.body(), "hi");
+    assert_eq!(response.text().unwrap(), "hi");
 
     let answered = h2c_get(addr, "/hello").await;
     assert_eq!(answered.status, 200);

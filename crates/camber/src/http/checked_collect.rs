@@ -87,10 +87,18 @@ impl CheckedCollector {
     /// Returns [`RuntimeError::LimitExceeded`] naming this collection's
     /// boundary when the stated length is above the configured maximum.
     pub(super) fn admit_declared(&self, declared: Option<u64>) -> Result<(), RuntimeError> {
-        match declared.is_some_and(|stated| declared_length_exceeds_limit(stated, self.ceiling())) {
+        match self.declares_crossing(declared) {
             true => Err(self.crossed()),
             false => Ok(()),
         }
+    }
+
+    /// Whether a source states a size above the maximum.
+    ///
+    /// The decision [`Self::admit_declared`] reports, for an owner that names
+    /// the refusal in its own vocabulary.
+    fn declares_crossing(&self, declared: Option<u64>) -> bool {
+        declared.is_some_and(|stated| declared_length_exceeds_limit(stated, self.ceiling()))
     }
 
     /// Buy the buffer a source's admitted declaration says it will need.
@@ -112,24 +120,9 @@ impl CheckedCollector {
             .reserve(declared_reserve(declared, self.ceiling()));
     }
 
-    /// Count one chunk, then keep it — or drop it and refuse.
-    ///
-    /// The chunk is taken by value so that a crossing one is released here,
-    /// where the refusal is decided, rather than left for a caller to remember
-    /// to drop.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RuntimeError::LimitExceeded`] naming this collection's
-    /// boundary when the chunk would carry the total past the maximum, or when
-    /// the addition that would prove otherwise overflows.
-    pub(super) fn retain(&mut self, chunk: Bytes) -> Result<(), RuntimeError> {
-        self.retain_slice(&chunk)
-    }
-
     /// Count one chunk this collection does not own, then copy it — or refuse.
     ///
-    /// The same three rules as [`Self::retain`], for a source that hands out a
+    /// The same three rules as [`Self::keep`], for a source that hands out a
     /// borrowed window onto a buffer it reuses: a file read fills one buffer
     /// over and over, and a crossing window is left in that buffer for its
     /// owner to overwrite rather than copied here first.
@@ -140,6 +133,27 @@ impl CheckedCollector {
     /// boundary when the chunk would carry the total past the maximum, or when
     /// the addition that would prove otherwise overflows.
     pub(super) fn retain_slice(&mut self, chunk: &[u8]) -> Result<(), RuntimeError> {
+        match self.keep_slice(chunk) {
+            true => Ok(()),
+            false => Err(self.crossed()),
+        }
+    }
+
+    /// Count one chunk, then keep it or drop it. Returns whether it was kept.
+    ///
+    /// The chunk is taken by value so that a crossing one is released here,
+    /// where the refusal is decided, rather than left for a caller to remember
+    /// to drop. The caller names the refusal in its own vocabulary.
+    fn keep(&mut self, chunk: Bytes) -> bool {
+        self.keep_slice(&chunk)
+    }
+
+    /// Count one borrowed chunk, then copy it or leave it. Returns whether it
+    /// was kept.
+    ///
+    /// The decision [`Self::retain_slice`] reports, for an owner that names
+    /// the refusal in its own vocabulary.
+    fn keep_slice(&mut self, chunk: &[u8]) -> bool {
         LifecycleScript::count_collected_chunk(self.observer.as_deref());
         let admitted =
             checked_body_frame_total(self.retained.len(), chunk.len(), self.ceiling()).is_some();
@@ -150,10 +164,7 @@ impl CheckedCollector {
         // that kept a crossing chunk before refusing it would report the bytes
         // it is holding, where a total it was permitted would hide them.
         LifecycleScript::observe_collected_retained(self.observer.as_deref(), self.retained.len());
-        match admitted {
-            true => Ok(()),
-            false => Err(self.crossed()),
-        }
+        admitted
     }
 
     /// Freeze what was retained into the shared buffer its owner receives.
@@ -209,6 +220,37 @@ impl CollectionIdle {
     }
 }
 
+/// Why one Reqwest-backed collection ended without its body.
+///
+/// The collection states the fact and each owner names it: a buffered proxy
+/// answer reports its configured boundary, and an outbound client call reports
+/// its closed client category. The read failure is handed over whole, so the
+/// owner classifies the typed error rather than text rendered from it.
+pub(super) enum CollectionFailure {
+    /// The body declared or delivered more than this ceiling, or its total
+    /// overflowed.
+    Crossed {
+        /// The number the refusing comparison used.
+        ceiling: usize,
+    },
+    /// The source went quiet for longer than this deadline allows.
+    Quiet(super::boundary::DeadlineBoundary),
+    /// A body read failed.
+    Read(reqwest::Error),
+}
+
+impl CollectionFailure {
+    /// This failure as the shared boundary error, naming `boundary` for a
+    /// crossing.
+    fn into_boundary_error(self, boundary: ByteBoundary) -> RuntimeError {
+        match self {
+            Self::Crossed { .. } => RuntimeError::LimitExceeded(boundary),
+            Self::Quiet(deadline) => RuntimeError::DeadlineExceeded(deadline),
+            Self::Read(error) => super::map_reqwest_error(error),
+        }
+    }
+}
+
 /// Take the next chunk of one answer, under the quiet interval it allows.
 ///
 /// `None` for `idle` is a consumer whose own transport already bounds its
@@ -216,26 +258,18 @@ impl CollectionIdle {
 async fn next_chunk(
     response: &mut reqwest::Response,
     idle: Option<CollectionIdle>,
-) -> Result<Option<Bytes>, RuntimeError> {
+) -> Result<Option<Bytes>, CollectionFailure> {
     let read = match idle {
         None => response.chunk().await,
         Some(idle) => tokio::time::timeout(idle.interval, response.chunk())
             .await
-            .map_err(|_| RuntimeError::DeadlineExceeded(idle.boundary))?,
+            .map_err(|_| CollectionFailure::Quiet(idle.boundary))?,
     };
-    read.map_err(super::map_reqwest_error)
+    read.map_err(CollectionFailure::Read)
 }
 
-/// Collect one outbound response body under `limit`.
-///
-/// The shared entry point for every Reqwest-backed consumer: the public client
-/// and the buffered proxy read the same declaration, the same chunks, and the
-/// same refusal, so a body one of them would refuse is never admitted by the
-/// other.
-///
-/// Nothing is polled after a terminal. The loop returns on the first refused
-/// chunk, so the response — and the connection under it — is released with its
-/// remaining frames unread.
+/// Collect one outbound response body under `limit`, reporting the shared
+/// boundary errors.
 ///
 /// # Errors
 ///
@@ -244,11 +278,37 @@ async fn next_chunk(
 /// when the source goes quiet for longer than it allows, or the mapped
 /// transport failure when the body cannot be read.
 pub(super) async fn collect_response(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     boundary: ByteBoundary,
     limit: Option<usize>,
     idle: Option<CollectionIdle>,
 ) -> Result<Bytes, RuntimeError> {
+    collect_checked(response, boundary, limit, idle)
+        .await
+        .map_err(|failure| failure.into_boundary_error(boundary))
+}
+
+/// Collect one outbound response body under `limit`.
+///
+/// The shared entry point for every Reqwest-backed consumer: the public client
+/// and the buffered proxy read the same declaration, the same chunks, and the
+/// same refusal, so a body one of them would refuse is never admitted by the
+/// other. Only the name each gives a refusal differs.
+///
+/// Nothing is polled after a terminal. The loop returns on the first refused
+/// chunk, so the response — and the connection under it — is released with its
+/// remaining frames unread.
+///
+/// # Errors
+///
+/// Returns the [`CollectionFailure`] that ended the collection: a crossing of
+/// `limit`, a quiet interval longer than `idle` allows, or a failed read.
+pub(super) async fn collect_checked(
+    mut response: reqwest::Response,
+    boundary: ByteBoundary,
+    limit: Option<usize>,
+    idle: Option<CollectionIdle>,
+) -> Result<Bytes, CollectionFailure> {
     let observer = response
         .remote_addr()
         .and_then(super::mock::lifecycle_script);
@@ -257,10 +317,17 @@ pub(super) async fn collect_response(
     // second time would be a second answer about what the peer stated.
     let declared = response.content_length();
     let mut collector = CheckedCollector::new(boundary, limit, observer);
-    collector.admit_declared(declared)?;
+    let crossed = CollectionFailure::Crossed {
+        ceiling: collector.ceiling(),
+    };
+    if collector.declares_crossing(declared) {
+        return Err(crossed);
+    }
     collector.reserve_declared(declared);
     while let Some(chunk) = next_chunk(&mut response, idle).await? {
-        collector.retain(chunk)?;
+        if !collector.keep(chunk) {
+            return Err(crossed);
+        }
     }
     Ok(collector.finish())
 }

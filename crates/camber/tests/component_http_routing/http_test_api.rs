@@ -1,5 +1,6 @@
 use crate::runtime_support as common;
 
+use camber::http::ClientResponse;
 use camber::http::mock;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
@@ -28,15 +29,15 @@ async fn mock_http_intercepts_outbound_call() {
 
     let mut router = Router::new();
     router.get("/proxy", |_req: &Request| async {
-        let upstream = http::get("https://external-api/data").await?;
-        Response::text(200, upstream.body())
+        let upstream: ClientResponse = http::get("https://external-api/data").await?;
+        Response::text(200, upstream.text()?)
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/proxy")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/proxy")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), r#"{"key":"value"}"#);
+    assert_eq!(resp.text().unwrap(), r#"{"key":"value"}"#);
 
     mock.assert_called_once();
 
@@ -55,14 +56,14 @@ async fn dropping_one_mock_leaves_its_twin_registered() {
     let first = mock::http(url).returns(Response::text(200, "first").expect("valid status"));
     let second = mock::http(url).returns(Response::text(200, "second").expect("valid status"));
 
-    let resp = http::get(url).await.expect("first mock intercepts");
-    assert_eq!(resp.body(), "first");
+    let resp: ClientResponse = http::get(url).await.expect("first mock intercepts");
+    assert_eq!(resp.text().unwrap(), "first");
     first.assert_called_once();
 
     drop(first);
 
-    let resp = http::get(url).await.expect("second mock still intercepts");
-    assert_eq!(resp.body(), "second");
+    let resp: ClientResponse = http::get(url).await.expect("second mock still intercepts");
+    assert_eq!(resp.text().unwrap(), "second");
     second.assert_called_once();
 
     runtime::request_shutdown();

@@ -1,5 +1,7 @@
 use crate::common;
 
+use camber::RuntimeError;
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 use std::sync::Arc;
@@ -39,7 +41,7 @@ fn builder_configures_concurrent_requests() {
             let addr = server.local_addr();
             let url = format!("http://{addr}/slow");
 
-            let responses = common::block_on(async {
+            let responses: Vec<Result<ClientResponse, RuntimeError>> = common::block_on(async {
                 tokio::time::timeout(
                     EVENT_TIMEOUT,
                     futures_util::future::join_all(

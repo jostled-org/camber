@@ -30,7 +30,7 @@ use crate::grpc_forms::{
 use crate::http as http_support;
 use crate::integration_rows::{Row, all, assert_verdicts, bounded, expect, expect_eq};
 use crate::operation_completion::{
-    Expected, Recorded, assert_event_matches, moved, only_completion,
+    Expected, Recorded, assert_event_matches, moved, only_completion, recorded,
 };
 
 /// How long one call, scrape wait, or teardown here may take.
@@ -507,7 +507,7 @@ fn unknown_service_is_unimplemented_and_recorded_once(fixture: &FormsFixture) ->
         answered
     })?;
     let settled = http_support::poll_until(BOUND, || {
-        moved(&before, &Recorded::scraped(addr), &expected) >= 1
+        recorded(&before, &Recorded::scraped(addr), &expected)
     });
     all([
         expect_eq("wire status", answered.status, 200),

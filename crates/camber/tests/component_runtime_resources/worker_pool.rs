@@ -1,5 +1,6 @@
 use crate::common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::{runtime, spawn_async};
 use std::sync::Arc;
@@ -26,9 +27,9 @@ async fn pool_dispatches_concurrent_http_requests() {
         let counter = Arc::clone(&counter);
         let url = format!("http://{addr}/hello");
         let h = spawn_async(async move {
-            let resp = http::get(&url).await.unwrap();
+            let resp: ClientResponse = http::get(&url).await.unwrap();
             assert_eq!(resp.status(), 200);
-            assert_eq!(resp.body(), "Hello, world!");
+            assert_eq!(resp.text().unwrap(), "Hello, world!");
             counter.fetch_add(1, Ordering::SeqCst);
         });
         handles.push(h);
@@ -84,7 +85,7 @@ fn pool_backpressure_under_load() {
                     let client = Arc::clone(&client);
                     let url = format!("http://{addr}/slow");
                     let handle = spawn_async(async move {
-                        let resp = client.get(&url).await.unwrap();
+                        let resp: ClientResponse = client.get(&url).await.unwrap();
                         assert_eq!(resp.status(), 200);
                     });
                     handles.push(handle);
@@ -122,7 +123,7 @@ async fn acceptor_stops_on_shutdown() {
     let addr = server.local_addr();
 
     // Confirm server is alive
-    let resp = http::get(&format!("http://{addr}/hello")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/hello")).await.unwrap();
     assert_eq!(resp.status(), 200);
 
     // Request shutdown
@@ -162,9 +163,12 @@ async fn pool_workers_joined_on_shutdown() {
     let server = common::spawn_server_ready(router, EVENT_TIMEOUT).unwrap();
     let addr = server.local_addr();
 
-    // Send a request that will be in-flight during shutdown
-    let url = format!("http://{addr}/slow");
-    let client = spawn_async(async move { http::get(&url).await.unwrap() });
+    // Send a request that will be in-flight during shutdown. The peer is a raw
+    // socket, not the outbound client: a client call inside this runtime is
+    // one of its operations, and shutdown ends it with `Cancelled`.
+    let peer = tokio::task::spawn_blocking(move || {
+        common::request(addr, "GET", "/slow", &[], &[], EVENT_TIMEOUT)
+    });
 
     tokio::time::timeout(EVENT_TIMEOUT, entered_rx)
         .await
@@ -175,12 +179,13 @@ async fn pool_workers_joined_on_shutdown() {
     runtime::request_shutdown();
     release.add_permits(1);
 
-    // Wait for client to get its response
-    let resp = tokio::time::timeout(EVENT_TIMEOUT, async { client.await })
+    // Wait for the peer to get its response
+    let resp = tokio::time::timeout(EVENT_TIMEOUT, peer)
         .await
         .unwrap()
+        .unwrap()
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status, 200);
 
     // After runtime::run returns, serve_listener has returned, which means
     // pool.shutdown() joined all workers. The handler must have completed.

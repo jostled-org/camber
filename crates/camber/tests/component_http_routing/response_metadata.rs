@@ -1,5 +1,6 @@
 use crate::runtime_support as common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 
@@ -14,19 +15,15 @@ async fn handler_sets_custom_headers_and_status() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/create")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/create")).await.unwrap();
 
     assert_eq!(resp.status(), 201);
 
-    let headers: Vec<(&str, &str)> = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.as_ref(), v.as_ref()))
-        .collect();
+    let headers: Vec<(&str, &[u8])> = resp.headers().collect();
 
     let has_custom = headers
         .iter()
-        .any(|(k, v)| k.eq_ignore_ascii_case("x-custom") && *v == "test-value");
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-custom") && *v == b"test-value");
     assert!(has_custom, "missing X-Custom header, got: {headers:?}");
 
     let content_type = headers
@@ -34,7 +31,7 @@ async fn handler_sets_custom_headers_and_status() {
         .find(|(k, _)| k.eq_ignore_ascii_case("content-type"));
     assert_eq!(
         content_type.map(|(_, v)| *v),
-        Some("text/html"),
+        Some(&b"text/html"[..]),
         "Content-Type should be text/html, got: {headers:?}"
     );
 
@@ -49,18 +46,17 @@ async fn default_text_response_has_plain_content_type() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/hello")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/hello")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hi");
+    assert_eq!(resp.text().unwrap(), "hi");
 
     let content_type = resp
         .headers()
-        .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-type"));
     assert_eq!(
-        content_type.map(|(_, v)| v.as_ref()),
-        Some("text/plain"),
+        content_type.map(|(_, v)| v),
+        Some(&b"text/plain"[..]),
         "default Content-Type should be text/plain"
     );
 

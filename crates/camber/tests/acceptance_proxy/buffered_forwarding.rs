@@ -1,5 +1,6 @@
 use crate::common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::{runtime, spawn_async};
 use std::future::Future;
@@ -318,11 +319,11 @@ async fn proxy_forwards_get_request() {
     main.proxy("/api", &format!("http://{backend_addr}"));
     let main_addr = common::spawn_server(main);
 
-    let resp = http::get(&format!("http://{main_addr}/api/hello"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/api/hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "from-backend");
+    assert_eq!(resp.text().unwrap(), "from-backend");
 
     runtime::request_shutdown();
 }
@@ -340,10 +341,10 @@ async fn proxy_forwards_post_with_body() {
     main.proxy("/api", &format!("http://{backend_addr}"));
     let main_addr = common::spawn_server(main);
 
-    let resp = http::post(&format!("http://{main_addr}/api/echo"), "request-body")
+    let resp: ClientResponse = http::post(&format!("http://{main_addr}/api/echo"), "request-body")
         .await
         .unwrap();
-    assert_eq!(resp.body(), "request-body");
+    assert_eq!(resp.text().unwrap(), "request-body");
 
     runtime::request_shutdown();
 }
@@ -386,7 +387,7 @@ async fn proxy_returns_502_on_backend_failure() {
     main.proxy("/api", "http://127.0.0.1:1");
     let main_addr = common::spawn_server(main);
 
-    let resp = http::get(&format!("http://{main_addr}/api/anything"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/api/anything"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 502);
@@ -407,17 +408,17 @@ async fn proxy_coexists_with_normal_routes() {
     main.proxy("/api", &format!("http://{backend_addr}"));
     let main_addr = common::spawn_server(main);
 
-    let health = http::get(&format!("http://{main_addr}/health"))
+    let health: ClientResponse = http::get(&format!("http://{main_addr}/health"))
         .await
         .unwrap();
     assert_eq!(health.status(), 200);
-    assert_eq!(health.body(), "ok");
+    assert_eq!(health.text().unwrap(), "ok");
 
-    let proxied = http::get(&format!("http://{main_addr}/api/hello"))
+    let proxied: ClientResponse = http::get(&format!("http://{main_addr}/api/hello"))
         .await
         .unwrap();
     assert_eq!(proxied.status(), 200);
-    assert_eq!(proxied.body(), "proxied");
+    assert_eq!(proxied.text().unwrap(), "proxied");
 
     runtime::request_shutdown();
 }
@@ -487,7 +488,7 @@ async fn proxy_streams_large_response() {
     main.proxy("/api", &format!("http://{backend_addr}"));
     let main_addr = common::spawn_server(main);
 
-    let resp = http::get(&format!("http://{main_addr}/api/large"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/api/large"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -575,9 +576,10 @@ async fn proxy_async_concurrent_requests() {
         .map(|_| {
             let addr = main_addr;
             spawn_async(async move {
-                let resp = http::get(&format!("http://{addr}/api/slow")).await.unwrap();
+                let resp: ClientResponse =
+                    http::get(&format!("http://{addr}/api/slow")).await.unwrap();
                 assert_eq!(resp.status(), 200);
-                assert_eq!(resp.body(), "done");
+                assert_eq!(resp.text().unwrap(), "done");
             })
         })
         .collect();
@@ -613,9 +615,10 @@ async fn proxy_concurrent_requests_still_work() {
         .map(|_| {
             let addr = main_addr;
             spawn_async(async move {
-                let resp = http::get(&format!("http://{addr}/api/slow")).await.unwrap();
+                let resp: ClientResponse =
+                    http::get(&format!("http://{addr}/api/slow")).await.unwrap();
                 assert_eq!(resp.status(), 200);
-                assert_eq!(resp.body(), "done");
+                assert_eq!(resp.text().unwrap(), "done");
             })
         })
         .collect();
@@ -798,11 +801,11 @@ async fn auth_middleware_blocks_unauthenticated_proxy() {
     let main_addr = common::spawn_server(main);
 
     // No auth header → 401 (not proxied)
-    let resp = http::get(&format!("http://{main_addr}/api/hello"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/api/hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 401);
-    assert_eq!(resp.body(), "unauthorized");
+    assert_eq!(resp.text().unwrap(), "unauthorized");
 
     // With auth header → 200 (proxied)
     let mut stream = std::net::TcpStream::connect(main_addr).unwrap();
@@ -846,7 +849,7 @@ async fn logging_middleware_captures_proxy_status() {
     main.proxy("/api", &format!("http://{backend_addr}"));
     let main_addr = common::spawn_server(main);
 
-    let resp = http::get(&format!("http://{main_addr}/api/hello"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/api/hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -882,7 +885,8 @@ async fn proxy_concurrent_streaming() {
         .map(|_| {
             let addr = main_addr;
             spawn_async(async move {
-                let resp = http::get(&format!("http://{addr}/api/slow")).await.unwrap();
+                let resp: ClientResponse =
+                    http::get(&format!("http://{addr}/api/slow")).await.unwrap();
                 assert_eq!(resp.status(), 200);
                 assert_eq!(resp.body_bytes().len(), 10_000);
             })
@@ -910,12 +914,12 @@ async fn buffered_proxy_still_materializes_response_body() {
     main.proxy("/api", &format!("http://{backend_addr}"));
     let main_addr = common::spawn_server(main);
 
-    let resp = http::get(&format!("http://{main_addr}/api/data"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/api/data"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(
-        resp.body(),
+        resp.text().unwrap(),
         "fully-buffered-body",
         "buffered proxy must return the full response body"
     );
@@ -1019,12 +1023,12 @@ async fn buffered_proxy_forwards_x_forwarded_proto_http() {
     let main_addr = common::spawn_server(main);
 
     // Plain HTTP listener → upstream should see X-Forwarded-Proto: http
-    let resp = http::get(&format!("http://{main_addr}/api/check-proto"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/api/check-proto"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(
-        resp.body(),
+        resp.text().unwrap(),
         "http",
         "expected X-Forwarded-Proto: http for plain HTTP proxy"
     );

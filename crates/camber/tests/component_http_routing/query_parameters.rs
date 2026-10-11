@@ -1,5 +1,6 @@
 use crate::runtime_support as common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 use std::net::SocketAddr;
@@ -91,12 +92,12 @@ async fn query_all_returns_iterator_over_repeated_values() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/tags?tag=a&tag=b&tag=c"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/tags?tag=a&tag=b&tag=c"))
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "a,b,c");
+    assert_eq!(resp.text().unwrap(), "a,b,c");
 
     runtime::request_shutdown();
 }
@@ -110,12 +111,12 @@ async fn query_param_extracts_single_value() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/search?q=hello"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/search?q=hello"))
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hello");
+    assert_eq!(resp.text().unwrap(), "hello");
 
     runtime::request_shutdown();
 }
@@ -129,12 +130,12 @@ async fn query_param_returns_none_when_missing() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/search?q=hello"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/search?q=hello"))
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "none");
+    assert_eq!(resp.text().unwrap(), "none");
 
     runtime::request_shutdown();
 }
@@ -148,12 +149,12 @@ async fn query_param_handles_multiple_values() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/filter?tag=rust&tag=go"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/filter?tag=rust&tag=go"))
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "rust,go");
+    assert_eq!(resp.text().unwrap(), "rust,go");
 
     runtime::request_shutdown();
 }
@@ -276,12 +277,12 @@ async fn query_param_decodes_percent_encoding() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/search?q=hello%20world"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/search?q=hello%20world"))
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hello world");
+    assert_eq!(resp.text().unwrap(), "hello world");
 
     runtime::request_shutdown();
 }

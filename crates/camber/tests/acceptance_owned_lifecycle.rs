@@ -70,9 +70,14 @@ mod nats_accounts;
 pub mod nats_ack_rows;
 #[path = "acceptance_owned_lifecycle/nats_acknowledged.rs"]
 mod nats_acknowledged;
+#[path = "acceptance_owned_lifecycle/outbound_client.rs"]
+mod outbound_client;
+use common::{halt, http};
 #[cfg(feature = "nats")]
 #[path = "support/nats_peer.rs"]
 pub mod nats_peer;
+#[path = "support/retry_upstream.rs"]
+pub mod retry_upstream;
 #[path = "acceptance_owned_lifecycle/scope_drain.rs"]
 mod scope_drain;
 // Every build: the integration registry rows share its poison-tolerant lock.

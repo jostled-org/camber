@@ -1,3 +1,4 @@
+use camber::http::ClientResponse;
 use camber::http::{Request, Response, Router};
 use std::time::Duration;
 
@@ -12,11 +13,12 @@ async fn delete_with_body_sends_body() {
     let server = crate::http::spawn_server_ready(router, Duration::from_secs(2)).unwrap();
     let addr = server.local_addr();
 
-    let resp = camber::http::delete_with_body(&format!("http://{addr}/echo"), "delete-payload")
-        .await
-        .unwrap();
+    let resp: ClientResponse =
+        camber::http::delete_with_body(&format!("http://{addr}/echo"), "delete-payload")
+            .await
+            .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "delete-payload");
+    assert_eq!(resp.text().unwrap(), "delete-payload");
     server.shutdown_bounded(Duration::from_secs(2)).unwrap();
 }
 
@@ -39,22 +41,22 @@ async fn put_json_and_patch_json_send_json_content_type() {
 
     let base = format!("http://{addr}/echo");
 
-    let put_resp = camber::http::put_json(&base, r#"{"key":"put"}"#)
+    let put_resp: ClientResponse = camber::http::put_json(&base, r#"{"key":"put"}"#)
         .await
         .unwrap();
     assert_eq!(put_resp.status(), 200);
-    let put_body = put_resp.body();
+    let put_body = put_resp.text().unwrap();
     assert!(
         put_body.starts_with("application/json"),
         "put_json should send application/json, got: {put_body}"
     );
     assert!(put_body.contains(r#"{"key":"put"}"#));
 
-    let patch_resp = camber::http::patch_json(&base, r#"{"key":"patch"}"#)
+    let patch_resp: ClientResponse = camber::http::patch_json(&base, r#"{"key":"patch"}"#)
         .await
         .unwrap();
     assert_eq!(patch_resp.status(), 200);
-    let patch_body = patch_resp.body();
+    let patch_body = patch_resp.text().unwrap();
     assert!(
         patch_body.starts_with("application/json"),
         "patch_json should send application/json, got: {patch_body}"
@@ -82,18 +84,18 @@ async fn put_form_and_patch_form_send_urlencoded() {
 
     let base = format!("http://{addr}/echo");
 
-    let put_resp = camber::http::put_form(&base, "a=1&b=2").await.unwrap();
+    let put_resp: ClientResponse = camber::http::put_form(&base, "a=1&b=2").await.unwrap();
     assert_eq!(put_resp.status(), 200);
-    let put_body = put_resp.body();
+    let put_body = put_resp.text().unwrap();
     assert!(
         put_body.starts_with("application/x-www-form-urlencoded"),
         "put_form should send urlencoded, got: {put_body}"
     );
     assert!(put_body.contains("a=1&b=2"));
 
-    let patch_resp = camber::http::patch_form(&base, "c=3&d=4").await.unwrap();
+    let patch_resp: ClientResponse = camber::http::patch_form(&base, "c=3&d=4").await.unwrap();
     assert_eq!(patch_resp.status(), 200);
-    let patch_body = patch_resp.body();
+    let patch_body = patch_resp.text().unwrap();
     assert!(
         patch_body.starts_with("application/x-www-form-urlencoded"),
         "patch_form should send urlencoded, got: {patch_body}"

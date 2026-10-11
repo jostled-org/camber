@@ -1,5 +1,6 @@
 use crate::runtime_support as common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::{RuntimeError, runtime, spawn};
 use std::sync::Arc;
@@ -195,10 +196,10 @@ async fn handler_arc_clone_produces_same_response() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/hello")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/hello")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "Hello, world!");
+    assert_eq!(resp.text().unwrap(), "Hello, world!");
 
     runtime::request_shutdown();
 }
@@ -215,12 +216,12 @@ async fn async_handler_runs_on_worker_thread() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/thread-check"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/thread-check"))
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    let thread_name = resp.body();
+    let thread_name = resp.text().unwrap();
     assert!(
         thread_name.contains("tokio-runtime-worker") || thread_name.contains("tokio-rt-worker"),
         "handler should run on worker thread; got: {thread_name}"
@@ -236,10 +237,10 @@ async fn async_handler_hello_text() {
     router.get("/", |_req: &Request| async { Response::text(200, "hello") });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hello");
+    assert_eq!(resp.text().unwrap(), "hello");
 
     runtime::request_shutdown();
 }
@@ -253,7 +254,7 @@ async fn async_handler_returns_result() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/fail")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/fail")).await.unwrap();
 
     assert_eq!(resp.status(), 500);
 
@@ -286,32 +287,32 @@ async fn all_http_methods_register_async() {
 
     let addr = common::spawn_server(router);
 
-    let get = http::get(&format!("http://{addr}/get")).await.unwrap();
+    let get: ClientResponse = http::get(&format!("http://{addr}/get")).await.unwrap();
     assert_eq!(get.status(), 200);
-    assert_eq!(get.body(), "get");
+    assert_eq!(get.text().unwrap(), "get");
 
-    let post = http::post(&format!("http://{addr}/post"), "")
+    let post: ClientResponse = http::post(&format!("http://{addr}/post"), "")
         .await
         .unwrap();
     assert_eq!(post.status(), 200);
 
-    let put = http::put(&format!("http://{addr}/put"), "").await.unwrap();
+    let put: ClientResponse = http::put(&format!("http://{addr}/put"), "").await.unwrap();
     assert_eq!(put.status(), 200);
 
-    let delete = http::delete(&format!("http://{addr}/delete"))
+    let delete: ClientResponse = http::delete(&format!("http://{addr}/delete"))
         .await
         .unwrap();
     assert_eq!(delete.status(), 200);
 
-    let patch = http::patch(&format!("http://{addr}/patch"), "")
+    let patch: ClientResponse = http::patch(&format!("http://{addr}/patch"), "")
         .await
         .unwrap();
     assert_eq!(patch.status(), 200);
 
-    let head = http::head(&format!("http://{addr}/head")).await.unwrap();
+    let head: ClientResponse = http::head(&format!("http://{addr}/head")).await.unwrap();
     assert_eq!(head.status(), 200);
 
-    let options = http::options(&format!("http://{addr}/options"))
+    let options: ClientResponse = http::options(&format!("http://{addr}/options"))
         .await
         .unwrap();
     assert_eq!(options.status(), 200);
@@ -329,10 +330,10 @@ async fn handler_with_path_params() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/users/42")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/users/42")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "42");
+    assert_eq!(resp.text().unwrap(), "42");
 
     runtime::request_shutdown();
 }
@@ -386,10 +387,10 @@ async fn async_handler_result_ok_responds() {
     });
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/result")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/result")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "ok");
+    assert_eq!(resp.text().unwrap(), "ok");
 
     runtime::request_shutdown();
 }
@@ -407,7 +408,8 @@ async fn handler_panic_kills_connection() {
 
     let addr = common::spawn_server(router);
 
-    let result = http::get(&format!("http://{addr}/panic")).await;
+    let result: Result<ClientResponse, RuntimeError> =
+        http::get(&format!("http://{addr}/panic")).await;
     assert!(
         result.is_err(),
         "panicking handler should kill the connection, got status: {}",

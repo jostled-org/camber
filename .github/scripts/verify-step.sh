@@ -10,7 +10,9 @@
 #   1. `CAMBER_VERIFY_SCOPE` non-empty → run fmt + pedant + clippy + test scoped to the
 #      named crates only.
 #   2. Scope empty but the changed-files list shows Rust-relevant
-#      changes → full workspace run.
+#      changes → full workspace run. Rust-relevant paths are the crates, the
+#      Cargo manifest and lockfile, the toolchain pin, the Pedant
+#      configuration, and the scripts under `.github/scripts`.
 #   3. Both empty (first step, or no diff yet) → full workspace run, so the
 #      first invocation cannot skip checks because its changes are unknown.
 #   4. Scope empty and only non-Rust files changed (docs, plans) → nothing to
@@ -102,7 +104,7 @@ changed_rust=false
 if [ -n "${CAMBER_VERIFY_CHANGED_FILES:-}" ] && [ -f "${CAMBER_VERIFY_CHANGED_FILES}" ]; then
     while IFS= read -r path; do
         case "$path" in
-            crates/*|Cargo.toml|Cargo.lock)
+            crates/*|Cargo.toml|Cargo.lock|rust-toolchain.toml|.pedant.toml|.pedant/*|.github/scripts/*)
                 changed_rust=true
                 ;;
         esac
@@ -120,6 +122,7 @@ if [ ${#scope_rust[@]} -eq 0 ]; then
         run .github/scripts/check-pedant.sh source
         run .github/scripts/check-pedant.sh tests
         run cargo clippy --workspace --features "$CAMBER_FEATURES" -- -D warnings
+        run cargo check --workspace --tests --keep-going --features "$CAMBER_FEATURES"
         run cargo test --workspace --features "$CAMBER_FEATURES"
     else
         echo "[verify_step] no Rust-relevant changes and no scope — nothing to verify"
@@ -141,9 +144,11 @@ done
 for pkg in "${scope_rust[@]}"; do
     if [ "$pkg" = "$FEATURED_CRATE" ]; then
         run cargo clippy -p "$pkg" --features "$CAMBER_FEATURES" -- -D warnings
+        run cargo check -p "$pkg" --tests --keep-going --features "$CAMBER_FEATURES"
         run cargo test -p "$pkg" --features "$CAMBER_FEATURES"
     else
         run cargo clippy -p "$pkg" -- -D warnings
+        run cargo check -p "$pkg" --tests --keep-going
         run cargo test -p "$pkg"
     fi
 done

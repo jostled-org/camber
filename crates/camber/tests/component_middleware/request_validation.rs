@@ -1,5 +1,6 @@
 use crate::runtime_support as common;
 
+use camber::http::ClientResponse;
 use camber::http::validate;
 use camber::http::{Request, Response, Router};
 use camber::runtime;
@@ -25,12 +26,12 @@ async fn validation_passes_valid_json() {
     let addr = common::spawn_server(router);
 
     let body = r#"{"name":"alice","email":"alice@example.com"}"#;
-    let resp = camber::http::post_json(&format!("http://{addr}/users"), body)
+    let resp: ClientResponse = camber::http::post_json(&format!("http://{addr}/users"), body)
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "alice");
+    assert_eq!(resp.text().unwrap(), "alice");
 
     runtime::request_shutdown();
 }
@@ -44,13 +45,14 @@ async fn validation_rejects_invalid_json() {
     });
     let addr = common::spawn_server(router);
 
-    let resp = camber::http::post(&format!("http://{addr}/users"), "not valid json")
-        .await
-        .unwrap();
+    let resp: ClientResponse =
+        camber::http::post(&format!("http://{addr}/users"), "not valid json")
+            .await
+            .unwrap();
 
     assert_eq!(resp.status(), 400);
     assert_eq!(
-        resp.body(),
+        resp.text().unwrap(),
         "malformed request body",
         "a validation failure answers with the fixed safe message"
     );
@@ -67,12 +69,12 @@ async fn validation_skips_non_post_requests() {
     });
     let addr = common::spawn_server(router);
 
-    let resp = camber::http::get(&format!("http://{addr}/users"))
+    let resp: ClientResponse = camber::http::get(&format!("http://{addr}/users"))
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "list");
+    assert_eq!(resp.text().unwrap(), "list");
 
     runtime::request_shutdown();
 }
@@ -92,12 +94,12 @@ async fn validation_caches_parse_result() {
     let addr = common::spawn_server(router);
 
     let body = r#"{"name":"bob","email":"bob@example.com"}"#;
-    let resp = camber::http::post_json(&format!("http://{addr}/users"), body)
+    let resp: ClientResponse = camber::http::post_json(&format!("http://{addr}/users"), body)
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "bob");
+    assert_eq!(resp.text().unwrap(), "bob");
 
     runtime::request_shutdown();
 }

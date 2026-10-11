@@ -1,5 +1,6 @@
 use crate::common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Next, ProxyHealthResource, Request, Response, Router};
 use camber::{Resource, RuntimeError, runtime};
 use std::future::Future;
@@ -127,15 +128,15 @@ async fn proxy_returns_503_when_backend_unhealthy() {
     main.proxy_checked("", &format!("http://{backend_addr}"), Arc::clone(&healthy));
     let main_addr = common::spawn_server(main);
 
-    let resp = http::get(&format!("http://{main_addr}/hello"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "from-backend");
+    assert_eq!(resp.text().unwrap(), "from-backend");
 
     healthy.store(false, Ordering::Relaxed);
 
-    let resp = http::get(&format!("http://{main_addr}/hello"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 503);
@@ -157,23 +158,23 @@ async fn proxy_recovers_when_backend_returns() {
     main.proxy_checked("", &format!("http://{backend_addr}"), Arc::clone(&healthy));
     let main_addr = common::spawn_server(main);
 
-    let resp = http::get(&format!("http://{main_addr}/hello"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
 
     healthy.store(false, Ordering::Relaxed);
-    let resp = http::get(&format!("http://{main_addr}/hello"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 503);
 
     healthy.store(true, Ordering::Relaxed);
-    let resp = http::get(&format!("http://{main_addr}/hello"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "alive");
+    assert_eq!(resp.text().unwrap(), "alive");
 
     runtime::request_shutdown();
 }
@@ -190,17 +191,17 @@ async fn proxy_without_health_check_unchanged() {
     main.proxy("/api", &format!("http://{backend_addr}"));
     let main_addr = common::spawn_server(main);
 
-    let resp = http::get(&format!("http://{main_addr}/api/hello"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/api/hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "proxied");
+    assert_eq!(resp.text().unwrap(), "proxied");
 
     let mut broken = Router::new();
     broken.proxy("/api", "http://127.0.0.1:1");
     let broken_addr = common::spawn_server(broken);
 
-    let resp = http::get(&format!("http://{broken_addr}/api/anything"))
+    let resp: ClientResponse = http::get(&format!("http://{broken_addr}/api/anything"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 502);
@@ -231,9 +232,10 @@ fn proxy_health_checker_reports_via_health_endpoint() {
             main.proxy_checked("", &format!("http://{backend_addr}"), healthy);
             let main_addr = common::spawn_server(main);
 
-            let resp = common::block_on(http::get(&format!("http://{main_addr}/health"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{main_addr}/health"))).unwrap();
             assert_eq!(resp.status(), 200);
-            let body = resp.body();
+            let body = resp.text().unwrap();
             assert!(
                 body.contains(&format!("http://{backend_addr}")),
                 "expected backend URL in health response: {body}"
@@ -283,14 +285,16 @@ fn proxy_health_checker_still_controls_routing() {
 
             wait_for_flag(&healthy, false);
 
-            let resp = common::block_on(http::get(&format!("http://{main_addr}/hello"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{main_addr}/hello"))).unwrap();
             assert_eq!(resp.status(), 503);
 
             healthy.store(true, Ordering::Release);
 
-            let resp = common::block_on(http::get(&format!("http://{main_addr}/hello"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{main_addr}/hello"))).unwrap();
             assert_eq!(resp.status(), 200);
-            assert_eq!(resp.body(), "from-backend");
+            assert_eq!(resp.text().unwrap(), "from-backend");
 
             runtime::request_shutdown();
         })
@@ -305,9 +309,10 @@ fn health_endpoint_returns_200_when_all_resources_healthy() {
         .resource(HealthyResource("cache"))
         .run(|| {
             let addr = common::spawn_server(Router::new());
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
             assert_eq!(resp.status(), 200);
-            assert!(resp.body().contains(r#""status":"healthy""#));
+            assert!(resp.text().unwrap().contains(r#""status":"healthy""#));
             runtime::request_shutdown();
         })
         .unwrap();
@@ -414,7 +419,8 @@ fn health_endpoint_goes_through_middleware() {
 
             let addr = common::spawn_server(router);
 
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
             assert_eq!(resp.status(), 401);
 
             let raw =
@@ -438,9 +444,10 @@ fn skip_middleware_for_internal_bypasses_auth() {
 
             let addr = common::spawn_server(router);
 
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
             assert_eq!(resp.status(), 200);
-            assert!(resp.body().contains(r#""status":"healthy""#));
+            assert!(resp.text().unwrap().contains(r#""status":"healthy""#));
 
             runtime::request_shutdown();
         })
@@ -456,10 +463,12 @@ fn internal_routes_registered_during_freeze() {
             let router = Router::new();
             let addr = common::spawn_server(router);
 
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
             assert_eq!(resp.status(), 200);
 
-            let resp = common::block_on(http::get(&format!("http://{addr}/metrics"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/metrics"))).unwrap();
             assert_eq!(resp.status(), 200);
 
             runtime::request_shutdown();

@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use camber::http::ClientError;
+use camber::http::ClientResponse;
 use camber::http::{Request, Response, Router};
 use camber::tls::CertStore;
 use camber::{RuntimeError, runtime, spawn};
@@ -107,22 +109,18 @@ fn tls_rejects_plaintext() {
             let mut router = Router::new();
             router.get("/hello", |_: &Request| async { Response::text(200, "hi") });
             let addr = spawn_router(router);
-            let result = crate::runtime_support::block_on(tokio::time::timeout(
-                PROTOCOL_TIMEOUT,
-                camber::http::get(&format!("http://{addr}/hello")),
-            ))
-            .expect("plaintext rejection timed out");
+            let result: Result<ClientResponse, RuntimeError> =
+                crate::runtime_support::block_on(tokio::time::timeout(
+                    PROTOCOL_TIMEOUT,
+                    camber::http::get(&format!("http://{addr}/hello")),
+                ))
+                .expect("plaintext rejection timed out");
             match result {
-                Err(RuntimeError::Http(message)) => {
-                    assert!(
-                        !message.is_empty(),
-                        "HTTP transport error must have context"
-                    );
-                }
-                Err(RuntimeError::Timeout) => {
+                Err(RuntimeError::Client(ClientError::Transport)) => {}
+                Err(RuntimeError::Client(ClientError::Timeout(_))) => {
                     panic!("Camber HTTP timeout is not proof that TLS rejected plaintext");
                 }
-                Err(error) => panic!("expected RuntimeError::Http, got {error:?}"),
+                Err(error) => panic!("expected the client transport failure, got {error:?}"),
                 Ok(response) => panic!(
                     "plaintext unexpectedly produced HTTP response {}",
                     response.status()

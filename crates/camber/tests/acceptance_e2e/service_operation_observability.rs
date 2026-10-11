@@ -21,11 +21,13 @@ use crate::common;
 use crate::http as http_support;
 use crate::operation_completion::{
     ABSENT, COMPLETION_EVENT, Expected, Recorded, assert_event_matches, assert_not_recorded_yet,
-    assert_recorded_once, moved, only_completion, recorded_latency,
+    assert_recorded_once, moved, only_completion, recorded, recorded_latency,
 };
 
 #[cfg(feature = "profiling")]
 use camber::__private::DEFAULT_PROFILING_RESPONSE_LIMIT;
+#[cfg(feature = "profiling")]
+use camber::http::ClientResponse;
 use camber::http::mock::ScopedUnwatched;
 #[cfg(feature = "profiling")]
 use camber::http::mock::{self, BlockingWorkerEdge};
@@ -173,12 +175,12 @@ async fn assert_the_unnamed_spelling_freezes_the_documented_maximum() {
     let server = serve(base_policy());
     let addr = server.addr();
 
-    let answered = profile(addr)
+    let answered: ClientResponse = profile(addr)
         .await
         .expect("the defaulted profiling request was answered");
     assert_eq!(answered.status(), 200, "{label}: unexpected status");
     assert!(
-        answered.body().starts_with("<?xml"),
+        answered.text().unwrap().starts_with("<?xml"),
         "{label}: the whole rendered profile reaches the peer",
     );
 
@@ -245,7 +247,7 @@ async fn assert_held_entry_renders_whole_under_the_opt_out() -> usize {
         0,
         "{label}: nothing is retained before the sampler runs",
     );
-    let witness = camber::http::get(&format!("http://{addr}{HELD_WITNESS_TARGET}"))
+    let witness: ClientResponse = camber::http::get(&format!("http://{addr}{HELD_WITNESS_TARGET}"))
         .await
         .expect("the request sent while the profiler is held was answered");
     assert_eq!(
@@ -258,13 +260,13 @@ async fn assert_held_entry_renders_whole_under_the_opt_out() -> usize {
         .worker
         .release(BlockingWorkerEdge::ProfilingWorkerEntered)
         .expect("the held worker resumes");
-    let answered = profiling
+    let answered: ClientResponse = profiling
         .await
         .expect("the profiling request task")
         .expect("the profiling answer");
     assert_eq!(answered.status(), 200, "{label}: unexpected status");
     assert!(
-        answered.body().starts_with("<?xml"),
+        answered.text().unwrap().starts_with("<?xml"),
         "{label}: the whole rendered profile reaches the peer",
     );
 
@@ -319,20 +321,20 @@ async fn assert_the_crossing_write_is_dropped_and_named(
     let addr = server.addr();
 
     let captured = common::capture_events(PROFILING_PATH_FIELD);
-    let answered = profile(addr)
+    let answered: ClientResponse = profile(addr)
         .await
         .expect("the refused profiling request was answered");
 
     assert_eq!(answered.status(), 500, "{label}: unexpected status");
     assert_eq!(
-        answered.body(),
+        answered.text().unwrap(),
         common::REDACTED_BODY,
         "{label}: the peer is told only that the service failed",
     );
     assert!(
-        !answered.body().contains("<?xml") && !answered.body().contains("svg"),
+        !answered.text().unwrap().contains("<?xml") && !answered.text().unwrap().contains("svg"),
         "{label}: no rendered byte reaches the peer: {}",
-        answered.body(),
+        answered.text().unwrap(),
     );
 
     let rendered = Rendered::of(&controller);
@@ -371,7 +373,7 @@ async fn assert_the_crossing_write_is_dropped_and_named(
 
 /// One live profiling request, bounded by the peer's own deadline.
 #[cfg(feature = "profiling")]
-async fn profile(addr: SocketAddr) -> Result<Response, camber::RuntimeError> {
+async fn profile(addr: SocketAddr) -> Result<ClientResponse, camber::RuntimeError> {
     camber::http::client()
         .request_timeout(ANSWER_BOUND)
         .get(&format!("http://{addr}{PROFILING_TARGET}"))
@@ -912,7 +914,7 @@ fn assert_upgrade_records_at_its_handoff(fixture: &CompletionFixture) {
     drop(peer);
 
     let settled = http_support::poll_until(COMPLETION_BOUND, || {
-        moved(&before, &Recorded::scraped(fixture.addr()), &expected) >= 1
+        recorded(&before, &Recorded::scraped(fixture.addr()), &expected)
     });
     assert!(settled, "upgrade: the committed handoff was never recorded");
     assert_recorded_once(&before, &Recorded::scraped(fixture.addr()), &expected);
@@ -992,7 +994,7 @@ fn assert_held_class_records_at_its_body(
     drop(peer);
 
     let settled = http_support::poll_until(COMPLETION_BOUND, || {
-        moved(&before, &Recorded::scraped(fixture.addr()), expected) >= 1
+        recorded(&before, &Recorded::scraped(fixture.addr()), expected)
     });
     assert!(
         settled,
@@ -1033,7 +1035,7 @@ fn assert_disconnect_records_the_peer_that_left(fixture: &CompletionFixture) {
     drop(peer);
 
     let settled = http_support::poll_until(COMPLETION_BOUND, || {
-        moved(&before, &Recorded::scraped(fixture.addr()), &expected) >= 1
+        recorded(&before, &Recorded::scraped(fixture.addr()), &expected)
     });
     assert!(
         settled,
@@ -1127,7 +1129,7 @@ fn assert_postcommit_boundary_keeps_the_committed_status(fixture: &CompletionFix
     );
 
     let settled = http_support::poll_until(COMPLETION_BOUND, || {
-        moved(&before, &Recorded::scraped(fixture.addr()), &expected) >= 1
+        recorded(&before, &Recorded::scraped(fixture.addr()), &expected)
     });
     assert!(
         settled,
@@ -1163,7 +1165,7 @@ fn assert_broken_transport_names_its_connection_end(fixture: &CompletionFixture)
     drop(peer);
 
     let settled = http_support::poll_until(COMPLETION_BOUND, || {
-        moved(&before, &Recorded::scraped(fixture.addr()), &expected) >= 1
+        recorded(&before, &Recorded::scraped(fixture.addr()), &expected)
     });
     assert!(
         settled,
@@ -1281,7 +1283,7 @@ fn assert_unrouted_authority_records_its_router_terminal(fixture: &CompletionFix
     drop(peer);
 
     let settled = http_support::poll_until(COMPLETION_BOUND, || {
-        moved(&before, &Recorded::scraped(fixture.addr()), &expected) >= 1
+        recorded(&before, &Recorded::scraped(fixture.addr()), &expected)
     });
     assert!(
         settled,
@@ -2275,7 +2277,7 @@ fn assert_graceful_stop_records_the_phase_it_observed(scrape: std::net::SocketAd
     drop(peer);
 
     let settled = http_support::poll_until(ESCALATION_BOUND, || {
-        moved(&before, &Recorded::scraped(scrape), &expected) >= 1
+        recorded(&before, &Recorded::scraped(scrape), &expected)
     });
     assert!(
         settled,
@@ -2417,9 +2419,7 @@ fn assert_precommit_reset_records_no_producer(scrape: std::net::SocketAddr) {
         let after = Recorded::scraped(scrape);
         results
             .iter()
-            .map(|expected| moved(&before, &after, expected))
-            .sum::<u64>()
-            >= 1
+            .any(|expected| recorded(&before, &after, expected))
     });
     let after = Recorded::scraped(scrape);
     let recorded: u64 = results

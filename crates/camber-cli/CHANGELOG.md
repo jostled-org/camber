@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(new)* The `http` template's `/proxy` route reads the upstream answer with
+  `ClientResponse::text` and builds its own `Response`. A non-UTF-8 upstream
+  body answers the fixed `500`.
+- *(context)* The Outbound HTTP section of `llms.txt` lists the
+  `ClientResponse` accessors and shows a handler that forwards an upstream
+  answer. It shows a request described with `Client::request`, with a sensitive
+  header, typed JSON, and a per-request response maximum. It states these
+  rules: redirects are not followed without `RedirectPolicy::SameOrigin`,
+  `total_timeout` bounds the whole call, only idempotent methods retry without
+  `RetryPolicy::Replayable`, and Camber does not check the address a host
+  resolves to. It names `trace_context(false)` and the
+  `http.client.completed` event.
+
 ## [0.10.0](https://github.com/jostled-org/camber/compare/camber-cli-v0.9.0...camber-cli-v0.10.0) - 2026-10-09
 
 ### Added

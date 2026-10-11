@@ -95,7 +95,7 @@ pub(super) fn read_response(client: &mut std::net::TcpStream) -> HttpResponse {
 }
 
 /// Open a connection and send `path` without reading anything back.
-pub(super) fn start_request(addr: SocketAddr, path: &str) -> std::net::TcpStream {
+pub(crate) fn start_request(addr: SocketAddr, path: &str) -> std::net::TcpStream {
     let mut client = crate::common::connect(addr).expect("failed to connect the peer");
     crate::common::write_request(&mut client, "GET", path, &[], &[])
         .expect("failed to send the request");

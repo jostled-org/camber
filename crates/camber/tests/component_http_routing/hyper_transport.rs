@@ -1,5 +1,6 @@
 use crate::runtime_support as common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::{runtime, spawn};
 use std::collections::HashSet;
@@ -52,9 +53,9 @@ async fn hyper_serves_get_request() {
 
     let addr = common::spawn_server(router);
 
-    let resp = http::get(&format!("http://{addr}/hello")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/hello")).await.unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hi");
+    assert_eq!(resp.text().unwrap(), "hi");
 
     runtime::request_shutdown();
 }
@@ -69,11 +70,11 @@ async fn hyper_serves_post_with_body() {
 
     let addr = common::spawn_server(router);
 
-    let resp = http::post(&format!("http://{addr}/echo"), "payload")
+    let resp: ClientResponse = http::post(&format!("http://{addr}/echo"), "payload")
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "payload");
+    assert_eq!(resp.text().unwrap(), "payload");
 
     runtime::request_shutdown();
 }
@@ -119,7 +120,7 @@ async fn hyper_graceful_shutdown() {
 
     let addr = common::spawn_server(router);
 
-    let resp = http::get(&format!("http://{addr}/alive")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/alive")).await.unwrap();
     assert_eq!(resp.status(), 200);
 
     runtime::request_shutdown();

@@ -2,9 +2,12 @@
 pub mod delivery_fixture;
 #[path = "support/deterministic.rs"]
 pub mod deterministic;
+#[path = "support/error_chain.rs"]
+pub mod error_chain;
 // Mounted for the bounded poll `process` reaps its children through, and for
 // the head read and address-reuse check the ambiguous transport row in
-// `retry_delays` uses.
+// `retry_delays` uses. `client_failures` uses the head read and the undialed
+// listener.
 #[path = "support/http.rs"]
 pub mod http;
 #[path = "support/integration_vocabulary.rs"]
@@ -19,6 +22,9 @@ pub mod local_integrations;
 pub mod process;
 #[path = "support/rejection_kinds.rs"]
 pub mod rejection_kinds;
+// Mounted for the served route the client-failure rejection rows enter through.
+#[path = "support/runtime.rs"]
+pub mod runtime_support;
 #[path = "support/temp.rs"]
 pub mod temp_support;
 #[path = "support/tls.rs"]
@@ -33,6 +39,10 @@ mod body_admission;
 mod certificate_management;
 #[path = "focused_api_contracts/channel_errors.rs"]
 mod channel_errors;
+#[path = "focused_api_contracts/client_failures.rs"]
+mod client_failures;
+#[path = "focused_api_contracts/client_redirects.rs"]
+mod client_redirects;
 #[path = "focused_api_contracts/configuration_loading.rs"]
 mod configuration_loading;
 #[path = "focused_api_contracts/configuration_validation.rs"]

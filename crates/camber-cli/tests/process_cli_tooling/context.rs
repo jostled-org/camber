@@ -34,6 +34,10 @@ fn context_command_generates_llms_txt() -> Result<(), FixtureError> {
         assert!(content.contains("Request"), "missing Request");
         assert!(content.contains("RuntimeError"), "missing RuntimeError");
         assert!(
+            content.contains("RuntimeError::Client(ClientError)"),
+            "missing the outbound failure variant"
+        );
+        assert!(
             content.contains("Anti-pattern")
                 || content.contains("anti-pattern")
                 || content.contains("Avoid"),

@@ -13,8 +13,52 @@ pub use crate::http::body_admission::{checked_body_frame_total, declared_length_
 /// Re-exported for the reason the pair above is: a focused contract that
 /// classified its own copy of a Reqwest error would prove its own rule, not the
 /// one a retried request is actually refused or admitted by. It reads an error,
-/// a method, and the configured opt-in, and owns nothing.
+/// a method, and the request's replay permission, and owns nothing.
 pub use crate::http::client::client_retryable_transport;
+
+/// The exact decisions the outbound client admits a redirect by and counts a
+/// send by.
+///
+/// Re-exported for the reason the decision above is: a focused contract that
+/// compared its own origins or added its own counters would prove its own
+/// rule, not the one a redirect is actually followed or refused by. Each reads
+/// its arguments and owns nothing.
+pub use crate::http::client::{
+    client_next_redirect, client_redirect_destination, client_send_total,
+};
+
+/// The exact projection the outbound client classifies a failed send with.
+///
+/// Re-exported for the reason the decision above is: a focused contract that
+/// classified its own copy of a Reqwest error would prove its own categories,
+/// not the one a failed request is actually returned as. It reads an error and
+/// owns nothing.
+pub use crate::http::client::client_error_projection;
+
+/// The exact projection the outbound client names a failed operation's
+/// outcome with in its completion event.
+///
+/// Re-exported for the reason the projection above is: a focused contract that
+/// named its own outcomes would prove its own vocabulary, not the one an
+/// emitted event carries. It reads an error and owns nothing.
+pub use crate::http::client::client_terminal_outcome;
+
+/// The exact sensitivity bit a described request hands the transport for one
+/// header.
+///
+/// Re-exported because the bit is not visible on the wire: a peer reads the
+/// header value and cannot read how the transport was told to treat it. It
+/// reads a request and owns nothing.
+pub use crate::http::client::client_header_sensitivity;
+
+/// The exact cache a reusable client keeps its built transport in, as a
+/// presence bit.
+///
+/// Re-exported because a discarded transport is not visible on the wire for
+/// every setting: no local peer can hold a dial open, so a connect bound a
+/// stale transport kept would answer exactly as the new one does. It reads a
+/// client and owns nothing.
+pub use crate::http::client::client_transport_is_built;
 
 /// The exact functions the outbound client chooses each retry delay with.
 ///

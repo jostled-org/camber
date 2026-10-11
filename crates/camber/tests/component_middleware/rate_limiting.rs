@@ -1,6 +1,7 @@
 use crate::runtime_support as common;
 
 use camber::RuntimeError;
+use camber::http::ClientResponse;
 use camber::http::rate_limit;
 use camber::http::{Request, Response, Router};
 use camber::runtime;
@@ -14,7 +15,7 @@ async fn rate_limit_allows_requests_within_limit() {
     let addr = common::spawn_server(router);
 
     for _ in 0..5 {
-        let resp = camber::http::get(&format!("http://{addr}/ok"))
+        let resp: ClientResponse = camber::http::get(&format!("http://{addr}/ok"))
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
@@ -32,7 +33,7 @@ async fn rate_limit_rejects_excess_requests() {
 
     let mut statuses = Vec::new();
     for _ in 0..5 {
-        let resp = camber::http::get(&format!("http://{addr}/ok"))
+        let resp: ClientResponse = camber::http::get(&format!("http://{addr}/ok"))
             .await
             .unwrap();
         statuses.push(resp.status());
@@ -55,7 +56,7 @@ async fn rate_limit_replenishes_over_time() {
 
     // Exhaust tokens
     for _ in 0..2 {
-        let resp = camber::http::get(&format!("http://{addr}/ok"))
+        let resp: ClientResponse = camber::http::get(&format!("http://{addr}/ok"))
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
@@ -66,7 +67,7 @@ async fn rate_limit_replenishes_over_time() {
 
     // Should have tokens again
     for _ in 0..2 {
-        let resp = camber::http::get(&format!("http://{addr}/ok"))
+        let resp: ClientResponse = camber::http::get(&format!("http://{addr}/ok"))
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
@@ -91,7 +92,7 @@ async fn rate_limit_builder_configures_burst() {
 
     // Burst allows 5 rapid requests
     for i in 0..5 {
-        let resp = camber::http::get(&format!("http://{addr}/ok"))
+        let resp: ClientResponse = camber::http::get(&format!("http://{addr}/ok"))
             .await
             .unwrap();
         assert_eq!(
@@ -102,7 +103,7 @@ async fn rate_limit_builder_configures_burst() {
     }
 
     // 6th should be rejected
-    let resp = camber::http::get(&format!("http://{addr}/ok"))
+    let resp: ClientResponse = camber::http::get(&format!("http://{addr}/ok"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 429);
@@ -119,7 +120,7 @@ async fn rate_limit_per_minute_works() {
 
     let mut statuses = Vec::new();
     for _ in 0..4 {
-        let resp = camber::http::get(&format!("http://{addr}/ok"))
+        let resp: ClientResponse = camber::http::get(&format!("http://{addr}/ok"))
             .await
             .unwrap();
         statuses.push(resp.status());

@@ -96,7 +96,7 @@ pub(super) fn count_rejection(ctx: &ConnCtx, kind: RejectionKind, status: u16) {
 ///
 /// Common codes get `&'static str` with zero allocation. Rare codes
 /// are cached in a fixed-size table initialized on first use — no memory leak.
-fn status_to_label(status: Option<u16>) -> &'static str {
+pub(super) fn status_to_label(status: Option<u16>) -> &'static str {
     match status {
         None => super::completion::ABSENT_LABEL,
         Some(200) => "200",

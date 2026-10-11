@@ -1,77 +1,76 @@
 //! One request and the collection of its answer.
 //!
-//! An exchange is what every attempt repeats: the same client, method, target,
-//! and body, collected under the same response maximum. It holds no retry
-//! policy and no deadline of its own beyond the ones its Reqwest client
-//! enforces per attempt.
+//! An exchange is what every attempt repeats: the same client and the same
+//! validated description, collected under the same response maximum. A
+//! followed redirect changes that description, so the attempts after it repeat
+//! the hop. It holds no retry policy, no redirect policy, and no deadline. It
+//! reads no trace context: the description already holds the one the
+//! operation began under. The operation that runs it owns the attempt timer
+//! and the operation deadline, and the Reqwest client owns the connect and
+//! quiet-interval timers.
 
-use super::super::Response;
 use super::super::boundary::ByteBoundary;
-use super::super::checked_collect::collect_response;
-use super::super::map_reqwest_error;
+use super::super::checked_collect::collect_checked;
+use super::description::Description;
+use super::projection::collection_failure;
+use super::redirect::Carried;
+use super::response::{ClientResponse, wire_headers};
 use crate::RuntimeError;
-use bytes::Bytes;
-use reqwest::Method;
-use reqwest::header::{CONTENT_TYPE, HeaderValue};
-use std::borrow::Cow;
-
-/// The W3C trace context header, validated at compile time rather than parsed
-/// on every attempt.
-#[cfg(feature = "otel")]
-const TRACEPARENT: reqwest::header::HeaderName =
-    reqwest::header::HeaderName::from_static("traceparent");
+use reqwest::{Method, Url};
 
 /// One request as every attempt of it is sent.
 pub(super) struct Exchange<'a> {
     client: &'a reqwest::Client,
-    method: &'a Method,
-    url: &'a str,
-    /// The content type and payload. The payload is copied once, here, and
-    /// each attempt shares that copy. The content type is a static
-    /// `HeaderValue`, so no attempt parses or copies it.
-    body: Option<(HeaderValue, Bytes)>,
-    /// The response ceiling, or `None` for the named opt-out.
-    response_limit: Option<usize>,
+    /// The validated request. Each attempt clones its headers and shares its
+    /// frozen body, so no attempt parses or copies a payload.
+    description: Description,
 }
 
 impl<'a> Exchange<'a> {
-    pub(super) fn new(
-        client: &'a reqwest::Client,
-        method: &'a Method,
-        url: &'a str,
-        body: Option<(HeaderValue, &str)>,
-        response_limit: Option<usize>,
-    ) -> Self {
+    pub(super) fn new(client: &'a reqwest::Client, description: Description) -> Self {
         Self {
             client,
-            method,
-            url,
-            body: body.map(|(content_type, payload)| {
-                (content_type, Bytes::copy_from_slice(payload.as_bytes()))
-            }),
-            response_limit,
+            description,
         }
     }
 
-    pub(super) fn method(&self) -> &'a Method {
-        self.method
+    pub(super) fn method(&self) -> &Method {
+        self.description.method()
     }
 
-    pub(super) fn url(&self) -> &'a str {
-        self.url
+    /// The URL the next attempt is sent to.
+    pub(super) fn url(&self) -> &Url {
+        self.description.url()
+    }
+
+    /// Make the request the one an authorized redirect asks for.
+    pub(super) fn follow(&mut self, url: Url, carried: Carried) {
+        self.description.retarget(url);
+        match carried {
+            Carried::Whole => {}
+            Carried::Bodiless(method) => self.description.become_bodiless(method),
+        }
+    }
+
+    /// The host this request is sent to.
+    ///
+    /// The only part of the target a diagnostic may name: the path and the
+    /// query can hold what the caller did not mean to publish.
+    pub(super) fn host(&self) -> &str {
+        self.description.url().host_str().unwrap_or_default()
     }
 
     /// Send one attempt and wait for its response head.
+    ///
+    /// An empty body is no body: the transport then declares no content.
     pub(super) async fn send(&self) -> Result<reqwest::Response, reqwest::Error> {
-        let mut builder = self.client.request(self.method.clone(), self.url);
-        if let Some((content_type, payload)) = &self.body {
-            builder = builder
-                .header(CONTENT_TYPE, content_type.clone())
-                .body(payload.clone());
-        }
-        #[cfg(feature = "otel")]
-        if let Some(ctx) = super::super::otel::current_context() {
-            builder = builder.header(TRACEPARENT, ctx.format_traceparent().as_str());
+        let description = &self.description;
+        let mut builder = self
+            .client
+            .request(description.method().clone(), description.url().clone())
+            .headers(description.headers().clone());
+        if !description.body().is_empty() {
+            builder = builder.body(description.body().clone());
         }
         builder.send().await
     }
@@ -79,43 +78,29 @@ impl<'a> Exchange<'a> {
     /// Read one answer's head, then collect its body under the configured
     /// maximum.
     ///
-    /// The head is taken first because the ceiling refuses bodies: a caller told
-    /// that its peer answered too large still learns the status and headers it
-    /// answered with from the typed cause's own boundary, and nothing here has
-    /// to re-read a response the collector consumed.
-    pub(super) async fn collect(&self, resp: reqwest::Response) -> Result<Response, RuntimeError> {
+    /// The head is copied first because the collector consumes the response.
+    /// A refused or failed collection returns its typed cause alone: the head
+    /// is dropped with it, so no partial answer reaches the caller.
+    pub(super) async fn collect(
+        &self,
+        resp: reqwest::Response,
+    ) -> Result<ClientResponse, RuntimeError> {
         let status = resp.status().as_u16();
-
-        let headers: Vec<_> = resp
-            .headers()
-            .iter()
-            .map(|(k, v)| {
-                let name: Cow<'static, str> = Cow::Owned(k.as_str().to_owned());
-                let value: Cow<'static, str> = Cow::Owned(v.to_str().unwrap_or("").to_owned());
-                (name, value)
-            })
-            .collect();
+        let headers = wire_headers(resp.headers());
 
         // No quiet interval of this collection's own: a client's response idle
         // deadline is configured on its Reqwest client and enforced per read
         // there, so arming a second timer here would be a second owner of one
         // dimension.
-        let body_bytes = collect_response(
+        let body_bytes = collect_checked(
             resp,
             ByteBoundary::ClientResponse,
-            self.response_limit,
+            self.description.response_limit(),
             None,
         )
-        .await?;
+        .await
+        .map_err(|failure| collection_failure(&failure))?;
 
-        Ok(Response::new(status, body_bytes, headers))
-    }
-
-    /// Run the exchange once, with no retry sequence around it.
-    ///
-    /// The attempt's own boundaries are the whole lifetime authority.
-    pub(super) async fn once(&self) -> Result<Response, RuntimeError> {
-        let resp = self.send().await.map_err(map_reqwest_error)?;
-        self.collect(resp).await
+        Ok(ClientResponse::new(status, headers, body_bytes))
     }
 }

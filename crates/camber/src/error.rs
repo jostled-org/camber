@@ -61,10 +61,10 @@ pub enum RuntimeError {
     /// A buffered collection crossed the byte maximum its policy configured.
     ///
     /// The counterpart of [`RuntimeError::DeadlineExceeded`] for the other half
-    /// of the same vocabulary: an oversized outbound response, upstream body,
-    /// static file, or rendered profile names the bound it crossed, so an
-    /// operator reads which maximum to widen rather than that "something was
-    /// too big". The crossing bytes are never retained, and the payload that
+    /// of the same vocabulary: an oversized upstream body, static file, or
+    /// rendered profile names the bound it crossed, so an operator reads which
+    /// maximum to widen rather than that "something was too big". An outbound
+    /// client response reports [`RuntimeError::Client`] instead. The crossing bytes are never retained, and the payload that
     /// was retained before it is released with this failure.
     #[error("byte limit exceeded: {0}")]
     LimitExceeded(crate::http::ByteBoundary),
@@ -111,6 +111,17 @@ pub enum RuntimeError {
     /// An HTTP client, server, or protocol-level failure occurred.
     #[error("http error: {0}")]
     Http(Arc<str>),
+
+    /// An outbound HTTP client call failed.
+    ///
+    /// Carries the closed [`ClientError`] category and nothing else: no URL,
+    /// header value, body, or transport error text, and no `source`. The HTTP
+    /// rejection boundary answers it with the fixed internal-service response,
+    /// so an upstream status is never an inbound status.
+    ///
+    /// [`ClientError`]: crate::http::ClientError
+    #[error("http client error: {0}")]
+    Client(crate::http::ClientError),
 
     /// The caller supplied invalid request data.
     #[error("bad request: {0}")]
@@ -197,6 +208,12 @@ pub enum RuntimeError {
     /// ACME certificate provisioning or renewal failed.
     #[error("acme error: {0}")]
     Acme(Box<str>),
+}
+
+impl From<crate::http::ClientError> for RuntimeError {
+    fn from(failure: crate::http::ClientError) -> Self {
+        Self::Client(failure)
+    }
 }
 
 /// The IO error kind a `RuntimeError` wraps, or `None` for every other

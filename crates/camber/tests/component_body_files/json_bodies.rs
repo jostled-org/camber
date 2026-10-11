@@ -1,5 +1,6 @@
 use crate::runtime_support as common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::{RuntimeError, runtime};
 use serde::{Deserialize, Serialize};
@@ -23,22 +24,21 @@ fn json_request_and_response_round_trip() {
             let addr = common::spawn_server(router);
 
             let body = r#"{"name":"alice","age":30}"#;
-            let resp =
+            let resp: ClientResponse =
                 common::block_on(http::post_json(&format!("http://{addr}/echo"), body)).unwrap();
 
             assert_eq!(resp.status(), 200);
 
             let ct = resp
                 .headers()
-                .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("content-type"));
             assert_eq!(
-                ct.map(|(_, v)| v.as_ref()),
-                Some("application/json"),
+                ct.map(|(_, v)| v),
+                Some(&b"application/json"[..]),
                 "Content-Type should be application/json"
             );
 
-            let parsed: Payload = serde_json::from_str(resp.body()).unwrap();
+            let parsed: Payload = serde_json::from_str(resp.text().unwrap()).unwrap();
             assert_eq!(
                 parsed,
                 Payload {
@@ -84,7 +84,7 @@ fn json_deserialization_error_returns_400() {
 
             // Missing required "age" field
             let body = r#"{"name":"alice"}"#;
-            let resp =
+            let resp: ClientResponse =
                 common::block_on(http::post_json(&format!("http://{addr}/typed"), body)).unwrap();
 
             assert_eq!(resp.status(), 400);

@@ -2,6 +2,7 @@ use crate::common;
 
 use camber::Resource;
 use camber::RuntimeError;
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -301,9 +302,10 @@ fn health_endpoint_returns_200_when_all_resources_healthy() {
         .resource(HealthyResource("cache"))
         .run(|| {
             let addr = common::spawn_server(Router::new());
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
             assert_eq!(resp.status(), 200);
-            assert!(resp.body().contains(r#""status":"healthy""#));
+            assert!(resp.text().unwrap().contains(r#""status":"healthy""#));
             runtime::request_shutdown();
         })
         .unwrap();
@@ -372,7 +374,8 @@ fn health_endpoint_goes_through_middleware() {
             let addr = common::spawn_server(router);
 
             // No auth header -> 401 (middleware blocks)
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
             assert_eq!(resp.status(), 401);
 
             // With auth header -> 200
@@ -398,9 +401,10 @@ fn skip_middleware_for_internal_bypasses_auth() {
             let addr = common::spawn_server(router);
 
             // No auth header -> 200 (middleware bypassed for internal routes)
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
             assert_eq!(resp.status(), 200);
-            assert!(resp.body().contains(r#""status":"healthy""#));
+            assert!(resp.text().unwrap().contains(r#""status":"healthy""#));
 
             runtime::request_shutdown();
         })
@@ -441,11 +445,13 @@ fn internal_routes_registered_during_freeze() {
             let addr = common::spawn_server(router);
 
             // /health responds (no explicit route registered)
-            let resp = common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/health"))).unwrap();
             assert_eq!(resp.status(), 200);
 
             // /metrics responds (no explicit route registered)
-            let resp = common::block_on(http::get(&format!("http://{addr}/metrics"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/metrics"))).unwrap();
             assert_eq!(resp.status(), 200);
 
             runtime::request_shutdown();

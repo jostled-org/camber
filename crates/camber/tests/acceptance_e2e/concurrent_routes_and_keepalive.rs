@@ -1,5 +1,6 @@
 use crate::common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::{RuntimeError, runtime, spawn};
 use std::io::{Read, Write};
@@ -28,22 +29,22 @@ impl RouteCounts {
         }
     }
 
-    fn record(&self, route: &str, response: &Response) {
+    fn record(&self, route: &str, response: &ClientResponse) {
         match route {
             "/hello" => {
-                assert_eq!(response.body(), "Hello");
+                assert_eq!(response.text().unwrap(), "Hello");
                 self.hello.fetch_add(1, Ordering::SeqCst);
             }
             "/proxy" => {
                 assert!(
-                    response.body().contains("backend-data"),
+                    response.text().unwrap().contains("backend-data"),
                     "proxy response: {}",
-                    response.body()
+                    response.text().unwrap()
                 );
                 self.proxy.fetch_add(1, Ordering::SeqCst);
             }
             "/slow" => {
-                assert_eq!(response.body(), "slow-done");
+                assert_eq!(response.text().unwrap(), "slow-done");
                 self.slow.fetch_add(1, Ordering::SeqCst);
             }
             _ => {}
@@ -77,8 +78,9 @@ fn spawn_main_server(backend_addr: SocketAddr) -> SocketAddr {
     router.get("/proxy", move |_req: &Request| {
         let backend_url = backend_url.clone();
         async move {
-            match http::get(&backend_url).await {
-                Ok(resp) => Response::text(200, resp.body()),
+            let fetched: Result<ClientResponse, RuntimeError> = http::get(&backend_url).await;
+            match fetched {
+                Ok(resp) => Response::text(200, resp.text()?),
                 Err(_) => Response::text(502, "upstream error"),
             }
         }
@@ -109,7 +111,7 @@ fn run_concurrent_routes(main_addr: SocketAddr) {
             let url = format!("http://{main_addr}{route}");
             let request_counts = counts.clone();
             spawn(move || {
-                let response = common::block_on(http::get(&url)).unwrap();
+                let response: ClientResponse = common::block_on(http::get(&url)).unwrap();
                 assert_eq!(response.status(), 200);
                 request_counts.record(route, &response);
             })
@@ -125,7 +127,8 @@ fn run_full_runtime_journey() {
     let backend_addr = spawn_backend_server();
     let main_addr = spawn_main_server(backend_addr);
     // Warm up
-    let response = common::block_on(http::get(&format!("http://{main_addr}/hello"))).unwrap();
+    let response: ClientResponse =
+        common::block_on(http::get(&format!("http://{main_addr}/hello"))).unwrap();
     assert_eq!(response.status(), 200);
     run_concurrent_routes(main_addr);
     verify_keepalive(main_addr);

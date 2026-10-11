@@ -1,5 +1,6 @@
 use crate::runtime_support as common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, HeaderPair, Response, Router};
 use camber::runtime;
 use std::io::Write;
@@ -45,12 +46,12 @@ async fn static_files_serves_file_content() {
     router.static_files("/assets", dir.path().to_str().unwrap());
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/assets/hello.txt"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/assets/hello.txt"))
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hello from file");
+    assert_eq!(resp.text().unwrap(), "hello from file");
 
     let direct = served_directly(dir.path(), "hello.txt").await;
     assert_eq!(direct.status(), 200);
@@ -66,10 +67,10 @@ async fn static_files_serves_index_at_root() {
     router.static_files("", dir.path().to_str().unwrap());
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "<h1>home</h1>");
+    assert_eq!(resp.text().unwrap(), "<h1>home</h1>");
 
     // The bare prefix asks the same owner for the index by name.
     let direct = served_directly(dir.path(), "index.html").await;
@@ -87,15 +88,23 @@ async fn static_files_sets_content_type() {
 
     let addr = common::spawn_server(router);
 
-    let css = http::get(&format!("http://{addr}/assets/style.css"))
+    let css: ClientResponse = http::get(&format!("http://{addr}/assets/style.css"))
         .await
         .unwrap();
-    let json = http::get(&format!("http://{addr}/assets/data.json"))
+    let json: ClientResponse = http::get(&format!("http://{addr}/assets/data.json"))
         .await
         .unwrap();
 
-    assert_eq!(content_type(css.headers()), Some("text/css"));
-    assert_eq!(content_type(json.headers()), Some("application/json"));
+    assert_eq!(
+        css.header("content-type")
+            .and_then(|v| std::str::from_utf8(v).ok()),
+        Some("text/css"),
+    );
+    assert_eq!(
+        json.header("content-type")
+            .and_then(|v| std::str::from_utf8(v).ok()),
+        Some("application/json"),
+    );
 
     assert_eq!(
         content_type(served_directly(dir.path(), "style.css").await.headers()),
@@ -116,7 +125,7 @@ async fn static_files_returns_404_for_missing() {
     router.static_files("/assets", dir.path().to_str().unwrap());
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/assets/nonexistent.txt"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/assets/nonexistent.txt"))
         .await
         .unwrap();
 
@@ -142,7 +151,7 @@ async fn static_files_blocks_directory_traversal() {
     router.static_files("/assets", dir.path().to_str().unwrap());
 
     let addr = common::spawn_server(router);
-    let resp = http::get(&format!("http://{addr}/assets/../../../etc/passwd"))
+    let resp: ClientResponse = http::get(&format!("http://{addr}/assets/../../../etc/passwd"))
         .await
         .unwrap();
 

@@ -1397,6 +1397,13 @@ fn classify(error: RuntimeError, kinds: ProducerKinds) -> Rejected {
         RuntimeError::Integration(failure) => {
             Rejected::faulted(RejectionKind::InternalService, failure)
         }
+        // An outbound failure is a fault of this service's own dependency,
+        // whichever stage awaited the call. The error is a closed category
+        // with no source, so the operator line reads it whole, and an upstream
+        // status it carries is never the status the inbound peer is given.
+        outbound @ RuntimeError::Client(_) => {
+            Rejected::faulted(RejectionKind::InternalService, Arc::new(outbound))
+        }
         other => Rejected::faulted(kinds.faulted, Arc::new(other)),
     }
 }

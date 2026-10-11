@@ -70,7 +70,7 @@ pub(super) fn start_owned(router: Router) -> (SocketAddr, ServerHandle) {
 ///
 /// The handle is dropped inside the closure so the supervisor terminates and
 /// the scope drain — which awaits the supervisor driver — completes.
-pub(super) fn with_owned_server<T, F>(router: Router, body: F) -> T
+pub(crate) fn with_owned_server<T, F>(router: Router, body: F) -> T
 where
     F: FnOnce(SocketAddr) -> T,
 {

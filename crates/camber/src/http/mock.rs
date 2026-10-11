@@ -1,11 +1,11 @@
 use super::Method;
 use super::Response;
 use super::boundary::CrossedBound;
+use super::client::{ClientResponse, HeaderEntry, request_target, text_headers};
 use super::completion::{ABSENT_LABEL, ConnectionEnd, DeliveryOutcome, ShutdownObservation};
 use super::method::RequestMethod;
 pub use super::operation::{InboundTerminal, OperationStage};
 use super::rejection::{RejectionKind, RejectionProtocol};
-use super::response::HeaderPair;
 pub use super::response_commitment::{ResponseCommit, ResponseOrigin};
 /// The proxy's own backend WebSocket handshake owner, under test trust.
 ///
@@ -4546,12 +4546,11 @@ struct MockEntry {
     url: Arc<str>,
     status: u16,
     body: bytes::Bytes,
-    /// Owned outright, not shared: nothing reads these headers but the
-    /// interception below, which copies each pair out. An `Arc<[_]>` here paid
-    /// for an atomic refcount block no one shares, and cost a second allocation
-    /// and a full copy at registration — `Vec::into` cannot reuse the buffer
-    /// for `Arc<[T]>` the way `into_boxed_slice` does.
-    headers: Box<[HeaderPair]>,
+    /// Stored in the shape an outbound response holds, converted once at
+    /// registration. Owned outright, not shared: nothing reads these headers
+    /// but the interception below, which copies the entries out for the one
+    /// answer it returns.
+    headers: Box<[HeaderEntry]>,
     call_count: Arc<AtomicUsize>,
 }
 
@@ -4565,33 +4564,35 @@ where
 }
 
 /// Check the mock registry for a matching (method, URL) pair.
-/// Returns Some(Response) if a mock is registered, None otherwise.
+/// Returns the canned answer as the outbound response a real call returns, or
+/// `None` when no mock is registered.
 ///
-/// Matching priority: exact method match first, then method-agnostic (None).
-pub(crate) fn try_intercept(method: Method, url: &str) -> Option<Response> {
+/// `method` is `None` for a method Camber does not route on. Matching
+/// priority: exact method match first, then method-agnostic (None). A request
+/// with no routed method matches a method-agnostic registration only.
+pub(crate) fn try_intercept(method: Option<Method>, url: &str) -> Option<ClientResponse> {
     if !MOCK_ACTIVE.load(Ordering::Acquire) {
         return None;
     }
     with_registry(|entries| {
         let entry = find_mock_entry(entries, method, url)?;
         entry.call_count.fetch_add(1, Ordering::Release);
-        let headers: Vec<HeaderPair> = entry
-            .headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        Some(Response::new(entry.status, entry.body.clone(), headers))
+        Some(ClientResponse::new(
+            entry.status,
+            entry.headers.clone(),
+            entry.body.clone(),
+        ))
     })
 }
 
 fn find_mock_entry<'a>(
     entries: &'a [MockEntry],
-    method: Method,
+    method: Option<Method>,
     url: &str,
 ) -> Option<&'a MockEntry> {
     entries
         .iter()
-        .find(|e| e.url.as_ref() == url && e.method == Some(method))
+        .find(|e| e.url.as_ref() == url && method.is_some() && e.method == method)
         .or_else(|| {
             entries
                 .iter()
@@ -4599,14 +4600,27 @@ fn find_mock_entry<'a>(
         })
 }
 
+/// The key one registration is matched by.
+///
+/// A request is matched by its validated target, so a registered URL is read
+/// through the same validation: a URL written without a path or with a
+/// fragment still names the request sent to it. A URL the client refuses is
+/// kept as written, and no request reaches it.
+fn mock_target(url: &str) -> Arc<str> {
+    match request_target(url) {
+        Ok(target) => Arc::from(target.as_str()),
+        Err(_) => Arc::from(url),
+    }
+}
+
 /// Register a method-agnostic mock for an outbound HTTP URL.
 ///
-/// Matches any HTTP method. Use `http_method` for method-specific mocks.
+/// Matches any HTTP method, including one Camber does not route on. Use `http_method` for method-specific mocks.
 /// Returns a `MockHttpBuilder` to configure the canned response.
 pub fn http(url: &str) -> MockHttpBuilder {
     MockHttpBuilder {
         method: None,
-        url: url.into(),
+        url: mock_target(url),
         response: None,
     }
 }
@@ -4618,7 +4632,7 @@ pub fn http(url: &str) -> MockHttpBuilder {
 pub fn http_method(method: Method, url: &str) -> MockHttpBuilder {
     MockHttpBuilder {
         method: Some(method),
-        url: url.into(),
+        url: mock_target(url),
         response: None,
     }
 }
@@ -4650,7 +4664,7 @@ impl MockHttpBuilder {
             url: self.url,
             status: resp.status(),
             body: bytes::Bytes::copy_from_slice(resp.body_bytes()),
-            headers: resp.headers().to_vec().into_boxed_slice(),
+            headers: text_headers(resp.headers()),
             call_count: Arc::clone(&call_count),
         };
         with_registry(|entries| {

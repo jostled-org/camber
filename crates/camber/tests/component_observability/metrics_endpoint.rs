@@ -1,5 +1,6 @@
 use crate::common;
 
+use camber::http::ClientResponse;
 use camber::http::{self, Next, Request, Response, Router};
 use camber::runtime;
 use std::future::Future;
@@ -19,15 +20,17 @@ fn metrics_endpoint_returns_prometheus_format() {
 
             // Send 5 requests to generate metrics
             for _ in 0..5 {
-                let resp = common::block_on(http::get(&format!("http://{addr}/hello"))).unwrap();
+                let resp: ClientResponse =
+                    common::block_on(http::get(&format!("http://{addr}/hello"))).unwrap();
                 assert_eq!(resp.status(), 200);
             }
 
             // Fetch the metrics endpoint
-            let resp = common::block_on(http::get(&format!("http://{addr}/metrics"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/metrics"))).unwrap();
             assert_eq!(resp.status(), 200);
 
-            let body = resp.body();
+            let body = resp.text().unwrap();
             assert!(
                 body.contains("http_requests_total"),
                 "expected http_requests_total in metrics output, got: {body}"
@@ -39,10 +42,8 @@ fn metrics_endpoint_returns_prometheus_format() {
 
             // Prometheus text format uses text/plain
             let content_type = resp
-                .headers()
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
-                .map(|(_, v)| v.as_ref())
+                .header("Content-Type")
+                .and_then(|v| std::str::from_utf8(v).ok())
                 .unwrap_or("");
             assert!(
                 content_type.contains("text/plain"),
@@ -64,7 +65,7 @@ async fn metrics_disabled_by_default() {
     let addr = common::spawn_server(router);
 
     // /metrics should be 404 when metrics not enabled
-    let resp = http::get(&format!("http://{addr}/metrics")).await.unwrap();
+    let resp: ClientResponse = http::get(&format!("http://{addr}/metrics")).await.unwrap();
     assert_eq!(resp.status(), 404);
 
     runtime::request_shutdown();
@@ -94,7 +95,8 @@ fn metrics_endpoint_goes_through_middleware() {
             let addr = common::spawn_server(router);
 
             // No auth header → 401 (middleware blocks)
-            let resp = common::block_on(http::get(&format!("http://{addr}/metrics"))).unwrap();
+            let resp: ClientResponse =
+                common::block_on(http::get(&format!("http://{addr}/metrics"))).unwrap();
             assert_eq!(resp.status(), 401);
 
             // With auth header → 200

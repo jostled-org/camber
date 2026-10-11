@@ -5,6 +5,7 @@ use crate::common::{
     write_ws_text_frame,
 };
 
+use camber::http::ClientResponse;
 use camber::http::{self, Request, Response, Router};
 use camber::runtime;
 use std::io::{Read, Write};
@@ -39,11 +40,11 @@ async fn e2e_proxy_handles_mixed_content() {
     let main_addr = common::spawn_server(main);
 
     // 1. Text GET through proxy
-    let resp = http::get(&format!("http://{main_addr}/api/text"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/api/text"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "hello");
+    assert_eq!(resp.text().unwrap(), "hello");
 
     // 2. Binary POST round-trip through proxy
     let binary_body: Vec<u8> = (0..=255u8).collect();
@@ -69,18 +70,18 @@ async fn e2e_proxy_handles_mixed_content() {
     );
 
     // 3. Large GET stream through proxy
-    let resp = http::get(&format!("http://{main_addr}/api/large"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/api/large"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.body_bytes().len(), 500_000);
 
     // 4. Health check on normal handler
-    let resp = http::get(&format!("http://{main_addr}/health"))
+    let resp: ClientResponse = http::get(&format!("http://{main_addr}/health"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.body(), "ok");
+    assert_eq!(resp.text().unwrap(), "ok");
 
     runtime::request_shutdown();
 }

@@ -31,8 +31,10 @@ pub enum DeadlineBoundary {
     ClientRequest,
     /// The quiet interval allowed between outbound response body frames.
     ClientResponseIdle,
-    /// One outbound client call's whole retry sequence: every attempt, every
-    /// delay between them, and collection of the final response body.
+    /// One outbound client call's whole retry sequence, as calls reported it
+    /// before `Client::total_timeout`. No outbound call returns it now: an
+    /// operation past its total returns `ClientTimeout::Operation`. The member
+    /// and its label stay for consumers that match or record them.
     ClientRetry,
     /// A resource's initial readiness health callback.
     ResourceStartupHealth,
@@ -113,6 +115,10 @@ pub enum ByteBoundary {
     /// The maximum of one streaming download.
     TransferDownload,
     /// The buffered maximum of an outbound client response.
+    ///
+    /// A client call reports its crossing as
+    /// [`ClientError::ResponseTooLarge`](super::ClientError::ResponseTooLarge).
+    /// This name stays for the labels that already carry it.
     ClientResponse,
     /// The buffered maximum of a proxied upstream response.
     ProxyBufferedResponse,
