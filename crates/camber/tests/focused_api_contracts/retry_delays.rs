@@ -12,7 +12,7 @@ use crate::deterministic::DeterministicGenerator;
 
 use camber::__private::{
     client_error_projection, client_retry_after_delay, client_retry_backoff,
-    client_retryable_transport,
+    client_retryable_failure,
 };
 use camber::http::ClientError;
 use camber::http::ClientRedirect;
@@ -380,7 +380,7 @@ const IDEMPOTENT_METHOD_COUNT: usize = 5;
 
 /// Every method the public client offers, the idempotent ones first, then an
 /// extension token.
-fn methods() -> [Method; 8] {
+pub(crate) fn methods() -> [Method; 8] {
     [
         Method::GET,
         Method::HEAD,
@@ -498,7 +498,7 @@ pub(crate) async fn untrusted_tls_error() -> reqwest::Error {
 }
 
 /// Every replay permission one decision is asked under.
-const PERMISSIONS: [RetryPolicy; 3] = [
+pub(crate) const PERMISSIONS: [RetryPolicy; 3] = [
     RetryPolicy::Never,
     RetryPolicy::Idempotent,
     RetryPolicy::Replayable,
@@ -508,7 +508,7 @@ const PERMISSIONS: [RetryPolicy; 3] = [
 ///
 /// The row's own oracle. The match has no wildcard arm, so a new permission
 /// fails to compile until its answer is written here.
-fn permits(policy: RetryPolicy, method: &Method) -> bool {
+pub(crate) fn permits(policy: RetryPolicy, method: &Method) -> bool {
     match policy {
         RetryPolicy::Never => false,
         RetryPolicy::Idempotent => methods()[..IDEMPOTENT_METHOD_COUNT].contains(method),
@@ -568,7 +568,7 @@ fn assert_decisions(failure: Failure, error: &reqwest::Error) {
     for method in &methods() {
         for policy in PERMISSIONS {
             assert_eq!(
-                client_retryable_transport(error, method, policy),
+                client_retryable_failure(client_error_projection(error), method, policy),
                 failure.transient() && permits(policy, method),
                 "{failure:?} failure, {method} under {policy:?}"
             );

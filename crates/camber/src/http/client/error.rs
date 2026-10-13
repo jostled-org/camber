@@ -51,6 +51,10 @@ pub enum ClientError {
         /// The ceiling the collection was refused under.
         limit: usize,
     },
+    /// The client's [`EgressPolicy`](super::EgressPolicy) refused the
+    /// destination. Nothing was sent to it.
+    #[error("egress refused: {0}")]
+    Egress(ClientEgress),
 }
 
 /// The part of a request description that was refused.
@@ -68,6 +72,12 @@ pub enum ClientInput {
     Body,
     /// The response ceiling is zero.
     ResponseLimit,
+    /// An [`EgressPolicy`](super::EgressPolicy) exception is not one exact
+    /// origin at one address the policy can admit.
+    EgressPolicy,
+    /// A streamed response has no finite byte maximum or no finite idle
+    /// interval.
+    StreamBudget,
 }
 
 impl ClientInput {
@@ -80,6 +90,8 @@ impl ClientInput {
             Self::ReservedHeader => "reserved header",
             Self::Body => "body",
             Self::ResponseLimit => "response limit",
+            Self::EgressPolicy => "egress policy",
+            Self::StreamBudget => "stream budget",
         }
     }
 }
@@ -100,6 +112,9 @@ pub enum ClientTimeout {
     /// A transport timer. Reqwest does not say whether connect or a read
     /// expired, so neither is claimed.
     Transport,
+    /// The idle interval of one demand for the next chunk of a streamed
+    /// body. The body owner arms it when it accepts the demand.
+    ResponseIdle,
 }
 
 impl ClientTimeout {
@@ -109,6 +124,7 @@ impl ClientTimeout {
             Self::Operation => "operation",
             Self::Attempt => "attempt",
             Self::Transport => "transport",
+            Self::ResponseIdle => "response idle",
         }
     }
 }
@@ -171,6 +187,36 @@ impl ClientDecode {
 }
 
 impl std::fmt::Display for ClientDecode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Why an [`EgressPolicy`](super::EgressPolicy) refused a destination.
+///
+/// The reason is the whole account. It holds no URL, no host, and no address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClientEgress {
+    /// The policy refuses the scheme of the target.
+    Scheme,
+    /// The policy refuses an address the target would be dialed at.
+    Address,
+    /// The target resolved to more addresses than one operation checks.
+    ResolutionLimit,
+}
+
+impl ClientEgress {
+    /// The fixed name this category prints.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Scheme => "scheme",
+            Self::Address => "address",
+            Self::ResolutionLimit => "resolution limit",
+        }
+    }
+}
+
+impl std::fmt::Display for ClientEgress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
     }

@@ -7,7 +7,7 @@ pub mod halt;
 #[path = "support/http.rs"]
 pub mod http;
 // Mounted for the private child the connect-retry rows read their global
-// capture in.
+// capture in, and for the one the egress rows give a proxy environment.
 #[path = "support/process.rs"]
 pub mod process;
 #[path = "support/rejection.rs"]
@@ -25,7 +25,8 @@ pub mod temp;
 pub mod tls_support;
 #[path = "support/trace_capture.rs"]
 pub mod trace_capture;
-// Mounted for the TLS peer the client-failure and retry rows refuse.
+// Mounted for the TLS peer the client-failure and retry rows refuse, and for
+// the named one the egress rows authenticate.
 #[path = "support/untrusted_tls.rs"]
 pub mod untrusted_tls;
 #[cfg(feature = "ws")]
@@ -40,6 +41,10 @@ mod audit_http_rate_limit;
 mod body_admission;
 #[path = "component_http_routing/bounded_client.rs"]
 mod bounded_client;
+#[path = "component_http_routing/client_body.rs"]
+mod client_body;
+#[path = "component_http_routing/client_egress.rs"]
+mod client_egress;
 #[path = "component_http_routing/client_failures.rs"]
 mod client_failures;
 #[path = "component_http_routing/client_methods.rs"]
@@ -50,6 +55,8 @@ mod client_redirects;
 mod client_request;
 #[path = "component_http_routing/client_response.rs"]
 mod client_response;
+#[path = "component_http_routing/client_streaming.rs"]
+mod client_streaming;
 #[path = "component_http_routing/client_timeouts.rs"]
 mod client_timeouts;
 #[path = "component_http_routing/connection_persistence.rs"]

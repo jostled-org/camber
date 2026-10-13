@@ -238,6 +238,18 @@ let answer: ProviderAnswer = client
     .error_for_status()?
     .json()?;
 
+// Stream a large body: the head first, then one bounded chunk for each call.
+let response = client
+    .request("GET", "https://objects.example/big")?
+    .response_limit(64 * 1024 * 1024)?
+    .send_streaming()
+    .await?
+    .error_for_status()?;
+let mut body = response.into_body();
+while let Some(chunk) = body.next().await? {
+    writer.write_chunk(chunk).await?;
+}
+
 // A handler builds its own Response from an upstream answer.
 router.get("/status", |_req| async {
     let upstream = http::get("https://api.example.com/status").await?;
@@ -248,13 +260,18 @@ router.get("/status", |_req| async {
 - One `total_timeout` bounds the whole call: every attempt, redirect, delay,
   and the final body. Runtime shutdown and a dropped call end it too.
 - The response maximum counts retained body bytes. The default is eight MiB.
+- A streamed body keeps the same maximum and total. Camber holds at most one
+  chunk you have not taken, and the idle interval measures a pending read only.
 - Redirects are off by default. `RedirectPolicy::SameOrigin` follows a
   redirect only to the origin the call began at.
 - Retries repeat only `GET`, `HEAD`, `OPTIONS`, `PUT`, and `DELETE`.
   `RetryPolicy::Replayable` permits one request's replay. You are responsible
   for the duplicate.
-- Camber does not check the address a host resolves to. It gives no
-  protection against server-side request forgery. Send only to URLs you trust.
+- A default client does not check the address a host resolves to, so it
+  reaches private services. Send only to URLs you trust.
+- `Client::egress_policy` restricts one client. Under
+  `EgressPolicy::public_internet()`, a call resolves its host once and dials
+  only the addresses the policy admitted.
 - Each started call records one `http.client.completed` tracing event. The
   event holds no path, query, header value, or body.
 

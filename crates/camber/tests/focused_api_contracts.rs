@@ -39,10 +39,14 @@ mod body_admission;
 mod certificate_management;
 #[path = "focused_api_contracts/channel_errors.rs"]
 mod channel_errors;
+#[path = "focused_api_contracts/client_egress.rs"]
+mod client_egress;
 #[path = "focused_api_contracts/client_failures.rs"]
 mod client_failures;
 #[path = "focused_api_contracts/client_redirects.rs"]
 mod client_redirects;
+#[path = "focused_api_contracts/client_streaming.rs"]
+mod client_streaming;
 #[path = "focused_api_contracts/configuration_loading.rs"]
 mod configuration_loading;
 #[path = "focused_api_contracts/configuration_validation.rs"]

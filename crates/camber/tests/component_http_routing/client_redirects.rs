@@ -12,9 +12,9 @@ use crate::bounded_client::within_bound;
 use crate::error_chain::assert_safe;
 use crate::retry_policy::{Draft, METHODS, PERMISSIONS, Permission, describe_draft};
 use crate::retry_upstream::{
-    Answer, PeerEvent, Recorded, Recording, RecordingUpstream, RunnableDriver, ScriptedUpstream,
-    answer, answered, assert_released, describe, describe_result, payload, settle_wakeups, settled,
-    spawn_get,
+    Answer, PROBE_TARGET, PeerEvent, Recorded, Recording, RecordingUpstream, RunnableDriver,
+    ScriptedUpstream, answer, answered, assert_released, describe, describe_result, payload, probe,
+    settle_wakeups, settled, spawn_get,
 };
 
 use camber::RuntimeError;
@@ -27,12 +27,9 @@ use camber::http::ClientResponse;
 use camber::http::ClientTimeout;
 use camber::http::RedirectPolicy;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 /// The credential every row sends, marked sensitive.
 const TOKEN: &str = "Bearer credential-sentinel-9b2e";
@@ -534,34 +531,6 @@ async fn send_row(row: &Row, first: &RecordingUpstream) -> Result<ClientResponse
         None => request,
     };
     request.send().await
-}
-
-/// The target of the request the row itself sends to the second origin.
-const PROBE_TARGET: &str = "/probe";
-
-/// Send one request to the second origin from the row, not from a client.
-///
-/// The listener accepts in arrival order. A connection a call had dialed is
-/// therefore accepted before this one, and the accept count shows it. Without
-/// the probe, a dial still in the backlog at teardown would not be counted.
-async fn probe(addr: SocketAddr) -> Result<(), String> {
-    let mut stream = TcpStream::connect(addr)
-        .await
-        .map_err(|error| format!("the probe could not connect: {error}"))?;
-    stream
-        .write_all(format!("GET {PROBE_TARGET} HTTP/1.1\r\nHost: probe\r\n\r\n").as_bytes())
-        .await
-        .map_err(|error| format!("the probe could not write: {error}"))?;
-    let mut reply = Vec::new();
-    let mut byte = [0_u8; 1];
-    while !reply.ends_with(b"\r\n\r\n") {
-        match stream.read(&mut byte).await {
-            Ok(0) => return Err("the second origin closed before it answered the probe".into()),
-            Ok(_) => reply.push(byte[0]),
-            Err(error) => return Err(format!("the probe could not read: {error}")),
-        }
-    }
-    Ok(())
 }
 
 /// Require a refusal of one of `kinds` that repeats no secret.

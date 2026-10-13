@@ -3,17 +3,23 @@
 
 use super::super::policy_value::clamped_duration;
 use super::super::transfer_budget::TransferBudget;
-use super::error::ClientError;
+use super::dns_edge::ClientDnsEdge;
+use super::egress::{EgressPolicy, egress_refused};
+use super::lifetime::Lifetime;
 use super::policy::OperationPolicy;
 use super::projection::client_error_projection;
 use super::redirect::RedirectPolicy;
 use super::replay::RetryPolicy;
 use super::request::ClientRequest;
 use super::response::ClientResponse;
+use super::transport::{
+    BuiltClient, Dialer, OperationTransport, PinnedDialer, Profile, TransportCache,
+    TransportSettings, build_client, pinned_transport,
+};
 use crate::RuntimeError;
-use reqwest::Method;
 use reqwest::header::HeaderValue;
-use std::sync::{LazyLock, OnceLock};
+use reqwest::{Method, Url};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 /// Hand every verb the client sends to `$generator`, so the client methods and
@@ -110,13 +116,6 @@ const DEFAULT_RESPONSE_POLICY: TransferBudget = TransferBudget::of(
     Some(DEFAULT_TIMEOUT),
 );
 
-/// A built client, or the category its build failed with.
-///
-/// The category is kept rather than the error because a cached failure is
-/// handed to every later call. `reqwest::Error` does not clone, and its text
-/// can repeat what the builder was given.
-type BuiltClient = Result<reqwest::Client, ClientError>;
-
 /// The client every free function sends through: the defaults, and one
 /// transport shared by all of them.
 static SHARED: LazyLock<Client> = LazyLock::new(client);
@@ -130,56 +129,49 @@ fn cached_client(built: &BuiltClient) -> Result<&reqwest::Client, RuntimeError> 
 
 /// Whether `client` holds a transport it has already built.
 ///
-/// A client builds its transport on first use and discards it when a
-/// transport setting is written, so this is `false` before the first call and
-/// after such a write.
+/// A client builds one transport for each terminal on first use and discards
+/// both when a transport setting is written. This is `true` while either is
+/// built, so it is `false` before the first call and after such a write.
 ///
 /// Semver-unsupported. It reads the client and changes nothing.
 #[doc(hidden)]
 pub fn client_transport_is_built(client: &Client) -> bool {
-    client.cached_client.get().is_some()
+    client.cached.is_built()
 }
 
-/// Build the Reqwest client one connect bound and one quiet interval describe.
+/// Give `client` the lookup answers of `edge` in place of the system
+/// resolver's.
 ///
-/// Reqwest enforces those two timers and no other. Its whole-request timeout
-/// is never set: the operation owns the attempt timer, and a second timer on
-/// the same boundary would compete with it to name the failure. An unbounded
-/// quiet interval configures no timer at all rather than a very long one.
+/// The edge answers only the lookups of a client whose policy restricts
+/// addresses: no other client resolves a name itself. Every address it returns
+/// is read by the production visit bound and the production policy decision,
+/// and is dialed through the production pinned transport.
 ///
-/// Reqwest's own retry policy is turned off. Its default resends a request
-/// after a low-level protocol NACK, which would put a second sender of the same
-/// request beside this module's coordinator: a request refused a replay
-/// here could still be replayed there, under a budget no Camber setting names.
+/// Semver-unsupported. It supplies an input and no verdict.
+#[doc(hidden)]
+#[must_use]
+pub fn client_dns_edge(mut client: Client, edge: &ClientDnsEdge) -> Client {
+    client.dns_edge = Some(edge.clone());
+    client
+}
+
+/// Add one local trust root, in PEM, to every transport `client` builds.
 ///
-/// Reqwest's redirect following is turned off for the same reason. A followed
-/// redirect is a second request, to a target the caller did not name, carrying
-/// the first request's headers. The transport returns every redirect as the
-/// answer it is, and the operation follows one only under the request's
-/// `RedirectPolicy`. The automatic `Referer` goes with it, and no cookie store
-/// is configured, so the transport adds no header that repeats where a request
-/// came from or what an earlier answer set.
+/// The root is merged with the roots the transport already trusts, through the
+/// factory every transport is built by. It adds trust and removes no check:
+/// the certificate chain, its validity, and the requested name are still
+/// verified. A second call replaces the first root. A root the TLS backend
+/// cannot read fails the build of the transport, and each call through the
+/// client then returns `ClientError::Configuration`.
 ///
-/// Automatic decoding is turned off for every codec Reqwest supports. Each one
-/// is a Cargo feature another crate in the build can enable, and an enabled
-/// codec would decode the body and remove the headers that describe it. The
-/// explicit settings keep the returned bytes the bytes the peer sent.
-fn build_client(connect_timeout: Duration, idle: Option<Duration>) -> BuiltClient {
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(connect_timeout)
-        .retry(reqwest::retry::never())
-        .redirect(reqwest::redirect::Policy::none())
-        .referer(false)
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .no_zstd();
-    if let Some(idle) = idle {
-        builder = builder.read_timeout(idle);
-    }
-    builder
-        .build()
-        .map_err(|error| client_error_projection(&error))
+/// Semver-unsupported.
+#[doc(hidden)]
+pub fn client_test_root(mut client: Client, pem: &[u8]) -> Result<Client, RuntimeError> {
+    let root = reqwest::Certificate::from_pem(pem)
+        .map_err(|error| RuntimeError::Client(client_error_projection(&error)))?;
+    client.test_root = Some(root);
+    client.discard_transport();
+    Ok(client)
 }
 
 /// Create a reusable client with the default timeout, retry, and response
@@ -195,7 +187,10 @@ pub fn client() -> Client {
         backoff: DEFAULT_BACKOFF,
         redirect: RedirectPolicy::None,
         total_timeout: DEFAULT_TOTAL_TIMEOUT,
-        cached_client: OnceLock::new(),
+        egress: EgressPolicy::unrestricted(),
+        dns_edge: None,
+        test_root: None,
+        cached: TransportCache::default(),
     }
 }
 
@@ -208,6 +203,7 @@ impl std::fmt::Debug for Client {
             .field("retries", &self.retries)
             .field("backoff", &self.backoff)
             .field("redirect", &self.redirect)
+            .field("egress", &self.egress)
             .finish()
     }
 }
@@ -217,9 +213,12 @@ impl std::fmt::Debug for Client {
 ///
 /// [`request`](Self::request) describes one request with any method, its own
 /// headers, and its own response maximum. The verb methods are conveniences
-/// over the same description. Requests share this client's connection pool
-/// and nothing else: one request's headers, body, and limits never reach
-/// another.
+/// over the same description. Requests share this client's egress policy and
+/// its connection pools, and nothing else: one request's headers, body, and
+/// limits never reach another. Buffered calls share one pool and streamed
+/// calls another. A call that [`EgressPolicy::public_internet`] restricts
+/// uses neither. It builds a transport of its own and closes it when the call
+/// ends.
 ///
 /// The four deadlines are independent boundaries, not one shared timeout:
 ///
@@ -228,7 +227,8 @@ impl std::fmt::Debug for Client {
 /// - `request_timeout` covers one attempt, from its send through the end of
 ///   its response body;
 /// - `connect_timeout` ends when the transport is established;
-/// - `response_idle_timeout` covers each wait for response bytes.
+/// - `response_idle_timeout` covers each wait for response bytes. For a
+///   streamed response it covers one pending read of the body.
 ///
 /// | Dimension | Default |
 /// | --- | --- |
@@ -247,8 +247,10 @@ impl std::fmt::Debug for Client {
 ///
 /// Each timer names itself. An operation past `total_timeout` returns
 /// `ClientTimeout::Operation`, and an attempt past `request_timeout` returns
-/// `ClientTimeout::Attempt`. The transport owns the connect and quiet-interval
-/// timers, and either one returns `ClientTimeout::Transport`.
+/// `ClientTimeout::Attempt`. The transport owns the connect timer and the
+/// quiet-interval timer of a buffered call, and either one returns
+/// `ClientTimeout::Transport`. Camber owns the idle interval of a streamed
+/// body, and it returns `ClientTimeout::ResponseIdle`.
 ///
 /// A retry is one more attempt under the same policy. The retry count and the
 /// backoff are unaffected by any of it. Whether a request may be sent again is
@@ -270,6 +272,11 @@ impl std::fmt::Debug for Client {
 /// not a failure, and the body is returned as the peer sent it: automatic
 /// decompression is disabled.
 ///
+/// [`ClientRequest::send_streaming`] returns the response head and reads the
+/// body one chunk at a time. A stream needs a finite response maximum and a
+/// finite idle interval. Buffered and streamed calls use separate connection
+/// pools.
+///
 /// Each started call records one `http.client.completed` tracing event: the
 /// method label, the host the call began at, the final status, the elapsed
 /// milliseconds, the sends, the followed redirects, and a closed outcome. The
@@ -277,13 +284,15 @@ impl std::fmt::Debug for Client {
 /// a call inside the tracing middleware sends that request's `traceparent`.
 /// Use [`ClientRequest::trace_context`] to withhold it from one request.
 ///
-/// Camber does not check the address a host resolves to. Send only to URLs
-/// you trust.
+/// By default Camber does not check the address a host resolves to, so a
+/// default client reaches private services. Send only to URLs you trust, or
+/// give the client an [`EgressPolicy`] with
+/// [`egress_policy`](Self::egress_policy) before it fetches a URL you do not.
 ///
 /// The underlying `reqwest::Client` is built lazily on first request
-/// and cached for subsequent calls. A setter that changes a transport setting
-/// discards the cached client, so the next request builds one from the
-/// current values.
+/// and cached for subsequent calls: one for buffered calls and one for
+/// streamed calls. A setter that changes a transport setting discards both,
+/// so the next request builds one from the current values.
 pub struct Client {
     /// The bound on one whole operation. Outside the response policy, so no
     /// write to that policy can remove it.
@@ -297,7 +306,16 @@ pub struct Client {
     backoff: Duration,
     /// The redirect policy a request described now starts with.
     redirect: RedirectPolicy,
-    cached_client: OnceLock<BuiltClient>,
+    /// Which destinations this client sends to. Immutable once set: no
+    /// request reads a wider one.
+    egress: EgressPolicy,
+    /// The lookup answers a test chose, in place of the system resolver's.
+    dns_edge: Option<ClientDnsEdge>,
+    /// The one local trust root a test added to every transport.
+    test_root: Option<reqwest::Certificate>,
+    /// The reusable transports, one for each terminal. Only a call whose
+    /// policy pins no address sends through one.
+    cached: TransportCache,
 }
 
 impl Client {
@@ -359,10 +377,16 @@ impl Client {
     /// bytes. Minimum: 1ms. Zero values are clamped.
     ///
     /// The interval resets on each successful read, so it detects a peer that
-    /// stopped sending without bounding a large body that keeps arriving. The
-    /// transport owns this timer, and a wait past it returns
-    /// `ClientTimeout::Transport`. It
-    /// writes the quiet-interval dimension of this client's one response
+    /// stopped sending without bounding a large body that keeps arriving. For
+    /// a buffered call the transport owns this timer, and a wait past it
+    /// returns `ClientTimeout::Transport`.
+    ///
+    /// For a streamed call Camber owns it. It measures one pending
+    /// [`ClientBody::next`](crate::http::ClientBody::next) and returns
+    /// `ClientTimeout::ResponseIdle`. Time the caller spends between reads is
+    /// not idle time.
+    ///
+    /// It writes the quiet-interval dimension of this client's one response
     /// policy, so a later [`response_budget`](Self::response_budget) replaces
     /// it.
     #[must_use]
@@ -384,6 +408,10 @@ impl Client {
     /// The budget can leave the attempt lifetime and the quiet interval
     /// unbounded. It cannot remove [`total_timeout`](Self::total_timeout),
     /// which is not one of its dimensions.
+    ///
+    /// A budget with no maximum or no quiet interval still serves buffered
+    /// calls. [`ClientRequest::send_streaming`] refuses it with
+    /// `ClientInput::StreamBudget`.
     #[must_use]
     pub fn response_budget(mut self, budget: TransferBudget) -> Self {
         self.response = budget;
@@ -399,6 +427,9 @@ impl Client {
     /// be mistaken for a default. A budget with no maximum, given to
     /// [`Client::response_budget`], removes the maximum too. Every deadline
     /// survives it.
+    ///
+    /// A streamed call does not run without a maximum. Give that request one
+    /// with [`ClientRequest::response_limit`].
     #[must_use]
     pub fn unbounded_response(mut self) -> Self {
         self.response = self.response.without_max_bytes();
@@ -460,7 +491,8 @@ impl Client {
     /// in one call. Any other destination ends the call with a
     /// `ClientError::Redirect` before anything is sent to it. A followed
     /// redirect carries the request's headers, credentials included. Camber
-    /// does not check the address a permitted host resolves to.
+    /// checks the address a permitted host resolves to only under an
+    /// [`egress_policy`](Self::egress_policy) that restricts addresses.
     ///
     /// A followed redirect is one more send under
     /// [`total_timeout`](Self::total_timeout), with its own
@@ -474,16 +506,57 @@ impl Client {
         self
     }
 
+    /// Set the destinations this client may send to. Default:
+    /// [`EgressPolicy::unrestricted`].
+    ///
+    /// The policy governs every call through this client: the verb
+    /// conveniences and every described request, buffered or streamed. No
+    /// request setter widens it.
+    /// A refused call returns `ClientError::Egress`, sends nothing, and is
+    /// never retried.
+    ///
+    /// Under [`EgressPolicy::https_only`], an HTTP target is refused before
+    /// its host is resolved. A policy that restricts only the scheme
+    /// restricts no address, and its calls keep this client's reusable
+    /// connection pool.
+    ///
+    /// Under [`EgressPolicy::public_internet`], each call resolves its host
+    /// once, through the system resolver, under the call's own deadline. An
+    /// address literal is checked as its own answer. An answer with more than
+    /// 64 addresses returns `ClientEgress::ResolutionLimit`. One refused
+    /// address refuses the whole answer with `ClientEgress::Address`, and an
+    /// empty or failed lookup returns `ClientError::Dns`. The call then dials
+    /// only the checked addresses: every retry and every followed redirect
+    /// of that call uses them, and no second lookup replaces them. The
+    /// request keeps its host name, so the `Host` header, the TLS server
+    /// name, and certificate verification read the name and not the address.
+    ///
+    /// A call under such a policy uses no proxy, from the environment or from
+    /// the system, and builds a transport of its own. Its connections are
+    /// closed when the call ends, and the next call resolves, checks, and
+    /// connects again. A restricted client therefore pays a lookup, a
+    /// connect, and a TLS handshake for each call.
+    ///
+    /// Setting a policy discards the transport this client built, so no
+    /// connection pooled under an earlier policy serves a later call.
+    #[must_use]
+    pub fn egress_policy(mut self, policy: EgressPolicy) -> Self {
+        self.egress = policy;
+        self.discard_transport();
+        self
+    }
+
     /// Describe one request with any HTTP method.
     ///
     /// Nothing is sent. The method and the target are validated here, and the
     /// returned [`ClientRequest`] takes headers, a body, a response maximum,
     /// its redirect and retry policies, and a deadline before
-    /// [`send`](ClientRequest::send) runs it.
+    /// [`send`](ClientRequest::send) or
+    /// [`send_streaming`](ClientRequest::send_streaming) runs it.
     ///
     /// `method` is any HTTP token, in the case it is written: `"PURGE"` is a
     /// method, and `"get"` is not `"GET"`. CONNECT is refused, because this
-    /// client returns a buffered response and not a tunnel. An invalid method
+    /// client returns a response and not a tunnel. An invalid method
     /// returns `ClientInput::Method`.
     ///
     /// `url` is an absolute `http` or `https` URL with a host and without a
@@ -493,21 +566,88 @@ impl Client {
         ClientRequest::parsed(self, method, url)
     }
 
-    /// The transport every request through this client shares, built on first
-    /// use.
-    pub(super) fn transport(&self) -> Result<&reqwest::Client, RuntimeError> {
-        cached_client(
-            self.cached_client
-                .get_or_init(|| build_client(self.connect_timeout, self.response.idle())),
-        )
+    /// The reusable transport of `profile`, built on first use.
+    fn transport(&self, profile: Profile) -> Result<&reqwest::Client, RuntimeError> {
+        cached_client(self.cached.get_or_build(profile, || {
+            build_client(&self.transport_settings(profile), None)
+        }))
     }
 
-    /// Forget the built transport after a transport setting changed.
+    /// The settings a transport of `profile` is built from.
     ///
-    /// The next request builds one from the current settings. A client that
-    /// kept the old transport would enforce the timers it was built with.
+    /// Only the buffered profile arms the quiet interval on its transport.
+    fn transport_settings(&self, profile: Profile) -> TransportSettings<'_> {
+        TransportSettings {
+            connect_timeout: self.connect_timeout,
+            idle: match profile {
+                Profile::Buffered => self.response.idle(),
+                Profile::Streaming => None,
+            },
+            test_root: self.test_root.as_ref(),
+        }
+    }
+
+    /// Refuse a target whose scheme this client's policy does not send to.
+    ///
+    /// No address is read, so nothing is resolved.
+    pub(super) fn admit_scheme(&self, target: &Url) -> Result<(), RuntimeError> {
+        self.egress.admit_scheme(target).map_err(egress_refused)
+    }
+
+    /// The transport one buffered operation to `target` sends through.
+    ///
+    /// A policy that pins no address uses the reusable buffered transport.
+    /// Any other resolves and checks `target` under `lifetime`, then builds a
+    /// transport that dials only the checked addresses. That transport is
+    /// never cached: it belongs to the operation that asked for it.
+    pub(super) async fn operation_transport(
+        &self,
+        target: &Url,
+        lifetime: &Lifetime,
+    ) -> Result<OperationTransport<'_>, RuntimeError> {
+        match self.egress.pins_addresses() {
+            false => self
+                .transport(Profile::Buffered)
+                .map(OperationTransport::Reusable),
+            true => pinned_transport(
+                &self.egress,
+                self.dns_edge.as_ref(),
+                &self.transport_settings(Profile::Buffered),
+                target,
+                lifetime,
+            )
+            .await
+            .map(OperationTransport::Pinned),
+        }
+    }
+
+    /// How one streaming operation gets its transport.
+    ///
+    /// The operation's task outlives this borrow, so the answer is owned. A
+    /// policy that pins no address shares the reusable streaming transport
+    /// and its pool. Any other copies what the task resolves, checks, and
+    /// builds its own pinned transport from. Nothing is resolved here.
+    pub(super) fn stream_dialer(&self) -> Result<Dialer, RuntimeError> {
+        match self.egress.pins_addresses() {
+            false => self
+                .transport(Profile::Streaming)
+                .map(|shared| Dialer::Reusable(shared.clone())),
+            true => Ok(Dialer::Pinned(PinnedDialer {
+                policy: self.egress.clone(),
+                edge: self.dns_edge.clone(),
+                connect_timeout: self.connect_timeout,
+                test_root: self.test_root.clone(),
+            })),
+        }
+    }
+
+    /// Forget both built transports after a transport setting changed.
+    ///
+    /// The next request of each terminal builds one from the current
+    /// settings. A client that kept an old transport would enforce the timers
+    /// it was built with.
     fn discard_transport(&mut self) {
-        self.cached_client = OnceLock::new();
+        self.cached = TransportCache::default();
     }
 
     /// The response ceiling a request described now starts with.
@@ -521,6 +661,7 @@ impl Client {
             total: self.total_timeout,
             deadline: None,
             attempt: self.response.total(),
+            idle: self.response.idle(),
             retries: self.retries,
             backoff: self.backoff,
             permission: RetryPolicy::default(),

@@ -426,9 +426,14 @@ pub fn assert_no_private_text(response: &HttpResponse, private: &[impl AsRef<str
 
 /// Assert none of `private` appears in `searched`, which `reached` names.
 ///
-/// Shared by the peer and mapper leak checks, so both refuse an empty list for
-/// the same reason.
-fn assert_private_absent(searched: &str, private: &[impl AsRef<str>], reached: &str, label: &str) {
+/// Shared by the peer, mapper, and rendering leak checks, so each refuses an
+/// empty list for the same reason.
+pub fn assert_private_absent(
+    searched: &str,
+    private: &[impl AsRef<str>],
+    reached: &str,
+    label: &str,
+) {
     assert!(
         !private.is_empty(),
         "{label}: no private text was declared, so no leak can be found"
@@ -453,6 +458,18 @@ pub fn assert_mapped_internal_refusal(
     label: &str,
 ) -> Observed {
     let mapped = only(journal, label);
+    assert_internal_refusal_record(&mapped, origin, private, label);
+    mapped
+}
+
+/// Assert one mapper record is a redacted internal-service refusal from
+/// `origin` that carries none of the private text.
+pub fn assert_internal_refusal_record(
+    mapped: &Observed,
+    origin: &str,
+    private: &[impl AsRef<str>],
+    label: &str,
+) {
     assert_eq!(mapped.origin, origin, "{label}: origin");
     assert_eq!(
         mapped.kind,
@@ -466,7 +483,6 @@ pub fn assert_mapped_internal_refusal(
         "{label}: the mapper is handed the fixed safe message"
     );
     assert_private_absent(&format!("{mapped:?}"), private, "the mapper context", label);
-    mapped
 }
 
 /// What one request's participants recorded, in the order they ran.

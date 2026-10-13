@@ -2,6 +2,8 @@
 //! one stored response policy. Outbound 4.T3: no write to that policy removes
 //! the operation total.
 
+use crate::retry_upstream::watch_streams;
+
 use camber::__private::client_transport_is_built;
 use camber::RuntimeError;
 use camber::http::Client;
@@ -9,7 +11,6 @@ use camber::http::ClientError;
 use camber::http::ClientResponse;
 use camber::http::ClientTimeout;
 use camber::http::RetryPolicy;
-use camber::http::mock::{self, ScopedTransferOwner};
 use camber::http::{self, Request, Response, Router, TransferBudget};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -171,12 +172,6 @@ async fn write_all(stream: &mut TcpStream, bytes: &[u8]) -> Result<(), Box<str>>
         .map_err(|error| -> Box<str> { format!("upstream flush failed: {error}").into() })
 }
 
-/// Watch one upstream's address, so a row reads what the production collector
-/// published while it read that upstream's answer.
-pub(crate) fn watch(addr: SocketAddr) -> ScopedTransferOwner {
-    mock::transfer_owner(addr).expect("one transfer-owner controller for this upstream")
-}
-
 /// Run one client call under the row bound, so a poll after a terminal fails
 /// the row instead of parking it.
 pub(crate) async fn within_bound<T>(row: &str, call: impl std::future::Future<Output = T>) -> T {
@@ -230,7 +225,7 @@ pub(crate) async fn collect_refused(
 ) -> (Result<ClientResponse, RuntimeError>, Collected, SocketAddr) {
     let upstream = ScriptedUpstream::start(head, body, hold).await;
     let addr = upstream.addr;
-    let observed = watch(addr);
+    let observed = watch_streams(addr);
 
     let result: Result<ClientResponse, RuntimeError> =
         within_bound(row, bounded_client().get(&format!("http://{addr}{path}"))).await;
@@ -287,7 +282,7 @@ async fn crossing_frame_is_dropped_and_ends_the_read() {
 async fn exact_boundary_frame_is_retained_whole() {
     let row = "exact boundary";
     let upstream = admitted_upstream().await;
-    let observed = watch(upstream.addr);
+    let observed = watch_streams(upstream.addr);
 
     let response: ClientResponse = within_bound(
         row,
@@ -320,7 +315,7 @@ async fn trailers_add_no_retained_bytes() {
         false,
     )
     .await;
-    let observed = watch(upstream.addr);
+    let observed = watch_streams(upstream.addr);
 
     let response: ClientResponse = within_bound(
         row,
@@ -347,7 +342,7 @@ async fn trailers_add_no_retained_bytes() {
 const ABOVE_CEILING: &[u8] = b"0123456789abcdef and eight more";
 
 /// The documented ceiling a client collects under when its caller wrote none.
-const DEFAULT_CEILING: usize = 8 * 1024 * 1024;
+pub(crate) const DEFAULT_CEILING: usize = 8 * 1024 * 1024;
 
 /// A head declaring nine MiB: one above the eight-MiB default a caller who
 /// wrote no ceiling of their own collects under. The peer never sends them.
@@ -358,7 +353,7 @@ const ABOVE_DEFAULT_HEAD: &str =
 async fn named_opt_out_admits_a_body_above_the_ceiling() {
     let row = "named opt-out";
     let upstream = above_ceiling_upstream().await;
-    let observed = watch(upstream.addr);
+    let observed = watch_streams(upstream.addr);
 
     let response: ClientResponse = within_bound(
         row,
@@ -387,7 +382,7 @@ async fn named_opt_out_admits_a_body_above_the_ceiling() {
 async fn default_ceiling_refuses_a_declaration_on_the_free_path() {
     let row = "free-function default";
     let upstream = ScriptedUpstream::start(ABOVE_DEFAULT_HEAD, Box::default(), true).await;
-    let observed = watch(upstream.addr);
+    let observed = watch_streams(upstream.addr);
 
     let result: Result<ClientResponse, RuntimeError> =
         within_bound(row, http::get(&format!("http://{}/default", upstream.addr))).await;
@@ -541,9 +536,10 @@ async fn stored_total_bounds_one_live_attempt(addr: SocketAddr) {
     assert_eq!(admitted.body_bytes(), b"paced");
 }
 
-/// The quiet interval one live row measures, short enough that a peer which
-/// stops sending is refused long before any total in this file.
-const QUIET_IDLE: Duration = Duration::from_millis(60);
+/// The quiet interval a live row measures, short enough that a peer which
+/// stops sending is refused long before any total written beside it. Real
+/// time crosses it.
+pub(crate) const QUIET_IDLE: Duration = Duration::from_millis(60);
 
 /// The longest a call bounded by [`QUIET_IDLE`] may take. Far below every
 /// request total written beside it, so a call ended by a total instead of the

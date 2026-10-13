@@ -274,27 +274,51 @@ number. None holds a URL, a header value, a body, or transport error text, and
 | `ClientError` | Meaning |
 | --- | --- |
 | `Configuration` | The underlying client could not be constructed |
-| `InvalidRequest(ClientInput)` | `Method`, `Url`, `Header`, `ReservedHeader`, `Body`, or `ResponseLimit` was refused before any send |
+| `InvalidRequest(ClientInput)` | `Method`, `Url`, `Header`, `ReservedHeader`, `Body`, or `ResponseLimit` was refused before any send. `StreamBudget` is a streamed response with no finite byte maximum or no finite idle interval. `EgressPolicy` is an `EgressPolicy` exception that was refused when it was configured |
 | `Encode` | Request JSON serialization failed |
 | `Dns` | The target name did not resolve |
 | `Connect` | The connection was not established, with no more specific typed cause |
 | `Tls` | A Rustls error identifies a TLS validation or protocol failure |
 | `Transport` | Any other send or response-read failure, including a truncated body |
-| `Timeout(ClientTimeout)` | `Operation`, `Attempt`, or `Transport` expired |
+| `Timeout(ClientTimeout)` | `Operation`, `Attempt`, `Transport`, or `ResponseIdle` expired |
 | `Redirect(ClientRedirect)` | `InvalidLocation`, `OriginChanged`, `HopLimit`, or `UnsafeMethod` |
 | `Status(u16)` | An explicit status conversion rejected a 400–599 status |
 | `Decode(ClientDecode)` | `Utf8` or `Json` decoding of a completed response failed |
 | `ResponseTooLarge { limit }` | The response declared or delivered more than `limit` bytes |
+| `Egress(ClientEgress)` | The destination policy refused the `Scheme` or an `Address`, or the name returned more addresses than the `ResolutionLimit` |
 
-Classification reads typed facts, not text. Camber owns two timers, and each
+`EgressPolicy` is the value that states which destinations a client may send
+to. `EgressPolicy::allow_destination` returns
+`InvalidRequest(ClientInput::EgressPolicy)` for an exception it cannot admit.
+An `Egress` refusal holds no URL, host, or address. It is never retried, and
+its completion outcome is `egress`. `Client::egress_policy` gives a client its
+policy. A call that the policy refuses returns `Egress` before it sends. See
+[Destination Policy](client.md#destination-policy).
+
+Classification reads typed facts, not text. Camber owns three timers, and each
 names itself. `Timeout(ClientTimeout::Operation)` is the whole operation: every
 attempt, every delay, and the final body, under `total_timeout` or the
 request's earlier `deadline`. `Timeout(ClientTimeout::Attempt)` is one attempt
 under `request_timeout`, from its send through the end of its body. A connect
-or response-idle timer that expires returns
+timer, or the response-idle timer of a buffered call, returns
 `Timeout(ClientTimeout::Transport)`: Reqwest does not say which one expired, so
 Camber does not claim it. A handshake failure with no Rustls cause stays
 `Connect` or `Transport`.
+
+`Timeout(ClientTimeout::ResponseIdle)` and
+`InvalidRequest(ClientInput::StreamBudget)` belong to `send_streaming`.
+`ResponseIdle` is the third timer: the idle interval of one pending
+`ClientBody::next`. See [Stream Time](client.md#stream-time). `StreamBudget`
+refuses a stream that has no finite bound. See
+[Stream Bounds](client.md#stream-bounds). Neither category is retried. Their completion outcomes are `timeout`
+and `invalid-request`.
+
+A streamed body returns the same categories as a buffered call for the same
+causes: `ResponseTooLarge`, `Transport`, and the `Operation` and `Attempt`
+timeouts. One cause differs. A read of a streamed body that fails is always
+`Transport`, even with a Rustls cause, which a buffered call reports as `Tls`.
+A `ClientBody` whose owner task was lost returns `Transport`. After the caller
+cancels a body, `next` returns `Cancelled`.
 
 A handler that propagates one with `?` answers the fixed `500`
 `InternalService` rejection. An upstream status in `Status` is never the status

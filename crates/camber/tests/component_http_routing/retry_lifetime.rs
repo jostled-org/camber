@@ -12,7 +12,7 @@ use crate::retry_policy::{Draft, METHODS, PERMISSIONS, Permission, spawn_draft};
 use crate::retry_upstream::{
     Answer, CLIENT_METHODS, Call, PeerEvent, RunnableDriver, ScriptedUpstream, TIMER_ROUNDING,
     advance_to, assert_released, describe, settle_wakeups, settled, spawn_get,
-    wait_for_body_collection, within_watchdog,
+    wait_for_body_collection, watch_streams, within_watchdog,
 };
 use crate::trace_capture::{TraceCapture, assert_field_value, capture_events};
 
@@ -266,7 +266,7 @@ impl OperationRow {
     async fn started(script: &[Answer], call: impl FnOnce(String) -> Call) -> Self {
         let driver = RunnableDriver::start();
         let upstream = ScriptedUpstream::bind(script).await;
-        let observed = mock::transfer_owner(upstream.addr()).expect("one observer per upstream");
+        let observed = watch_streams(upstream.addr());
         let entry = Instant::now();
         let call = call(upstream.url(RETRY_PATH));
         Self {
@@ -515,6 +515,37 @@ async fn pending_until(call: &Call, deadline: Instant) -> bool {
     pending
 }
 
+/// Join a call the clock has stepped onto `bound` for, require `expected`,
+/// and release its fixture. Return what [`assert_cleanup`] reads.
+///
+/// The ending is required before the cleanup. A call still pending here would
+/// be ended by the cleanup's own clock step, and its late release would fail
+/// the fixture in this claim's place.
+async fn ended_and_released(
+    phase: Phase,
+    expected: Ending,
+    bound: Duration,
+    row: OperationRow,
+    context: &str,
+) -> (Result<(), String>, u32) {
+    let OperationRow {
+        driver,
+        mut upstream,
+        call,
+        ..
+    } = row;
+    let result: Option<Result<ClientResponse, RuntimeError>> = settled(call).await;
+    assert!(
+        expected.ended(&result),
+        "{context}: returned {}, not {expected:?} on {bound:?} from entry",
+        describe(&result)
+    );
+    let released = released_in_flight(phase, &mut upstream).await;
+    step_past_every_held_timer(phase).await;
+    let starts = upstream.finish(driver, context).await;
+    (released, starts)
+}
+
 /// Park the first attempt at `phase`, step to one tick before `bound`, require
 /// the call still pending, then step onto `bound` and require `expected`.
 ///
@@ -529,30 +560,16 @@ async fn assert_first_attempt_ends_at(
     expected: Ending,
     context: &str,
 ) {
-    let OperationRow {
-        driver,
-        mut upstream,
-        entry,
-        call,
-        ..
-    } = OperationRow::parked(phase, client, context).await;
+    let row = OperationRow::parked(phase, client, context).await;
 
-    let pending_before_bound = pending_until(&call, entry + bound).await;
+    let pending_before_bound = pending_until(&row.call, row.entry + bound).await;
     tokio::time::advance(expected.rounding()).await;
-    let result: Option<Result<ClientResponse, RuntimeError>> = settled(call).await;
-    let released = released_in_flight(phase, &mut upstream).await;
-    step_past_every_held_timer(phase).await;
-    let starts = upstream.finish(driver, context).await;
-
     assert!(
         pending_before_bound,
         "{context}: the call ended before {bound:?}"
     );
-    assert!(
-        expected.ended(&result),
-        "{context}: returned {}, not {expected:?}",
-        describe(&result)
-    );
+    let (released, starts) = ended_and_released(phase, expected, bound, row, context).await;
+
     assert_cleanup(phase, released, starts, context);
 }
 
@@ -616,7 +633,7 @@ const INNER_BOUND: Duration = Duration::from_secs(1);
 /// The attempt timer is Camber's and runs from the send through the end of the
 /// body. The quiet interval is the transport's. A stalled body ends with its
 /// own timer's name with retries to spare too: a final-body failure is never
-/// sent again.
+/// sent again. A head that arrives late does not move the attempt timer.
 async fn assert_each_timer_names_itself() {
     for phase in FIRST_ATTEMPT {
         assert_first_attempt_ends_at(
@@ -652,6 +669,56 @@ async fn assert_each_timer_names_itself() {
         "attempt timer in the final body with retries to spare",
     )
     .await;
+    for retries in [0, SPARE_RETRIES] {
+        assert_attempt_timer_outlives_a_delayed_head(retries).await;
+    }
+}
+
+/// How long the delayed-head row's peer holds the final head.
+///
+/// It is inside the inner bound, so the head arrives under the attempt timer.
+/// It is far above one tick, so a timer armed at the head would still be
+/// running when the row steps onto the bound.
+const HEAD_DELAY: Duration = Duration::from_millis(400);
+
+/// The attempt timer a final head carries is the one its send armed.
+///
+/// The peer holds the head for [`HEAD_DELAY`] and then stalls the body, so
+/// the send and the head sit at different instants. The call is still pending
+/// one tick before the bound measured from entry, and ends on that bound. A
+/// timer armed again at the head would end it [`HEAD_DELAY`] later.
+async fn assert_attempt_timer_outlives_a_delayed_head(retries: u32) {
+    let context = format!("attempt timer across a delayed head with {retries} retries");
+    let client = operation_client(retries, CROSSED_BACKOFF).request_timeout(INNER_BOUND);
+    let mut row = OperationRow::start(&[Answer::StallBodyAfter(HEAD_DELAY)], client).await;
+    row.upstream.expect(PeerEvent::Started(0), &context).await;
+    settle_wakeups().await;
+    let pending_before_head = !row.call.is_finished();
+    let unread_before_head = row.observed.collected_chunks_polled() == 0;
+
+    advance_to(row.entry + HEAD_DELAY).await;
+    row.upstream.expect(PeerEvent::Stalled(0), &context).await;
+    let collecting = wait_for_body_collection(&row.observed).await;
+    let pending_before_bound = pending_until(&row.call, row.entry + INNER_BOUND).await;
+    let (released, starts) = ended_and_released(
+        Phase::InitialBody,
+        Ending::AttemptTimeout,
+        INNER_BOUND,
+        row,
+        &context,
+    )
+    .await;
+
+    assert!(
+        pending_before_head && unread_before_head,
+        "{context}: the call left its head wait before the peer released the head"
+    );
+    assert_eq!(collecting, Ok(()), "{context}: the delayed head");
+    assert!(
+        pending_before_bound,
+        "{context}: the call ended before {INNER_BOUND:?}"
+    );
+    assert_cleanup(Phase::InitialBody, released, starts, &context);
 }
 
 /// Send one GET with an absolute request deadline, under a client whose only

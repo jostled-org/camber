@@ -20,7 +20,36 @@
 //! public requests that end before any send are fed to it too. This proves the
 //! vocabulary is closed and complete. It does not prove that an event is
 //! emitted: the observability root owns that.
+//!
+//! Egress 1.T2: the destination-policy categories join every table above. The
+//! refusals a real policy returns are read for the text they were built from.
+//! The replay decision is the production one, reached through `__private` as
+//! `client_retryable_failure(ClientError, &Method, RetryPolicy) -> bool`. The
+//! served refusal is entered at the handler stage and at the middleware stage.
+//!
+//! Clause → row → the mutation that turns the row red:
+//!
+//! | Clause | Row | Mutation |
+//! |---|---|---|
+//! | Each reason has its own safe name | `assert_nested_categories_are_named`, `assert_safe_formatting` | erase one Display or category arm |
+//! | A refusal records `egress` | `assert_categories_project_closed_outcomes`, run by 7.T3 | erase the outcome arm |
+//! | No refusal is replayed | `assert_egress_refusals_never_replay` | make Address replayable |
+//! | No refusal repeats its inputs | `assert_egress_refusals_keep_no_text` | expose exception text |
+//! | A middleware failure is this service's | `assert_internal_service_refusals`, middleware stage | remove the Client classification arm |
+//!
+//! Streaming 4.T3: `ClientInput::StreamBudget` and
+//! `ClientTimeout::ResponseIdle` join every table above. Both are values here.
+//! No row starts a stream, so this proves the vocabulary and its consumers,
+//! not that a stream returns either one.
+//!
+//! | Clause | Row | Mutation |
+//! |---|---|---|
+//! | Each addition has its own safe name | `assert_nested_categories_are_named`, `assert_safe_formatting` | share a label with `ResponseLimit` or `Transport` |
+//! | Each addition records its outcome | `assert_categories_project_closed_outcomes`, run by 7.T3 | erase the outcome arm |
+//! | Neither addition is sent again | `assert_stream_categories_never_replay` | retry `ResponseIdle` |
+//! | Neither is an inbound deadline refusal | `assert_internal_service_refusals`, both stages | fall through to a legacy `DeadlineBoundary` |
 
+use crate::client_egress::{EXCEPTED, decide, excepting, ip};
 use crate::error_chain::{assert_no_raw_source, assert_safe, assert_secret_free, renderings};
 use crate::http::{UndialedListener, WIRE_TIMEOUT, read_head, request};
 use crate::leaky_source::LeakySource;
@@ -28,15 +57,19 @@ use crate::retry_delays;
 use crate::runtime_support::{spawn_server, test_runtime};
 
 use camber::__private::client_error_projection;
+use camber::__private::client_retryable_failure;
 use camber::__private::client_terminal_outcome;
 use camber::http::Client;
 use camber::http::ClientDecode;
+use camber::http::ClientEgress;
 use camber::http::ClientError;
 use camber::http::ClientInput;
 use camber::http::ClientRedirect;
 use camber::http::ClientRequest;
 use camber::http::ClientResponse;
 use camber::http::ClientTimeout;
+use camber::http::EgressPolicy;
+use camber::http::Next;
 use camber::http::{Rejection, RejectionContext, RejectionKind, Request, Response, Router};
 use camber::{RuntimeError, runtime};
 use futures_util::FutureExt;
@@ -66,7 +99,7 @@ struct Row {
     build: fn() -> ClientError,
 }
 
-const ROWS: [Row; 24] = [
+const ROWS: [Row; 30] = [
     Row {
         label: "configuration",
         category: "configuration",
@@ -101,6 +134,16 @@ const ROWS: [Row; 24] = [
         label: "invalid response limit",
         category: "invalid-request/response-limit",
         build: || ClientError::InvalidRequest(ClientInput::ResponseLimit),
+    },
+    Row {
+        label: "invalid egress policy",
+        category: "invalid-request/egress-policy",
+        build: || ClientError::InvalidRequest(ClientInput::EgressPolicy),
+    },
+    Row {
+        label: "invalid stream budget",
+        category: "invalid-request/stream-budget",
+        build: || ClientError::InvalidRequest(ClientInput::StreamBudget),
     },
     Row {
         label: "encode",
@@ -141,6 +184,11 @@ const ROWS: [Row; 24] = [
         label: "transport timeout",
         category: "timeout/transport",
         build: || ClientError::Timeout(ClientTimeout::Transport),
+    },
+    Row {
+        label: "response idle timeout",
+        category: "timeout/response-idle",
+        build: || ClientError::Timeout(ClientTimeout::ResponseIdle),
     },
     Row {
         label: "invalid location",
@@ -187,6 +235,21 @@ const ROWS: [Row; 24] = [
         category: "response-too-large",
         build: || ClientError::ResponseTooLarge { limit: ROW_LIMIT },
     },
+    Row {
+        label: "egress scheme",
+        category: "egress/scheme",
+        build: || ClientError::Egress(ClientEgress::Scheme),
+    },
+    Row {
+        label: "egress address",
+        category: "egress/address",
+        build: || ClientError::Egress(ClientEgress::Address),
+    },
+    Row {
+        label: "egress resolution limit",
+        category: "egress/resolution-limit",
+        build: || ClientError::Egress(ClientEgress::ResolutionLimit),
+    },
 ];
 
 /// A table with no rows would build no category and still report success.
@@ -204,7 +267,7 @@ macro_rules! categories {
         /// The category one value belongs to.
         ///
         /// The match has no wildcard arm at either level. A variant added to
-        /// any of the five enums fails to compile until it is listed, and
+        /// any of the six enums fails to compile until it is listed, and
         /// [`assert_every_category_has_a_row`] then fails until it is given a
         /// row.
         fn category_of(error: &ClientError) -> &'static str {
@@ -223,6 +286,8 @@ categories! {
     ClientError::InvalidRequest(ClientInput::ReservedHeader) => "invalid-request/reserved-header",
     ClientError::InvalidRequest(ClientInput::Body) => "invalid-request/body",
     ClientError::InvalidRequest(ClientInput::ResponseLimit) => "invalid-request/response-limit",
+    ClientError::InvalidRequest(ClientInput::EgressPolicy) => "invalid-request/egress-policy",
+    ClientError::InvalidRequest(ClientInput::StreamBudget) => "invalid-request/stream-budget",
     ClientError::Encode => "encode",
     ClientError::Dns => "dns",
     ClientError::Connect => "connect",
@@ -231,6 +296,7 @@ categories! {
     ClientError::Timeout(ClientTimeout::Operation) => "timeout/operation",
     ClientError::Timeout(ClientTimeout::Attempt) => "timeout/attempt",
     ClientError::Timeout(ClientTimeout::Transport) => "timeout/transport",
+    ClientError::Timeout(ClientTimeout::ResponseIdle) => "timeout/response-idle",
     ClientError::Redirect(ClientRedirect::InvalidLocation) => "redirect/invalid-location",
     ClientError::Redirect(ClientRedirect::OriginChanged) => "redirect/origin-changed",
     ClientError::Redirect(ClientRedirect::HopLimit) => "redirect/hop-limit",
@@ -239,6 +305,9 @@ categories! {
     ClientError::Decode(ClientDecode::Utf8) => "decode/utf8",
     ClientError::Decode(ClientDecode::Json) => "decode/json",
     ClientError::ResponseTooLarge { .. } => "response-too-large",
+    ClientError::Egress(ClientEgress::Scheme) => "egress/scheme",
+    ClientError::Egress(ClientEgress::Address) => "egress/address",
+    ClientError::Egress(ClientEgress::ResolutionLimit) => "egress/resolution-limit",
 }
 
 /// The compile-time half of the error contract.
@@ -293,11 +362,14 @@ fn assert_nested_categories_are_named() {
         ReservedHeader,
         Body,
         ResponseLimit,
+        EgressPolicy,
+        StreamBudget,
     });
     assert_closed_enum!(ClientTimeout {
         Operation,
         Attempt,
         Transport,
+        ResponseIdle,
     });
     assert_closed_enum!(ClientRedirect {
         InvalidLocation,
@@ -306,6 +378,11 @@ fn assert_nested_categories_are_named() {
         UnsafeMethod,
     });
     assert_closed_enum!(ClientDecode { Utf8, Json });
+    assert_closed_enum!(ClientEgress {
+        Scheme,
+        Address,
+        ResolutionLimit,
+    });
 }
 
 /// The rows name every declared category, and each row builds the one it names.
@@ -383,44 +460,107 @@ struct Mapped {
 
 type Journal = Arc<Mutex<Vec<Mapped>>>;
 
+/// The prefix every row's path has before its index.
+const ROW_PREFIX: &str = "/client-failure/";
+
 /// The path one row's failing route is served at.
 fn row_path(index: usize) -> String {
-    format!("/client-failure/{index}")
+    format!("{ROW_PREFIX}{index}")
 }
 
-/// One route per row, each returning its category as a handler failure, behind
-/// a mapper that records what it was handed.
-fn failing_router(rows: &[Row], journal: &Journal) -> Router {
-    let mut router = Router::new();
+/// The stage of a served request that returns the row's category.
+#[derive(Clone, Copy, Debug)]
+enum Stage {
+    Handler,
+    /// A middleware frame returns it, and the handler behind it is never
+    /// entered. A middleware frame's own faults are middleware refusals, so
+    /// only the outbound classification makes this one an internal-service
+    /// refusal.
+    Middleware,
+}
+
+/// The row a request path names, if it names one.
+fn row_build(builds: &[fn() -> ClientError], path: &str) -> Option<fn() -> ClientError> {
+    path.strip_prefix(ROW_PREFIX)?
+        .parse::<usize>()
+        .ok()
+        .and_then(|index| builds.get(index).copied())
+}
+
+/// One route per row, each returning its category as a handler failure.
+fn add_failing_handlers(router: &mut Router, rows: &[Row]) {
     for (index, row) in rows.iter().enumerate() {
         let build = row.build;
-        router.get(&row_path(index), move |_req: &Request| {
+        router.get(&row_path(index), move |_: &Request| {
             std::future::ready(Err::<Response, RuntimeError>(RuntimeError::Client(build())))
         });
     }
-    let recorded = Arc::clone(journal);
-    router.rejection_mapper(move |rejection: &Rejection, context: &RejectionContext| {
-        recorded
-            .lock()
-            .expect("the journal lock is not poisoned")
-            .push(Mapped {
-                path: context.raw_path().into(),
-                kind: rejection.kind(),
-                status: rejection.status(),
-                message: rejection.message().into(),
-            });
-        Response::text(rejection.status(), rejection.message())
-    })
 }
 
-/// Every category a handler returns is the fixed internal-service refusal.
+/// One frame that returns the category of the row a path names, in front of
+/// one route per row that records that it was entered. Returns that record.
+fn add_failing_middleware(router: &mut Router, rows: &[Row]) -> Arc<AtomicBool> {
+    let entered = Arc::new(AtomicBool::new(false));
+    let builds: Arc<[fn() -> ClientError]> = rows.iter().map(|row| row.build).collect();
+    router.use_middleware(move |req: &Request, _: Next| {
+        let outcome: Result<Response, RuntimeError> = match row_build(&builds, req.path()) {
+            Some(build) => Err(RuntimeError::Client(build())),
+            None => Response::text(404, "no row"),
+        };
+        std::future::ready(outcome)
+    });
+    for index in 0..rows.len() {
+        let entered = Arc::clone(&entered);
+        router.get(&row_path(index), move |_: &Request| {
+            entered.store(true, Ordering::SeqCst);
+            std::future::ready(Response::text(200, "the handler was entered"))
+        });
+    }
+    entered
+}
+
+/// One route per row, failing at `stage` with the row's category, behind a
+/// mapper that records what it was handed. The middleware stage also returns
+/// the record of a handler entered behind its failing frame.
+fn failing_router(
+    rows: &[Row],
+    stage: Stage,
+    journal: &Journal,
+) -> (Router, Option<Arc<AtomicBool>>) {
+    let mut router = Router::new();
+    let entered = match stage {
+        Stage::Handler => {
+            add_failing_handlers(&mut router, rows);
+            None
+        }
+        Stage::Middleware => Some(add_failing_middleware(&mut router, rows)),
+    };
+    let recorded = Arc::clone(journal);
+    let router =
+        router.rejection_mapper(move |rejection: &Rejection, context: &RejectionContext| {
+            recorded
+                .lock()
+                .expect("the journal lock is not poisoned")
+                .push(Mapped {
+                    path: context.raw_path().into(),
+                    kind: rejection.kind(),
+                    status: rejection.status(),
+                    message: rejection.message().into(),
+                });
+            Response::text(rejection.status(), rejection.message())
+        });
+    (router, entered)
+}
+
+/// Every category a handler or a middleware frame returns is the fixed
+/// internal-service refusal.
 ///
 /// The status a `Status` failure carries is the upstream's. It is never the
 /// status the inbound peer is given, and a response-limit failure is not a
 /// payload refusal of the inbound request.
-fn assert_internal_service_refusals(rows: &[Row]) {
+fn assert_internal_service_refusals(rows: &[Row], stage: Stage) {
     let journal = Journal::default();
-    let router = failing_router(rows, &journal);
+    let (router, entered) = failing_router(rows, stage, &journal);
     let driven = Arc::clone(&journal);
     let labels: Box<[&'static str]> = rows.iter().map(|row| row.label).collect();
 
@@ -429,6 +569,7 @@ fn assert_internal_service_refusals(rows: &[Row]) {
             let addr = spawn_server(router);
             for (index, label) in labels.iter().enumerate() {
                 let path = row_path(index);
+                let label = format!("{label} at {stage:?}");
                 let response = request(addr, "GET", &path, &[], &[], WIRE_TIMEOUT)
                     .unwrap_or_else(|error| panic!("{label}: the request failed: {error}"));
                 assert_eq!(response.status, INTERNAL_STATUS, "{label}: wire status");
@@ -460,6 +601,12 @@ fn assert_internal_service_refusals(rows: &[Row]) {
         unread.is_empty(),
         "the mapper was called for a request no row sent: {unread:?}"
     );
+    if let Some(entered) = entered {
+        assert!(
+            !entered.load(Ordering::SeqCst),
+            "{stage:?}: a handler behind the failing frame was entered"
+        );
+    }
 }
 
 /// A secret the refused client construction was given.
@@ -862,18 +1009,229 @@ fn assert_projection_is_typed_and_safe(rows: &[ProjectionRow]) {
     }
 }
 
-/// 1.T2
+/// The private address the egress rows except is [`EXCEPTED`]. This is the
+/// one beside it.
+const REFUSED_TEXT: &str = "10.20.30.41";
+
+/// The port the excepted origin and every egress target name.
+const EXCEPTED_PORT: u16 = 8080;
+
+/// The text the egress rows build their policy and their targets from.
+const EXCEPTION_HOST_SECRET: &str = "exception-host-sentinel-6b1f.internal";
+const EGRESS_HOST_SECRET: &str = "egress-host-sentinel-83c2.internal";
+const EGRESS_USER_SECRET: &str = "egress-user-sentinel-5a90";
+const EGRESS_PASSWORD_SECRET: &str = "egress-password-sentinel-d417";
+const EGRESS_PATH_SECRET: &str = "egress-path-sentinel-2e6c";
+const EGRESS_QUERY_SECRET: &str = "egress-query-sentinel-f03b";
+
+/// Everything an egress refusal was built from and may not repeat.
+const EGRESS_SECRETS: [&str; 8] = [
+    EXCEPTION_HOST_SECRET,
+    EGRESS_HOST_SECRET,
+    EGRESS_USER_SECRET,
+    EGRESS_PASSWORD_SECRET,
+    EGRESS_PATH_SECRET,
+    EGRESS_QUERY_SECRET,
+    EXCEPTED,
+    REFUSED_TEXT,
+];
+
+/// The restricted policy with one exception at [`EXCEPTED`].
+fn excepting_policy() -> EgressPolicy {
+    let origin = format!("http://{EXCEPTION_HOST_SECRET}:{EXCEPTED_PORT}");
+    excepting(EgressPolicy::public_internet(), &origin, ip(EXCEPTED))
+}
+
+/// The failure a call returned.
+fn refusal<T>(result: Result<T, RuntimeError>, label: &str) -> RuntimeError {
+    match result {
+        Err(error) => error,
+        Ok(_) => panic!("{label}: the call was not refused"),
+    }
+}
+
+/// The category a refusal carries.
+fn refusal_category(error: &RuntimeError, label: &str) -> &'static str {
+    match error {
+        RuntimeError::Client(category) => category_of(category),
+        other => panic!("{label}: the refusal is not a client failure: {other:?}"),
+    }
+}
+
+/// A refused exception, built from an origin that holds every target secret.
+fn refused_exception() -> RuntimeError {
+    let origin = format!(
+        "http://{EGRESS_USER_SECRET}:{EGRESS_PASSWORD_SECRET}@{EGRESS_HOST_SECRET}\
+         /{EGRESS_PATH_SECRET}?token={EGRESS_QUERY_SECRET}"
+    );
+    let added: Result<EgressPolicy, RuntimeError> =
+        excepting_policy().allow_destination(&origin, ip(REFUSED_TEXT));
+    refusal(added, "an origin with userinfo, a path, and a query")
+}
+
+/// A target at the excepted port, with a path and a query, under `scheme`.
+fn egress_target(scheme: &str) -> String {
+    format!(
+        "{scheme}://{EGRESS_HOST_SECRET}:{EXCEPTED_PORT}\
+         /{EGRESS_PATH_SECRET}?token={EGRESS_QUERY_SECRET}"
+    )
+}
+
+/// One refusal a real policy returned, with the category and the outcome it
+/// must carry.
+struct EgressRefusal {
+    label: &'static str,
+    error: RuntimeError,
+    category: &'static str,
+    outcome: &'static str,
+}
+
+/// The three refusals a real policy returns, each built from secret text.
+fn egress_refusals(policy: &EgressPolicy) -> [EgressRefusal; 3] {
+    let address: Result<(), RuntimeError> =
+        decide(policy, &egress_target("http"), ip(REFUSED_TEXT));
+    let secure = excepting_policy().https_only();
+    let scheme: Result<(), RuntimeError> = decide(&secure, &egress_target("http"), ip(EXCEPTED));
+    [
+        EgressRefusal {
+            label: "refused exception",
+            error: refused_exception(),
+            category: "invalid-request/egress-policy",
+            outcome: "invalid-request",
+        },
+        EgressRefusal {
+            label: "refused address",
+            error: refusal(address, "a private address with no exception"),
+            category: "egress/address",
+            outcome: "egress",
+        },
+        EgressRefusal {
+            label: "refused scheme",
+            error: refusal(scheme, "an HTTP target under HTTPS-only"),
+            category: "egress/scheme",
+            outcome: "egress",
+        },
+    ]
+}
+
+/// The refusals a real policy returns keep their closed category, record
+/// their outcome, and repeat nothing they were built from. Neither does the
+/// policy's own `Debug`.
+fn assert_egress_refusals_keep_no_text() {
+    let policy = excepting_policy();
+    for row in egress_refusals(&policy) {
+        let (label, error) = (row.label, &row.error);
+        assert_eq!(
+            refusal_category(error, label),
+            row.category,
+            "{label}: {error:?}"
+        );
+        assert_eq!(
+            closed_outcome(error, label),
+            row.outcome,
+            "{label}: outcome"
+        );
+        assert_safe(error, &EGRESS_SECRETS, label);
+    }
+
+    for rendering in [format!("{policy:?}"), format!("{policy:#?}")] {
+        assert!(!rendering.is_empty(), "the policy has an empty Debug");
+        let repeated = EGRESS_SECRETS
+            .iter()
+            .find(|secret| rendering.contains(**secret));
+        assert_eq!(repeated, None, "the policy's Debug repeats it: {rendering}");
+    }
+}
+
+/// Every egress category the rows build.
+///
+/// The rows cover every `ClientEgress` reason, so a new reason is asked the
+/// replay question once it has its row.
+fn egress_categories(rows: &[Row]) -> Box<[ClientError]> {
+    let refused: Box<[ClientError]> = rows
+        .iter()
+        .map(|row| (row.build)())
+        .filter(|category| matches!(category, ClientError::Egress(_)))
+        .collect();
+    assert!(!refused.is_empty(), "no row builds an egress refusal");
+    refused
+}
+
+/// Require that no category of `refused` is sent again, for any method under
+/// any permission.
+///
+/// `control` is a category a permission does replay. It is asked beside each
+/// row and must follow the permission, so a decision that refuses everything
+/// fails here.
+fn assert_never_replayed(control: ClientError, control_label: &str, refused: &[ClientError]) {
+    let methods = retry_delays::methods();
+    let asked = methods
+        .iter()
+        .flat_map(|method| retry_delays::PERMISSIONS.map(|policy| (method, policy)));
+    for (method, policy) in asked {
+        assert_eq!(
+            client_retryable_failure(control, method, policy),
+            retry_delays::permits(policy, method),
+            "{control_label}, {method} under {policy:?}"
+        );
+        let replayed = refused
+            .iter()
+            .find(|category| client_retryable_failure(**category, method, policy));
+        assert_eq!(replayed, None, "{method} under {policy:?} was replayed");
+    }
+}
+
+/// No egress refusal is sent again, for any method under any permission.
+///
+/// The refused dial is asked beside each, so a decision that refuses
+/// everything proves nothing here.
+fn assert_egress_refusals_never_replay(rows: &[Row]) {
+    assert_never_replayed(
+        ClientError::Connect,
+        "a refused dial",
+        &egress_categories(rows),
+    );
+}
+
+/// The two categories a stream adds. Neither is a pre-head outcome another
+/// send could change.
+fn stream_categories() -> [ClientError; 2] {
+    [
+        ClientError::InvalidRequest(ClientInput::StreamBudget),
+        ClientError::Timeout(ClientTimeout::ResponseIdle),
+    ]
+}
+
+/// Neither stream category is sent again, for any method under any
+/// permission.
+///
+/// The attempt timer is asked beside each, so a decision that refuses every
+/// timeout proves nothing here. A quiet body is read after the final head, and
+/// no failure after that head starts another send.
+fn assert_stream_categories_never_replay() {
+    assert_never_replayed(
+        ClientError::Timeout(ClientTimeout::Attempt),
+        "an expired attempt",
+        &stream_categories(),
+    );
+}
+
+/// 1.T2, 4.T3
 #[test]
 fn client_error_categories_map_to_internal_service() {
     assert_nested_categories_are_named();
     assert_every_category_has_a_row(&ROWS);
     assert_safe_formatting(&ROWS);
     assert_projection_is_typed_and_safe(&PROJECTION_ROWS);
-    assert_internal_service_refusals(&ROWS);
+    assert_egress_refusals_keep_no_text();
+    assert_egress_refusals_never_replay(&ROWS);
+    assert_stream_categories_never_replay();
+    assert_internal_service_refusals(&ROWS, Stage::Handler);
+    assert_internal_service_refusals(&ROWS, Stage::Middleware);
 }
 
 /// Every outcome a completion event may record.
-const OUTCOMES: [&str; 13] = [
+const OUTCOMES: [&str; 14] = [
     "response",
     "configuration",
     "no-runtime",
@@ -885,6 +1243,7 @@ const OUTCOMES: [&str; 13] = [
     "timeout",
     "redirect",
     "response-too-large",
+    "egress",
     "cancelled",
     "abandoned",
 ];
@@ -910,14 +1269,19 @@ fn outcome_of(error: &ClientError) -> Option<&'static str> {
             | ClientInput::Header
             | ClientInput::ReservedHeader
             | ClientInput::Body
-            | ClientInput::ResponseLimit,
+            | ClientInput::ResponseLimit
+            | ClientInput::EgressPolicy
+            | ClientInput::StreamBudget,
         ) => Some("invalid-request"),
         ClientError::Dns => Some("dns"),
         ClientError::Connect => Some("connect"),
         ClientError::Tls => Some("tls"),
         ClientError::Transport => Some("transport"),
         ClientError::Timeout(
-            ClientTimeout::Operation | ClientTimeout::Attempt | ClientTimeout::Transport,
+            ClientTimeout::Operation
+            | ClientTimeout::Attempt
+            | ClientTimeout::Transport
+            | ClientTimeout::ResponseIdle,
         ) => Some("timeout"),
         ClientError::Redirect(
             ClientRedirect::InvalidLocation
@@ -926,6 +1290,9 @@ fn outcome_of(error: &ClientError) -> Option<&'static str> {
             | ClientRedirect::UnsafeMethod,
         ) => Some("redirect"),
         ClientError::ResponseTooLarge { .. } => Some("response-too-large"),
+        ClientError::Egress(
+            ClientEgress::Scheme | ClientEgress::Address | ClientEgress::ResolutionLimit,
+        ) => Some("egress"),
         ClientError::Encode
         | ClientError::Status(_)
         | ClientError::Decode(ClientDecode::Utf8 | ClientDecode::Json) => None,
@@ -950,8 +1317,9 @@ fn closed_outcome(error: &RuntimeError, label: &str) -> &'static str {
     outcome
 }
 
-/// Every category projects to its outcome, the two shared runtime failures
-/// project to theirs, and together they reach the whole vocabulary.
+/// Every category projects to its outcome, the three runtime failures an
+/// operation returns project to theirs, and together they reach the whole
+/// vocabulary.
 fn assert_categories_project_closed_outcomes(rows: &[Row]) {
     let mut reached = BTreeSet::from(UNFAILED_OUTCOMES);
     for row in rows {
@@ -965,6 +1333,9 @@ fn assert_categories_project_closed_outcomes(rows: &[Row]) {
     for (label, error, expected) in [
         ("cancelled", RuntimeError::Cancelled, "cancelled"),
         ("no runtime", RuntimeError::NoRuntime, "no-runtime"),
+        // A stream its runtime refuses to admit. The word is the least
+        // specific failure, and the reference documents it.
+        ("closed scope", RuntimeError::ScopeClosed, "transport"),
     ] {
         assert_eq!(
             closed_outcome(&error, label),
@@ -1035,10 +1406,7 @@ fn assert_unsent_requests_project_their_outcome() {
         ("TRACE with a body", refused, "invalid-request"),
         ("expired deadline", expired, "timeout"),
     ] {
-        let error = match result {
-            Err(error) => error,
-            Ok(response) => panic!("{label}: the call answered {}", response.status()),
-        };
+        let error = refusal(result, label);
         assert_eq!(
             closed_outcome(&error, label),
             expected,

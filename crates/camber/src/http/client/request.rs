@@ -1,13 +1,14 @@
 //! The public description of one outbound request.
 
+use super::buffered::operate;
 use super::description::{Description, request_method};
 use super::error::ClientError;
-use super::operation::operate;
 use super::policy::OperationPolicy;
 use super::redirect::RedirectPolicy;
 use super::replay::RetryPolicy;
 use super::response::ClientResponse;
 use super::reusable::Client;
+use super::stream::{ClientStreamResponse, operate as operate_streaming};
 use crate::RuntimeError;
 use bytes::Bytes;
 use reqwest::Method;
@@ -21,7 +22,8 @@ const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json
 ///
 /// [`Client::request`] validates the method and the target and returns this
 /// description. Each setter consumes it and returns it, and
-/// [`send`](Self::send) runs it. Nothing reaches the network before `send`.
+/// [`send`](Self::send) or [`send_streaming`](Self::send_streaming) runs it.
+/// Nothing reaches the network before that.
 ///
 /// The description owns its target, headers, and body, and holds its own copy
 /// of the client's response ceiling, operation total, retry settings, and
@@ -138,7 +140,8 @@ impl<'a> ClientRequest<'a> {
         Ok(self)
     }
 
-    /// Replace the largest response body this request retains.
+    /// Replace the largest response body this request retains, or the most
+    /// body bytes it delivers as a stream.
     ///
     /// Zero returns `ClientInput::ResponseLimit`.
     pub fn response_limit(mut self, max_bytes: usize) -> Result<Self, RuntimeError> {
@@ -230,6 +233,72 @@ impl<'a> ClientRequest<'a> {
     /// is never polled records nothing.
     pub async fn send(self) -> Result<ClientResponse, RuntimeError> {
         operate(self.client, self.description, self.policy).await
+    }
+
+    /// Send the request and return the response head with its body unread.
+    ///
+    /// The returned [`ClientStreamResponse`] holds the final status and
+    /// headers. Its body is read one chunk at a time through
+    /// [`ClientBody`](crate::http::ClientBody), and Camber reads the upstream
+    /// only when a chunk is asked for. Every status is a response.
+    ///
+    /// ```no_run
+    /// # use camber::http::{Bytes, Client};
+    /// # async fn write_chunk(chunk: Bytes) -> Result<(), camber::RuntimeError> {
+    /// #     drop(chunk);
+    /// #     Ok(())
+    /// # }
+    /// # async fn fetch(client: &Client, source_url: &str) -> Result<(), camber::RuntimeError> {
+    /// let response = client
+    ///     .request("GET", source_url)?
+    ///     .response_limit(64 * 1024 * 1024)?
+    ///     .send_streaming()
+    ///     .await?
+    ///     .error_for_status()?;
+    /// let mut body = response.into_body();
+    /// while let Some(chunk) = body.next().await? {
+    ///     write_chunk(chunk).await?;
+    /// }
+    /// body.close().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The checks of [`send`](Self::send) apply, and so do its retries and
+    /// redirects, up to the final head. After the head is returned nothing is
+    /// sent again: not for a body failure, and not for a status conversion.
+    ///
+    /// A stream needs a finite response maximum and a finite response idle
+    /// interval. A client whose policy removed either returns
+    /// `ClientInput::StreamBudget` before anything is resolved or dialed.
+    /// [`response_limit`](Self::response_limit) supplies the maximum for one
+    /// request. A head that declares more than the maximum returns
+    /// `ClientError::ResponseTooLarge`, and no body byte is read.
+    ///
+    /// The operation begins when this future is first polled, and that poll
+    /// fixes its deadline, its trace context, and the runtime that owns it.
+    /// The deadline covers the head, the body, and the time the caller holds
+    /// the response between reads. The attempt timeout continues through the
+    /// body the same way. The idle interval measures only a pending
+    /// [`ClientBody::next`](crate::http::ClientBody::next).
+    ///
+    /// One task owns the response. Under a Camber runtime it belongs to the
+    /// runtime that first polled this future, and a runtime whose scope is
+    /// closed returns `RuntimeError::ScopeClosed` and sends nothing. Runtime
+    /// shutdown ends the response and returns `RuntimeError::Cancelled`.
+    /// Outside a Camber runtime the returned handle owns the task. Polled
+    /// outside a Tokio executor, this future returns
+    /// `RuntimeError::NoRuntime`.
+    ///
+    /// Dropping this future ends the operation. A returned error means the
+    /// upstream is already released.
+    ///
+    /// A started operation records one `http.client.completed` tracing event,
+    /// after the upstream is released. A body read to its clean end records
+    /// `response`. A response or body that is dropped or closed first records
+    /// `abandoned`. A failure after the head keeps the status of that head.
+    pub async fn send_streaming(self) -> Result<ClientStreamResponse, RuntimeError> {
+        operate_streaming(self.client, self.description, self.policy).await
     }
 }
 

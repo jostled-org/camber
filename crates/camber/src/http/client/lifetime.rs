@@ -1,5 +1,5 @@
 //! The lifetime of one operation: its absolute deadline, the runtime's
-//! shutdown, and the attempt timer inside them.
+//! stop request, and the attempt timer inside them.
 //!
 //! The deadline is fixed once, when the operation is first polled. No attempt
 //! and no delay resets it. Every pending phase runs under [`Lifetime::within`],
@@ -8,17 +8,66 @@
 
 use super::error::{ClientError, ClientTimeout};
 use crate::RuntimeError;
+use crate::runtime_state::LifecycleSignals;
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::Instant;
 
-/// The failure of an operation that outlived its own deadline.
-const OPERATION_EXPIRED: RuntimeError =
-    RuntimeError::Client(ClientError::Timeout(ClientTimeout::Operation));
+/// The category of an operation that outlived its own deadline.
+pub(super) const OPERATION_EXPIRED: ClientError = ClientError::Timeout(ClientTimeout::Operation);
 
-/// The absolute deadline of one operation.
+/// How a lifetime ended a wait. These two ends are the only ones it has.
+pub(super) enum LifetimeEnd {
+    /// The operation deadline expired.
+    Expired,
+    /// The runtime asked the operation to stop.
+    Stopped,
+}
+
+impl From<LifetimeEnd> for RuntimeError {
+    fn from(end: LifetimeEnd) -> Self {
+        match end {
+            LifetimeEnd::Expired => Self::Client(OPERATION_EXPIRED),
+            LifetimeEnd::Stopped => Self::Cancelled,
+        }
+    }
+}
+
+/// The category of an attempt whose timer expired, before its head or during
+/// its body.
+pub(super) const ATTEMPT_EXPIRED: ClientError = ClientError::Timeout(ClientTimeout::Attempt);
+
+/// Where one operation reads its runtime's request to stop.
+pub(super) enum Stop {
+    /// The runtime of the task that polls the operation. An inline call
+    /// reads it at each wait.
+    Ambient,
+    /// The runtime that admitted the operation's task, fixed at the first
+    /// poll. Its shutdown and the close of its root scope both stop the
+    /// operation.
+    Captured(LifecycleSignals),
+    /// No Camber runtime owns the operation, so nothing can ask it to stop.
+    Never,
+}
+
+impl Stop {
+    /// Wait until the runtime asks the operation to stop.
+    ///
+    /// The request is sticky: one made before this wait began is read at
+    /// once.
+    async fn requested(&self) {
+        match self {
+            Self::Ambient => crate::task::on_shutdown().await,
+            Self::Captured(signals) => signals.wait().await,
+            Self::Never => std::future::pending().await,
+        }
+    }
+}
+
+/// The absolute deadline of one operation, and its source of a stop request.
 pub(super) struct Lifetime {
     deadline: Instant,
+    stop: Stop,
 }
 
 impl Lifetime {
@@ -41,9 +90,17 @@ impl Lifetime {
             .map(|at| at.saturating_duration_since(std::time::Instant::now()))
             .and_then(|left| entry.checked_add(left));
         match supplied_end.map_or(total_end, |supplied| supplied.min(total_end)) {
-            deadline if deadline > entry => Ok(Self { deadline }),
-            _ => Err(OPERATION_EXPIRED),
+            deadline if deadline > entry => Ok(Self {
+                deadline,
+                stop: Stop::Ambient,
+            }),
+            _ => Err(RuntimeError::Client(OPERATION_EXPIRED)),
         }
+    }
+
+    /// Read the stop request from `stop` from now on. The deadline is kept.
+    pub(super) fn stopped_by(self, stop: Stop) -> Self {
+        Self { stop, ..self }
     }
 
     /// When an attempt that starts now and may last `attempt` expires.
@@ -65,7 +122,7 @@ impl Lifetime {
     /// order imposed: the deadline and shutdown are unordered between
     /// themselves, and either one ready beside a finished phase is a member of
     /// the closed result set the contract admits.
-    pub(super) async fn within<T>(&self, work: impl Future<Output = T>) -> Result<T, RuntimeError> {
+    pub(super) async fn within<T>(&self, work: impl Future<Output = T>) -> Result<T, LifetimeEnd> {
         tokio::select! {
             biased;
             cause = self.ended() => Err(cause),
@@ -76,13 +133,14 @@ impl Lifetime {
     /// Run one phase of an attempt until it finishes, its attempt timer
     /// expires, or the operation ends.
     ///
-    /// `None` is the attempt timer. The caller names that failure, because
-    /// only the caller knows whether the phase may be sent again.
+    /// `None` is the attempt timer. The caller names that failure as
+    /// [`ATTEMPT_EXPIRED`], because only the caller knows whether the phase
+    /// may be sent again.
     pub(super) async fn within_attempt<T>(
         &self,
         bound: Option<Instant>,
         work: impl Future<Output = T>,
-    ) -> Result<Option<T>, RuntimeError> {
+    ) -> Result<Option<T>, LifetimeEnd> {
         match bound {
             Some(expiry) => self
                 .within(tokio::time::timeout_at(expiry, work))
@@ -96,7 +154,7 @@ impl Lifetime {
     ///
     /// A delay that would reach the deadline is the deadline: the wait ends
     /// there with the operation's own failure, and no attempt starts after it.
-    pub(super) async fn wait(&self, delay: Duration) -> Result<(), RuntimeError> {
+    pub(super) async fn wait(&self, delay: Duration) -> Result<(), LifetimeEnd> {
         match Instant::now()
             .checked_add(delay)
             .filter(|wake| *wake < self.deadline)
@@ -106,15 +164,15 @@ impl Lifetime {
         }
     }
 
-    /// The first of the operation deadline and runtime shutdown.
+    /// The first of the operation deadline and the runtime's stop request.
     ///
-    /// Shutdown is sticky: one requested before this wait began is observed at
-    /// once. With no runtime established, nothing can request it, so only the
+    /// The request is sticky: one made before this wait began is observed at
+    /// once. With no runtime established, nothing can make it, so only the
     /// deadline remains.
-    async fn ended(&self) -> RuntimeError {
+    async fn ended(&self) -> LifetimeEnd {
         tokio::select! {
-            () = tokio::time::sleep_until(self.deadline) => OPERATION_EXPIRED,
-            () = crate::task::on_shutdown() => RuntimeError::Cancelled,
+            () = tokio::time::sleep_until(self.deadline) => LifetimeEnd::Expired,
+            () = self.stop.requested() => LifetimeEnd::Stopped,
         }
     }
 }

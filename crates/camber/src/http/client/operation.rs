@@ -1,10 +1,17 @@
-//! One complete outbound operation: every attempt, every followed redirect,
-//! every delay, and the final collection under one lifetime.
+//! The final-head coordinator of one outbound operation: every attempt, every
+//! followed redirect, and every delay under one lifetime.
 //!
-//! Every call enters here: a verb convenience, a described request, and a
-//! mocked call, with zero retries or with retries to spare. The operation
-//! polls all of its work inline. It spawns no task, so dropping the call drops
-//! the attempt in flight and nothing can send afterwards.
+//! Every call the network answers enters here, buffered or streamed, with
+//! zero retries or with retries to spare. The coordinator polls its work
+//! inside its caller's future. It spawns no task, so dropping that future
+//! drops the attempt in flight and nothing can send afterwards. A buffered
+//! call is that future. A streamed call runs it inside the one task that owns
+//! its response.
+//!
+//! The coordinator ends at the final head. It returns that head with the
+//! lifetime, the attempt timer, and the transport it arrived under, and it
+//! drops the request. No retry and no redirect can follow an accepted head,
+//! because the value that could send is gone.
 //!
 //! A per-attempt boundary that commits before the response head keeps its own
 //! result and enters the replay decision. The operation deadline and runtime
@@ -18,10 +25,10 @@
 use super::completion::{Completion, method_label};
 use super::delay::{retry_delay, stated_retry_after};
 use super::description::Description;
-use super::error::{ClientError, ClientRedirect, ClientTimeout};
+use super::error::{ClientError, ClientRedirect};
 use super::exchange::Exchange;
-use super::intercept::{admit_mock, mock_answer};
-use super::lifetime::Lifetime;
+use super::handoff::FinalHead;
+use super::lifetime::{ATTEMPT_EXPIRED, Lifetime};
 use super::policy::OperationPolicy;
 use super::projection::client_error_projection;
 use super::redirect::{
@@ -29,79 +36,67 @@ use super::redirect::{
     redirect_location,
 };
 use super::replay::{client_retryable_failure, client_retryable_status};
-use super::response::ClientResponse;
 use super::reusable::Client;
+use super::transport::OperationTransport;
 use crate::RuntimeError;
 use crate::runtime;
 use reqwest::Url;
 use std::time::Duration;
 use tokio::time::Instant;
 
-/// Run one described call to its answer or its failure, and record its end.
+/// Run the checks every terminal's first poll shares, in their one order.
 ///
-/// This is the operation's first poll, and the record begins here. A call
-/// that returns settles the record with its result. A call dropped while it
-/// is pending leaves the record unsettled, and the record's own drop reports
-/// the abandonment.
-pub(super) async fn operate(
+/// The executor is checked first, so a call polled outside Tokio returns
+/// `NoRuntime` and arms no timer. A stop request is read next. The deadline is
+/// fixed after that, and an expired one ends the call before a mock answers
+/// or the network is used. The client's egress policy reads the scheme last,
+/// so a refused scheme is refused under a mock too.
+pub(super) fn first_poll(
     client: &Client,
-    description: Description,
-    policy: OperationPolicy,
-) -> Result<ClientResponse, RuntimeError> {
-    let mut completion = Completion::begin(description.method(), description.url());
-    let result = started(client, description, policy, &mut completion).await;
-    completion.settle(&result);
-    result
-}
-
-/// Run one started call to its answer or its failure.
-///
-/// The checks that need more than one field run first, so a refused
-/// description sends nothing. The executor is checked next, so a call polled
-/// outside Tokio returns `NoRuntime` and arms no timer. The deadline is fixed
-/// after that, and an expired one ends the call before a mock answers or the
-/// network is used. The transport is built, and the caller's trace context is
-/// read, only when the network is used.
-async fn started(
-    client: &Client,
-    mut description: Description,
-    policy: OperationPolicy,
-    completion: &mut Completion,
-) -> Result<ClientResponse, RuntimeError> {
-    description.admit()?;
-    tokio::runtime::Handle::try_current().map_err(|_| RuntimeError::NoRuntime)?;
+    description: &Description,
+    policy: &OperationPolicy,
+) -> Result<(tokio::runtime::Handle, Lifetime), RuntimeError> {
+    let executor = tokio::runtime::Handle::try_current().map_err(|_| RuntimeError::NoRuntime)?;
     runtime::check_cancel()?;
     let lifetime = Lifetime::begin(policy.total, policy.deadline)?;
-    match mock_answer(&description) {
-        Some(answer) => {
-            completion.final_head(answer.status());
-            admit_mock(answer, description.response_limit())
-        }
-        None => {
-            let transport = client.transport()?;
-            description.carry_trace_context(policy.trace_context);
-            Operation {
-                initial: description.url().clone(),
-                exchange: Exchange::new(transport, description),
-                policy,
-                lifetime,
-                retries_sent: 0,
-                redirects_followed: 0,
-                completion,
-            }
-            .run()
-            .await
-        }
-    }
+    client.admit_scheme(description.url())?;
+    Ok((executor, lifetime))
 }
 
-/// The category of an attempt whose timer expired, before its head or during
-/// its body.
-const ATTEMPT_EXPIRED: ClientError = ClientError::Timeout(ClientTimeout::Attempt);
+/// Run one admitted call to its final response head.
+///
+/// The caller chose `transport` for this call's target and terminal, and the
+/// description already holds the trace context the call began under.
+/// `lifetime` is the one the call's first poll fixed. The returned head
+/// carries it on, with the transport: one pinned to this call's checked
+/// addresses is released when the head is.
+///
+/// `completion` is borrowed until the head is final. The coordinator reports
+/// each send, each followed redirect, and the final status to it, and the
+/// borrow ends here.
+pub(super) async fn final_head<'t>(
+    transport: OperationTransport<'t>,
+    description: Description,
+    policy: OperationPolicy,
+    lifetime: Lifetime,
+    completion: &mut Completion,
+) -> Result<FinalHead<'t>, RuntimeError> {
+    Operation {
+        initial: description.url().clone(),
+        exchange: Exchange::new(transport, description),
+        policy,
+        lifetime,
+        retries_sent: 0,
+        redirects_followed: 0,
+        completion,
+    }
+    .run()
+    .await
+}
 
 /// What the operation does with one response head.
 enum Answered {
-    /// Collect it: it is the call's answer.
+    /// Hand it on: it is the call's answer.
     Final,
     /// Release it and send the current request again as this retry.
     Retry(u32),
@@ -111,13 +106,17 @@ enum Answered {
 }
 
 /// The uniquely owned coordinator of one call's attempts.
-struct Operation<'a> {
+///
+/// `'t` is the borrow of the client a reusable transport reads. `'c` is the
+/// borrow of the terminal record. They are separate so that the final head
+/// keeps the first and cannot keep the second.
+struct Operation<'t, 'c> {
     /// The URL the call began at. Its origin is the only one a redirect may
     /// name, and no hop changes it.
     initial: Url,
     /// The current request: the first one, or the one the last followed
     /// redirect asked for.
-    exchange: Exchange<'a>,
+    exchange: Exchange<'t>,
     policy: OperationPolicy,
     lifetime: Lifetime,
     /// How many retries this operation has sent, across every hop.
@@ -126,22 +125,23 @@ struct Operation<'a> {
     redirects_followed: usize,
     /// The terminal record. The operation reports each send, each followed
     /// redirect, and its final head, and reads nothing back.
-    completion: &'a mut Completion,
+    completion: &'c mut Completion,
 }
 
-impl Operation<'_> {
+impl<'t> Operation<'t, '_> {
     /// Run attempts until one answer is final, a failure is not replayable, a
     /// redirect is refused, or the operation ends.
     ///
-    /// Each attempt has one timer, armed at its send and held through the end
-    /// of its body. Each send after the first spends one configured retry or
-    /// one redirect hop.
-    async fn run(mut self) -> Result<ClientResponse, RuntimeError> {
+    /// Each attempt has one timer, armed at its send. The final attempt's
+    /// timer leaves with its head and is held through the end of its body.
+    /// Each send after the first spends one configured retry or one redirect
+    /// hop.
+    async fn run(mut self) -> Result<FinalHead<'t>, RuntimeError> {
         loop {
             let bound = self.lifetime.attempt_bound(self.policy.attempt);
             let head = self.head(bound).await?;
             match head.map(|resp| (self.answered(&resp), resp)) {
-                Ok((Answered::Final, resp)) => return self.collect(resp, bound).await,
+                Ok((Answered::Final, resp)) => return Ok(self.accept(resp, bound)),
                 Ok((Answered::Retry(retry), resp)) => self.retry_status(resp, retry).await?,
                 Ok((Answered::Redirect(decision), resp)) => self.follow(resp, decision)?,
                 Err(failure) => self.retry_failure(failure).await?,
@@ -173,7 +173,10 @@ impl Operation<'_> {
     /// Admit one redirect: its destination, then its method, then its hop.
     ///
     /// Every check runs before a request to the destination exists, so a
-    /// refused redirect dials nothing.
+    /// refused redirect dials nothing. The destination has the initial origin:
+    /// its scheme is the one the egress policy admitted, and its host is the
+    /// one a pinned transport holds checked addresses for. A followed redirect
+    /// therefore starts no lookup.
     fn hop(&self, status: u16, location: &[u8]) -> Result<Hop, ClientRedirect> {
         let url = client_redirect_destination(&self.initial, self.exchange.url(), location)?;
         let carried = redirect_carried(status, self.exchange.method(), self.policy.permission)?;
@@ -271,21 +274,23 @@ impl Operation<'_> {
         })
     }
 
-    /// Collect the final answer under the attempt timer its send armed.
+    /// Accept one head as the call's answer, and end the coordinator.
     ///
-    /// A timer that expires here is the call's answer. A final body is never
-    /// sent for again. The head is final from here, whatever its collection
-    /// returns, so its status is recorded first.
-    async fn collect(
-        &mut self,
-        resp: reqwest::Response,
-        bound: Option<Instant>,
-    ) -> Result<ClientResponse, RuntimeError> {
-        self.completion.final_head(resp.status().as_u16());
-        self.lifetime
-            .within_attempt(bound, self.exchange.collect(resp))
-            .await?
-            .unwrap_or(Err(RuntimeError::Client(ATTEMPT_EXPIRED)))
+    /// The head is final from here, whatever reading its body returns, so its
+    /// status is recorded first. The request is dropped: the returned head
+    /// holds the transport and the response maximum and nothing to send. The
+    /// lifetime and the attempt timer move on as they are, so neither one
+    /// starts again.
+    fn accept(self, response: reqwest::Response, attempt: Option<Instant>) -> FinalHead<'t> {
+        self.completion.final_head(response.status().as_u16());
+        let (transport, limit) = self.exchange.finish();
+        FinalHead {
+            response,
+            lifetime: self.lifetime,
+            attempt,
+            transport,
+            limit,
+        }
     }
 
     /// The ordinal of the retry a replay would send, or `None` when the

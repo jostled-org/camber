@@ -91,6 +91,48 @@ impl<E: Debug + Send + 'static> HaltableListener<E> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap_or_else(|error| panic!("{what}: binding failed: {error}"));
+        Self::serve(what, listener, serving, failed)
+    }
+
+    /// Serve every connection an already bound listener accepts.
+    ///
+    /// For a row that chose the address itself: an IPv6 loopback peer, or one
+    /// half of a pair that shares a port. The rest is [`Self::bind`].
+    pub fn adopt<M, S, F>(
+        what: &str,
+        listener: std::net::TcpListener,
+        serving: M,
+        failed: fn(usize, Box<str>) -> E,
+    ) -> Self
+    where
+        M: FnOnce(&mpsc::UnboundedSender<E>) -> S,
+        S: FnMut(TcpStream, usize, mpsc::UnboundedSender<E>, watch::Receiver<bool>) -> F
+            + Send
+            + 'static,
+        F: Future<Output = ()> + Send + 'static,
+    {
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|error| panic!("{what}: the listener cannot be polled: {error}"));
+        let listener = TcpListener::from_std(listener)
+            .unwrap_or_else(|error| panic!("{what}: the listener was not adopted: {error}"));
+        Self::serve(what, listener, serving, failed)
+    }
+
+    /// Start the accept loop of `listener`, and keep its halt and its reports.
+    fn serve<M, S, F>(
+        what: &str,
+        listener: TcpListener,
+        serving: M,
+        failed: fn(usize, Box<str>) -> E,
+    ) -> Self
+    where
+        M: FnOnce(&mpsc::UnboundedSender<E>) -> S,
+        S: FnMut(TcpStream, usize, mpsc::UnboundedSender<E>, watch::Receiver<bool>) -> F
+            + Send
+            + 'static,
+        F: Future<Output = ()> + Send + 'static,
+    {
         let addr = listener
             .local_addr()
             .unwrap_or_else(|error| panic!("{what}: the address is unreadable: {error}"));
@@ -110,6 +152,11 @@ impl<E: Debug + Send + 'static> HaltableListener<E> {
 
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// The plain-HTTP URL of `path` on this listener.
+    pub fn http_url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.addr)
     }
 
     /// The next report, unbounded. The caller owns the bound, because a

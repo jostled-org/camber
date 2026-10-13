@@ -7,7 +7,6 @@
 use super::super::method::Method as LocalMethod;
 use super::super::record::status_to_label;
 use super::error::ClientError;
-use super::response::ClientResponse;
 use crate::RuntimeError;
 use reqwest::{Method, Url};
 use std::time::Instant;
@@ -44,8 +43,11 @@ enum Outcome {
     Timeout,
     Redirect,
     ResponseTooLarge,
+    Egress,
     Cancelled,
-    /// The pending call was dropped. No returned value records this outcome.
+    /// The caller gave the operation up. It dropped the pending call, or it
+    /// dropped, closed, or refused by status a streamed response or body
+    /// before its end.
     Abandoned,
 }
 
@@ -64,6 +66,7 @@ impl Outcome {
             Self::Timeout => "timeout",
             Self::Redirect => "redirect",
             Self::ResponseTooLarge => "response-too-large",
+            Self::Egress => "egress",
             Self::Cancelled => "cancelled",
             Self::Abandoned => "abandoned",
         }
@@ -87,21 +90,31 @@ const fn category_outcome(category: ClientError) -> Outcome {
         ClientError::Timeout(_) => Outcome::Timeout,
         ClientError::Redirect(_) => Outcome::Redirect,
         ClientError::ResponseTooLarge { .. } => Outcome::ResponseTooLarge,
+        ClientError::Egress(_) => Outcome::Egress,
         ClientError::Transport | ClientError::Status(_) | ClientError::Decode(_) => {
             Outcome::Transport
         }
     }
 }
 
+/// The outcome of a streamed call its runtime refused to admit.
+///
+/// The runtime's scope no longer admits the task that would own the response.
+/// No word of the vocabulary names that refusal, so it is recorded as the
+/// least specific failure.
+const CLOSED_SCOPE: Outcome = Outcome::Transport;
+
 /// The outcome of an operation that returned `error`.
 ///
-/// An operation returns a client category, a cancellation, or a missing
-/// runtime. Any other failure is read as the least specific one.
+/// An operation returns a client category, a cancellation, a missing
+/// runtime, or the refusal of a closed scope. Only a streamed call returns
+/// the last one. Any other failure is read as the least specific one.
 fn failure_outcome(error: &RuntimeError) -> Outcome {
     match error {
         RuntimeError::Client(category) => category_outcome(*category),
         RuntimeError::Cancelled => Outcome::Cancelled,
         RuntimeError::NoRuntime => Outcome::NoRuntime,
+        RuntimeError::ScopeClosed => CLOSED_SCOPE,
         _ => Outcome::Transport,
     }
 }
@@ -115,13 +128,52 @@ pub fn client_terminal_outcome(error: &RuntimeError) -> &'static str {
     failure_outcome(error).label()
 }
 
+/// The fact one operation ended on, as its owner states it.
+///
+/// The fact is a closed value of its own. It does not hold the answer or the
+/// failure, so the owner of any terminal can state one.
+#[derive(Clone, Copy)]
+pub(super) struct Terminal(Outcome);
+
+impl Terminal {
+    /// The fact a returned `result` states: an answer, or the boundary its
+    /// failure names.
+    ///
+    /// The returned value is not read, so the fact is the same whatever a
+    /// terminal returns on success.
+    pub(super) fn of<T>(result: &Result<T, RuntimeError>) -> Self {
+        Self(match result {
+            Ok(_) => Outcome::Response,
+            Err(error) => failure_outcome(error),
+        })
+    }
+
+    /// The fact of a streamed body that reached its clean end.
+    pub(super) const ANSWERED: Self = Self(Outcome::Response);
+
+    /// The fact of a streamed body its caller closed or dropped.
+    pub(super) const ABANDONED: Self = Self(Outcome::Abandoned);
+
+    /// The fact of a streamed body its runtime stopped.
+    pub(super) const CANCELLED: Self = Self(Outcome::Cancelled);
+
+    /// The fact of a streamed body that failed as `category`.
+    pub(super) const fn failed(category: ClientError) -> Self {
+        Self(category_outcome(category))
+    }
+}
+
 /// The finalization guard of one started operation.
 ///
 /// The operation's first poll creates it, and its drop records the one
 /// `http.client.completed` event. A call that returns settles the outcome
-/// first. A pending call that is dropped never does, so its guard still holds
-/// the outcome it began with and records the abandonment. No task is spawned
-/// and nothing is recorded later.
+/// first, and settling consumes the guard. A pending call that is dropped
+/// never settles, so its guard still holds the outcome it began with and
+/// records the abandonment.
+///
+/// A buffered call keeps the guard in its own future. A streamed call moves
+/// it into the task that owns the response, and that task settles it after
+/// the source is released. Nothing is recorded later than that.
 pub(super) struct Completion {
     method: &'static str,
     /// The host of the URL the call began at. No redirect changes it.
@@ -160,17 +212,19 @@ impl Completion {
         self.redirects = self.redirects.saturating_add(1);
     }
 
-    /// Record the status of the head the operation collects as its answer.
+    /// Record the status of the head the operation accepts as its answer.
+    ///
+    /// The status stays the recorded one whatever fact the operation ends on.
     pub(super) fn final_head(&mut self, status: u16) {
         self.status = Some(status);
     }
 
-    /// Record how the operation returned.
-    pub(super) fn settle(&mut self, result: &Result<ClientResponse, RuntimeError>) {
-        self.outcome = match result {
-            Ok(_) => Outcome::Response,
-            Err(error) => failure_outcome(error),
-        };
+    /// End the record on `terminal`.
+    ///
+    /// The guard is consumed, so a record is settled once, and its drop here
+    /// is the one emission. The owner settles after it releases the response.
+    pub(super) fn settle(mut self, terminal: Terminal) {
+        self.outcome = terminal.0;
     }
 }
 

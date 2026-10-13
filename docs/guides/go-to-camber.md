@@ -173,6 +173,20 @@ there is no `resp.Body.Close()`. Read it with `resp.text()?`,
 `resp.json::<T>()?`, or `resp.body_bytes()`. A 4xx or 5xx status is a
 response, as in Go; `resp.error_for_status()?` converts it to an error.
 
+To read a body as it arrives, as you would read `resp.Body` in Go, end a
+described request with `.send_streaming().await?`. Call
+`response.into_body()`, then `body.next().await?` for each chunk. Dropping the
+body cancels it, and `body.close().await?` waits for the release. See
+[Streaming A Response](../reference/client.md#streaming-a-response).
+
+**Warning.** A default client sends to every address, private ones included,
+as Go's `http.DefaultClient` does. Do not give it a URL you do not trust.
+Give that client an `EgressPolicy` with `Client::egress_policy`:
+`EgressPolicy::public_internet()` admits ordinary public unicast addresses
+only, for buffered and streamed calls. Each restricted call resolves the host
+once and builds its own transport. Connections are not shared across calls. See
+[Destination Policy](../reference/client.md#destination-policy).
+
 ### HTTP Client with Retries
 
 In Go, retry logic requires a custom `RoundTripper` or a third-party library like `hashicorp/go-retryablehttp`. Camber has it built in.

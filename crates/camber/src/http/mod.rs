@@ -90,10 +90,11 @@
 //! }
 //! ```
 //!
-//! Every call returns a [`self::ClientResponse`]: the whole body, collected
-//! under the client's response maximum, and the headers as the peer sent
-//! them. It is not a server [`self::Response`]. Every status is a response,
-//! and decoding is explicit:
+//! A verb call and [`ClientRequest::send`](self::ClientRequest::send) return a
+//! [`self::ClientResponse`]: the whole body, collected under the client's
+//! response maximum, and the headers as the peer sent them. It is not a
+//! server [`self::Response`]. Every status is a response, and decoding is
+//! explicit:
 //!
 //! ```rust,no_run
 //! use camber::RuntimeError;
@@ -106,6 +107,16 @@
 //!     Response::text(200, upstream.text()?)
 //! }
 //! ```
+//!
+//! To read a body without collecting it, describe the request and end it
+//! with [`ClientRequest::send_streaming`](self::ClientRequest::send_streaming).
+//! It returns a [`self::ClientStreamResponse`] at the response head, and
+//! [`self::ClientBody`] reads one chunk for each call under the same maximum
+//! and deadlines.
+//!
+//! A default client sends to every address, private ones included. Before a
+//! client fetches a URL you do not trust, give it a [`self::EgressPolicy`]
+//! with [`Client::egress_policy`](self::Client::egress_policy).
 //!
 //! # Middleware and Handler Shape
 //!
@@ -209,9 +220,10 @@ pub use boundary::{ByteBoundary, DeadlineBoundary};
 /// usable API.
 pub use bytes::Bytes;
 pub use client::{
-    Client, ClientDecode, ClientError, ClientInput, ClientRedirect, ClientRequest, ClientResponse,
-    ClientTimeout, RedirectPolicy, RetryPolicy, client, delete, delete_with_body, get, head,
-    options, patch, patch_form, patch_json, post, post_form, post_json, put, put_form, put_json,
+    Client, ClientBody, ClientDecode, ClientEgress, ClientError, ClientInput, ClientRedirect,
+    ClientRequest, ClientResponse, ClientStreamResponse, ClientTimeout, EgressPolicy,
+    RedirectPolicy, RetryPolicy, client, delete, delete_with_body, get, head, options, patch,
+    patch_form, patch_json, post, post_form, post_json, put, put_form, put_json,
 };
 pub use cookie::{CookieOptions, SameSite};
 pub use disconnect::{DisconnectCause, DisconnectSignal};

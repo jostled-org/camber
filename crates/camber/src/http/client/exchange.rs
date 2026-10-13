@@ -1,37 +1,45 @@
-//! One request and the collection of its answer.
+//! One request as every attempt of it is sent.
 //!
-//! An exchange is what every attempt repeats: the same client and the same
-//! validated description, collected under the same response maximum. A
-//! followed redirect changes that description, so the attempts after it repeat
-//! the hop. It holds no retry policy, no redirect policy, and no deadline. It
-//! reads no trace context: the description already holds the one the
-//! operation began under. The operation that runs it owns the attempt timer
-//! and the operation deadline, and the Reqwest client owns the connect and
-//! quiet-interval timers.
+//! An exchange is what every attempt repeats: the same transport and the same
+//! validated description. A followed redirect changes that description, so the
+//! attempts after it repeat the hop. It holds no retry policy, no redirect
+//! policy, and no deadline. It reads no trace context: the description already
+//! holds the one the operation began under. The operation that runs it owns
+//! the attempt timer and the operation deadline, and the Reqwest client owns
+//! the connect and quiet-interval timers.
+//!
+//! An exchange sends and does not collect. It ends at the final head, where it
+//! gives up its transport and drops its request.
 
-use super::super::boundary::ByteBoundary;
-use super::super::checked_collect::collect_checked;
 use super::description::Description;
-use super::projection::collection_failure;
 use super::redirect::Carried;
-use super::response::{ClientResponse, wire_headers};
-use crate::RuntimeError;
+use super::transport::OperationTransport;
 use reqwest::{Method, Url};
 
 /// One request as every attempt of it is sent.
-pub(super) struct Exchange<'a> {
-    client: &'a reqwest::Client,
+pub(super) struct Exchange<'t> {
+    /// The transport every attempt and every hop of this operation sends
+    /// through. The exchange owns it until the final head takes it.
+    transport: OperationTransport<'t>,
     /// The validated request. Each attempt clones its headers and shares its
     /// frozen body, so no attempt parses or copies a payload.
     description: Description,
 }
 
-impl<'a> Exchange<'a> {
-    pub(super) fn new(client: &'a reqwest::Client, description: Description) -> Self {
+impl<'t> Exchange<'t> {
+    pub(super) fn new(transport: OperationTransport<'t>, description: Description) -> Self {
         Self {
-            client,
+            transport,
             description,
         }
+    }
+
+    /// End the exchange at its final head.
+    ///
+    /// The transport and the response maximum are what the body is read
+    /// under. The request is dropped here, so no attempt follows.
+    pub(super) fn finish(self) -> (OperationTransport<'t>, Option<usize>) {
+        (self.transport, self.description.response_limit())
     }
 
     pub(super) fn method(&self) -> &Method {
@@ -66,41 +74,13 @@ impl<'a> Exchange<'a> {
     pub(super) async fn send(&self) -> Result<reqwest::Response, reqwest::Error> {
         let description = &self.description;
         let mut builder = self
-            .client
+            .transport
+            .client()
             .request(description.method().clone(), description.url().clone())
             .headers(description.headers().clone());
         if !description.body().is_empty() {
             builder = builder.body(description.body().clone());
         }
         builder.send().await
-    }
-
-    /// Read one answer's head, then collect its body under the configured
-    /// maximum.
-    ///
-    /// The head is copied first because the collector consumes the response.
-    /// A refused or failed collection returns its typed cause alone: the head
-    /// is dropped with it, so no partial answer reaches the caller.
-    pub(super) async fn collect(
-        &self,
-        resp: reqwest::Response,
-    ) -> Result<ClientResponse, RuntimeError> {
-        let status = resp.status().as_u16();
-        let headers = wire_headers(resp.headers());
-
-        // No quiet interval of this collection's own: a client's response idle
-        // deadline is configured on its Reqwest client and enforced per read
-        // there, so arming a second timer here would be a second owner of one
-        // dimension.
-        let body_bytes = collect_checked(
-            resp,
-            ByteBoundary::ClientResponse,
-            self.description.response_limit(),
-            None,
-        )
-        .await
-        .map_err(|failure| collection_failure(&failure))?;
-
-        Ok(ClientResponse::new(status, headers, body_bytes))
     }
 }

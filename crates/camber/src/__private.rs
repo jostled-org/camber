@@ -8,13 +8,23 @@ pub use crossbeam_channel;
 /// body, or owns anything.
 pub use crate::http::body_admission::{checked_body_frame_total, declared_length_exceeds_limit};
 
-/// The exact decision the outbound client replays a failed send from.
+/// The exact decision the outbound client replays a failed send from, over
+/// the category the failure projects to.
 ///
 /// Re-exported for the reason the pair above is: a focused contract that
-/// classified its own copy of a Reqwest error would prove its own rule, not the
-/// one a retried request is actually refused or admitted by. It reads an error,
-/// a method, and the request's replay permission, and owns nothing.
-pub use crate::http::client::client_retryable_transport;
+/// classified a failure by its own rule would prove that rule, not the one a
+/// retried request is actually refused or admitted by. It reads a category, a
+/// method, and the request's replay permission, and owns nothing.
+pub use crate::http::client::client_retryable_failure;
+
+/// The exact decision the outbound client admits or refuses a destination by.
+///
+/// Re-exported for the reason the decision above is: a focused contract that
+/// classified an address by its own ranges, or compared its own origins, would
+/// prove its own rule, not the one a dial is actually admitted or refused by.
+/// It reads a policy, a target, and one address, resolves nothing, and owns
+/// nothing.
+pub use crate::http::client::client_egress_decision;
 
 /// The exact decisions the outbound client admits a redirect by and counts a
 /// send by.
@@ -59,6 +69,28 @@ pub use crate::http::client::client_header_sensitivity;
 /// stale transport kept would answer exactly as the new one does. It reads a
 /// client and owns nothing.
 pub use crate::http::client::client_transport_is_built;
+
+/// The controlled inputs of the outbound client's two unstable edges: the
+/// answer of a name lookup, and one local trust root.
+///
+/// Exported because no local test can change what the system resolver answers
+/// or which authorities the platform trusts. Each supplies an input to the
+/// production path and reads a count. An edge's addresses are read by the
+/// production visit bound, policy decision, and pinned transport. A test root
+/// is merged by the production transport factory and disables no check.
+/// Neither can admit a destination or accept a certificate.
+pub use crate::http::client::{ClientDnsEdge, client_dns_edge, client_test_root};
+
+/// The component driver of the outbound client's body engine.
+///
+/// Exported because no local peer can send an empty frame, an overflowing
+/// total, or a source that stays pending on demand. The driver runs the
+/// production body owner over scripted frames and returns the real
+/// `ClientBody`. It supplies frames and reads counts. It cannot commit a
+/// terminal result, and it sends no request.
+pub use crate::http::client::{
+    ClientBodyBounds, ClientBodyDriver, ClientBodyFrame, ClientBodyObservation,
+};
 
 /// The exact functions the outbound client chooses each retry delay with.
 ///

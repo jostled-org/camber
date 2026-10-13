@@ -10,7 +10,6 @@
 //! permission is the only authority for a repeat.
 
 use super::error::{ClientError, ClientTimeout};
-use super::projection::client_error_projection;
 use reqwest::Method;
 
 /// Which requests may be sent again after a transient outcome.
@@ -95,8 +94,11 @@ fn is_transient_status(status: u16) -> bool {
 /// A refused or timed-out dial, a connection closed without an answer, and an
 /// expired attempt timer can each pass. A name that does not resolve and a
 /// peer whose TLS is refused fail the same way again, and a fault in the call
-/// itself repeats the fault. Every category that is not a pre-head transport
-/// outcome is terminal, so a new category is terminal until it is named here.
+/// itself repeats the fault. A destination the egress policy refused is
+/// refused again, for every reason it gives. A quiet streamed body is read
+/// after the final head, and no failure after that head sends again. Every
+/// category that is not a pre-head transport outcome is terminal, so a new
+/// category is terminal until it is named here.
 fn is_transient_failure(category: ClientError) -> bool {
     match category {
         ClientError::Connect
@@ -107,11 +109,12 @@ fn is_transient_failure(category: ClientError) -> bool {
         | ClientError::Encode
         | ClientError::Dns
         | ClientError::Tls
-        | ClientError::Timeout(ClientTimeout::Operation)
+        | ClientError::Timeout(ClientTimeout::Operation | ClientTimeout::ResponseIdle)
         | ClientError::Redirect(_)
         | ClientError::Status(_)
         | ClientError::Decode(_)
-        | ClientError::ResponseTooLarge { .. } => false,
+        | ClientError::ResponseTooLarge { .. }
+        | ClientError::Egress(_) => false,
     }
 }
 
@@ -122,25 +125,13 @@ pub(super) fn client_retryable_status(status: u16, method: &Method, policy: Retr
 
 /// Whether an attempt that failed with `category` before its response head
 /// earns another attempt.
-pub(super) fn client_retryable_failure(
+///
+/// Semver-unsupported. It reads its arguments and changes nothing.
+#[doc(hidden)]
+pub fn client_retryable_failure(
     category: ClientError,
     method: &Method,
     policy: RetryPolicy,
 ) -> bool {
     permits_replay(policy, method) && is_transient_failure(category)
-}
-
-/// Whether a failed send earns another attempt.
-///
-/// The failure is read through the one client projection, so the category the
-/// caller would receive is the category this decision is made on.
-///
-/// Semver-unsupported. It reads its arguments and changes nothing.
-#[doc(hidden)]
-pub fn client_retryable_transport(
-    error: &reqwest::Error,
-    method: &Method,
-    policy: RetryPolicy,
-) -> bool {
-    client_retryable_failure(client_error_projection(error), method, policy)
 }

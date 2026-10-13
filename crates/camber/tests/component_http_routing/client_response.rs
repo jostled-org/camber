@@ -9,7 +9,8 @@
 use crate::bounded_client::{ADMITTED, CEILING, assert_client_limit, bounded_client, within_bound};
 use crate::error_chain::assert_secret_free;
 use crate::retry_upstream::{
-    Answer, CLIENT_METHODS, PeerEvent, RunnableDriver, ScriptedUpstream, answered, send_method,
+    Answer, CLIENT_METHODS, HeaderEntry, PeerEvent, RunnableDriver, ScriptedUpstream, answered,
+    header_entries, send_method, values_of,
 };
 
 use camber::RuntimeError;
@@ -34,7 +35,7 @@ const TARGET: &str = "/client-response";
 struct Observed {
     status: u16,
     /// Every header entry, in the order `headers` yields it.
-    headers: Box<[(Box<str>, Box<[u8]>)]>,
+    headers: Box<[HeaderEntry]>,
     /// What `header` answered for each name a row looked up, in that order.
     first: Box<[Option<Box<[u8]>>]>,
     body: Box<[u8]>,
@@ -46,27 +47,13 @@ struct Observed {
     converted: Result<Bytes, RuntimeError>,
 }
 
-impl Observed {
-    /// Every value `headers` yields for `name`, in the order it yields them.
-    fn values_of(&self, name: &str) -> Box<[&[u8]]> {
-        self.headers
-            .iter()
-            .filter(|(found, _)| found.eq_ignore_ascii_case(name))
-            .map(|(_, value)| &**value)
-            .collect()
-    }
-}
-
 /// Read one answer through every accessor, then consume it.
 ///
 /// The borrowing accessors run first. `error_for_status` and `into_body` take
 /// the response, so they run last.
 fn observe(response: ClientResponse, lookups: &[&str]) -> Observed {
     let status = response.status();
-    let headers = response
-        .headers()
-        .map(|(name, value)| (Box::from(name), Box::from(value)))
-        .collect();
+    let headers = header_entries(response.headers());
     let first = lookups
         .iter()
         .map(|name| response.header(name).map(Box::from))
@@ -203,12 +190,12 @@ async fn headers_keep_repeats_and_raw_bytes() {
     let observed = answer_to_get(row, HEADER_WIRE, &lookups).await;
 
     assert_eq!(
-        *observed.values_of("set-cookie"),
+        *values_of(&observed.headers, "set-cookie"),
         [&b"first=1"[..], &b"second=2"[..]],
         "{row}: a repeated name must keep every value in the order sent"
     );
     assert_eq!(
-        *observed.values_of("x-opaque"),
+        *values_of(&observed.headers, "x-opaque"),
         [OPAQUE_VALUE],
         "{row}: a non-text value must keep its bytes"
     );
@@ -604,7 +591,7 @@ async fn mock_answer_within_the_ceiling_is_converted_whole() {
     let url = "http://client-response.mock.test/at-ceiling";
     let canned = Response::bytes(503, MOCK_AT_CEILING)
         .expect("a valid mock status")
-        .with_header("x-mock", "kept");
+        .with_header("X-Mock", "kept");
     let registered = mock::http(url).returns(canned);
 
     let fetched: Result<ClientResponse, RuntimeError> =
@@ -622,6 +609,16 @@ async fn mock_answer_within_the_ceiling_is_converted_whole() {
         *observed.first,
         [Some(Box::from(&b"kept"[..]))],
         "{row}: the mock header was lost"
+    );
+    let stored: [HeaderEntry; 3] = [
+        ("content-type", &b"application/octet-stream"[..]),
+        ("x-content-type-options", b"nosniff"),
+        ("x-mock", b"kept"),
+    ]
+    .map(|(name, value)| (name.into(), value.into()));
+    assert_eq!(
+        *observed.headers, stored,
+        "{row}: a mock header name is read in lowercase, as a wire name is"
     );
     assert!(
         is_decode(&observed.text, ClientDecode::Utf8),

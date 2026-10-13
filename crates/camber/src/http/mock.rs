@@ -1,7 +1,9 @@
 use super::Method;
 use super::Response;
 use super::boundary::CrossedBound;
-use super::client::{ClientResponse, HeaderEntry, request_target, text_headers};
+use super::client::{
+    ClientBodyObservation, ClientResponse, HeaderEntry, StreamMetrics, request_target, text_headers,
+};
 use super::completion::{ABSENT_LABEL, ConnectionEnd, DeliveryOutcome, ShutdownObservation};
 use super::method::RequestMethod;
 pub use super::operation::{InboundTerminal, OperationStage};
@@ -394,10 +396,12 @@ pub enum ResponseCommitmentEdge {
 
 /// Every edge one transfer owner can be held at.
 ///
-/// Owner-local, and only this direction's own two moments: before it reads its
+/// Owner-local, and only this direction's own moments: before it reads its
 /// source, and after that read, before it commits the one terminal it will end
-/// on. A controller holding one of these cannot supply a frame, charge a byte,
-/// mint a deadline, or choose the terminal.
+/// on. The owner of a streamed client response has one more: the final head
+/// in hand, before it is handed to the waiting send. A controller holding one
+/// of these cannot supply a frame, charge a byte, mint a deadline, deliver a
+/// head, or choose the terminal.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransferOwnerEdge {
@@ -409,6 +413,12 @@ pub enum TransferOwnerEdge {
     /// One transfer owner has read its source and has not committed the
     /// terminal that read decided.
     BeforeTerminalCommit,
+    /// The owner of one streamed client response holds its final head and has
+    /// not handed it to the waiting send.
+    ///
+    /// Held here, a case drops that send before the delivery, so the delivery
+    /// fails. The hold drops nothing itself.
+    BeforeHeadDelivery,
 }
 
 /// Every edge one streaming-multipart session owner can be held at.
@@ -1543,6 +1553,12 @@ pub(crate) struct LifecycleScript {
     body: BodyObservations,
     /// What the checked collector published while reading this peer's answers.
     collection: CollectionObservations,
+    /// What the streaming body owners of the calls to this peer published.
+    ///
+    /// The production counters themselves, for the reason the multipart ones
+    /// are held here: a stream reports through the registration its peer is
+    /// watched under, or not at all.
+    streams: StreamMetrics,
     /// What the static-file workers under this root published about where they
     /// ran and what they still hold.
     static_files: StaticFileObservations,
@@ -1582,6 +1598,7 @@ impl LifecycleScript {
             ownership: ConnectionOwnershipObservations::default(),
             body: BodyObservations::default(),
             collection: CollectionObservations::default(),
+            streams: StreamMetrics::default(),
             static_files: StaticFileObservations::default(),
             #[cfg(feature = "profiling")]
             profiling: ProfilingObservations::default(),
@@ -1847,6 +1864,11 @@ impl LifecycleScript {
         Self::observe_ws(script, |websocket| {
             websocket.permit_released.store(true, Ordering::Release);
         });
+    }
+
+    /// The counters the streamed calls to this peer publish through.
+    pub(in crate::http) fn streams(&self) -> &StreamMetrics {
+        &self.streams
     }
 
     /// The counters this listener's multipart sessions publish through.
@@ -2501,6 +2523,15 @@ impl LifecycleScript {
         edge: MultipartOwnerEdge,
     ) {
         Self::pause_at_key(script, PauseKey::Multipart(edge)).await;
+    }
+
+    /// Hold one transfer owner at `edge`, and do nothing when no controller
+    /// watches.
+    ///
+    /// For an owner that can await. An owner driven from a body poll takes
+    /// [`Self::hold_at_transfer`].
+    pub(in crate::http) async fn pause_at_transfer(script: Option<&Self>, edge: TransferOwnerEdge) {
+        Self::pause_at_key(script, PauseKey::TransferOwner(edge)).await;
     }
 
     async fn pause_at_key(script: Option<&Self>, key: PauseKey) {
@@ -4232,9 +4263,10 @@ impl ResponseCommitmentController {
 
 /// The narrow controller over one listener's transfer owners.
 ///
-/// Two moments per direction and nothing else: before the source read, and
-/// after it, before the terminal that read decided is committed. It supplies no
-/// frame, charges no byte, and chooses no terminal.
+/// Two moments per direction: before the source read, and after it, before the
+/// terminal that read decided is committed. One more for a streamed client
+/// response: before its head is delivered. It supplies no frame, charges no
+/// byte, delivers no head, and chooses no terminal.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct TransferOwnerController {
@@ -4271,6 +4303,16 @@ impl TransferOwnerController {
     /// reads, so the peak and the first boundary answer for one instant.
     pub fn collected(&self) -> CollectionObservation {
         self.script.collection_observed()
+    }
+
+    /// What the streaming body owner of the calls to this peer did.
+    ///
+    /// The counts of the latest streamed response from this peer: the polls
+    /// of its source, the chunks its owner admitted and holds, and whether
+    /// the source is released and the owner task has ended. Read-only. It
+    /// polls no frame and commits no result.
+    pub fn streamed(&self) -> ClientBodyObservation {
+        self.script.streams().observed()
     }
 
     /// How many chunks the checked collector read from this peer's answers.

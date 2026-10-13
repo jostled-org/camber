@@ -20,6 +20,11 @@ pub(super) struct OperationPolicy {
     /// The bound on one attempt, from its send through the end of its body,
     /// or `None` when the response policy leaves that dimension unbounded.
     pub(super) attempt: Option<Duration>,
+    /// How long one demand of a streamed body may wait for its chunk, or
+    /// `None` when the response policy leaves that dimension unbounded. Only
+    /// the streaming terminal reads it: a buffered call's transport owns its
+    /// quiet interval.
+    pub(super) idle: Option<Duration>,
     /// The most sends this operation may add to its first one.
     pub(super) retries: u32,
     pub(super) backoff: Duration,

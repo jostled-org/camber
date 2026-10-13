@@ -143,6 +143,21 @@ Each call returns a `ClientResponse` with the whole body already collected.
 synchronous and local, where reqwest's `text()` and `json()` are async reads.
 Automatic decompression is off: a compressed answer returns its encoded bytes.
 
+To read a large body without collecting it, end the request with
+`.send_streaming().await?`. It returns the head. `response.into_body()` gives
+the body, and `body.next().await?` returns one chunk for each call, like
+reqwest's `chunk()`. A stream keeps the client's response maximum, idle
+interval, and total timeout. See
+[Streaming A Response](../reference/client.md#streaming-a-response).
+
+**Warning.** A default client sends to every address, private ones included,
+as a default reqwest client does. Do not give it a URL you do not trust.
+Give that client an `EgressPolicy` with `Client::egress_policy`:
+`EgressPolicy::public_internet()` admits ordinary public unicast addresses
+only, for buffered and streamed calls. Each restricted call resolves the host
+once and builds its own transport. Connections are not shared across calls. See
+[Destination Policy](../reference/client.md#destination-policy).
+
 ## HTTP Client with Retries
 
 ### Axum (reqwest)

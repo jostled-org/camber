@@ -6,6 +6,8 @@ Camber ships an async outbound HTTP client with:
 - a reusable `Client` for retries and timeouts
 - a general request description for any method, headers, and a per-request
   response maximum
+- a streaming terminal that returns the response head and reads the body one
+  chunk at a time
 
 ## One-Shot Requests
 
@@ -42,12 +44,80 @@ let resp = client.get("https://api.example.com/data").await?;
 method consumes it and returns the changed client. There is no build step.
 
 `Client` exposes the same request methods as the free functions. Requests
-through one client share its connection pool.
+through one client share its connection pool, unless its
+[destination policy](#destination-policy) restricts addresses. Buffered calls
+and streamed calls use separate pools, because their transports arm different
+timers.
+
+### Destination Policy
+
+A default client sends to every address, private ones included. Use it for
+services you trust. Before a client fetches a URL you do not trust, give it an
+`EgressPolicy`.
+
+```rust
+use camber::http::{self, EgressPolicy};
+use std::net::{IpAddr, Ipv4Addr};
+
+let billing = IpAddr::V4(Ipv4Addr::new(10, 20, 30, 40));
+let policy = EgressPolicy::public_internet()
+    .https_only()
+    .allow_destination("https://billing.internal:8443", billing)?;
+let fetcher = http::client().egress_policy(policy);
+```
+
+| Policy | Effect |
+| --- | --- |
+| `EgressPolicy::unrestricted()` | Every destination. This is the default |
+| `EgressPolicy::public_internet()` | Ordinary public unicast addresses only |
+| `.https_only()` | Refuses an HTTP target before its host is resolved |
+| `.allow_destination(origin, address)` | Admits one exact origin at one exact address |
+
+The policy belongs to the client. It governs the verb conveniences and every
+described request, and no request setter widens it. A refused call returns
+`ClientError::Egress`, sends nothing, and is never retried.
+
+Under `public_internet()`, each call does these steps:
+
+1. It checks the scheme.
+2. It resolves the host once, through the system resolver, under the call's
+   own deadline. An address literal is its own answer.
+3. It refuses an answer with more than 64 addresses as `ResolutionLimit`.
+4. It checks every address. One refused address refuses the whole answer as
+   `Address`. An empty or failed lookup is `Dns`.
+5. It dials only the checked addresses.
+
+Every retry and every followed redirect of that call uses the same checked
+addresses. No second lookup replaces them. The request keeps its host name, so
+the `Host` header, the TLS server name, and certificate verification read the
+name and not the address.
+
+An exception is exact. It admits its scheme, host, effective port, and address.
+It admits no subdomain, no other port, and no other address the name resolves
+to. No exception admits HTTP under `https_only()`.
+
+A policy that restricts only the scheme restricts no address. Its calls keep
+the client's reusable connection pool.
+
+**Cost.** A call under `public_internet()` builds a transport of its own and
+uses no proxy from the environment or the system. Camber closes its
+connections when the call ends. Each call therefore pays a lookup, a connect,
+and a TLS handshake. No restricted call reuses a connection from another call.
+A streamed call holds its transport until its body is released.
+
+**Limits.** The ranges are conservative application policy. Camber cannot
+identify a metadata service at a public address. It does not control host
+routing, NAT, or what a remote server forwards. A cancelled lookup ends the
+call's wait, but the system resolver can finish its own work afterwards. That
+work starts no request.
+
+A mock registered with `http::mock` answers without a lookup. The scheme check
+still runs. A mocked answer is no evidence of where a connection would go.
 
 ## Describing A Request
 
 `Client::request` describes one request with any method. Nothing is sent until
-`send`.
+`send` or `send_streaming` is awaited.
 
 ```rust
 use camber::http;
@@ -78,6 +148,7 @@ let answer: ProviderAnswer = response.json()?;
 | `retries(count)` | `ClientRequest` | Replace the most sends this request adds to its first one |
 | `trace_context(enabled)` | `ClientRequest` | Send or withhold the automatic [trace context](#trace-propagation) |
 | `send()` | async `Result<ClientResponse, RuntimeError>` | Send the request and collect its response |
+| `send_streaming()` | async `Result<ClientStreamResponse, RuntimeError>` | Send the request and return at the final head. See [Streaming A Response](#streaming-a-response) |
 
 The last write wins. `body` after `json` keeps the JSON content type, and
 `header("content-type", ...)` after `json` replaces it.
@@ -97,8 +168,10 @@ Validation sends nothing. Each refusal is
 | A target that is not an absolute `http` or `https` URL with a host, or one with a user name or password | `Url` |
 | A header name or value outside the HTTP grammar, including a CR or LF | `Header` |
 | `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`, `Trailer`, or `Proxy-Authorization` | `ReservedHeader` |
-| A `TRACE` request with a body, refused by `send` | `Body` |
+| A `TRACE` request with a body, refused by `send` or `send_streaming` | `Body` |
 | A response maximum of zero | `ResponseLimit` |
+| An exception that `EgressPolicy::allow_destination` cannot admit | `EgressPolicy` |
+| A stream with no finite response maximum or idle interval, refused by `send_streaming`. See [Stream Bounds](#stream-bounds) | `StreamBudget` |
 
 A value that does not serialize makes `json` return `ClientError::Encode`.
 
@@ -177,9 +250,9 @@ The status decides the method and the body of the next request:
 
 A followed redirect carries every header of the request, credentials
 included. Camber never removes credentials to send to another origin: it
-refuses the redirect. Camber does not check the address a permitted host
-resolves to, so this policy is not protection against server-side request
-forgery. Give it only URLs you trust.
+refuses the redirect. A redirect policy compares origins and reads no
+address. A [destination policy](#destination-policy) reads the address. Under
+one, a followed redirect uses the addresses its call already checked.
 
 Each redirect spends one hop. Each retry spends one retry. A redirect does not
 return a spent retry, and a retry does not return a spent hop, so one call
@@ -206,8 +279,9 @@ Each boundary is separate. One does not lend time to another.
 | `total_timeout` | 30 seconds | One whole operation: every attempt, every followed redirect, every delay, and the final body | Camber | `ClientTimeout::Operation` |
 | `request_timeout` | 30 seconds | One attempt, from its send through body end | Camber | `ClientTimeout::Attempt` |
 | `connect_timeout` | 30 seconds | Establishing the transport | Reqwest | `ClientTimeout::Transport` |
-| `response_idle_timeout` | 30 seconds | Each wait for response bytes | Reqwest | `ClientTimeout::Transport` |
-| response maximum | eight MiB | Bytes one response may retain | Camber | `ResponseTooLarge` |
+| `response_idle_timeout`, buffered call | 30 seconds | Each wait for response bytes | Reqwest | `ClientTimeout::Transport` |
+| `response_idle_timeout`, streamed call | 30 seconds | One pending `ClientBody::next` | Camber | `ClientTimeout::ResponseIdle` |
+| response maximum | eight MiB | Bytes one response may retain or deliver | Camber | `ResponseTooLarge` |
 
 Each duration setter holds a value from one millisecond to thirty years. A
 value outside that range is clamped, with a warning.
@@ -222,8 +296,9 @@ Read the result back with `response_policy()`.
 a client given `TransferBudget::unbounded()` has no attempt timer, no quiet
 interval, and no response maximum, and its operations still end at the total.
 
-A setter that changes a transport setting discards the cached transport. The
-next request builds one from the current values.
+A setter that changes a transport setting discards both cached transports,
+the buffered one and the streaming one. The next request of each kind builds
+one from the current values.
 
 ```rust
 use camber::http::{self, TransferBudget};
@@ -280,6 +355,129 @@ Retries are unaffected by any of this. The retry count, the backoff, and each
 request's replay permission are unchanged. `request_timeout` bounds each
 attempt, and `total_timeout` bounds the operation.
 
+## Streaming A Response
+
+`send_streaming()` returns a `ClientStreamResponse` when the final status and
+headers arrive. Camber has read no body byte then. `into_body()` gives the one
+`ClientBody`, and each `next()` returns one chunk.
+
+```rust
+let response = client
+    .request("GET", source_url)?
+    .response_limit(64 * 1024 * 1024)?
+    .deadline(deadline)
+    .send_streaming()
+    .await?
+    .error_for_status()?;
+let mut body = response.into_body();
+while let Some(chunk) = body.next().await? {
+    object_writer.write_chunk(chunk).await?;
+}
+body.close().await?;
+```
+
+The writer is yours. Camber does not buffer for it and does not own it. A
+chunk you received stays yours, whatever happens to the stream afterwards.
+
+Only the request builder streams. The verb conveniences stay buffered.
+
+| `ClientStreamResponse` | Returns | Notes |
+| --- | --- | --- |
+| `status()` | `u16` | Every status is a response |
+| `header(name)` | `Option<&[u8]>` | The first value, matched without regard to case |
+| `headers()` | iterator of `(&str, &[u8])` | The same rules as `ClientResponse` |
+| `error_for_status()` | `Result<ClientStreamResponse, RuntimeError>` | Refuses 400–599 and cancels the unread body |
+| `into_body()` | `ClientBody` | The one handle to the body |
+
+| `ClientBody` | Returns | Notes |
+| --- | --- | --- |
+| `next().await` | `Result<Option<Bytes>, RuntimeError>` | One nonempty chunk, `None` at the clean end, or the failure |
+| `close().await` | `Result<(), RuntimeError>` | Cancels the body and waits until the upstream is released |
+
+Neither type is `Clone`, and neither converts into a server `Response`. Both
+are `Send`. `Debug` prints no header value and no body content.
+
+### Stream Bounds
+
+A stream needs a finite response maximum and a finite `response_idle_timeout`.
+If the client's policy removed either one, `send_streaming` returns
+`ClientInput::StreamBudget`. It resolves nothing and dials nothing.
+`response_limit` supplies the maximum for one request. Buffered calls keep
+their opt-outs.
+
+The retries and redirects of `send` apply up to the final head. After the head
+is returned, Camber sends nothing again. A body failure does not retry, and a
+status conversion does not retry.
+
+A head that declares more than the maximum returns `ResponseTooLarge` from
+`send_streaming`, and Camber reads no body byte. Camber reads the transport's
+effective length, so a HEAD answer or a `304` is not refused for a length that
+will not arrive. During the body, Camber counts each chunk before it delivers
+it. The chunk that crosses the maximum is dropped whole, and `next` returns
+`ResponseTooLarge`. Chunks you already received are not taken back. A body
+that ends before its framing does is `ClientError::Transport`, not a clean end.
+Every other failed read of the body is `Transport` too, including one with a
+Rustls cause.
+
+Camber reads the upstream only when `next` asks. It holds at most one chunk
+that you have not taken, so the payload it holds does not grow with the length
+of the response. This is not a limit on process memory. Transport and TLS
+buffers, response headers, and the chunks you keep are separate.
+
+### Stream Time
+
+`total_timeout` and the request's `deadline` start at the first poll of
+`send_streaming`. They cover the head, the body, and the time you hold the
+response between reads. `request_timeout` continues from the final send
+through the body in the same way. Returning the head restarts neither timer.
+When the operation deadline or the attempt timer expires, Camber releases the
+response without a call from you. The next `next` returns that timeout.
+
+`response_idle_timeout` measures one pending `next`. It starts when the body
+owner accepts the call. Time you spend between calls is not idle time. An
+empty frame or a trailer does not restart it. Expiry returns
+`ClientTimeout::ResponseIdle`. The streaming transport arms no read timer of
+its own.
+
+### Ending A Stream
+
+| You do | Camber does | You know the upstream is released |
+| --- | --- | --- |
+| `next()` returns `None` or an error | Releases the upstream first | Yes |
+| `send_streaming()` returns an error | Releases the upstream first | Yes |
+| `close().await` | Cancels, then waits for the release | Yes |
+| Drop the response or the body | Requests the release | No |
+| `error_for_status()` refuses the status | Requests the release | No |
+| Drop a pending `next()` | Cancels the body | No |
+
+An end is final. After a clean end, `next` returns `None` again. After a
+failure, `next` and `close` return the same category. After you cancel, `next`
+returns `RuntimeError::Cancelled` and `close` returns `Ok`. A cancelled `next`
+never hands its chunk to a later call.
+
+### Stream Ownership
+
+One task owns a streamed response. The first poll of `send_streaming` decides
+where that task runs.
+
+Inside a Camber runtime, the task belongs to that runtime. Runtime shutdown or
+the close of its scope ends the response, and `next` then returns
+`RuntimeError::Cancelled`. The runtime joins the task. A runtime that already
+closed its scope returns `RuntimeError::ScopeClosed` and sends nothing. If you
+move the body to another task or another runtime, the owner stays where it
+is.
+
+When an inbound peer disconnects, Camber drops the handler. That drops a
+pending `send_streaming` or a body the handler holds, and the stream ends. A
+body you moved into your own task is not the handler's, and it keeps running.
+
+Outside a Camber runtime, the returned handle owns the task. Dropping the
+handle aborts it. If the executor that runs the task goes away, `next`
+returns `ClientError::Transport`.
+
+A mock registered with `http::mock` answers a stream too. The stream bounds,
+the response maximum, and the scheme check all apply to it.
+
 ## Failures
 
 A failed call returns `RuntimeError::Client(ClientError)`. The error is a
@@ -296,17 +494,20 @@ and it has no source.
 | TLS validation or protocol failure, with a Rustls cause | `Tls` |
 | The operation outlived `total_timeout` or the request's `deadline` | `Timeout(ClientTimeout::Operation)` |
 | One attempt outlived `request_timeout` | `Timeout(ClientTimeout::Attempt)` |
-| A connect or response-idle timer expired | `Timeout(ClientTimeout::Transport)` |
+| A connect timer, or the response-idle timer of a buffered call, expired | `Timeout(ClientTimeout::Transport)` |
+| One pending `ClientBody::next` outlived `response_idle_timeout` | `Timeout(ClientTimeout::ResponseIdle)` |
 | Any other send or read failure, including a truncated body | `Transport` |
 | The response crossed its maximum | `ResponseTooLarge { limit }` |
 | A redirect was refused under `RedirectPolicy::SameOrigin` | `Redirect(ClientRedirect)` |
+| The client's destination policy refused the call | `Egress(ClientEgress)` |
 
 A status is not a failure. A call that receives a `404` or a `503` returns
 that response. See [Response Access](#response-access) for the explicit
 status conversion and the two decode failures.
 
-Camber owns the operation and attempt timers, so each names itself. Camber
-does not report which transport timer expired, because Reqwest does not say.
+Camber owns the operation timer, the attempt timer, and the idle interval of
+a streamed body, so each names itself. Camber does not report which transport
+timer expired, because Reqwest does not say.
 Runtime shutdown returns `RuntimeError::Cancelled`. A call polled outside a
 Tokio executor returns `RuntimeError::NoRuntime` and sends nothing.
 
@@ -383,7 +584,8 @@ Runtime shutdown ends the operation too. A pending attempt or delay returns
 future is ordinary caller cancellation: the attempt in flight is dropped and
 nothing more is sent. A handler that awaits a call inline is dropped when its
 inbound peer disconnects, and the call is dropped with it. The client spawns
-no task for a call.
+no task for a buffered call. A streamed call has one owner task. See
+[Stream Ownership](#stream-ownership).
 
 Each attempt keeps its own boundaries. A connect, request, or response-idle
 timeout that expires first returns its own result. Before the response head
@@ -453,8 +655,9 @@ The request body is sent again with each retry.
 
 ## Response Access
 
-Every call returns a `ClientResponse`. It holds the complete body, collected
-under the response maximum, and the headers as the peer sent them.
+Every buffered call returns a `ClientResponse`. It holds the complete body,
+collected under the response maximum, and the headers as the peer sent them.
+For the streamed form, see [Streaming A Response](#streaming-a-response).
 
 | Method | Returns | Notes |
 | --- | --- | --- |
@@ -521,9 +724,10 @@ extension method such as `PURGE`.
 ## Completion Event
 
 Each started operation records one `INFO` tracing event named
-`http.client.completed`. The operation starts at the first poll of `send` or of
-a verb call. The event is recorded when the call returns, or when its pending
-future is dropped.
+`http.client.completed`. The operation starts at the first poll of `send`, of
+`send_streaming`, or of a verb call. A buffered call records the event when it
+returns, or when its pending future is dropped. A streamed call records it
+after its upstream is released, not when its head returns.
 
 | Field | Value |
 | --- | --- |
@@ -537,27 +741,36 @@ future is dropped.
 
 | `outcome` | The call ended with |
 | --- | --- |
-| `response` | A response, with any status |
-| `invalid-request` | `ClientError::InvalidRequest`, refused by `send` |
+| `response` | A response, with any status. For a stream: the body reached its clean end |
+| `invalid-request` | `ClientError::InvalidRequest`, refused by `send` or `send_streaming` |
 | `configuration` | `ClientError::Configuration` |
 | `no-runtime` | `RuntimeError::NoRuntime` |
-| `dns`, `connect`, `tls`, `transport` | The `ClientError` of the same name |
+| `dns`, `connect`, `tls` | The `ClientError` of the same name |
+| `transport` | `ClientError::Transport`. Also `RuntimeError::ScopeClosed` from `send_streaming`: the runtime had closed its scope, and `attempts` is `0` |
 | `timeout` | Any `ClientError::Timeout` |
 | `redirect` | Any `ClientError::Redirect` |
 | `response-too-large` | `ClientError::ResponseTooLarge` |
+| `egress` | `ClientError::Egress`. The client's destination policy refused the call, and `attempts` is `0` |
 | `cancelled` | `RuntimeError::Cancelled`, at runtime shutdown |
-| `abandoned` | A pending call that was dropped |
+| `abandoned` | A pending call that was dropped. For a stream: a response or body that was dropped, closed, or refused by `error_for_status` before its end |
 
 `status` is the head that Camber collects as the answer. A head released for a
 retry or a redirect is not final. A truncated body and a crossed maximum
 record the status of their head beside the failure outcome. A mock answer
 records zero attempts. So does a call that ends before its first send: a
-refused description, a missing executor, or an expired deadline.
+refused description, a missing executor, a closed scope, or an expired
+deadline.
+
+A stream records the status of its head beside whatever its body ended on: an
+idle timeout, an expired deadline, a crossed maximum, or an abandonment. A
+stream records one event. If it already ended on a failure, a later drop or
+conversion records nothing more. `response` for a stream means that Camber
+delivered the whole body. It does not mean that your sink stored it.
 
 These calls record no event:
 
 - a refusal from `request` or from a request setter, including `json`;
-- a `send` future that is never polled;
+- a `send` or `send_streaming` future that is never polled;
 - `text()`, `json()`, and `error_for_status()` on a returned response.
 
 The event holds no path, query, fragment, user name, password, header value,

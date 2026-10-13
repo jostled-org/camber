@@ -10,6 +10,8 @@ use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Once};
 
+use camber::http::mock::ScopedTransferOwner;
+
 /// How many bytes of transcript one capture retains.
 ///
 /// The same budget the child-process capture in `process.rs` holds its pipes
@@ -45,10 +47,35 @@ impl Transcript {
     }
 }
 
+/// What a subscription reads at each event it records: whether a watched
+/// client body owner had released its source.
+pub struct SourceReleaseProbe {
+    watched: ScopedTransferOwner,
+    readings: Arc<Mutex<Vec<bool>>>,
+}
+
+impl SourceReleaseProbe {
+    /// Read `watched` at each event, and append each reading to `readings`.
+    pub fn new(watched: ScopedTransferOwner, readings: Arc<Mutex<Vec<bool>>>) -> Self {
+        Self { watched, readings }
+    }
+
+    /// Take one reading.
+    fn read(&self) {
+        let reading = self.watched.streamed().source_released;
+        self.readings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(reading);
+    }
+}
+
 /// One test's standing interest in the events naming it.
 struct Subscription {
     needle: Box<str>,
     events: Arc<Mutex<Transcript>>,
+    /// Run on the emitting thread, before the event is readable.
+    probe: Option<SourceReleaseProbe>,
 }
 
 /// The live subscriptions the bus fans out to.
@@ -130,6 +157,9 @@ fn fan_out(event: &camber::tracing::Event<'_>, subscriptions: &[Subscription]) {
         .iter()
         .filter(|subscription| text.contains(subscription.needle.as_ref()))
     {
+        if let Some(probe) = &subscription.probe {
+            probe.read();
+        }
         subscription
             .events
             .lock()
@@ -430,6 +460,25 @@ pub fn captures_for(needle: &str) -> usize {
 /// Capturing starts here and ends when the returned handle drops, so a test
 /// reads only what it asked for even while the rest of the binary runs.
 pub fn capture_events(needle: &str) -> TraceCapture {
+    subscribe(needle, None)
+}
+
+/// Capture like [`capture_events`], and take `probe`'s reading at each
+/// captured event.
+///
+/// The probe runs inside the recording, on the thread that emits the event,
+/// before the capture holds it. What the probe reads is therefore the state
+/// production recorded the event in, on any runtime. A reader that finds the
+/// event finds the probe's reading already taken.
+///
+/// The bus holds its lock across the probe. A probe that emits an event or
+/// opens a capture deadlocks.
+pub fn capture_events_probed(needle: &str, probe: SourceReleaseProbe) -> TraceCapture {
+    subscribe(needle, Some(probe))
+}
+
+/// Add one subscription for `needle`, and return its handle.
+fn subscribe(needle: &str, probe: Option<SourceReleaseProbe>) -> TraceCapture {
     install_bus();
     let events = Arc::new(Mutex::new(Transcript::default()));
     subscriptions()
@@ -438,6 +487,7 @@ pub fn capture_events(needle: &str) -> TraceCapture {
         .push(Subscription {
             needle: needle.into(),
             events: Arc::clone(&events),
+            probe,
         });
     TraceCapture { events }
 }

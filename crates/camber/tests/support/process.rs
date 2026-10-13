@@ -86,6 +86,18 @@ impl ReapProbe {
     }
 }
 
+/// What a private child's environment is given and denied before it starts.
+///
+/// Only a child takes these. A row that changed the environment of its own
+/// process would change it under every test that runs beside it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChildEnvironment<'a> {
+    /// Each variable the child starts with, and its value.
+    pub set: &'a [(&'a str, &'a str)],
+    /// Each variable the child starts without, whatever this process holds.
+    pub removed: &'a [&'a str],
+}
+
 pub struct ChildGuard {
     child: Option<Child>,
     lines: Receiver<Box<str>>,
@@ -104,10 +116,33 @@ impl ChildGuard {
         mode: &str,
         cleanup_timeout: Duration,
     ) -> Result<Self, ProcessError> {
+        Self::spawn_exact_current_in(
+            test_name,
+            mode,
+            cleanup_timeout,
+            &ChildEnvironment::default(),
+        )
+    }
+
+    /// Spawn the private child with `environment` written on its command.
+    ///
+    /// The child therefore owns those variables before its first instruction,
+    /// and before any runtime or client it builds reads them. This process's
+    /// own environment is not changed.
+    pub fn spawn_exact_current_in(
+        test_name: &str,
+        mode: &str,
+        cleanup_timeout: Duration,
+        environment: &ChildEnvironment<'_>,
+    ) -> Result<Self, ProcessError> {
         let nonce = CHILD_NONCE.fetch_add(1, Ordering::Relaxed);
         let nonce = format!("{}-{nonce}", std::process::id());
         let mut command = Command::new(std::env::current_exe()?);
+        environment.removed.iter().for_each(|name| {
+            command.env_remove(name);
+        });
         command
+            .envs(environment.set.iter().copied())
             .arg("--exact")
             .arg(test_name)
             .arg("--nocapture")
@@ -479,6 +514,28 @@ pub fn run_in_child(
     bound: Duration,
     body: impl FnOnce(),
 ) -> bool {
+    run_in_child_in(
+        test_name,
+        mode,
+        marker,
+        bound,
+        &ChildEnvironment::default(),
+        body,
+    )
+}
+
+/// [`run_in_child`], with `environment` written on the child before it starts.
+///
+/// For a row whose claim is about a process-global variable: the child reads
+/// what the parent chose, and no test beside the parent reads it.
+pub fn run_in_child_in(
+    test_name: &str,
+    mode: &str,
+    marker: &str,
+    bound: Duration,
+    environment: &ChildEnvironment<'_>,
+    body: impl FnOnce(),
+) -> bool {
     if is_private_child(mode) {
         body();
         println!("{marker}");
@@ -488,13 +545,19 @@ pub fn run_in_child(
         io::Write::flush(&mut std::io::stdout()).expect("the child could not flush its marker");
         return true;
     }
-    assert_child_succeeded(test_name, mode, marker, bound);
+    assert_child_succeeded(test_name, mode, marker, bound, environment);
     false
 }
 
 /// Run the private child from the parent side, failing with what it said.
-fn assert_child_succeeded(test_name: &str, mode: &str, marker: &str, bound: Duration) {
-    let mut child = ChildGuard::spawn_exact_current(test_name, mode, bound)
+fn assert_child_succeeded(
+    test_name: &str,
+    mode: &str,
+    marker: &str,
+    bound: Duration,
+    environment: &ChildEnvironment<'_>,
+) {
+    let mut child = ChildGuard::spawn_exact_current_in(test_name, mode, bound, environment)
         .expect("the isolated child could not be started");
     let failure = match drive_isolated(&mut child, marker, bound) {
         Ok(status) if status.success() => return,
