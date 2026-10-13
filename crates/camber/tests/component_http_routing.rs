@@ -49,6 +49,8 @@ mod client_egress;
 mod client_failures;
 #[path = "component_http_routing/client_methods.rs"]
 mod client_methods;
+#[path = "component_http_routing/client_protocol_retry.rs"]
+mod client_protocol_retry;
 #[path = "component_http_routing/client_redirects.rs"]
 mod client_redirects;
 #[path = "component_http_routing/client_request.rs"]

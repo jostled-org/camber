@@ -889,7 +889,7 @@ fn write_staged_body(peer: &mut TcpStream, wire: StagedWire) {
     match wire {
         StagedWire::Withheld | StagedWire::Broken => {}
         StagedWire::Crossing => {
-            http_support::write_chunk(peer, &vec![b'x'; STAGED_CEILING * 4])
+            http_support::write_chunk(peer, &[b'x'; STAGED_CEILING * 4])
                 .expect("write the crossing frame");
         }
         StagedWire::Complete => {
