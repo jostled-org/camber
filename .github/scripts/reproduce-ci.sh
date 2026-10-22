@@ -304,7 +304,7 @@ run_workflow_phase() {
         hook-contract) "${checkout}/.github/scripts/ci-selftest.sh" ;;
         fmt) cargo fmt --check ;;
         clippy)
-            cargo clippy --workspace \
+            cargo clippy --workspace --all-targets \
                 --features "${CAMBER_WORKFLOW_FEATURES}" -- -D warnings
             ;;
         features) "${checkout}/.github/scripts/check-feature-builds.sh" ;;

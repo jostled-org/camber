@@ -121,7 +121,7 @@ if [ ${#scope_rust[@]} -eq 0 ]; then
         run cargo fmt --check
         run .github/scripts/check-pedant.sh source
         run .github/scripts/check-pedant.sh tests
-        run cargo clippy --workspace --features "$CAMBER_FEATURES" -- -D warnings
+        run cargo clippy --workspace --all-targets --features "$CAMBER_FEATURES" -- -D warnings
         run cargo check --workspace --tests --keep-going --features "$CAMBER_FEATURES"
         run cargo test --workspace --features "$CAMBER_FEATURES"
     else
@@ -143,11 +143,11 @@ done
 # `set -u` aborts with "unbound variable".
 for pkg in "${scope_rust[@]}"; do
     if [ "$pkg" = "$FEATURED_CRATE" ]; then
-        run cargo clippy -p "$pkg" --features "$CAMBER_FEATURES" -- -D warnings
+        run cargo clippy -p "$pkg" --all-targets --features "$CAMBER_FEATURES" -- -D warnings
         run cargo check -p "$pkg" --tests --keep-going --features "$CAMBER_FEATURES"
         run cargo test -p "$pkg" --features "$CAMBER_FEATURES"
     else
-        run cargo clippy -p "$pkg" -- -D warnings
+        run cargo clippy -p "$pkg" --all-targets -- -D warnings
         run cargo check -p "$pkg" --tests --keep-going
         run cargo test -p "$pkg"
     fi

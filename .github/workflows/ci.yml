@@ -55,7 +55,7 @@ jobs:
       - run: .github/scripts/reproduce-ci.sh require-tools git rg rustc cargo clippy rustfmt
       - run: .github/scripts/ci-selftest.sh
       - run: cargo fmt --check
-      - run: cargo clippy --workspace --features "${CAMBER_CI_FEATURES}" -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features "${CAMBER_CI_FEATURES}" -- -D warnings
       - name: Check each optional feature alone
         run: .github/scripts/check-feature-builds.sh
       - name: Check API documentation

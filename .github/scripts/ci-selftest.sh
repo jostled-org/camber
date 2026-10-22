@@ -76,7 +76,7 @@ check_workflow_entries() {
     # Each phase command reproduce-ci.sh runs, as CI states it.
     assert_workflow_entry 'run: cargo fmt --check' 'format check' || return $?
     assert_workflow_entry \
-        "run: cargo clippy --workspace --features \"\${CAMBER_CI_FEATURES}\" -- -D warnings" \
+        "run: cargo clippy --workspace --all-targets --features \"\${CAMBER_CI_FEATURES}\" -- -D warnings" \
         'workspace lint check' || return $?
     assert_workflow_entry 'run: .github/scripts/check-feature-builds.sh' \
         'isolated optional feature builds' || return $?

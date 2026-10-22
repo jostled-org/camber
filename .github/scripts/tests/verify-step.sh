@@ -50,6 +50,12 @@ for scope in '' 'camber' 'camber-build camber'; do
         exit 1
     fi
     rg -q '^cargo clippy ' "$CALLS"
+    # Clippy lints the tests and benches too, not only the library source.
+    if rg '^cargo clippy ' "$CALLS" | rg -qv -- ' --all-targets '; then
+        cat "$CALLS"
+        printf 'FAIL: a clippy run skipped the test targets\n'
+        exit 1
+    fi
     rg -q '^cargo test ' "$CALLS"
     case "$scope" in
         '') assert_compile_before_test '--workspace' ' --features profiling,ws,grpc,acme,dns01,nats,sqs,otel' ;;
