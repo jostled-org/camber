@@ -510,6 +510,10 @@ impl FrozenRouter {
                     plan: self.body_plan(route, RequestBodyMode::Streaming, outer),
                 })
             }
+            RouteHandler::Sse(registration) if registration.reads_body() => RouteClass::Buffered {
+                method,
+                plan: self.body_plan(route, RequestBodyMode::Buffered, outer),
+            },
             RouteHandler::Sse(_) => RouteClass::HeadOnly,
             #[cfg(feature = "ws")]
             RouteHandler::WebSocket(_) => RouteClass::HeadOnly,

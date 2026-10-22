@@ -207,6 +207,19 @@ router.get_sse("/events", |_req, sse| {
 });
 ```
 
+Use `get_sse_async` or `post_sse` when the feed awaits an async source or
+starts from a request body:
+
+```rust
+router.post_sse("/jobs", |req, sse| {
+    let job: Box<str> = req.body().into();
+    async move {
+        sse.event("queued", &job).await?;
+        Ok(())
+    }
+});
+```
+
 For generic chunked responses, use `StreamResponse::new()` for the default buffer or
 `StreamResponse::with_buffer(status, cap)` when you need explicit backpressure tuning.
 

@@ -19,6 +19,8 @@ pub mod stream_support;
 #[path = "support/trace_capture.rs"]
 pub mod trace_capture;
 
+#[path = "component_streaming/async_server_sent_events.rs"]
+mod async_server_sent_events;
 #[path = "component_streaming/server_sent_events.rs"]
 mod server_sent_events;
 #[path = "component_streaming/source_failure_fixture.rs"]

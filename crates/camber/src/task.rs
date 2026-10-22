@@ -681,6 +681,64 @@ where
     }
 }
 
+/// Run one Camber-internal async producer, admitted to the root scope when a
+/// runtime context is established, and detached on the ambient Tokio runtime
+/// otherwise.
+///
+/// The async twin of [`spawn_internal_blocking`], with the same dispositions:
+/// a refusal is reported against the response that lost its producer, and
+/// dropping the refused future drops its channel sender, which lets the body
+/// end its own stream. A panic is reported here rather than recorded against
+/// the scope, as a blocking producer's is: the producer belongs to one
+/// response, not to the runtime.
+pub(crate) fn spawn_internal_async<F>(producer: &'static str, path: &str, body: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let body = run_async_producer(producer, body);
+    match runtime::runtime_context() {
+        Ok(rt) => record_async_admission(producer, path, rt.admit_internal_async(None, body)),
+        Err(RuntimeError::NoRuntime) => detach_async_producer(producer, path, body),
+        Err(error) => record_producer_refusal(producer, path, &error),
+    }
+}
+
+/// Report an async producer the root scope refused.
+fn record_async_admission(producer: &'static str, path: &str, admission: Result<(), RuntimeError>) {
+    if let Err(error) = admission {
+        record_producer_refusal(producer, path, &error);
+    }
+}
+
+/// Run one unadmitted async producer detached on the ambient Tokio runtime, or
+/// report that there is nowhere left to run it.
+///
+/// The async twin of [`detach_producer`], for the same bare-Tokio case.
+fn detach_async_producer<F>(producer: &'static str, path: &str, body: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(executor) => drop(executor.spawn(body)),
+        Err(_) => record_producer_refusal(producer, path, &RuntimeError::NoRuntime),
+    }
+}
+
+/// Run a per-response async producer, reporting a panic that would otherwise
+/// vanish.
+///
+/// The async sibling of [`run_producer`], at the same level for the same
+/// reason.
+async fn run_async_producer<F>(producer: &'static str, body: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    match catch_panic_async(body).await {
+        Ok(()) => {}
+        Err(error) => tracing::error!(producer, %error, "per-response producer panicked"),
+    }
+}
+
 /// Run one unadmitted producer detached on the ambient Tokio pool, or report
 /// that there is nowhere left to run it.
 ///

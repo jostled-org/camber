@@ -21,6 +21,7 @@ Supported registration methods include:
 - `get`, `post`, `put`, `patch`, `delete`, `head`, `options`
 - `get_stream`
 - `get_sse` and `get_sse_with_budget`
+- `get_sse_async`, `post_sse`, and their `_with_budget` forms
 - `ws` with the `ws` feature
 - `proxy`, `proxy_stream`, and health-checked variants
 - `static_files`, `static_files_with_limit`, and `static_files_unbounded`
@@ -979,6 +980,47 @@ router.get_sse("/events", |_req: &Request, sse: &mut SseWriter| -> Result<(), Ru
 SSE routes are also classified before request-body buffering. They keep the same handler API, but
 the framework does not collect request bodies for routes that never use them.
 
+`SseWriter::event` sends a typed event. `SseWriter::data` sends a data-only
+event, which clients dispatch as `message`. `SseWriter::comment` sends `:` as a
+keepalive.
+
+### Async event streams
+
+`get_sse` runs its handler on a blocking thread. Use `get_sse_async` when the
+feed awaits an async source, such as a channel, a subprocess, or an upstream
+connection. Use `post_sse` when the feed starts from a request body, such as a
+completion API or a job submission.
+
+```rust
+use camber::http::{AsyncSseWriter, Request, Router};
+
+let mut router = Router::new();
+router.post_sse("/jobs", |req: &Request, sse: AsyncSseWriter| {
+    let job: Box<str> = req.body().into();
+    async move {
+        sse.event("queued", &job).await?;
+        sse.comment().await?;
+        sse.data("done").await?;
+        Ok(())
+    }
+});
+```
+
+The handler reads the request and returns the future that writes the feed. Move
+anything the future needs into it, as with `Router::ws`. `AsyncSseWriter` has
+the same `event`, `data`, and `comment` methods as `SseWriter`. Each call waits
+for room in the event channel and returns an error after the client disconnects.
+
+`post_sse` reads the request body before the handler runs, under the route's
+request-body policy. A body over the route's maximum gets its refusal, such as
+`413`, and no feed starts. `get_sse_async` reads its body the same way.
+
+The feed ends when its future ends. Camber drops the future when the client
+disconnects, when the feed crosses its transfer budget, or when a server stop
+releases the stream. So a feed that waits on something other than its writer
+still stops. A handler error ends the feed after the events it already sent.
+A `HEAD` request gets the `200` head and runs no handler.
+
 ### Bounding an event stream
 
 `get_sse` states `TransferBudget::unbounded()` for the feed it registers: an event
@@ -987,7 +1029,8 @@ bounded by the configured event-channel depth. Under a router, host, server, or
 runtime download policy it inherits that policy rather than widening it.
 
 `get_sse_with_budget(path, budget, handler)` is how one feed names its own payload
-maximum, quiet interval between events, and lifetime. The budget is applied under
+maximum, quiet interval between events, and lifetime. `get_sse_async_with_budget`
+and `post_sse_with_budget` take the same budget for an async feed. The budget is applied under
 whatever the outer layers already selected: an unbounded dimension here inherits
 the outer bound, and two finite values resolve to the smaller. The bounds are
 enforced on the event body, after the `200` has committed, so a crossing ends the

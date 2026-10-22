@@ -10,10 +10,12 @@ use super::rejection::{Rejection, RejectionContext, RejectionMapper, shared_mapp
 use super::response::HandlerOutcome;
 use super::response::IntoResponse;
 use super::response_commitment::ResponseOrigin;
-use super::sse::SseWriter;
+use super::sse::{AsyncSseWriter, SseWriter};
 use super::static_files::{DEFAULT_STATIC_FILE_LIMIT, frozen_static_file_limit};
 use super::stream::StreamResponse;
-use super::trie::{CANONICAL_METHODS, MultipartRegistration, RouteHandler, TrieNode};
+use super::trie::{
+    CANONICAL_METHODS, MultipartRegistration, RouteHandler, SseFeed, SseProducer, TrieNode,
+};
 #[cfg(feature = "ws")]
 use super::websocket::WsConn;
 use super::{Request, Response};
@@ -482,7 +484,12 @@ impl Router {
         path: &str,
         handler: impl Fn(&Request, &mut SseWriter) -> Result<(), RuntimeError> + Send + Sync + 'static,
     ) {
-        self.add_sse(path, INHERITED_SSE_POLICY, handler);
+        self.add_sse(
+            Method::Get,
+            path,
+            INHERITED_SSE_POLICY,
+            SseProducer::Blocking(Arc::new(handler)),
+        );
     }
 
     /// Register an SSE streaming handler under the transfer policy it names.
@@ -501,22 +508,112 @@ impl Router {
         budget: super::TransferBudget,
         handler: impl Fn(&Request, &mut SseWriter) -> Result<(), RuntimeError> + Send + Sync + 'static,
     ) {
-        self.add_sse(path, budget, handler);
+        self.add_sse(
+            Method::Get,
+            path,
+            budget,
+            SseProducer::Blocking(Arc::new(handler)),
+        );
+    }
+
+    /// Register an async SSE handler for GET requests.
+    ///
+    /// The handler receives the request and an [`AsyncSseWriter`], and returns
+    /// the future that writes the feed. It may read the request before it
+    /// returns; anything the future needs across an `.await` must be moved
+    /// into it as owned state. The feed ends when the future ends, and the
+    /// future is dropped when the client disconnects or the server shuts down.
+    ///
+    /// The feed is bounded the way [`Self::get_sse`]'s is.
+    /// [`Self::get_sse_async_with_budget`] is how one feed names its own bounds.
+    pub fn get_sse_async<F, Fut>(&mut self, path: &str, handler: F)
+    where
+        F: Fn(&Request, AsyncSseWriter) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
+    {
+        self.add_sse(
+            Method::Get,
+            path,
+            INHERITED_SSE_POLICY,
+            async_sse_producer(handler),
+        );
+    }
+
+    /// Register an async SSE handler for GET requests under the transfer
+    /// policy it names.
+    ///
+    /// `budget` is applied the way [`Self::get_sse_with_budget`] applies it.
+    pub fn get_sse_async_with_budget<F, Fut>(
+        &mut self,
+        path: &str,
+        budget: super::TransferBudget,
+        handler: F,
+    ) where
+        F: Fn(&Request, AsyncSseWriter) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
+    {
+        self.add_sse(Method::Get, path, budget, async_sse_producer(handler));
+    }
+
+    /// Register an async SSE handler for POST requests.
+    ///
+    /// The request body is read in full, under the route's upload policy,
+    /// before the handler runs, so a body the route refuses gets its refusal
+    /// and no feed. The handler then works as [`Self::get_sse_async`]'s does,
+    /// and reads the body through [`Request::body`].
+    ///
+    /// ```
+    /// let mut router = camber::http::Router::new();
+    /// router.post_sse("/jobs", |req, sse| {
+    ///     let job: Box<str> = req.body().into();
+    ///     async move {
+    ///         sse.event("queued", &job).await?;
+    ///         sse.data("done").await
+    ///     }
+    /// });
+    /// ```
+    pub fn post_sse<F, Fut>(&mut self, path: &str, handler: F)
+    where
+        F: Fn(&Request, AsyncSseWriter) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
+    {
+        self.add_sse(
+            Method::Post,
+            path,
+            INHERITED_SSE_POLICY,
+            async_sse_producer(handler),
+        );
+    }
+
+    /// Register an async SSE handler for POST requests under the transfer
+    /// policy it names.
+    ///
+    /// `budget` is applied the way [`Self::get_sse_with_budget`] applies it.
+    pub fn post_sse_with_budget<F, Fut>(
+        &mut self,
+        path: &str,
+        budget: super::TransferBudget,
+        handler: F,
+    ) where
+        F: Fn(&Request, AsyncSseWriter) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
+    {
+        self.add_sse(Method::Post, path, budget, async_sse_producer(handler));
     }
 
     /// Insert one SSE registration under the policy its caller selected.
     fn add_sse(
         &mut self,
+        method: Method,
         path: &str,
         budget: super::TransferBudget,
-        handler: impl Fn(&Request, &mut SseWriter) -> Result<(), RuntimeError> + Send + Sync + 'static,
+        producer: SseProducer,
     ) {
         self.root.insert_route(
-            Method::Get,
+            method,
             path,
             RouteHandler::Sse(Arc::new(super::trie::SseRegistration::new(
-                Box::new(handler),
-                budget,
+                producer, budget,
             ))),
         );
     }
@@ -896,6 +993,17 @@ impl PrefixPatterns {
             },
         }
     }
+}
+
+/// Erase one async SSE handler the way every stored handler is erased.
+fn async_sse_producer<F, Fut>(handler: F) -> SseProducer
+where
+    F: Fn(&Request, AsyncSseWriter) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
+{
+    SseProducer::Async(Box::new(move |req: &Request, writer: AsyncSseWriter| {
+        Box::pin(handler(req, writer)) as SseFeed
+    }))
 }
 
 /// The file one static-files pattern serves, named by `select`.

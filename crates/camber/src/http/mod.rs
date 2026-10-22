@@ -256,7 +256,7 @@ pub use server::{
     server_hosts,
 };
 pub use server_policy::ServerPolicy;
-pub use sse::SseWriter;
+pub use sse::{AsyncSseWriter, SseWriter};
 pub use static_files::{serve_file, serve_file_unbounded, serve_file_with_limit};
 pub use stream::{StreamResponse, StreamSender};
 pub use transfer_budget::TransferBudget;

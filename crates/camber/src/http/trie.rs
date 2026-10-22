@@ -5,7 +5,7 @@ use super::proxy_upstream::ProxyUpstream;
 use super::request::Params;
 use super::response::HandlerOutcome;
 use super::response_commitment::ResponseOrigin;
-use super::sse::SseWriter;
+use super::sse::{AsyncSseWriter, SseWriter};
 use super::stream::StreamResponse;
 #[cfg(feature = "ws")]
 use super::ws_proxy::{BridgeStart, GatedBridge, WsBridgeInput};
@@ -22,9 +22,26 @@ use std::sync::atomic::AtomicBool;
 pub(super) type Handler =
     Box<dyn Fn(&Request) -> Pin<Box<dyn Future<Output = HandlerOutcome> + Send>> + Send + Sync>;
 pub(super) type SseHandler = Arc<SseRegistration>;
-/// One registered SSE producer, erased the way every stored handler is.
-pub(super) type SseProducer =
-    Box<dyn Fn(&Request, &mut SseWriter) -> Result<(), RuntimeError> + Send + Sync>;
+/// One registered blocking SSE producer, erased the way every stored handler is.
+///
+/// Shared rather than boxed: each feed's blocking thread takes its own handle
+/// to the producer it runs.
+pub(super) type BlockingSseProducer =
+    Arc<dyn Fn(&Request, &mut SseWriter) -> Result<(), RuntimeError> + Send + Sync>;
+/// The future one async SSE handler returns, which owns its writer.
+pub(super) type SseFeed = Pin<Box<dyn Future<Output = Result<(), RuntimeError>> + Send>>;
+/// One registered async SSE handler, erased the way every stored handler is.
+pub(super) type AsyncSseProducer = Box<dyn Fn(&Request, AsyncSseWriter) -> SseFeed + Send + Sync>;
+
+/// The producer one SSE route runs.
+pub(super) enum SseProducer {
+    /// A handler that writes the whole feed on a blocking thread. It reads no
+    /// request body.
+    Blocking(BlockingSseProducer),
+    /// A handler whose future writes the feed. It reads the request body
+    /// first, as every buffered route does.
+    Async(AsyncSseProducer),
+}
 pub(super) type StreamHandler =
     Box<dyn Fn(&Request) -> Pin<Box<dyn Future<Output = StreamResponse> + Send>> + Send + Sync>;
 /// One `Router::ws` registration's shared launch.
@@ -70,13 +87,14 @@ impl SseRegistration {
         self.budget
     }
 
-    /// Run this registration's producer against the one writer it is given.
-    pub(super) fn produce(
-        &self,
-        request: &Request,
-        writer: &mut SseWriter,
-    ) -> Result<(), RuntimeError> {
-        (self.producer)(request, writer)
+    /// The producer this registration runs.
+    pub(super) const fn producer(&self) -> &SseProducer {
+        &self.producer
+    }
+
+    /// Whether this route reads its request body before the feed starts.
+    pub(super) const fn reads_body(&self) -> bool {
+        matches!(self.producer, SseProducer::Async(_))
     }
 }
 

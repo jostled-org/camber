@@ -10,9 +10,11 @@ use super::request::{RequestHead, RequestOrigin};
 use super::response::HeaderPair;
 use super::response_commitment::ResponseOrigin;
 use super::server_lifecycle::ConnectionLifecycle;
-use super::sse::SseWriter;
+use super::sse::{AsyncSseWriter, SseWriter};
+use super::trie::{AsyncSseProducer, BlockingSseProducer, SseProducer};
+use std::sync::Arc;
 
-/// Produce the SSE response and start the blocking producer that feeds it.
+/// Produce the SSE response and start the producer that feeds it.
 ///
 /// The producer may observe this response's lifetime through
 /// `req.on_disconnect()`, but it never establishes the completion point: the
@@ -44,9 +46,14 @@ pub(super) async fn handle_sse(
     // under the route's: the body that carries these events is bounded by one
     // owner, and a HEAD that produces none still resolves it the same way.
     let owner = operation.download(handler.budget(), script);
-    let body = match req.is_head() {
-        true => StreamBody::Drained,
-        false => spawn_sse_producer(handler, req, buffer_size, owner),
+    let body = match (req.is_head(), handler.producer()) {
+        (true, _) => StreamBody::Drained,
+        (false, SseProducer::Blocking(produce)) => {
+            spawn_sse_producer(Arc::clone(produce), req, buffer_size, owner)
+        }
+        (false, SseProducer::Async(start)) => {
+            spawn_async_sse_producer(start, req, buffer_size, owner)
+        }
     };
     let builder = hyper::Response::builder()
         .status(200)
@@ -64,7 +71,7 @@ pub(super) async fn handle_sse(
 
 /// Start the blocking SSE producer and hand back the body it feeds.
 fn spawn_sse_producer(
-    handler: super::router::SseHandler,
+    produce: BlockingSseProducer,
     req: Request,
     buffer_size: usize,
     owner: super::transfer::TransferOwner,
@@ -78,9 +85,41 @@ fn spawn_sse_producer(
     let uri = req.uri_owned();
     crate::task::spawn_internal_blocking("sse", uri.path(), move || {
         let mut writer = SseWriter::new(tx);
-        if let Err(e) = handler.produce(&req, &mut writer) {
+        if let Err(e) = produce(&req, &mut writer) {
             tracing::warn!(error = %e, "SSE handler returned error");
         }
+    });
+
+    StreamBody::channel(owner, rx)
+}
+
+/// Start an async SSE handler's feed and hand back the body it writes.
+///
+/// The handler runs here, on the connection, and returns the feed; only the
+/// feed is spawned. It runs until it ends or its body is gone. `watch` is a
+/// handle on the channel the feed's writer holds, kept only to learn when the
+/// body dropped its receiver: a departed peer, a server stop, and a crossed
+/// transfer bound all end the body, and each then drops a feed that waits on
+/// something other than its writer. The request stays alive as long as the
+/// feed, as it does for a blocking producer.
+fn spawn_async_sse_producer(
+    start: &AsyncSseProducer,
+    req: Request,
+    buffer_size: usize,
+    owner: super::transfer::TransferOwner,
+) -> StreamBody {
+    let (watch, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(buffer_size);
+    let feed = start(&req, AsyncSseWriter::new(watch.clone()));
+    let uri = req.uri_owned();
+    crate::task::spawn_internal_async("sse", uri.path(), async move {
+        tokio::select! {
+            outcome = feed => match outcome {
+                Ok(()) => {}
+                Err(e) => tracing::warn!(error = %e, "SSE handler returned error"),
+            },
+            () = watch.closed() => {}
+        }
+        drop(req);
     });
 
     StreamBody::channel(owner, rx)
