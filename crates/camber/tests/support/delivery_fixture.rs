@@ -238,7 +238,7 @@ impl Tool {
             Self::Clippy => ("clippy 0.1.98 (88d9e12ae1 2026-08-18)", "0.1.98"),
             Self::Rustfmt => ("rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)", "1.9.0"),
             Self::Pedant => ("pedant 0.30.1", "0.30.1"),
-            Self::CargoDeny => ("cargo-deny 0.19.0", "0.19.0"),
+            Self::CargoDeny => ("cargo-deny 0.20.2", "0.20.2"),
         }
     }
 
@@ -250,7 +250,7 @@ impl Tool {
             Self::Clippy => ("clippy 0.1.97 (51ff8ff5d0 2026-07-07)", "0.1.97"),
             Self::Rustfmt => ("rustfmt 1.8.0-stable (51ff8ff5d0 2026-07-07)", "1.8.0"),
             Self::Pedant => ("pedant 0.30.0", "0.30.0"),
-            Self::CargoDeny => ("cargo-deny 0.18.9", "0.18.9"),
+            Self::CargoDeny => ("cargo-deny 0.20.1", "0.20.1"),
         }
     }
 }
