@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "camber"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "allocation-counter",
  "arc-swap",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "camber-build"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "prost-build",
  "protoc-bin-vendored",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "camber-cli"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "camber",
  "clap",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "camber-macros"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "proc-macro2",
  "quote",

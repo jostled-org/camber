@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1](https://github.com/jostled-org/camber/compare/camber-v0.14.0...camber-v0.14.1) - 2026-10-22
+
+### Added
+
+- *(http)* let servers move or disable the resource health route
+
+### Fixed
+
+- *(deps)* patch rustls advisories and pin cargo-deny 0.20.2
+
 ## [0.14.0](https://github.com/jostled-org/camber/compare/camber-v0.13.2...camber-v0.14.0) - 2026-10-13
 
 ### Added

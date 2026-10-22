@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/jostled-org/camber/compare/camber-macros-v0.10.0...camber-macros-v0.10.1) - 2026-10-22
+
+### Added
+
+- *(http)* let servers move or disable the resource health route
+
 ## [0.10.0](https://github.com/jostled-org/camber/compare/camber-macros-v0.9.0...camber-macros-v0.10.0) - 2026-10-13
 
 ### Added
