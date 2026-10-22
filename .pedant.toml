@@ -6,3 +6,48 @@ check_vec_box_dyn = false
 max_depth = 2
 check_long_function_body = true
 max_function_body_lines = 80
+
+# Source code never panics. Tests may.
+[forbid_calls]
+enabled = true
+patterns = [
+    ".unwrap()",
+    ".expect(*)",
+]
+
+[forbid_macros]
+enabled = true
+patterns = [
+    "panic!",
+    "core::panic!",
+    "std::panic!",
+    "::core::panic!",
+    "::std::panic!",
+    "todo!",
+    "core::todo!",
+    "std::todo!",
+    "::core::todo!",
+    "::std::todo!",
+    "unimplemented!",
+    "core::unimplemented!",
+    "std::unimplemented!",
+    "::core::unimplemented!",
+    "::std::unimplemented!",
+    "unreachable!",
+    "core::unreachable!",
+    "std::unreachable!",
+    "::core::unreachable!",
+    "::std::unreachable!",
+]
+
+[overrides."**/tests/**".forbid_calls]
+enabled = false
+
+[overrides."**/tests/**".forbid_macros]
+enabled = false
+
+[overrides."**/benches/**".forbid_calls]
+enabled = false
+
+[overrides."**/benches/**".forbid_macros]
+enabled = false

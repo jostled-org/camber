@@ -91,9 +91,14 @@ CAMBER_VERIFY_SCOPE=camber FAIL_COMMAND='cargo fmt' FAIL_STATUS=23 bash "$scratc
 rg -q '^cargo test ' "$CALLS"
 CAMBER_VERIFY_SCOPE=camber FAIL_COMMAND=none bash "$scratch/repo/.github/scripts/verify-step.sh" > "$scratch/output" 2>&1
 # Missing Cargo is unavailable infrastructure, not an unknown crate or a finding.
+# Some distributions put a rustup proxy at /usr/bin/cargo, so the row mirrors
+# the system tools without Cargo instead of trusting /usr/bin to lack it.
+mkdir "$scratch/no-cargo"
+find /usr/bin /bin -maxdepth 1 ! -name cargo ! -type d \
+    -exec sh -c 'ln -sf "$@" "$0"' "$scratch/no-cargo" {} +
 for scope in '' 'camber'; do
     status=0
-    PATH=/usr/bin:/bin CAMBER_VERIFY_SCOPE="$scope" FAIL_COMMAND=none \
+    PATH="$scratch/no-cargo" CAMBER_VERIFY_SCOPE="$scope" FAIL_COMMAND=none \
         "$BASH" "$scratch/repo/.github/scripts/verify-step.sh" > "$scratch/output" 2>&1 || status=$?
     [ "$status" -eq 75 ] || { cat "$scratch/output"; printf 'FAIL: [%s] without cargo exited %s\n' "$scope" "$status"; exit 1; }
     rg -q 'INFRASTRUCTURE: cargo is not on PATH' "$scratch/output" || { printf 'FAIL: missing cargo diagnostic\n'; exit 1; }

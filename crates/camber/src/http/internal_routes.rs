@@ -13,20 +13,60 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 
-/// The fixed identity `/metrics` is named by.
-static METRICS_ROUTE: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from("/metrics"));
+/// The path the metrics exporter is served at.
+pub(super) const METRICS_PATH: &str = "/metrics";
 
-/// The fixed identity `/health` is named by.
-static HEALTH_ROUTE: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from("/health"));
+/// The path the resource health report is served at unless a policy moves it.
+pub(super) const DEFAULT_HEALTH_PATH: &str = "/health";
+
+/// The path the CPU profiler is served at.
+pub(super) const PROFILING_PATH: &str = "/debug/pprof/cpu";
+
+/// The fixed identity `/metrics` is named by.
+static METRICS_ROUTE: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from(METRICS_PATH));
 
 /// The fixed identity `/debug/pprof/cpu` is named by.
 #[cfg(feature = "profiling")]
-static PROFILING_ROUTE: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from("/debug/pprof/cpu"));
+static PROFILING_ROUTE: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from(PROFILING_PATH));
+
+/// The resource health report one server answers, and the path it answers at.
+///
+/// Resolved once per server from the runtime's registry and the server's
+/// narrowed policy, then shared by every connection it accepts. The path is the
+/// route's identity as well as its match, so a refusal names the path this
+/// server actually served rather than the default one.
+#[derive(Clone)]
+pub(super) struct HealthEndpoint {
+    path: Arc<str>,
+    registry: ResourceRegistry,
+}
+
+impl HealthEndpoint {
+    /// The report a server answers, or `None` when it answers none.
+    ///
+    /// A runtime with no resources has nothing to report, and a policy that
+    /// disabled the route exposes nothing on this server.
+    pub(super) fn resolve(
+        registry: Option<&ResourceRegistry>,
+        route: super::HealthRoute,
+    ) -> Option<Self> {
+        let (registry, path) = (registry?, route.path()?);
+        Some(Self {
+            path: Arc::from(path),
+            registry: Arc::clone(registry),
+        })
+    }
+
+    /// The exact path this report is answered at.
+    pub(super) fn path(&self) -> &str {
+        &self.path
+    }
+}
 
 /// Which internal route was matched. Used to avoid per-request Box<dyn Fn> allocation.
 pub(super) enum InternalRoute {
     Metrics(metrics_exporter_prometheus::PrometheusHandle),
-    Health(ResourceRegistry),
+    Health(HealthEndpoint),
     #[cfg(feature = "profiling")]
     Profiling(ProfilingRequest),
 }
@@ -41,7 +81,7 @@ impl InternalRoute {
     pub(super) fn route(&self) -> Arc<str> {
         match self {
             Self::Metrics(_) => Arc::clone(&METRICS_ROUTE),
-            Self::Health(_) => Arc::clone(&HEALTH_ROUTE),
+            Self::Health(endpoint) => Arc::clone(&endpoint.path),
             #[cfg(feature = "profiling")]
             Self::Profiling(_) => Arc::clone(&PROFILING_ROUTE),
         }
@@ -53,12 +93,13 @@ impl InternalRoute {
 /// Used before body collection to bypass buffering for internal routes.
 pub(super) fn match_internal_route_from_path(path: &str, ctx: &ConnCtx) -> Option<InternalRoute> {
     match path {
-        "/metrics" => ctx.metrics_handle.clone().map(InternalRoute::Metrics),
-        "/health" => ctx
-            .resources
+        METRICS_PATH => ctx.metrics_handle.clone().map(InternalRoute::Metrics),
+        _ => ctx
+            .health
             .as_ref()
-            .map(|hs| InternalRoute::Health(hs.clone())),
-        _ => None,
+            .filter(|endpoint| endpoint.path() == path)
+            .cloned()
+            .map(InternalRoute::Health),
     }
 }
 
@@ -74,7 +115,7 @@ pub(super) fn match_profiling_route(
     ctx: &ConnCtx,
 ) -> Option<InternalRoute> {
     match path {
-        "/debug/pprof/cpu" if ctx.profiling_enabled => {
+        PROFILING_PATH if ctx.profiling_enabled => {
             Some(InternalRoute::Profiling(ProfilingRequest::new(
                 parse_profiling_seconds_from_query(query),
                 frozen_profiling_response_limit(&ctx.policy),
@@ -97,7 +138,7 @@ pub(super) async fn invoke_internal_route(route: &InternalRoute) -> Result<Respo
     match route {
         InternalRoute::Metrics(handle) => Ok(Response::bytes_raw(200, handle.render())
             .with_content_type("text/plain; version=0.0.4; charset=utf-8")),
-        InternalRoute::Health(hs) => build_health_response(hs),
+        InternalRoute::Health(endpoint) => build_health_response(&endpoint.registry),
         // The whole answer belongs to `profiling`: it samples for as long as the
         // peer asked for and retains what it renders under the maximum this route
         // froze, both on a thread that may block.

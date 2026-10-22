@@ -30,12 +30,15 @@ const AWAITING_ONE: RuntimeCheckpoint = RuntimeCheckpoint::ScopeWaitObserved(1);
 /// The drain's terminal observation, taken after the forced join.
 const DRAINED: RuntimeCheckpoint = RuntimeCheckpoint::ScopeWaitObserved(0);
 
+/// A child's join acknowledgment and whether its owner still holds it.
+type ChildRead = (bool, bool);
+
 /// One named child's join acknowledgment and whether its owner still holds it,
 /// read as one observation so the pair is always taken at the same instant.
 ///
 /// Both readings take the sentinel [`reached`] carries: a failed probe must
 /// still release the window it paused, or the runtime never returns.
-fn read_child(child: &AdmittedScope) -> (bool, bool) {
+fn read_child(child: &AdmittedScope) -> ChildRead {
     (
         reached(child, AdmittedScope::joined),
         reached(child, AdmittedScope::retained),
@@ -51,7 +54,7 @@ fn read_child(child: &AdmittedScope) -> (bool, bool) {
 fn observe_drain_end<F, T>(
     shutdown_timeout: Duration,
     body: F,
-) -> (Result<T, RuntimeError>, Option<(bool, bool)>)
+) -> (Result<T, RuntimeError>, Option<ChildRead>)
 where
     F: FnOnce() -> T,
 {
@@ -376,7 +379,7 @@ fn deadline_drains_registered_async_child_to_zero() {
 fn observe_escalation_boundary(
     watch: &ArmedWatch<'_>,
     named: &NamedSubject,
-) -> (Option<(bool, bool)>, Option<(bool, bool)>) {
+) -> (Option<ChildRead>, Option<ChildRead>) {
     let read = || read_child(named.get("the escalation-boundary probe"));
     watch.wait_armed();
     // The drain is waiting on exactly this child, and holding it here spends

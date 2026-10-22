@@ -95,6 +95,16 @@ impl HostRouter {
         self.buffers
     }
 
+    /// Whether any host's router, or the default router, registers a route at
+    /// exactly this static path.
+    pub(super) fn claims_static_path(&self, path: &str) -> bool {
+        self.hosts
+            .iter()
+            .map(|(_, router)| router)
+            .chain(self.default.as_ref())
+            .any(|router| router.claims_static_path(path))
+    }
+
     /// Set the policy for refusals no child router claims.
     ///
     /// A resolved child router's own mapper wins. This one answers a malformed

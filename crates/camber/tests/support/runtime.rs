@@ -100,6 +100,14 @@ pub fn spawn_server(router: Router) -> SocketAddr {
     spawn_bound(move |listener| http::serve_listener(listener, router))
 }
 
+/// Serve a router under its own server policy and wait until it answers.
+///
+/// [`spawn_server`]'s counterpart for the cases that turn on a dimension only
+/// the owned server builder can name.
+pub fn spawn_server_with_policy(router: Router, policy: http::ServerPolicy) -> SocketAddr {
+    spawn_bound(move |listener| http::server(router).policy(policy).serve_listener(listener))
+}
+
 /// Serve a host router on an ephemeral port and wait until it answers.
 ///
 /// [`spawn_server`]'s counterpart for the cases that turn on the authority a

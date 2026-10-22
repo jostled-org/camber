@@ -12,7 +12,7 @@ use super::inbound_read::retain_within_budget;
 #[cfg(feature = "profiling")]
 use super::internal_routes::match_profiling_route;
 use super::internal_routes::{
-    build_internal_handler, invoke_internal_route, match_internal_route_from_path,
+    HealthEndpoint, build_internal_handler, invoke_internal_route, match_internal_route_from_path,
 };
 use super::middleware::TerminalEntry;
 use super::operation::{InboundFailure, InboundTerminal, OperationEnvelope, OperationStage};
@@ -26,7 +26,6 @@ use super::streaming::{dispatch_streaming_proxy, handle_sse, handle_stream_respo
 #[cfg(feature = "ws")]
 use super::ws_proxy::{self, WsUpgrade};
 use super::{BufferConfig, Request, Response};
-use crate::resource::registry::ResourceRegistry;
 use crate::runtime_state::RuntimeInner;
 use std::convert::identity;
 use std::sync::Arc;
@@ -42,7 +41,8 @@ pub(super) struct ConnCtx {
     pub(super) sse_buffer_size: usize,
     #[cfg(feature = "ws")]
     pub(super) ws_buffer_size: usize,
-    pub(super) resources: Option<ResourceRegistry>,
+    /// The resource health report this server answers, if it answers one.
+    pub(super) health: Option<HealthEndpoint>,
     pub(super) is_tls: bool,
     /// The bounds this server serves under, already narrowed against the
     /// runtime that contains it. Every request this connection carries resolves
@@ -52,11 +52,16 @@ pub(super) struct ConnCtx {
 
 impl ConnCtx {
     /// Build from a running Camber runtime and buffer configuration.
+    ///
+    /// The health endpoint is the server's, resolved once from this runtime's
+    /// registry under the server's narrowed policy, so a connection only shares
+    /// it.
     pub(super) fn from_runtime(
         rt: &Arc<RuntimeInner>,
         buffers: BufferConfig,
         is_tls: bool,
         policy: super::ServerPolicy,
+        health: Option<HealthEndpoint>,
     ) -> Self {
         Self {
             tracing_enabled: rt.config.tracing_enabled,
@@ -66,7 +71,7 @@ impl ConnCtx {
             sse_buffer_size: buffers.sse_buffer_size,
             #[cfg(feature = "ws")]
             ws_buffer_size: buffers.ws_buffer_size,
-            resources: rt.resources.clone(),
+            health,
             is_tls,
             policy,
         }

@@ -1,3 +1,11 @@
+// Tests may panic; the workspace ban on panicking calls covers source only.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable
+)]
+
 use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};

@@ -409,6 +409,20 @@ impl TrieNode {
         self.insert_segments(&segments, registered);
     }
 
+    /// Whether a route registered at exactly this static path claims it, under
+    /// any method.
+    ///
+    /// Only static children are walked. A parameter or wildcard route that also
+    /// matches the path is a pattern over many paths, not a claim on this one.
+    /// Segments are split the way registration splits them, so `//a/` and `/a`
+    /// name the same node.
+    pub(crate) fn claims_static(&self, path: &str) -> bool {
+        path.split('/')
+            .filter(|segment| !segment.is_empty())
+            .try_fold(self, |node, segment| node.static_children.get(segment))
+            .is_some_and(|node| !node.handlers.is_empty())
+    }
+
     fn insert_segments(&mut self, segments: &[Segment], registered: RegisteredHandler) {
         match segments.first() {
             None => self.handlers.push(registered),

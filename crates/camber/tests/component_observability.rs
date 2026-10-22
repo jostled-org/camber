@@ -1,3 +1,11 @@
+// Tests may panic; the workspace ban on panicking calls covers source only.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable
+)]
+
 pub mod common;
 // The outbound client fixtures below reach `halt`, `http`, and `tls_support`
 // through `super`. `common` has already compiled all three, so they are named

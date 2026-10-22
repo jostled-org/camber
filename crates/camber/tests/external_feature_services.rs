@@ -1,3 +1,11 @@
+// Tests may panic; the workspace ban on panicking calls covers source only.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable
+)]
+
 #[cfg(feature = "dns01")]
 #[path = "support/challenge_dns.rs"]
 pub mod challenge_dns;

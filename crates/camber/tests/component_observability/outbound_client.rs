@@ -2590,10 +2590,13 @@ async fn streamed_request_sentinels_travel() {
     assert_request_sentinels(row, &recording.requests[0], "POST");
 }
 
+/// A refused stream's label, client, typed error, and recorded error kind.
+type RefusedStream = (&'static str, fn() -> Client, ClientError, &'static str);
+
 /// A stream its client's policy or budget refuses starts the operation and
 /// sends nothing. Each records one completion with zero attempts.
 async fn refused_streams_record_zero_attempts() {
-    let refusals: [(&str, fn() -> Client, ClientError, &'static str); 2] = [
+    let refusals: [RefusedStream; 2] = [
         (
             "a stream with no byte maximum",
             || http::client().unbounded_response(),

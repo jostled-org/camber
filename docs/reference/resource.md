@@ -102,6 +102,55 @@ the structured operator event the coordinator emits, and no resource name
 becomes a metric label. The endpoint answers 200 when every resource is well and
 503 otherwise.
 
+### Which server serves the report
+
+The runtime owns the registered resources and runs every health check. Each
+server decides whether it answers the report, and at which path, through
+`ServerPolicy::health_route`:
+
+| `HealthRoute` | The server |
+| --- | --- |
+| `Default` | answers at `/health`, or at the path the runtime's policy chose |
+| `Path("/ops/health")` | answers at that exact path |
+| `Disabled` | answers no report |
+
+A service that must keep its own `/health` contract disables Camber's route on
+that server and registers its own handler. One runtime can expose the report on
+an admin listener and hide it on a public one:
+
+```rust
+use camber::http::{self, HealthRoute, ServerPolicy};
+
+let admin = ServerPolicy::default().health_route(HealthRoute::Path("/ops/health"))?;
+let public = ServerPolicy::default().health_route(HealthRoute::Disabled)?;
+http::server(admin_router).policy(admin).serve_background(admin_listener)?;
+http::server(public_router).policy(public).serve_background(public_listener)?;
+```
+
+Health checks, their operator events, and resource shutdown run whatever the
+servers choose. A server answers the report only when the runtime has at least
+one resource.
+
+A `Path` must start with `/`, name only static segments, and carry no empty
+segment, trailing `/`, query, or fragment. It cannot be `/metrics` or
+`/debug/pprof/cpu`. `health_route` refuses any other path with
+`RuntimeError::InvalidArgument`.
+
+Inside a runtime, the server's choice narrows the runtime's
+(`RuntimeBuilder::server_policy`). `Disabled` on either side disables the
+report. A server's `Path` wins over the runtime's choice. A server's `Default`
+keeps the runtime's choice.
+
+Camber matches its internal routes before the router. So while a server answers
+the report, a router route at the same exact path could never answer. The
+server refuses to start with `RuntimeError::InvalidArgument` naming that path.
+The same rule refuses a router `/metrics` while metrics are on, and a router
+`/debug/pprof/cpu` while profiling is on.
+
+Only exact static routes are refused. A parameter or wildcard route that also matches the path is not refused. Examples
+are `/:page`, a root proxy, and root static files. Such a route still answers
+every other path.
+
 ## Failures
 
 No resource failure is reduced to a log line:

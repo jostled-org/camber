@@ -10,6 +10,9 @@ homepage = "https://github.com/jostled-org/camber"
 documentation = "https://docs.rs/camber-macros"
 readme = "../../README.md"
 
+[lints]
+workspace = true
+
 [lib]
 proc-macro = true
 

@@ -1,3 +1,11 @@
+// Tests may panic; the workspace ban on panicking calls covers source only.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable
+)]
+
 pub mod common;
 
 // The closed lifecycle and resource vocabularies, shared with the focused root
@@ -23,6 +31,8 @@ mod circuit_breaker;
 mod health_closing;
 #[path = "component_runtime_resources/health_resources.rs"]
 mod health_resources;
+#[path = "component_runtime_resources/health_route.rs"]
+mod health_route;
 #[path = "component_runtime_resources/integration_accounts.rs"]
 mod integration_accounts;
 #[path = "component_runtime_resources/integration_lifecycle.rs"]

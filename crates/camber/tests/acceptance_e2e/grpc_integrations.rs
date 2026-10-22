@@ -542,8 +542,11 @@ fn mapper_counts_a_refusal_it_owns(fixture: &FormsFixture) -> Row {
     ])
 }
 
+/// One gRPC row's name and the check it runs against the fixture.
+type GrpcRow = (&'static str, fn(&FormsFixture) -> Row);
+
 /// The gRPC rows, each of which must leave the mapper untouched.
-const GRPC_ROWS: [(&str, fn(&FormsFixture) -> Row); 10] = [
+const GRPC_ROWS: [GrpcRow; 10] = [
     ("uncredentialed calls", uncredentialed_calls_enter_no_form),
     ("unary success", unary_success_keeps_metadata_and_trailer),
     ("unary refusal", unary_refusal_keeps_its_status),

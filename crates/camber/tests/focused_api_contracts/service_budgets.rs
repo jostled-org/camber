@@ -8,8 +8,8 @@ use camber::__private::{
     frozen_static_file_limit,
 };
 use camber::http::{
-    ByteBoundary, DeadlineBoundary, HostRouter, ProxyPolicy, RequestBudget, Router, ServerPolicy,
-    TransferBudget,
+    ByteBoundary, DeadlineBoundary, HealthRoute, HostRouter, ProxyPolicy, RequestBudget, Router,
+    ServerPolicy, TransferBudget,
 };
 use camber::{ResourceBudget, ResourcePhase, RuntimeError};
 use std::collections::HashSet;
@@ -294,6 +294,48 @@ fn assert_connection_limit_contract(default: ServerPolicy) {
     );
 }
 
+/// Every health route a server can expose, and every path it cannot.
+///
+/// The default is `/health`, so naming it changes nothing. A path Camber's
+/// route would serve must be one exact, normalized, static path: the internal
+/// route matches the raw request path, and a pattern or an unnormalized
+/// spelling would answer a request no router registration could conflict with.
+fn assert_health_route_contract(default: ServerPolicy) {
+    assert_eq!(
+        default,
+        default
+            .health_route(HealthRoute::Default)
+            .expect("the default health route"),
+    );
+    let moved = default
+        .health_route(HealthRoute::Path("/camber/health"))
+        .expect("a static health path");
+    let disabled = default
+        .health_route(HealthRoute::Disabled)
+        .expect("a disabled health route");
+    assert_ne!(default, moved);
+    assert_ne!(default, disabled);
+    assert_ne!(moved, disabled);
+
+    for refused in [
+        "",
+        "health",
+        "/health/",
+        "/camber//health",
+        "/health/:check",
+        "/health/*rest",
+        "/health?verbose",
+        "/health#top",
+        "/metrics",
+        "/debug/pprof/cpu",
+    ] {
+        expect_invalid(
+            default.health_route(HealthRoute::Path(refused)),
+            "health_route",
+        );
+    }
+}
+
 /// Every deadline a policy owner's clock can carry, and every one it cannot.
 ///
 /// A finite deadline becomes `Instant::now() + value` at the owner enforcing
@@ -363,6 +405,7 @@ fn assert_server_policy_contract() {
     );
 
     assert_connection_limit_contract(default);
+    assert_health_route_contract(default);
     expect_invalid(default.header_timeout(ZERO), "header_timeout");
     expect_invalid(default.shutdown_timeout(ZERO), "shutdown_timeout");
 

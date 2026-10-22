@@ -83,10 +83,9 @@ impl UpstreamState {
     /// Whether this upstream may answer a connection standing at `read`.
     fn may_answer(&self, read: ConnectionRead, connection: &ConnectionBuffer) -> bool {
         match (self.answers, read) {
-            (_, ConnectionRead::Partial) => false,
+            (_, ConnectionRead::Partial) | (UpstreamAnswers::Withheld, _) => false,
             (UpstreamAnswers::OnHead | UpstreamAnswers::OnHeadThenHold, _) => true,
             (UpstreamAnswers::AfterBodyStarted, _) => connection.body_started(),
-            (UpstreamAnswers::Withheld, _) => false,
             (UpstreamAnswers::OnBodyEnd, read) => {
                 matches!(read, ConnectionRead::Ended | ConnectionRead::Closed)
             }

@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use crate::common;
 
 use camber::http::ClientResponse;

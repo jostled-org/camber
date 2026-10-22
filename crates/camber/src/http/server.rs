@@ -210,6 +210,36 @@ impl ServerRoutes {
             Self::Host(host_router) => ServerDispatch::Host(host_router.freeze()),
         }
     }
+
+    fn claims_static_path(&self, path: &str) -> bool {
+        match self {
+            Self::Single(router) => router.claims_static_path(path),
+            Self::Host(host_router) => host_router.claims_static_path(path),
+        }
+    }
+
+    /// Refuse a route that one of Camber's internal routes would shadow.
+    ///
+    /// Internal routes are matched from the path before any router is
+    /// consulted, so a registration at the same exact path would never answer.
+    /// It is refused here, where the routes and the serving context first meet,
+    /// rather than served unreachable with no error.
+    fn refuse_shadowed(&self, snapshot: &ServerContextSnapshot) -> Result<(), RuntimeError> {
+        match snapshot
+            .internal_paths()
+            .find(|path| self.claims_static_path(path))
+        {
+            Some(path) => Err(RuntimeError::InvalidArgument(
+                format!(
+                    "router route {path} is shadowed by a Camber internal route on this server; \
+                     register it at another path, or move or disable Camber's health route \
+                     with ServerPolicy::health_route"
+                )
+                .into_boxed_str(),
+            )),
+            None => Ok(()),
+        }
+    }
 }
 
 /// The canonical owned server: routes, policy, and transport, frozen at one
@@ -224,6 +254,13 @@ impl ServerRoutes {
 /// returns. A returned [`ServerHandleFuture`] moved to another executor
 /// therefore keeps the authority its constructor saw, and ambient context that
 /// changes afterwards cannot reach the server.
+///
+/// Camber matches its internal routes (the resource health report, `/metrics`,
+/// `/debug/pprof/cpu`) before the router. Every terminal refuses a router that
+/// registers the exact path of one this server answers, with
+/// `RuntimeError::InvalidArgument` naming the path, rather than serve a route
+/// that could never answer. [`HealthRoute`](super::HealthRoute) moves or
+/// disables the health report.
 ///
 /// ```rust,no_run
 /// use camber::RuntimeError;
@@ -413,13 +450,15 @@ impl ServerBuilder {
     /// # Errors
     ///
     /// Returns `RuntimeError::InvalidArgument` for a certificate this builder
-    /// named on a listener that cannot wrap one.
+    /// named on a listener that cannot wrap one, or for a router route at the
+    /// exact path of an internal route this server answers.
     fn freeze(
         self,
         listener: net::Listener,
     ) -> Result<(ServerSupervisor, StopAuthority), RuntimeError> {
         let buffers = self.routes.buffer_config();
         let snapshot = ServerContextSnapshot::capture(buffers, self.policy);
+        self.routes.refuse_shadowed(&snapshot)?;
         let tls_acceptor =
             wrapped_transport(&listener, self.tls, &snapshot)?.map(tokio_rustls::TlsAcceptor::from);
         // The acceptor, not the configuration: what this server will actually

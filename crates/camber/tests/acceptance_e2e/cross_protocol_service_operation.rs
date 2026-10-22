@@ -803,9 +803,8 @@ async fn assert_posthead_upload_failure_reaches_tonic() {
         Some(InboundTerminal::TransferIdle),
         "{label}: the upload owner fixed the terminal its own policy names",
     );
-    assert_eq!(
+    assert!(
         fixture.log.fault_code().is_some(),
-        true,
         "{label}: the request body's terminal error reached tonic's service",
     );
     let carried = settled

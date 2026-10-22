@@ -1,5 +1,6 @@
 //! The complete operating envelope one HTTP server serves under.
 
+use super::health_route::HealthRoute;
 #[cfg(feature = "profiling")]
 use super::policy_value::positive_limit;
 use super::policy_value::{MAX_POLICY_DEADLINE, finite_duration, limit_within, narrow};
@@ -36,6 +37,7 @@ pub const DEFAULT_PROFILING_RESPONSE_LIMIT: usize = 8 * 1024 * 1024;
 /// | `shutdown_timeout` | 30 seconds |
 /// | `profiling_response_limit` | eight MiB |
 /// | `connection_limit` | none — unbounded |
+/// | `health_route` | [`HealthRoute::Default`] — `/health` |
 ///
 /// The rendered-profile maximum is finite by default and is removed only by
 /// [`unbounded_profiling_response`](Self::unbounded_profiling_response), which
@@ -77,6 +79,7 @@ pub struct ServerPolicy {
     #[cfg(feature = "profiling")]
     profiling_response: Option<usize>,
     connection_limit: Option<usize>,
+    health_route: HealthRoute,
 }
 
 /// The pre-head wait a test runtime serves under.
@@ -113,6 +116,7 @@ impl ServerPolicy {
             #[cfg(feature = "profiling")]
             profiling_response: Some(DEFAULT_PROFILING_RESPONSE_LIMIT),
             connection_limit: None,
+            health_route: HealthRoute::Default,
         }
     }
 
@@ -270,6 +274,23 @@ impl ServerPolicy {
         }
     }
 
+    /// Choose whether this server answers Camber's resource health report, and
+    /// at which path.
+    ///
+    /// See [`HealthRoute`] for how the choice narrows under a runtime's policy
+    /// and which router routes it refuses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::InvalidArgument`] when [`HealthRoute::Path`]
+    /// names a path the report cannot be served at.
+    pub fn health_route(self, route: HealthRoute) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            health_route: route.validated()?,
+            ..self
+        })
+    }
+
     // The readers below carry a `_value` suffix because each dimension's
     // natural name is already the setter this immutable value is built with.
     // They are crate-internal: a caller configures a policy and compares
@@ -306,6 +327,11 @@ impl ServerPolicy {
         self.connection_limit
     }
 
+    /// The configured health route.
+    pub(crate) const fn health_route_value(&self) -> HealthRoute {
+        self.health_route
+    }
+
     /// This policy applied under the one that contains it.
     ///
     /// Every dimension narrows independently through the shared rule, so a
@@ -321,6 +347,7 @@ impl ServerPolicy {
             #[cfg(feature = "profiling")]
             profiling_response: narrow(self.profiling_response, outer.profiling_response),
             connection_limit: narrow(self.connection_limit, outer.connection_limit),
+            health_route: self.health_route.narrowed_by(outer.health_route),
         }
     }
 }

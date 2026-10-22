@@ -162,6 +162,7 @@ mod grpc_support;
 mod handle;
 mod head_projection;
 mod health;
+mod health_route;
 mod host_router;
 mod inbound_read;
 mod internal_routes;
@@ -230,6 +231,7 @@ pub use disconnect::{DisconnectCause, DisconnectSignal};
 #[cfg(feature = "grpc")]
 pub use grpc_handoff::GrpcRequestBody;
 pub use health::{ProxyHealthResource, spawn_health_checker};
+pub use health_route::HealthRoute;
 pub use host_router::HostRouter;
 pub use method::{Method, ParseMethodError};
 pub use middleware::{MiddlewareFn, MiddlewareFuture, Next, ResponseFuture};

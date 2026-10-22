@@ -289,6 +289,9 @@ fn assert_unheld_families() {
     );
 }
 
+/// One scope observation, read through its controller.
+type ScopeRead = fn(&AdmittedScope) -> Result<bool, RuntimeError>;
+
 /// The runtime's root-scope observation, and the reads it refuses.
 ///
 /// The one narrow family this file reaches outside `http::mock`, and a third
@@ -307,7 +310,7 @@ fn assert_scope_settlement_family() {
         "scope settlement: a controller no runtime attached read the scope as {drained:?}"
     );
 
-    let reads: [(&str, fn(&AdmittedScope) -> Result<bool, RuntimeError>); 4] = [
+    let reads: [(&str, ScopeRead); 4] = [
         ("admitted", AdmittedScope::admitted),
         ("retained", AdmittedScope::retained),
         ("joined", AdmittedScope::joined),

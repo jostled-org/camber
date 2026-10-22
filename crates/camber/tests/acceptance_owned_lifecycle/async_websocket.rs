@@ -168,7 +168,7 @@ fn async_websocket_callback_accepts_send_non_sync_future() {
         let path: Box<str> = request.path().into();
         async move {
             let answered = std::cell::Cell::new(0_usize);
-            let pinned = Unmovable(std::marker::PhantomPinned);
+            let _pinned = Unmovable(std::marker::PhantomPinned);
             tokio::time::sleep(Duration::ZERO).await;
             while let Some(message) = connection.recv().await {
                 connection.send(&message).await?;
@@ -176,7 +176,6 @@ fn async_websocket_callback_accepts_send_non_sync_future() {
             }
             connection.send(&path).await?;
             answered.set(answered.get() + 1);
-            drop(pinned);
             Ok(())
         }
     });

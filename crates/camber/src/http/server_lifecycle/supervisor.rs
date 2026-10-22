@@ -16,6 +16,9 @@ use std::time::Duration;
 use futures_util::FutureExt;
 
 use super::super::BufferConfig;
+#[cfg(feature = "profiling")]
+use super::super::internal_routes::PROFILING_PATH;
+use super::super::internal_routes::{HealthEndpoint, METRICS_PATH};
 use super::super::mock::{
     ConnectionOwnerEdge, ConnectionOwnershipEvent, LifecycleScript, ServerStopEdge,
     ServerTaskFault, SupervisorJoinProbe,
@@ -46,12 +49,15 @@ const TRANSIENT_ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// so there is one answer to each question rather than a stored copy that can
 /// disagree with its source. `None` is the standalone capture, and stays
 /// `None`. Only the router's buffer sizes and the TLS flag are independent of
-/// the runtime, so they are the only other fields.
+/// the runtime, so they are the only other fields — apart from the health
+/// endpoint, which is derived from the runtime and the policy together and is
+/// resolved here once so that no connection allocates its own copy.
 pub(in crate::http) struct ServerContextSnapshot {
     runtime: Option<Arc<RuntimeInner>>,
     buffers: BufferConfig,
     is_tls: bool,
     policy: super::super::ServerPolicy,
+    health: Option<HealthEndpoint>,
 }
 
 impl ServerContextSnapshot {
@@ -73,12 +79,41 @@ impl ServerContextSnapshot {
             Some(runtime) => policy.narrowed_by(runtime.config.server_policy),
             None => policy,
         };
+        let registry = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.resources.as_ref());
+        let health = HealthEndpoint::resolve(registry, policy.health_route_value());
         Self {
             runtime,
             buffers,
             is_tls: false,
             policy,
+            health,
         }
+    }
+
+    /// Every path one of Camber's internal routes answers on this server.
+    ///
+    /// These are matched before the router, so a router registration at one of
+    /// them would never be reached.
+    pub(in crate::http) fn internal_paths(&self) -> impl Iterator<Item = &str> {
+        let runtime = self.runtime.as_deref();
+        let metrics = runtime
+            .filter(|runtime| runtime.metrics_handle.is_some())
+            .map(|_| METRICS_PATH);
+        #[cfg(feature = "profiling")]
+        let profiling = runtime
+            .filter(|runtime| runtime.config.profiling_enabled)
+            .map(|_| PROFILING_PATH);
+        // No profiler is compiled in, so no server answers its path.
+        #[cfg(not(feature = "profiling"))]
+        let profiling = None;
+        self.health
+            .as_ref()
+            .map(HealthEndpoint::path)
+            .into_iter()
+            .chain(metrics)
+            .chain(profiling)
     }
 
     /// The TLS configuration the captured runtime supplies, if any.
@@ -139,6 +174,7 @@ impl ServerContextSnapshot {
                 self.buffers,
                 self.is_tls,
                 self.policy,
+                self.health.clone(),
             ),
             None => self.standalone_context(),
         }
@@ -156,7 +192,7 @@ impl ServerContextSnapshot {
             sse_buffer_size: self.buffers.sse_buffer_size,
             #[cfg(feature = "ws")]
             ws_buffer_size: self.buffers.ws_buffer_size,
-            resources: None,
+            health: None,
             is_tls: self.is_tls,
             policy: self.policy,
         }

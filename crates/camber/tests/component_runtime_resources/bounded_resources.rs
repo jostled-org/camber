@@ -252,7 +252,7 @@ fn timed_out_shutdown() -> Box<[Box<str>]> {
         .shutdown_timeout(Duration::from_secs(2))
         .resource_budget(short_resource_budget())
         .resource(parked)
-        .run(|| runtime::request_shutdown())
+        .run(runtime::request_shutdown)
         .expect_err("an abandoned teardown callback was not reported");
 
     assert!(

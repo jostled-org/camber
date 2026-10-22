@@ -526,6 +526,8 @@ router.get("/health", |_req| async {
 
 For async database clients like `sqlx`, keep the health check in normal application code unless you have a specific need for a custom runtime resource adapter.
 
+If the same service also registers a `Resource`, Camber answers `/health` itself and refuses to start a server whose router registers `/health` too. To keep your own handler, serve with `ServerPolicy::default().health_route(HealthRoute::Disabled)?`. See [Which server serves the report](../reference/resource.md#which-server-serves-the-report).
+
 ## Error Handling
 
 Go uses `if err != nil` at every call site. Camber uses `?` for propagation.

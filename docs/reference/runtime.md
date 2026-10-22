@@ -165,6 +165,12 @@ bound. Zero is refused. `unbounded_profiling_response()` is the only spelling th
 the maximum, and it holds the whole rendered answer in memory however large the sampler
 made it.
 
+`ServerPolicy::health_route(route)` chooses whether a server answers the resource health
+report, and at which path. It defaults to `/health`. `HealthRoute::Disabled` lets a service
+own `/health` while it still registers resources. A server refuses to start when its router
+registers the exact path of an internal route it answers. See
+[Which server serves the report](resource.md#which-server-serves-the-report).
+
 `ServerPolicy` refuses every deadline that is zero or longer than thirty years, and the
 request, transfer, and proxy budgets refuse the same two. Thirty years is the horizon
 Tokio's own timer stops at. Past it Camber would hand the clock a deadline the platform

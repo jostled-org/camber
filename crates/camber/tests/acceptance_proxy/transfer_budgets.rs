@@ -26,8 +26,16 @@ const PREFIX: &str = "/api";
 /// The route pattern a request behind that prefix matches.
 const PREFIX_ROUTE: &str = "/api/*proxy_path";
 
-/// The path every row asks for behind the prefix.
+/// The path every provenance row asks for behind the prefix.
 const TARGET: &str = "/api/answer";
+
+/// The path every staged row uploads to behind the prefix.
+///
+/// Distinct from [`TARGET`] because the provenance rows capture operator events
+/// by path, and the capture is process-wide. A staged row that runs at the same
+/// time ends on its own deadline, and on a shared path its rejection would be
+/// read as a second record of the provenance row's.
+const STAGED_TARGET: &str = "/api/staged-answer";
 
 /// How long one row waits for an answer its proxy already settled.
 const ROW_BOUND: Duration = Duration::from_secs(5);
@@ -52,14 +60,14 @@ fn policy(configure: impl FnOnce(ProxyPolicy) -> ProxyPolicy) -> ProxyPolicy {
     configure(ProxyPolicy::default())
 }
 
-/// Open one chunked upload against a streaming route and send one frame.
-fn open_upload(served: SocketAddr) -> TcpStream {
+/// Open one chunked upload to `target` on a streaming route and send one frame.
+fn open_upload(served: SocketAddr, target: &str) -> TcpStream {
     let mut peer = common::connect(served).expect("the uploading peer connected");
     common::write_chunked_head(
         &mut peer,
         common::KEEP_CONNECTION,
         "POST",
-        TARGET,
+        target,
         common::DEFAULT_HOST,
     )
     .expect("the upload head reached the proxy");
@@ -375,7 +383,7 @@ fn upload_phase_row() {
     );
 
     let captured = common::capture_events(&format!("raw_path={TARGET}"));
-    let mut peer = open_upload(server.addr());
+    let mut peer = open_upload(server.addr(), TARGET);
     let answered =
         common::read_http_response_bounded(&mut peer).expect("the quiet upload was answered");
     assert_upload_phase(&answered, &journal, &controller, label);
@@ -707,7 +715,7 @@ impl Staged {
             ResponseCommitmentEdge::UpstreamHeadReady,
             label,
         );
-        let peer = open_upload(self.addr);
+        let peer = open_upload(self.addr, STAGED_TARGET);
         common::wait_paused_blocking(
             &self.controller,
             ResponseCommitmentEdge::UpstreamHeadReady,

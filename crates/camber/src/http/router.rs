@@ -211,6 +211,11 @@ impl Router {
         self.buffers
     }
 
+    /// Whether a route registered at exactly this static path claims it.
+    pub(super) fn claims_static_path(&self, path: &str) -> bool {
+        self.root.claims_static(path)
+    }
+
     /// Skip middleware for internal routes (`/health`, `/metrics`, `/debug/pprof/cpu`).
     ///
     /// Default: `false` (middleware applies to all routes including internal ones).
