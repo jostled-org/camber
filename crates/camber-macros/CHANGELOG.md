@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2](https://github.com/jostled-org/camber/compare/camber-macros-v0.10.1...camber-macros-v0.10.2) - 2026-10-22
+
+### Added
+
+- *(http)* add async SSE registration for GET and POST
+
 ## [0.10.1](https://github.com/jostled-org/camber/compare/camber-macros-v0.10.0...camber-macros-v0.10.1) - 2026-10-22
 
 ### Added
