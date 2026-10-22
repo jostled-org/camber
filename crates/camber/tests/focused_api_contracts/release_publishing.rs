@@ -369,6 +369,38 @@ fn release_selection_uses_the_merge_commit_when_the_pr_was_squashed() {
     repo.close();
 }
 
+/// The crates.io auth action release the workflow pins, by its commit.
+const CRATES_IO_AUTH_ACTION: &str =
+    "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5";
+
+#[test]
+fn release_workflow_publishes_through_trusted_publishing() {
+    let workflow = repository_text(".github/workflows/release-plz.yml");
+    assert!(
+        !workflow.contains("secrets.CARGO_REGISTRY_TOKEN"),
+        "no stored crates.io token takes part in a release"
+    );
+    assert!(
+        workflow.contains(CRATES_IO_AUTH_ACTION),
+        "the publish job mints its token through the pinned auth action"
+    );
+    let release = workflow
+        .split("\n  release-pr:")
+        .next()
+        .expect("the workflow holds the release job");
+    assert!(
+        release.contains("      id-token: write"),
+        "only the publishing job may request an OIDC token"
+    );
+    let minted = release
+        .find("id: crates-io-auth")
+        .expect("the auth step is named for the publish step to read");
+    let published = release
+        .find("CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}")
+        .expect("the publish step takes the minted token");
+    assert!(minted < published, "the token is minted before publishing");
+}
+
 #[test]
 fn release_workflow_separates_publishing_and_uses_pinned_tools() {
     let workflow = repository_text(".github/workflows/release-plz.yml");
