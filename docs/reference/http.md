@@ -1039,6 +1039,35 @@ stream rather than replacing its status.
 For untrusted or long-lived consumers, set a finite download policy on the router
 or the server rather than leaving every feed unbounded.
 
+### Choosing between a feed and a response
+
+An SSE route always answers `200 text/event-stream` before its handler runs. If
+the handler must choose its answer from the request, register it with
+`post_stream` or `get_stream`. Then return `StreamResponse::sse()` only when it
+starts a feed:
+
+```rust
+router.post_stream("/jobs", |req: &Request| {
+    let job: Box<str> = req.body().into();
+    Box::pin(async move {
+        if job.is_empty() {
+            let (resp, body) = StreamResponse::new(400);
+            let _ = body.send(&br#"{"error":"empty job"}"#[..]).await;
+            return resp.with_header("Content-Type", "application/json");
+        }
+        let (resp, sse) = StreamResponse::sse();
+        tokio::spawn(async move { sse.event("queued", &job).await });
+        resp.with_header("X-Request-Id", "req-7")
+    }) as Pin<Box<dyn Future<Output = StreamResponse> + Send>>
+});
+```
+
+`StreamResponse::sse()` sets `Content-Type: text/event-stream` and
+`Cache-Control: no-cache`. It gives the same `AsyncSseWriter` that `post_sse`
+gives. It uses the default stream buffer, not the router's `sse_buffer_size`.
+`StreamResponse::sse_with_budget(cap, budget)` names the buffer and transfer
+policy, as `with_budget` does.
+
 ## Streaming Responses
 
 Use `router.get_stream(...)` for chunked async responses.

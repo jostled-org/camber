@@ -1,4 +1,5 @@
 use super::response::HeaderPair;
+use super::sse::AsyncSseWriter;
 use super::transfer_budget::TransferBudget;
 use crate::RuntimeError;
 use bytes::Bytes;
@@ -114,6 +115,44 @@ impl StreamResponse {
             )),
             cap => Ok(Self::over(status, cap, budget)),
         }
+    }
+
+    /// Start an SSE response: `200 text/event-stream` with
+    /// `Cache-Control: no-cache`, and the writer that feeds it.
+    ///
+    /// A stream handler uses this to start a feed only after it has read the
+    /// request, so it can answer with an error or a plain response first. The
+    /// writer frames events as `post_sse` and `get_sse_async` do. Uses the
+    /// default stream buffer, not the router's SSE buffer size, and the download
+    /// policy its route, host, server, or runtime selected.
+    pub fn sse() -> (Self, AsyncSseWriter) {
+        Self::into_sse(Self::over(
+            200,
+            DEFAULT_STREAM_BUFFER,
+            INHERITED_STREAM_POLICY,
+        ))
+    }
+
+    /// Start an SSE response under the buffer and transfer policy it names.
+    ///
+    /// `cap` and `budget` mean what they mean for [`Self::with_budget`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::InvalidArgument`] when `cap` is zero.
+    pub fn sse_with_budget(
+        cap: usize,
+        budget: TransferBudget,
+    ) -> Result<(Self, AsyncSseWriter), RuntimeError> {
+        Self::with_budget(200, cap, budget).map(Self::into_sse)
+    }
+
+    /// Mark a `200` stream as SSE and wrap its sender in the SSE writer.
+    fn into_sse((resp, StreamSender { tx }): (Self, StreamSender)) -> (Self, AsyncSseWriter) {
+        let resp = resp
+            .with_header("Content-Type", "text/event-stream")
+            .with_header("Cache-Control", "no-cache");
+        (resp, AsyncSseWriter::new(tx))
     }
 
     /// Build the response and its sender over a capacity already accepted.

@@ -222,6 +222,8 @@ router.post_sse("/jobs", |req, sse| {
 
 For generic chunked responses, use `StreamResponse::new()` for the default buffer or
 `StreamResponse::with_buffer(status, cap)` when you need explicit backpressure tuning.
+A stream handler that must choose between an error and a feed returns
+`StreamResponse::sse()` to start the feed.
 
 ## HTTP Client
 

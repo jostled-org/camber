@@ -1,5 +1,6 @@
 //! Async SSE registrations: `post_sse`, `get_sse_async`, and their budgeted
-//! forms.
+//! forms, and the SSE responses a stream handler starts with
+//! `StreamResponse::sse`.
 //!
 //! The handler reads the request, then returns a future that owns an
 //! [`AsyncSseWriter`]. The feed ends when that future ends, when the peer
@@ -8,10 +9,12 @@
 use crate::runtime_support as common;
 
 use camber::http::mock::InboundTerminal;
-use camber::http::{AsyncSseWriter, Request, Router, SseWriter, TransferBudget};
+use camber::http::{AsyncSseWriter, Request, Router, SseWriter, StreamResponse, TransferBudget};
 use camber::{RuntimeError, runtime};
+use std::future::Future;
 use std::io::{BufReader, Write};
 use std::net::TcpStream;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -368,4 +371,121 @@ fn budgeted_feeds_end_at_their_own_maximum() {
             runtime::request_shutdown();
         })
         .unwrap();
+}
+
+type StreamFuture = Pin<Box<dyn Future<Output = StreamResponse> + Send>>;
+
+/// A `post_stream` handler that answers `400` for an empty body, and otherwise
+/// starts an SSE feed that echoes the body.
+fn choose_stream_or_error(req: &Request) -> StreamFuture {
+    let job: Box<str> = req.body().into();
+    Box::pin(async move {
+        if job.is_empty() {
+            let (response, sender) = StreamResponse::new(400);
+            let _ = sender.send(&br#"{"error":"empty job"}"#[..]).await;
+            return response.with_header("Content-Type", "application/json");
+        }
+        let (response, writer) = StreamResponse::sse();
+        tokio::spawn(async move {
+            writer.event("queued", &job).await?;
+            writer.data("done").await?;
+            writer.comment().await
+        });
+        response.with_header("X-Request-Id", "req-7")
+    })
+}
+
+#[test]
+fn stream_handler_answers_an_error_before_any_feed() {
+    runtime()
+        .run(|| {
+            let mut router = Router::new();
+            router.post_stream("/jobs", choose_stream_or_error);
+            let addr = common::spawn_server(router);
+
+            let response = crate::http::request(addr, "POST", "/jobs", &[], b"", TIMEOUT)
+                .expect("read the refusal");
+            assert_eq!(response.status, 400);
+            assert_eq!(response.header("content-type"), Some("application/json"));
+            assert_eq!(response.body.as_ref(), br#"{"error":"empty job"}"#);
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn stream_handler_starts_an_sse_feed_it_chose() {
+    runtime()
+        .run(|| {
+            let mut router = Router::new();
+            router.post_stream("/jobs", choose_stream_or_error);
+            let addr = common::spawn_server(router);
+
+            let response = crate::http::request(addr, "POST", "/jobs", &[], b"job-7", TIMEOUT)
+                .expect("read the feed");
+            assert_event_stream(&response);
+            assert_eq!(response.header("x-request-id"), Some("req-7"));
+            assert_eq!(
+                response.body.as_ref(),
+                b"event: queued\ndata: job-7\n\ndata: done\n\n:\n\n"
+            );
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn stream_sse_feed_ends_at_its_own_maximum() {
+    runtime()
+        .run(|| {
+            // Two events of `data: 0123456789\n\n` are 36 bytes; the third crosses.
+            let budget = TransferBudget::unbounded()
+                .with_max_bytes(36)
+                .expect("the feed maximum is accepted");
+            let port = crate::http::reserve_transfer_owner();
+            let mut router = Router::new();
+            router.get_stream("/feed", move |_req: &Request| -> StreamFuture {
+                Box::pin(async move {
+                    let (response, writer) = StreamResponse::sse_with_budget(4, budget)
+                        .expect("the feed buffer is accepted");
+                    tokio::spawn(async move {
+                        for _ in 0..3 {
+                            writer.data("0123456789").await?;
+                        }
+                        std::future::pending::<()>().await;
+                        Ok::<(), RuntimeError>(())
+                    });
+                    response
+                })
+            });
+            let server = port.serve(router);
+            let mut reader = {
+                let mut stream = TcpStream::connect(server.addr()).unwrap();
+                stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+                write!(stream, "GET /feed HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+                BufReader::new(stream)
+            };
+            let (status, _) = crate::wire::read_response_head(&mut reader);
+            assert_eq!(status, 200);
+
+            let row = "a stream handler's SSE maximum";
+            let observed = crate::stream_support::released_download(server.controller(), row);
+            assert_eq!(
+                (observed.download.terminal, observed.download.max_bytes),
+                (Some(InboundTerminal::TransferBytes), Some(36)),
+                "the response's own maximum ended the feed: {observed:?}"
+            );
+            assert_eq!(observed.download.admitted_bytes, 36);
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn stream_sse_refuses_a_zero_buffer() {
+    let refused = StreamResponse::sse_with_budget(0, TransferBudget::unbounded());
+    assert!(
+        matches!(refused, Err(RuntimeError::InvalidArgument(_))),
+        "a zero buffer is refused: {refused:?}"
+    );
 }
