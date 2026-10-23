@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3](https://github.com/jostled-org/camber/compare/camber-cli-v0.12.2...camber-cli-v0.12.3) - 2026-10-23
+
+### Added
+
+- *(http)* let stream handlers start an SSE feed
+
 ## [0.12.2](https://github.com/jostled-org/camber/compare/camber-cli-v0.12.1...camber-cli-v0.12.2) - 2026-10-22
 
 ### Added
