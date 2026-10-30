@@ -6,7 +6,7 @@
 //! on them holds no second copy of any.
 //!
 //! Same-origin policy admits only the initial origin. Cross-origin policy adds
-//! an explicit allowlist and refuses HTTPS downgrades. Each admitted hop says
+//! an explicit allowlist or every HTTPS origin, and refuses HTTPS downgrades. Each admitted hop says
 //! whether it changes origin. The exchange that applies it removes the
 //! credentials and replaces the transport on that change.
 
@@ -53,26 +53,35 @@ pub enum RedirectPolicy {
         /// call, and a retry does not return a spent hop.
         max_hops: NonZeroUsize,
     },
-    /// Follow redirects to the initial origin and an explicit allowlist.
-    /// Construct with [`Self::cross_origin`]. Credentials are removed permanently
-    /// on each origin change. HTTPS never redirects to HTTP.
+    /// Follow redirects to the initial origin and to an explicit allowlist or
+    /// every HTTPS origin. Construct with [`Self::cross_origin`] or
+    /// [`Self::cross_origin_https`]. Credentials are removed permanently on
+    /// each origin change. HTTPS never redirects to HTTP.
     ///
     /// The method and body rules are those of [`Self::SameOrigin`]. A 307 or
-    /// 308 that repeats the body sends it to the allowlisted origin.
+    /// 308 that repeats the body sends it to the admitted origin.
     CrossOrigin(CrossOriginRedirects),
 }
 
 /// A validated, finite cross-origin redirect allowance.
 ///
-/// The allowlist is sorted and has no repeated origin, so two allowances
+/// An allowlist is sorted and has no repeated origin, so two allowances
 /// with the same hop bound and the same origins are equal in any order.
-/// `Debug` prints the hop bound and the origins. An origin holds no
-/// credentials, path, or query, so it is not secret.
+/// `Debug` prints the hop bound and the origins, or `AnyHttps`. An origin
+/// holds no credentials, path, or query, so it is not secret.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CrossOriginRedirects {
     max_hops: NonZeroUsize,
+    destinations: Destinations,
+}
+
+/// The origins past the initial one that an allowance admits.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Destinations {
     /// Bare origins: a scheme, a host, an optional port, and the root path.
-    origins: Arc<[Url]>,
+    Listed(Arc<[Url]>),
+    /// Every HTTPS origin.
+    AnyHttps,
 }
 
 impl CrossOriginRedirects {
@@ -84,21 +93,34 @@ impl CrossOriginRedirects {
 
     /// The allowlisted origins in sorted order, as the URL parser serialized
     /// them: `https://cdn.example:8443`. A name is in lower case, an IDN is in
-    /// its ASCII form, and a default port is not written.
+    /// its ASCII form, and a default port is not written. An allowance that
+    /// admits every HTTPS origin has no list, so this is empty.
     pub fn origins(&self) -> impl ExactSizeIterator<Item = &str> + '_ {
-        self.origins.iter().map(origin_text)
+        let listed: &[Url] = match &self.destinations {
+            Destinations::Listed(origins) => origins,
+            Destinations::AnyHttps => &[],
+        };
+        listed.iter().map(origin_text)
+    }
+
+    /// Whether this allowance admits every HTTPS origin instead of a list.
+    #[must_use]
+    pub const fn admits_any_https(&self) -> bool {
+        matches!(self.destinations, Destinations::AnyHttps)
     }
 
     /// Whether a hop from `current` to `resolved` stays inside this allowance:
     /// it does not leave HTTPS for HTTP, and it reaches the initial origin,
-    /// which `returns` says, or an allowlisted one.
+    /// which `returns` says, or an admitted one.
     fn admits(&self, returns: bool, current: &Url, resolved: &Url) -> Result<(), ClientRedirect> {
         let downgrade = current.scheme() == "https" && resolved.scheme() == "http";
         let permitted = returns
-            || self
-                .origins
-                .iter()
-                .any(|origin| same_origin(origin, resolved));
+            || match &self.destinations {
+                Destinations::Listed(origins) => {
+                    origins.iter().any(|origin| same_origin(origin, resolved))
+                }
+                Destinations::AnyHttps => resolved.scheme() == "https",
+            };
         match (downgrade, permitted) {
             (true, _) => Err(ClientRedirect::Downgrade),
             (false, true) => Ok(()),
@@ -117,19 +139,21 @@ impl std::fmt::Debug for CrossOriginRedirects {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CrossOriginRedirects")
             .field("max_hops", &self.max_hops)
-            .field("origins", &OriginList(&self.origins))
+            .field("destinations", &self.destinations)
             .finish()
     }
 }
 
-/// The `Debug` form of an allowlist: its origin texts.
-struct OriginList<'a>(&'a [Url]);
-
-impl std::fmt::Debug for OriginList<'_> {
+/// An allowlist prints its origin texts.
+impl std::fmt::Debug for Destinations {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list()
-            .entries(self.0.iter().map(origin_text))
-            .finish()
+        match self {
+            Self::Listed(origins) => f
+                .debug_list()
+                .entries(origins.iter().map(origin_text))
+                .finish(),
+            Self::AnyHttps => f.write_str("AnyHttps"),
+        }
     }
 }
 
@@ -138,6 +162,11 @@ const fn refused(reason: ClientRedirectPolicy) -> RuntimeError {
     RuntimeError::Client(ClientError::InvalidRequest(ClientInput::RedirectPolicy(
         reason,
     )))
+}
+
+/// A positive hop bound, or the `ZeroHops` refusal.
+fn hop_bound(max_hops: usize) -> Result<NonZeroUsize, RuntimeError> {
+    NonZeroUsize::new(max_hops).ok_or(refused(ClientRedirectPolicy::ZeroHops))
 }
 
 impl RedirectPolicy {
@@ -177,8 +206,7 @@ impl RedirectPolicy {
         max_hops: usize,
         origins: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Self, RuntimeError> {
-        let max_hops =
-            NonZeroUsize::new(max_hops).ok_or(refused(ClientRedirectPolicy::ZeroHops))?;
+        let max_hops = hop_bound(max_hops)?;
         let mut origins = origins
             .into_iter()
             .enumerate()
@@ -192,9 +220,43 @@ impl RedirectPolicy {
             true => Err(refused(ClientRedirectPolicy::EmptyAllowlist)),
             false => Ok(Self::CrossOrigin(CrossOriginRedirects {
                 max_hops,
-                origins: origins.into(),
+                destinations: Destinations::Listed(origins.into()),
             })),
         }
+    }
+
+    /// Permit every HTTPS origin under one positive hop bound.
+    ///
+    /// Use this when the destinations are not known in advance, such as the
+    /// signed CDN URL a download endpoint redirects to. The initial origin is
+    /// always permitted. Every other destination must use HTTPS, and HTTPS
+    /// never redirects to HTTP. Credentials are removed on each origin change
+    /// as under [`Self::cross_origin`].
+    ///
+    /// Any server the call reaches can send it to any HTTPS host, internal
+    /// hosts included. The removed credentials do not reach that host, but its
+    /// answer reaches the caller. Pair this policy with an
+    /// [`EgressPolicy`](super::EgressPolicy) that refuses private addresses.
+    ///
+    /// ```
+    /// use camber::http::{self, EgressPolicy, RedirectPolicy};
+    /// # fn main() -> Result<(), camber::RuntimeError> {
+    /// let client = http::client()
+    ///     .egress_policy(EgressPolicy::public_internet().https_only())
+    ///     .redirect_policy(RedirectPolicy::cross_origin_https(3)?);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientInput::RedirectPolicy` with `ZeroHops` for a zero hop
+    /// bound.
+    pub fn cross_origin_https(max_hops: usize) -> Result<Self, RuntimeError> {
+        Ok(Self::CrossOrigin(CrossOriginRedirects {
+            max_hops: hop_bound(max_hops)?,
+            destinations: Destinations::AnyHttps,
+        }))
     }
 
     /// Whether a hop from `current` to `resolved` stays inside the origins
@@ -268,7 +330,8 @@ pub(super) fn redirect_location<'a>(
 ///
 /// `location` is resolved against `current`, the URL of the send it answers.
 /// The policy then admits the origin: the initial origin always, and an
-/// allowlisted one under `CrossOrigin`, which also refuses HTTPS to HTTP. Only
+/// allowlisted or HTTPS one under `CrossOrigin`, which also refuses HTTPS to
+/// HTTP. Only
 /// then must the URL be sendable, so a destination with a user name or a
 /// password is refused as invalid. The admitted URL has no fragment.
 pub(super) fn redirect_destination(
@@ -293,7 +356,7 @@ pub(super) fn redirect_destination(
 ///
 /// The call began at `initial` and is now at `current`. The decision is
 /// `redirect_destination`'s: the origin must be the initial one or, under
-/// `CrossOrigin`, an allowlisted one with no HTTPS-to-HTTP step. A change of
+/// `CrossOrigin`, an admitted one with no HTTPS-to-HTTP step. A change of
 /// scheme is a change of origin. The admitted URL has no fragment and passes
 /// the checks a request's own target passes, so a destination with a user
 /// name or a password is refused.

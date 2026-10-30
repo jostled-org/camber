@@ -181,6 +181,9 @@ body cancels it, and `body.close().await?` waits for the release. See
 
 Camber follows no redirects by default. Select `RedirectPolicy::SameOrigin`
 or a validated `RedirectPolicy::cross_origin(max_hops, origins)?` allowlist.
+For destinations you cannot list, such as signed CDN URLs, use
+`RedirectPolicy::cross_origin_https(max_hops)?` with
+`EgressPolicy::public_internet()`.
 Cross-origin hops remove credentials permanently and cannot downgrade HTTPS
 to HTTP. Redirects and retries share the call's deadline and keep separate
 operation-wide counters. See

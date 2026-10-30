@@ -110,6 +110,7 @@ impl std::fmt::Display for ClientInput {
 }
 
 /// Why [`RedirectPolicy::cross_origin`](super::RedirectPolicy::cross_origin)
+/// or [`RedirectPolicy::cross_origin_https`](super::RedirectPolicy::cross_origin_https)
 /// refused its arguments.
 ///
 /// An invalid entry is named by its position, not its text: the text can

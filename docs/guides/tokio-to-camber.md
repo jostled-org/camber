@@ -152,7 +152,9 @@ interval, and total timeout. See
 
 Redirects are disabled by default. Select `RedirectPolicy::SameOrigin` for
 same-origin hops, or `RedirectPolicy::cross_origin(max_hops, origins)?` for an
-explicit origin allowlist. An origin change permanently removes credentials;
+explicit origin allowlist. `RedirectPolicy::cross_origin_https(max_hops)?`
+admits every HTTPS origin; pair it with `EgressPolicy::public_internet()`.
+An origin change permanently removes credentials;
 HTTPS cannot redirect to HTTP. Both response modes share these rules and one
 operation deadline. See [Redirects](../reference/client.md#redirects).
 

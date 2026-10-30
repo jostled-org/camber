@@ -246,6 +246,28 @@ bound and the origins. The policy shares immutable allowlist storage.
 `RedirectPolicy` implements `Clone` and no longer implements `Copy`; clone a
 policy when reusing its value.
 
+When the destinations are not known in advance, such as the signed CDN URL a
+download endpoint redirects to, permit every HTTPS origin instead:
+
+```rust
+use camber::http::{self, EgressPolicy, RedirectPolicy};
+
+let client = http::client()
+    .egress_policy(EgressPolicy::public_internet().https_only())
+    .redirect_policy(RedirectPolicy::cross_origin_https(3)?);
+```
+
+The initial origin is always permitted. Every other destination must use
+HTTPS, and HTTPS never redirects to HTTP. A zero hop bound returns the
+`ZeroHops` reason. `admits_any_https()` on `CrossOriginRedirects` reports
+this policy, and `origins()` is empty. Credential removal, method rules, the
+hop bound, and the deadline are the same as under an allowlist.
+
+> **Pair `cross_origin_https` with an egress policy.** Any server the call
+> reaches can redirect it to any HTTPS host, internal hosts included. Camber
+> removes the credentials before that hop, but the host's answer reaches your
+> code. `EgressPolicy::public_internet()` refuses private addresses.
+
 The origin is the scheme, the host, and the port. The host is compared without
 regard to case or IDN spelling, and a port that is not written is the default
 port of the scheme. A root dot makes another origin: `cdn.example.` and
@@ -264,7 +286,7 @@ names:
 | Redirect | `ClientRedirect` |
 | --- | --- |
 | A repeated `Location`, one that is not a URL, or one with a user name or password | `InvalidLocation` |
-| Another origin under `SameOrigin`, or an origin outside the cross-origin allowlist | `OriginChanged` |
+| Another origin under `SameOrigin`, an origin outside the cross-origin allowlist, or an HTTP origin under `cross_origin_https` | `OriginChanged` |
 | HTTPS to HTTP under the cross-origin policy, even when allowlisted | `Downgrade` |
 | More redirects than `max_hops` in one call | `HopLimit` |
 | A method the status does not let Camber send again | `UnsafeMethod` |
@@ -282,7 +304,7 @@ The status decides the method and the body of the next request:
 | 307, 308 | any other | Refused as `UnsafeMethod` |
 
 The same rules apply under both policies. When a hop changes origin, the body
-goes to the allowlisted origin, and the headers lose their credentials as
+goes to the admitted origin, and the headers lose their credentials as
 described below. A refused `POST` dials nothing at the new origin.
 
 `RetryPolicy::Never` stops retries. It does not stop a redirect.
@@ -294,7 +316,7 @@ return hops cannot restore removed headers. Other headers stay on the request.
 
 > **Set secrets with `sensitive_header`.** Camber does not guess which other
 > headers are secret. A key set with plain `header`, such as `X-Api-Key`, goes
-> to every allowlisted origin.
+> to every admitted origin.
 
 A [destination policy](#destination-policy) still checks each destination.
 The operation retains its TLS trust, connect bound, timer profile, and egress

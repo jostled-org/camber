@@ -1908,6 +1908,140 @@ async fn cross_origin_https_chain_never_downgrades_on_a_later_hop() {
     }
 }
 
+/// The headers every any-HTTPS row sends that no other origin may receive.
+const COOKIE_SENTINEL: &str = "session=cookie-sentinel-91b3";
+const SENSITIVE_SENTINEL: &str = "sensitive-sentinel-4f60";
+
+/// The any-HTTPS client: egress admits only the HTTPS origins in
+/// `admitted`, at the IPv4 loopback.
+fn any_https_client(admitted: &[&str], edge: &ClientDnsEdge, cert: &[u8]) -> Client {
+    let policy = admitted.iter().fold(
+        EgressPolicy::public_internet().https_only(),
+        |policy, origin| policy.allow_destination(origin, V4).unwrap(),
+    );
+    client_test_root(restricted(policy, edge), cert)
+        .unwrap()
+        .redirect_policy(RedirectPolicy::cross_origin_https(2).unwrap())
+}
+
+/// A GET to `url` with an authorization, a cookie, and a sensitive header.
+fn credentialed_get<'a>(client: &'a Client, url: &str) -> camber::http::ClientRequest<'a> {
+    client
+        .request("GET", url)
+        .unwrap()
+        .header("Authorization", CREDENTIAL)
+        .unwrap()
+        .header("Cookie", COOKIE_SENTINEL)
+        .unwrap()
+        .sensitive_header("x-secret", SENSITIVE_SENTINEL)
+        .unwrap()
+}
+
+/// HTTPS A redirects to HTTPS B, which no allowlist names. An any-HTTPS
+/// policy follows it, and B receives no credential and no sensitive header.
+#[tokio::test]
+async fn cross_origin_https_follows_an_unlisted_origin_without_credentials() {
+    use crate::retry_upstream::client_answer;
+    for streaming in [false, true] {
+        let (cert, key) = generate_cert_with_san(NAME);
+        let mut second = named_tls_peer(&cert, &key, closing_answer(SECURE_BODY)).await;
+        let second_origin = format!("https://{NAME}:{}", second.addr().port());
+        let landing = format!("{second_origin}/landed");
+        let mut first = named_tls_peer(
+            &cert,
+            &key,
+            answer("302 Found", &[("Location", &landing)], b""),
+        )
+        .await;
+        let first_origin = format!("https://{NAME}:{}", first.addr().port());
+        let edge = ClientDnsEdge::new();
+        edge.answer(&[V4]);
+        edge.answer(&[V4]);
+        let client = any_https_client(&[&first_origin, &second_origin], &edge, &cert);
+        let result = within_watchdog(client_answer(
+            credentialed_get(&client, &format!("{first_origin}/start")),
+            streaming,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            result.unwrap(),
+            (200, SECURE_BODY.to_vec()),
+            "streaming {streaming}"
+        );
+        let first_sent = within_watchdog(first.recv()).await;
+        let second_sent = within_watchdog(second.recv()).await;
+        first
+            .finish("any-HTTPS first origin", within_watchdog)
+            .await;
+        second
+            .finish("any-HTTPS unlisted origin", within_watchdog)
+            .await;
+        let first_head = String::from_utf8_lossy(named_request("any-HTTPS first", &first_sent));
+        let second_head =
+            String::from_utf8_lossy(named_request("any-HTTPS unlisted", &second_sent));
+        assert!(first_head.contains(CREDENTIAL), "{first_head}");
+        assert!(second_head.starts_with("GET /landed "), "{second_head}");
+        for secret in [CREDENTIAL, COOKIE_SENTINEL, SENSITIVE_SENTINEL] {
+            assert!(
+                !second_head.contains(secret),
+                "streaming {streaming}: {secret} reached the unlisted origin"
+            );
+        }
+        assert_eq!(edge.lookups(), 2);
+    }
+}
+
+/// An any-HTTPS policy admits the redirect, and egress policy still refuses
+/// the destination's address before it is dialed.
+#[tokio::test]
+async fn cross_origin_https_destination_still_passes_egress_policy() {
+    use crate::retry_upstream::client_answer;
+    for streaming in [false, true] {
+        let unadmitted = RecordingUpstream::bind(answer("200 OK", &[], b"must not arrive")).await;
+        let away = format!("https://{OTHER_NAME}:{}/away", unadmitted.addr().port());
+        let (cert, key) = generate_cert_with_san(NAME);
+        let mut first = named_tls_peer(
+            &cert,
+            &key,
+            answer("302 Found", &[("Location", &away)], b""),
+        )
+        .await;
+        let first_origin = format!("https://{NAME}:{}", first.addr().port());
+        let edge = ClientDnsEdge::new();
+        edge.answer(&[V4]);
+        edge.answer(&[V4]);
+        let client = any_https_client(&[&first_origin], &edge, &cert);
+        let result = within_watchdog(client_answer(
+            credentialed_get(&client, &first_origin),
+            streaming,
+        ))
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeError::Client(ClientError::Egress(
+                    ClientEgress::Address
+                )))
+            ),
+            "streaming {streaming}: {result:?}"
+        );
+        assert_completed_handshake("any-HTTPS egress", &within_watchdog(first.recv()).await);
+        first
+            .finish("any-HTTPS egress first", within_watchdog)
+            .await;
+        assert_eq!(edge.lookups(), 2);
+        assert_eq!(
+            unadmitted
+                .finish_probed("any-HTTPS unadmitted destination")
+                .await
+                .connections,
+            0
+        );
+    }
+}
+
 #[tokio::test]
 async fn cross_origin_return_requires_fresh_dns_admission() {
     use crate::retry_upstream::client_answer;

@@ -1670,6 +1670,71 @@ fn cross_origin_policy_normalizes_and_reports_its_allowlist() {
     );
 }
 
+#[test]
+fn cross_origin_https_policy_validates_hops_and_reports_any_https() {
+    assert_eq!(
+        policy_refusal(RedirectPolicy::cross_origin_https(0)),
+        "zero hops"
+    );
+    let policy = RedirectPolicy::cross_origin_https(2).unwrap();
+    assert_eq!(policy, RedirectPolicy::cross_origin_https(2).unwrap());
+    assert_ne!(policy, RedirectPolicy::cross_origin_https(3).unwrap());
+    assert_ne!(
+        policy,
+        RedirectPolicy::cross_origin(2, ["https://example.test"]).unwrap()
+    );
+    let RedirectPolicy::CrossOrigin(allowance) = &policy else {
+        panic!("expected a cross-origin policy, got {policy:?}");
+    };
+    assert_eq!(allowance.max_hops().get(), 2);
+    assert!(allowance.admits_any_https());
+    assert_eq!(allowance.origins().len(), 0);
+    let shown = format!("{policy:?}");
+    assert!(shown.contains("AnyHttps"), "{shown}");
+    let listed = RedirectPolicy::cross_origin(2, ["https://example.test"]).unwrap();
+    let RedirectPolicy::CrossOrigin(listed) = &listed else {
+        panic!("expected a cross-origin policy, got {listed:?}");
+    };
+    assert!(!listed.admits_any_https());
+}
+
+/// A call that began over HTTP follows an any-HTTPS policy only to its own
+/// origin or to HTTPS. A plain-HTTP hop elsewhere is refused before the other
+/// origin is dialed.
+#[tokio::test]
+async fn cross_origin_https_refuses_an_http_destination_before_sending() {
+    use crate::retry_upstream::client_answer;
+    for streaming in [false, true] {
+        let second = RecordingUpstream::bind(answer("200 OK", &[], b"must not arrive")).await;
+        let destination = second.url("/away");
+        let first =
+            RecordingUpstream::bind(answer("302 Found", &[("Location", &destination)], b"")).await;
+        let client = http::client().redirect_policy(RedirectPolicy::cross_origin_https(2).unwrap());
+        let request = client.request("GET", &first.url("/start")).unwrap();
+        let result = within_bound("any-HTTPS refusal", client_answer(request, streaming)).await;
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeError::Client(ClientError::Redirect(
+                    ClientRedirect::OriginChanged
+                )))
+            ),
+            "streaming {streaming}: {result:?}"
+        );
+        assert_eq!(
+            first.finish_probed("any-HTTPS first").await.requests.len(),
+            1
+        );
+        assert_eq!(
+            second
+                .finish_probed("any-HTTPS refused HTTP")
+                .await
+                .connections,
+            0
+        );
+    }
+}
+
 #[tokio::test]
 async fn cross_origin_return_hops_and_retries_never_restore_credentials() {
     for streaming in [false, true] {

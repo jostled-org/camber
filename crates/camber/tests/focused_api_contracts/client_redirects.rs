@@ -8,7 +8,8 @@
 //!   resolves one `Location` value against the current URL. It returns the URL
 //!   the next send goes to, with no fragment, or the refusal. Same-origin
 //!   policy compares against the initial URL's origin. Cross-origin policy
-//!   also admits its allowlist and refuses an HTTPS-to-HTTP hop.
+//!   also admits its allowlist, or any HTTPS origin, and refuses an
+//!   HTTPS-to-HTTP hop.
 //! - `client_next_redirect(policy, followed)` returns the ordinal of the
 //!   redirect a follow would spend, or `None` when the allowance is spent.
 //! - `client_send_total(retries_sent, redirects_followed)` returns how many
@@ -314,24 +315,33 @@ fn assert_none_admits_no_redirect() {
 /// Exactly `max_hops` redirects are admitted: the last one at the boundary,
 /// and none past it.
 fn assert_hop_allowance_boundary(max_hops: usize) {
-    let policy = same_origin(max_hops);
+    for policy in [
+        same_origin(max_hops),
+        RedirectPolicy::cross_origin_https(max_hops).unwrap(),
+    ] {
+        assert_policy_hop_boundary(&policy, max_hops);
+    }
+}
+
+/// `policy` admits exactly `max_hops` redirects.
+fn assert_policy_hop_boundary(policy: &RedirectPolicy, max_hops: usize) {
     assert_eq!(
-        client_next_redirect(&policy, 0),
+        client_next_redirect(policy, 0),
         Some(1),
         "the first of {max_hops} hops"
     );
     assert_eq!(
-        client_next_redirect(&policy, max_hops - 1),
+        client_next_redirect(policy, max_hops - 1),
         Some(max_hops),
         "the last of {max_hops} hops"
     );
     assert_eq!(
-        client_next_redirect(&policy, max_hops),
+        client_next_redirect(policy, max_hops),
         None,
         "a hop past {max_hops}"
     );
     assert_eq!(
-        client_next_redirect(&policy, usize::MAX),
+        client_next_redirect(policy, usize::MAX),
         None,
         "a full counter under {max_hops} hops"
     );
@@ -550,6 +560,120 @@ fn assert_secure_hop_never_returns_to_http() {
     );
 }
 
+/// The URL an any-HTTPS call began at over plain HTTP.
+const HTTP_START: &str = "http://api.example/start";
+
+/// One any-HTTPS row: the URL the call began at, the URL it is at, the
+/// `Location`, and the decision.
+type AnyHttpsRow = (
+    &'static str,
+    &'static str,
+    &'static str,
+    Result<&'static str, ClientRedirect>,
+);
+
+/// Every any-HTTPS decision row.
+const ANY_HTTPS_ROWS: [AnyHttpsRow; 15] = [
+    (
+        START,
+        START,
+        "https://unlisted.example/f",
+        Ok("https://unlisted.example/f"),
+    ),
+    (
+        START,
+        START,
+        "https://unlisted.example:8443/f#x",
+        Ok("https://unlisted.example:8443/f"),
+    ),
+    (
+        START,
+        START,
+        "//other.example/f",
+        Ok("https://other.example/f"),
+    ),
+    (START, START, "https://[::1]/f", Ok("https://[::1]/f")),
+    (
+        START,
+        "https://cdn.example/f",
+        "https://api.example/back",
+        Ok("https://api.example/back"),
+    ),
+    (
+        START,
+        START,
+        "http://unlisted.example/f",
+        Err(ClientRedirect::Downgrade),
+    ),
+    (
+        START,
+        START,
+        "http://api.example/start",
+        Err(ClientRedirect::Downgrade),
+    ),
+    (
+        START,
+        START,
+        "ftp://unlisted.example/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        START,
+        START,
+        "data:text/plain,unlisted.example",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        START,
+        START,
+        "https://user:pw@unlisted.example/f",
+        Err(ClientRedirect::InvalidLocation),
+    ),
+    (
+        HTTP_START,
+        HTTP_START,
+        "https://unlisted.example/f",
+        Ok("https://unlisted.example/f"),
+    ),
+    (
+        HTTP_START,
+        HTTP_START,
+        "/again",
+        Ok("http://api.example/again"),
+    ),
+    (
+        HTTP_START,
+        HTTP_START,
+        "http://unlisted.example/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        HTTP_START,
+        HTTP_START,
+        "http://api.example:8080/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        HTTP_START,
+        "https://cdn.example/f",
+        "http://api.example/back",
+        Err(ClientRedirect::Downgrade),
+    ),
+];
+
+/// An any-HTTPS destination is admitted when it is the initial origin or
+/// any HTTPS origin, and never by a step from HTTPS to HTTP.
+fn assert_any_https_decisions() {
+    let policy = RedirectPolicy::cross_origin_https(2).unwrap();
+    for (initial, current, location, expected) in ANY_HTTPS_ROWS {
+        assert_eq!(
+            decided(&policy, initial, current, location),
+            expected.map(str::to_owned),
+            "began at {initial}, at {current}: Location {location:?}"
+        );
+    }
+}
+
 /// The count is the first send plus each retry and each redirect, and it is
 /// absent instead of wrapped.
 fn assert_send_total_is_checked() {
@@ -589,6 +713,7 @@ fn origin_and_send_accounting_share_production_predicates() {
     assert_unsendable_locations_are_refused();
     assert_cross_origin_decisions();
     assert_secure_hop_never_returns_to_http();
+    assert_any_https_decisions();
 
     assert_none_admits_no_redirect();
     for max_hops in [1, 2, 7, usize::MAX] {
