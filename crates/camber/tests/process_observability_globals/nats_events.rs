@@ -191,6 +191,14 @@ const TERMINAL_ROWS: &[NamedRow<'static>] = &[
         ack::nats_acknowledged_forced_stop_settles_under_shutdown,
     ),
     (
+        "nats ordinary failure during graceful stop keeps operation provenance",
+        ack::nats_ordinary_failure_during_graceful_stop,
+    ),
+    (
+        "nats receiver forced before publish follows owner while foreign runtime stays open",
+        crate::nats_forced_events::receiver_force_precedes_publish_abort,
+    ),
+    (
         "nats_acknowledged_redacts_dynamic_values",
         ack::nats_acknowledged_redacts_dynamic_values,
     ),

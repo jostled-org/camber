@@ -1,7 +1,12 @@
 use super::Response;
 use super::body_admission::ConfiguredCeiling;
+use super::dispatch::RouterEnvelope;
+use super::policy_report::PolicyReport;
+use super::policy_resolution::Located;
+use super::policy_sources::{PolicyBound, PolicyLayer};
 use super::rejection::{Rejected, Rejection, RejectionContext, RejectionMapper, shared_mapper};
 use super::request::RequestHead;
+use super::route_budgets::RouteBudgets;
 use super::router::{FrozenRouter, Router};
 use super::{BufferConfig, Request};
 use crate::RuntimeError;
@@ -27,7 +32,7 @@ pub struct HostRouter {
     buffers: BufferConfig,
     mapper: Option<Arc<RejectionMapper>>,
     body_ceiling: ConfiguredCeiling,
-    budgets: super::route_budgets::RouteBudgets,
+    budgets: RouteBudgets,
 }
 
 impl HostRouter {
@@ -60,10 +65,12 @@ impl HostRouter {
         self
     }
 
-    /// Set the maximum request body size in bytes (capped at 256 MB).
+    /// Set the requested maximum body size in bytes; zero admits empty bodies only.
     ///
-    /// This ceiling contains every child router. A child that configures none
-    /// inherits it; a child that configures one can only narrow it.
+    /// A child that configures no ceiling inherits this one. When both set
+    /// one, the narrower applies. When only the child sets one, the child's
+    /// applies: the host's 8 MiB default never narrows it. The resolved
+    /// [`ServerPolicy`](super::ServerPolicy) hard cap always contains both.
     #[must_use]
     pub fn max_request_body(mut self, bytes: usize) -> Self {
         self.body_ceiling = ConfiguredCeiling::configured(bytes);
@@ -136,20 +143,48 @@ impl HostRouter {
         self
     }
 
-    pub(super) fn freeze(self) -> FrozenHostRouter {
-        let mut hosts: Vec<(Box<str>, FrozenRouter)> = self
+    /// Freeze every child under this host router's resolved policy.
+    ///
+    /// `outer` is the server's resolved budgets and `cap` its request-body hard
+    /// cap. Resolution runs once here, so routing only reads its results.
+    pub(super) fn freeze(
+        mut self,
+        outer: Located<RouteBudgets>,
+        cap: PolicyBound<usize>,
+        report: &mut PolicyReport,
+    ) -> FrozenHostRouter {
+        let budgets = self.budgets.located(PolicyLayer::Host).contained_by(outer);
+        report.budgets(PolicyLayer::Host, &self.budgets, &budgets);
+        report.body_limit(
+            PolicyLayer::Host,
+            self.body_ceiling.configured_value(),
+            self.body_ceiling.resolved_host(cap),
+        );
+        let fallback = RouterEnvelope {
+            budgets,
+            host_ceiling: Some(self.body_ceiling),
+            cap,
+            host: None,
+        };
+        self.hosts.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let hosts: Box<[(Box<str>, FrozenRouter)]> = self
             .hosts
             .into_iter()
-            .map(|(host, router)| (host, router.freeze()))
+            .map(|(host, router)| {
+                let named = RouterEnvelope {
+                    host: Some(&host),
+                    ..fallback
+                };
+                let frozen = router.freeze(&named, report);
+                (host, frozen)
+            })
             .collect();
-        hosts.sort_by(|(a, _), (b, _)| a.cmp(b));
-        let default = self.default.map(Router::freeze);
+        let default = self.default.map(|router| router.freeze(&fallback, report));
         FrozenHostRouter {
-            hosts: hosts.into_boxed_slice(),
+            hosts,
             default,
             mapper: self.mapper,
-            body_ceiling: self.body_ceiling,
-            budgets: self.budgets,
+            budgets: budgets.values(),
         }
     }
 }
@@ -159,8 +194,8 @@ pub(super) struct FrozenHostRouter {
     hosts: Box<[(Box<str>, FrozenRouter)]>,
     default: Option<FrozenRouter>,
     mapper: Option<Arc<RejectionMapper>>,
-    body_ceiling: ConfiguredCeiling,
-    budgets: super::route_budgets::RouteBudgets,
+    /// The resolved budgets a request runs under when no child claims it.
+    budgets: RouteBudgets,
 }
 
 /// Reject values that are not an HTTP authority.
@@ -227,13 +262,8 @@ impl FrozenHostRouter {
         self.mapper.clone()
     }
 
-    /// The request-body ceiling that contains every child registered here.
-    pub(super) fn body_ceiling(&self) -> ConfiguredCeiling {
-        self.body_ceiling
-    }
-
-    /// The budgets containing every child router here.
-    pub(super) fn budgets(&self) -> super::route_budgets::RouteBudgets {
+    /// The resolved budgets containing every child router here.
+    pub(super) const fn budgets(&self) -> RouteBudgets {
         self.budgets
     }
 

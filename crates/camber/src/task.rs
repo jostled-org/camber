@@ -1,12 +1,15 @@
 use crate::RuntimeError;
 use crate::runtime_state::{self as runtime, LifecycleSignals, RuntimeInner, ScopeSlot};
 use futures_util::FutureExt;
+use result::{TaskResult, TaskResultSender};
 use std::future::{Future, IntoFuture};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
+
+mod result;
 
 /// Future that completes when the runtime begins shutting down.
 ///
@@ -54,14 +57,14 @@ impl<T> std::fmt::Debug for JoinHandle<T> {
 /// at all — the variant is what says so.
 enum JoinSource<T> {
     Task {
-        rx: std::sync::mpsc::Receiver<Result<T, RuntimeError>>,
+        rx: TaskResult<Result<T, RuntimeError>>,
         cancel: Arc<AtomicBool>,
         cancel_tx: crossbeam_channel::Sender<()>,
     },
     Refused(RuntimeError),
 }
 
-/// Handle to a spawned task. Retrieve the result with `join()`.
+/// Handle to a blocking task. Await its result, or call `join()` synchronously.
 pub struct JoinHandle<T> {
     source: JoinSource<T>,
 }
@@ -92,9 +95,7 @@ fn report_dropped_result<E>(sent: Result<(), E>, flavor: &'static str) {
 }
 
 /// Deliver a blocking task's result, mapping a dropped sender to a panic.
-fn recv_task_result<T>(
-    rx: std::sync::mpsc::Receiver<Result<T, RuntimeError>>,
-) -> Result<T, RuntimeError> {
+fn recv_task_result<T>(rx: TaskResult<Result<T, RuntimeError>>) -> Result<T, RuntimeError> {
     match rx.recv() {
         Ok(result) => result,
         Err(_) => Err(channel_closed()),
@@ -174,6 +175,8 @@ impl<T> JoinHandle<T> {
 
     /// Wait for the task to complete and return its result.
     ///
+    /// Blocks the calling thread. In async code, `.await` the handle instead.
+    ///
     /// Returns `Err(TaskPanicked)` if the task panicked, `Err(ScopeClosed)` if
     /// the root scope refused the spawn, or `Err(NoRuntime)` if no runtime
     /// context was established when `spawn` was called — a refusal carries
@@ -195,6 +198,111 @@ impl<T> JoinHandle<T> {
     }
 }
 
+/// What an awaited task future still has to deliver.
+///
+/// A future delivers its task result or refusal once, then holds `Spent`.
+/// Polling a future after it returned `Ready` is a caller mistake. Both task
+/// futures answer it by parking. A spent tokio oneshot receiver would panic
+/// instead, with a message that names nothing in Camber. Only a future reaches
+/// `Spent`; a handle always holds a task or a refusal.
+enum Delivery<R> {
+    Task(R),
+    Refused(RuntimeError),
+    Spent,
+}
+
+impl<R> Delivery<R> {
+    /// Describe a task future the way its handle describes itself.
+    fn describe(&self, name: &str, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(name)
+            .field("refused", &matches!(self, Self::Refused(_)))
+            .field("spent", &matches!(self, Self::Spent))
+            .finish()
+    }
+}
+
+/// Deliver a future's outcome once, polling a live task through `poll_task`.
+///
+/// Delivery leaves `Spent` behind. A task that is still pending goes back in
+/// place, so the next poll reaches it again.
+fn poll_delivery<R, T>(
+    delivery: &mut Delivery<R>,
+    cx: &mut Context<'_>,
+    poll_task: fn(&mut R, &mut Context<'_>) -> Poll<Result<T, RuntimeError>>,
+) -> Poll<Result<T, RuntimeError>> {
+    match std::mem::replace(delivery, Delivery::Spent) {
+        Delivery::Task(mut task) => {
+            let outcome = poll_task(&mut task, cx);
+            restore_pending_task(delivery, task, outcome)
+        }
+        Delivery::Refused(error) => Poll::Ready(Err(error)),
+        Delivery::Spent => Poll::Pending,
+    }
+}
+
+/// Put a pending task back for its next poll; drop a task that delivered.
+fn restore_pending_task<R, T>(
+    delivery: &mut Delivery<R>,
+    task: R,
+    outcome: Poll<Result<T, RuntimeError>>,
+) -> Poll<Result<T, RuntimeError>> {
+    match outcome {
+        Poll::Pending => {
+            *delivery = Delivery::Task(task);
+            Poll::Pending
+        }
+        ready => ready,
+    }
+}
+
+/// Future returned when a blocking [`JoinHandle`] is awaited.
+///
+/// Dropping this future discards the result. The closure continues in its runtime
+/// scope; blocking work cannot be preempted. Call the handle's `cancel()` before
+/// conversion to request cancellation at a cooperating Camber IO boundary.
+pub struct JoinFuture<T> {
+    delivery: Delivery<TaskResult<Result<T, RuntimeError>>>,
+}
+
+impl<T> std::fmt::Debug for JoinFuture<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.delivery.describe("JoinFuture", f)
+    }
+}
+
+impl<T> Future for JoinFuture<T> {
+    type Output = Result<T, RuntimeError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        poll_delivery(&mut self.get_mut().delivery, cx, poll_blocking_result)
+    }
+}
+
+/// Map the blocking task channel's outcome, treating a closed channel as a
+/// panic.
+fn poll_blocking_result<T>(
+    rx: &mut TaskResult<Result<T, RuntimeError>>,
+    cx: &mut Context<'_>,
+) -> Poll<Result<T, RuntimeError>> {
+    rx.poll(cx)
+        .map(|received| received.unwrap_or_else(|_| Err(channel_closed())))
+}
+
+impl<T> IntoFuture for JoinHandle<T> {
+    type Output = Result<T, RuntimeError>;
+    type IntoFuture = JoinFuture<T>;
+
+    /// Keep only the result. The future has no `cancel()`, so it drops the
+    /// cancel half; a cancellation requested earlier stays recorded.
+    fn into_future(self) -> Self::IntoFuture {
+        let delivery = match self.source {
+            JoinSource::Task { rx, .. } => Delivery::Task(rx),
+            JoinSource::Refused(error) => Delivery::Refused(error),
+        };
+        JoinFuture { delivery }
+    }
+}
+
 /// Spawn a closure on Tokio's blocking thread pool.
 ///
 /// The task is admitted to the runtime's root scope, and the runtime entry
@@ -202,6 +310,20 @@ impl<T> JoinHandle<T> {
 /// `RuntimeBuilder::run`, or `#[camber::test]`. Once the scope closes, the
 /// spawn is refused and the handle yields `RuntimeError::ScopeClosed`; with no
 /// runtime context established it yields `RuntimeError::NoRuntime`.
+///
+/// In async code, `.await` the handle so the runtime worker stays available:
+///
+/// ```rust
+/// # fn main() -> Result<(), camber::RuntimeError> {
+/// let count = camber::runtime::run(|| {
+///     camber::runtime::block_on(async {
+///         camber::spawn(|| "one two three".split_whitespace().count()).await
+///     })
+/// })??;
+/// assert_eq!(count, 3);
+/// # Ok(())
+/// # }
+/// ```
 pub fn spawn<F, T>(f: F) -> JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -226,7 +348,7 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<T, RuntimeError>>(1);
+    let (tx, rx) = result::channel::<Result<T, RuntimeError>>();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_child = Arc::clone(&cancel);
 
@@ -295,7 +417,7 @@ where
 /// mapping a panic to `TaskPanicked` for the handle's holder.
 fn deliver_task_result<F, T>(
     f: F,
-    tx: std::sync::mpsc::SyncSender<Result<T, RuntimeError>>,
+    tx: TaskResultSender<Result<T, RuntimeError>>,
     cancel: Arc<AtomicBool>,
     cancel_rx: crossbeam_channel::Receiver<()>,
 ) where
@@ -322,15 +444,7 @@ impl<T> std::fmt::Debug for AsyncJoinHandle<T> {
 /// already-terminal outcome for a spawn the scope refused.
 enum AsyncJoinSource<T> {
     Task(tokio::sync::oneshot::Receiver<Result<T, RuntimeError>>),
-    /// Delivered exactly once; `None` after the future has yielded it.
-    ///
-    /// `None` is also the spent state of a task that already delivered. Polling
-    /// a future after it returned `Ready` is a caller mistake, and this type
-    /// answers it by parking — the same answer for both arms. Leaving a
-    /// delivered task in place would answer it instead with a panic raised
-    /// inside tokio's oneshot receiver, worded for tokio and naming nothing in
-    /// Camber.
-    Refused(Option<RuntimeError>),
+    Refused(RuntimeError),
 }
 
 /// Handle to a spawned async task. Use `.await` to retrieve the result.
@@ -356,10 +470,8 @@ impl<T> AsyncJoinHandle<T> {
     /// Request cancellation, and `.await` returns `Err(Cancelled)`.
     ///
     /// A future from [`spawn_async`] is dropped. A Camber-owned operation
-    /// that holds external state, such as [`AcmeDns01::spawn_renewal`]'s,
+    /// that holds external state, such as `AcmeDns01::spawn_renewal` with the `dns01` feature,
     /// stops instead: it settles that state, then resolves.
-    ///
-    /// [`AcmeDns01::spawn_renewal`]: crate::dns01::AcmeDns01::spawn_renewal
     pub fn cancel(&self) {
         match &self.cancel {
             Some(CancelRequest::Drop(cancel)) => cancel.notify_one(),
@@ -373,7 +485,7 @@ impl<T> AsyncJoinHandle<T> {
     /// observes the refusal through the handle's existing result channel.
     pub(crate) fn refused(error: RuntimeError) -> Self {
         Self {
-            source: AsyncJoinSource::Refused(Some(error)),
+            source: AsyncJoinSource::Refused(error),
             cancel: None,
         }
     }
@@ -385,77 +497,40 @@ impl<T> AsyncJoinHandle<T> {
 /// handle. Cancellation is no longer possible after conversion — call
 /// `cancel()` before awaiting if you need cooperative cancellation.
 pub struct AsyncJoinFuture<T> {
-    source: AsyncJoinSource<T>,
+    delivery: Delivery<tokio::sync::oneshot::Receiver<Result<T, RuntimeError>>>,
+}
+
+impl<T> std::fmt::Debug for AsyncJoinFuture<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.delivery.describe("AsyncJoinFuture", f)
+    }
 }
 
 impl<T> Future for AsyncJoinFuture<T> {
     type Output = Result<T, RuntimeError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Borrow-split first: the task arm has to write back the field it just
-        // polled, and a local `&mut` whose reborrow ends with the poll is what
-        // lets it do that without a second nesting layer.
-        let source = &mut self.get_mut().source;
-        match source {
-            AsyncJoinSource::Task(rx) => {
-                let outcome = poll_task_result(Pin::new(rx), cx);
-                spend_delivered_task(source, outcome)
-            }
-            AsyncJoinSource::Refused(error) => take_refusal(error.take()),
-        }
+        poll_delivery(&mut self.get_mut().delivery, cx, poll_async_result)
     }
 }
 
-/// Retire a task source that has delivered, so a second poll lands on the
-/// already-total refused arm.
-///
-/// `tokio::sync::oneshot::Receiver` panics with "called after complete" once it
-/// is spent. That would give one public future two opposite policies for the
-/// same caller mistake — the refused arm parks, the task arm aborts the process
-/// from inside a dependency. Replacing the delivered source makes both park.
-fn spend_delivered_task<T>(
-    source: &mut AsyncJoinSource<T>,
-    outcome: Poll<Result<T, RuntimeError>>,
-) -> Poll<Result<T, RuntimeError>> {
-    match outcome {
-        Poll::Ready(result) => {
-            *source = AsyncJoinSource::Refused(None);
-            Poll::Ready(result)
-        }
-        Poll::Pending => Poll::Pending,
-    }
-}
-
-/// Map the task channel's outcome, treating a dropped sender — an aborted or
-/// forcibly stopped task — as a panic.
-fn poll_task_result<T>(
-    rx: Pin<&mut tokio::sync::oneshot::Receiver<Result<T, RuntimeError>>>,
+/// Map the async task channel's outcome, treating a dropped sender — an
+/// aborted or forcibly stopped task — as a panic.
+fn poll_async_result<T>(
+    rx: &mut tokio::sync::oneshot::Receiver<Result<T, RuntimeError>>,
     cx: &mut Context<'_>,
 ) -> Poll<Result<T, RuntimeError>> {
-    match rx.poll(cx) {
+    match Pin::new(rx).poll(cx) {
         Poll::Ready(Ok(result)) => Poll::Ready(result),
         Poll::Ready(Err(_)) => Poll::Ready(Err(channel_closed())),
         Poll::Pending => Poll::Pending,
     }
 }
 
-/// Yield a refusal once; a second poll has nothing left to deliver.
-///
-/// Parking is the honest answer there. Polling a future after it returned
-/// `Ready` is a caller contract violation, not a task outcome, and reporting it
-/// as `TaskPanicked` would name a panic that never happened — in logs and in
-/// any caller matching on that variant.
-fn take_refusal<T>(error: Option<RuntimeError>) -> Poll<Result<T, RuntimeError>> {
-    match error {
-        Some(error) => Poll::Ready(Err(error)),
-        None => Poll::Pending,
-    }
-}
-
 impl<T> AsyncJoinFuture<T> {
     pub(crate) fn closed() -> Self {
         Self {
-            source: AsyncJoinSource::Refused(Some(channel_closed())),
+            delivery: Delivery::Refused(channel_closed()),
         }
     }
 }
@@ -465,9 +540,11 @@ impl<T> IntoFuture for AsyncJoinHandle<T> {
     type IntoFuture = AsyncJoinFuture<T>;
 
     fn into_future(self) -> Self::IntoFuture {
-        AsyncJoinFuture {
-            source: self.source,
-        }
+        let delivery = match self.source {
+            AsyncJoinSource::Task(rx) => Delivery::Task(rx),
+            AsyncJoinSource::Refused(error) => Delivery::Refused(error),
+        };
+        AsyncJoinFuture { delivery }
     }
 }
 

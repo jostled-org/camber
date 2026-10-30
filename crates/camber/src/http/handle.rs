@@ -23,6 +23,7 @@ use super::response_commitment::ResponseOrigin;
 use super::router::{DispatchResult, GateCheck, ServerDispatch};
 use super::server_lifecycle::ConnectionLifecycle;
 use super::streaming::{dispatch_streaming_proxy, handle_sse, handle_stream_response};
+use super::trie::StreamHandler;
 #[cfg(feature = "ws")]
 use super::ws_proxy::{self, WsUpgrade};
 use super::{BufferConfig, Request, Response};
@@ -292,11 +293,9 @@ fn classify_pre_body<'a>(
     let asks_websocket = false;
     match internal {
         Some(route) => PreBodyRoute::Internal(route),
-        None => PreBodyRoute::Class(dispatch.classify_route(
-            &head,
-            HeadUpgrade::of(asks_websocket),
-            ctx.policy,
-        )),
+        None => {
+            PreBodyRoute::Class(dispatch.classify_route(&head, HeadUpgrade::of(asks_websocket)))
+        }
     }
 }
 
@@ -306,13 +305,15 @@ fn classify_pre_body<'a>(
 /// takes must not be held across an await. The returned check owns everything
 /// it needs.
 fn pending_middleware_gate(
-    result: &DispatchResult,
+    result: &mut DispatchResult,
     router: Option<&FrozenRouter>,
     scope: &RejectionScope,
 ) -> Result<Option<GateCheck>, Rejected> {
     match (result.needs_middleware_gate(), router) {
         (false, _) => Ok(None),
-        (true, Some(router)) => Ok(router.middleware_gate(result.request_ref(), scope)),
+        (true, Some(router)) => Ok(result
+            .request_mut()
+            .lend(|req| router.middleware_gate(req, scope))),
         // Named rather than folded into the pass above. Only a resolved router
         // has handlers to select a gated class from, so nothing reaches here
         // today — but the pass arm forwards, and a stream, an SSE, or a proxied
@@ -384,6 +385,19 @@ fn answer_over(
     scope: &RejectionScope,
     crossed: CrossedBound,
 ) -> hyper::Response<HyperResponseBody> {
+    let finalized = finalize_response(ctx, resp, account, scope, crossed);
+    let (parts, body) = finalized.response.into_parts();
+    hyper::Response::from_parts(parts, HyperResponseBody::Full(body))
+}
+
+/// Finalize and account for a buffered answer before selecting its body transport.
+pub(super) fn finalize_response(
+    ctx: &ConnCtx,
+    resp: Response,
+    account: &CompletionAccount,
+    scope: &RejectionScope,
+    crossed: CrossedBound,
+) -> super::rejection::Finalized {
     let finalized = scope.finalize(resp);
     let status = finalized.response.status().as_u16();
     if let Some(kind) = finalized.refused {
@@ -394,8 +408,7 @@ fn answer_over(
         account.record_rejection(kind);
     }
     account.commit_refused(scope, status, crossed);
-    let (parts, body) = finalized.response.into_parts();
-    hyper::Response::from_parts(parts, HyperResponseBody::Full(body))
+    finalized
 }
 
 /// The per-connection facts every classified head shares, before an operation
@@ -797,7 +810,7 @@ async fn dispatch_built_request<'a>(
     #[cfg(not(feature = "ws"))]
     let req = input;
     let Routed {
-        result,
+        mut result,
         router,
         scope,
     } = dispatch.dispatch_resolved(req, resolved);
@@ -812,7 +825,7 @@ async fn dispatch_built_request<'a>(
     };
     // Built in its own statement: `DispatchResult` is not `Sync`, so the borrow
     // this takes must end before the check is awaited.
-    let gate = match pending_middleware_gate(&result, router, &scope) {
+    let gate = match pending_middleware_gate(&mut result, router, &scope) {
         Ok(gate) => gate,
         Err(unrunnable) => {
             return Ok(answer_framework(
@@ -884,8 +897,8 @@ async fn finish_dispatched<'a>(
         DispatchResult::Async(buffered) => {
             finish_buffered(buffered, ctx, scope, account, operation).await
         }
-        DispatchResult::Stream(fut, req) => {
-            finish_stream(fut, req, ctx, scope, account, operation, lifecycle).await
+        DispatchResult::Stream(handler, req) => {
+            finish_stream(&handler, req, ctx, scope, account, operation, lifecycle).await
         }
         DispatchResult::Sse(handler, req) => {
             operation.commit_response(ResponseOrigin::ServerSentEvents);
@@ -1170,19 +1183,26 @@ async fn finish_buffered(
 /// runs — the difference is only what the future resolves to — so it spends the
 /// same total. The body behind the committed head does not: it belongs to the
 /// download budget, and [`handle_stream_response`] runs after this returns.
+///
+/// The handler is called here, after the route's middleware gate passed, as an
+/// SSE handler is. A refusing gate therefore stops the handler before its
+/// synchronous part runs, and the gate reads the whole body before the handler
+/// can take it.
 async fn finish_stream(
-    producing: std::pin::Pin<
-        Box<dyn std::future::Future<Output = super::stream::StreamResponse> + Send>,
-    >,
-    held_request: Request,
+    handler: &StreamHandler,
+    mut held_request: Request,
     ctx: &ConnCtx,
     scope: &RejectionScope,
     account: &CompletionAccount,
     operation: &OperationEnvelope,
     lifecycle: &ConnectionLifecycle,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
+    let producing = held_request.lend(|req| handler(req));
     match within_total(producing, operation).await {
-        Ok(stream_resp) => {
+        Ok(outcome) => {
+            let stream_resp = outcome.unwrap_or_else(|error| {
+                scope.resolve(Err(error), super::rejection::HANDLER).into()
+            });
             // The response the handler produced names its own policy, and the
             // route's contains it: resolved here, at the one head this arm
             // commits, rather than inside the body that then has no policy to
@@ -1316,10 +1336,7 @@ async fn dispatch_internal_head_only(
         lifecycle,
         ..
     } = conn;
-    let operation = conn.admit(
-        super::route_budgets::RouteBudgets::from_policy(ctx.policy),
-        lifecycle.script().as_ref(),
-    );
+    let operation = conn.admit(ctx.policy.route_budgets(), lifecycle.script().as_ref());
     match dispatch.skip_middleware_for_internal() {
         true => Ok(answer_internal_directly(
             hyper_req, &route, dispatch, ctx, origin, account, &operation,
@@ -1549,7 +1566,7 @@ fn classify_grpc_head<'a>(
             RequestIdentity::from_head(&origin, hyper_req.method(), hyper_req.uri()),
         )
         .established(super::grpc_support::grpc_route(), RejectionProtocol::Grpc);
-    let budgets = dispatch.resolved_budgets(&resolved, ctx.policy);
+    let budgets = dispatch.resolved_budgets(&resolved);
     match resolved {
         Ok(router) => GrpcHead::Classified(GrpcClass {
             scope,

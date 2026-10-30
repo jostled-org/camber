@@ -212,6 +212,14 @@ async fn assert_moved_future_keeps_its_captured_policy() {
         .policy(ServerPolicy::default())
         .serve_async(listener)
         .expect("the owned future is built inside the Camber runtime");
+    assert_eq!(
+        served
+            .effective_policies()
+            .server()
+            .header_timeout()
+            .value(),
+        RUNTIME_HEADER_TIMEOUT
+    );
 
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let foreign = std::thread::spawn(move || {

@@ -42,8 +42,13 @@ pub(super) enum SseProducer {
     /// first, as every buffered route does.
     Async(AsyncSseProducer),
 }
-pub(super) type StreamHandler =
-    Box<dyn Fn(&Request) -> Pin<Box<dyn Future<Output = StreamResponse> + Send>> + Send + Sync>;
+pub(super) type StreamFuture =
+    Pin<Box<dyn Future<Output = Result<StreamResponse, RuntimeError>> + Send>>;
+/// One registered stream handler, erased the way every stored handler is.
+///
+/// Shared rather than boxed: dispatch hands each request its own handle, so
+/// the handler runs after the route's middleware gate passes.
+pub(super) type StreamHandler = Arc<dyn Fn(&Request) -> StreamFuture + Send + Sync>;
 /// One `Router::ws` registration's shared launch.
 ///
 /// Only this closure is erased. Each call spawns one direct bridge behind that
@@ -73,17 +78,24 @@ pub(super) type MultipartHandler = Box<
 /// pays for.
 pub(super) struct SseRegistration {
     producer: SseProducer,
-    budget: super::TransferBudget,
+    budget: Option<super::TransferBudget>,
 }
 
 impl SseRegistration {
     /// Register one producer under the policy the application chose for it.
-    pub(super) fn new(producer: SseProducer, budget: super::TransferBudget) -> Self {
+    pub(super) fn new(producer: SseProducer, budget: Option<super::TransferBudget>) -> Self {
         Self { producer, budget }
     }
 
     /// The download policy this registration's body is bounded by.
     pub(super) const fn budget(&self) -> super::TransferBudget {
+        match self.budget {
+            Some(budget) => budget,
+            None => super::TransferBudget::unbounded(),
+        }
+    }
+
+    pub(super) const fn configured_budget(&self) -> Option<super::TransferBudget> {
         self.budget
     }
 
@@ -170,6 +182,8 @@ pub(super) enum RouteHandler {
         prefix: Arc<str>,
         healthy: Option<Arc<AtomicBool>>,
         upstream: Arc<ProxyUpstream>,
+        /// The transfer budgets this registration configured, with their intent.
+        budgets: super::route_budgets::RouteBudgets,
     },
 }
 
@@ -603,6 +617,16 @@ struct FrozenMethodHandlers {
     claimed: Option<Claimed>,
 }
 
+impl FrozenMethodHandlers {
+    fn visit_registrations(&self, visitor: &mut impl FnMut(Method, &Arc<str>, &RouteHandler)) {
+        Method::ALL.into_iter().for_each(|method| {
+            if let Some(registered) = &self.by_method[method.ordinal()] {
+                visitor(method, &registered.route, &registered.handler);
+            }
+        });
+    }
+}
+
 /// Immutable trie node for request dispatch.
 pub(crate) struct FrozenNode {
     static_children: Box<[(Box<str>, FrozenNode)]>,
@@ -626,6 +650,23 @@ type Accepts<'v, 'n> = &'v mut dyn FnMut(&'n FrozenMethodHandlers) -> bool;
 type PathMatch<'n, 'p> = (&'n FrozenMethodHandlers, CaptureVec<'p>);
 
 impl FrozenNode {
+    /// Visit stored registrations without performing path matching.
+    pub(super) fn visit_registrations(
+        &self,
+        visitor: &mut impl FnMut(Method, &Arc<str>, &RouteHandler),
+    ) {
+        self.handlers.visit_registrations(visitor);
+        if let Some(wildcard) = &self.wildcard {
+            wildcard.visit_registrations(visitor);
+        }
+        self.static_children
+            .iter()
+            .for_each(|(_, child)| child.visit_registrations(visitor));
+        if let Some(child) = &self.param_child {
+            child.visit_registrations(visitor);
+        }
+    }
+
     /// Match a path, then select a handler for the received method.
     ///
     /// Priority is static children, then the param child, then the wildcard

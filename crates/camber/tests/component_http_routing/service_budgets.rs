@@ -86,6 +86,7 @@ async fn assert_row(row: PolicyRow, hosts: Option<HostRouter>) {
     }
     .serve_background(listener)
     .expect("owned server requires a Tokio runtime");
+    assert_report(handle.effective_policies(), &row);
     let server = http_support::ReadyServer::adopt(addr, handle);
 
     let request = tokio::spawn(async move {
@@ -133,6 +134,17 @@ async fn assert_row(row: PolicyRow, hosts: Option<HostRouter>) {
     server
         .shutdown_bounded(SHUTDOWN_TIMEOUT)
         .unwrap_or_else(|error| panic!("{}: teardown failed: {error}", row.name));
+}
+
+fn assert_report(report: &camber::http::EffectivePolicies, row: &PolicyRow) {
+    assert_eq!(
+        report.server().header_timeout().value(),
+        row.expected_header
+    );
+    let route = &report.routes()[0];
+    assert_eq!(route.request_budget().value(), row.expected_request);
+    assert_eq!(route.upload_budget().value(), row.expected_upload);
+    assert_eq!(route.download_budget().value(), row.expected_download);
 }
 
 /// A server that configures nothing inherits the runtime's bounds, and its own

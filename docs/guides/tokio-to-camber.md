@@ -74,7 +74,7 @@ For exact method names and type behavior, use the reference docs. This table is 
 | Tokio/Axum | Camber | Notes |
 |---|---|---|
 | `#[tokio::main]` | `fn main() -> Result<(), RuntimeError>` | Camber boots Tokio internally |
-| `tokio::spawn` | `camber::spawn` | Sync closure on Tokio's blocking pool. Returns `JoinHandle<T>` with `.join()` and `.cancel()` |
+| `tokio::task::spawn_blocking` | `camber::spawn` | Blocking closure on Tokio's pool. Await its `JoinHandle<T>`; synchronous callers use `.join()`. Cancellation is cooperative. |
 | `tokio::spawn` (async) | `camber::spawn_async` | Async future on Tokio runtime. Returns `AsyncJoinHandle<T>` (`.await` or `.cancel()`) |
 | `tokio::sync::mpsc` | `camber::channel` | Crossbeam underneath, supports `select!` |
 | `tokio::select!` | `camber::select!` | Same macro pattern, backed by crossbeam |
@@ -93,7 +93,7 @@ For exact method names and type behavior, use the reference docs. This table is 
 | Tower body validation | `camber::http::validate` | `validate::json::<T>()` — rejects invalid JSON before the handler runs |
 | `axum::extract::ws::WebSocket` | `router.ws(path, handler)` | Handler receives `(&Request, WsConn)` and returns a future. Waits use `.await`. Feature: `ws` |
 | Axum SSE (via `Sse<impl Stream>`) | `router.get_sse(path, handler)` | Handler receives `(&Request, &mut SseWriter)`. Sync, long-lived |
-| Axum streaming body | `router.get_stream(path, handler)` | Async handler returns `StreamResponse`. Push chunks via `StreamSender` |
+| Axum streaming body | `router.get_stream(path, handler)` | Async handler returns `Response`, `StreamResponse`, or either in `Result`. Push chunks via `StreamSender` |
 | `reqwest::get(url).await` | `http::get(url).await?` | Async. Same `.await` pattern as reqwest |
 | `reqwest::Client::builder()` | `http::client()` | `.retries(3).backoff(Duration).connect_timeout(Duration)` |
 | `tokio::time::sleep` | `tokio::time::sleep` | Use directly in async handlers |
@@ -150,12 +150,19 @@ reqwest's `chunk()`. A stream keeps the client's response maximum, idle
 interval, and total timeout. See
 [Streaming A Response](../reference/client.md#streaming-a-response).
 
+Redirects are disabled by default. Select `RedirectPolicy::SameOrigin` for
+same-origin hops, or `RedirectPolicy::cross_origin(max_hops, origins)?` for an
+explicit origin allowlist. An origin change permanently removes credentials;
+HTTPS cannot redirect to HTTP. Both response modes share these rules and one
+operation deadline. See [Redirects](../reference/client.md#redirects).
+
 **Warning.** A default client sends to every address, private ones included,
 as a default reqwest client does. Do not give it a URL you do not trust.
 Give that client an `EgressPolicy` with `Client::egress_policy`:
 `EgressPolicy::public_internet()` admits ordinary public unicast addresses
-only, for buffered and streamed calls. Each restricted call resolves the host
-once and builds its own transport. Connections are not shared across calls. See
+only, for buffered and streamed calls. Each restricted call resolves its first
+destination and each changed origin, including return hops. Retries reuse the
+current checked addresses. Connections are not shared across calls. See
 [Destination Policy](../reference/client.md#destination-policy).
 
 ## HTTP Client with Retries
@@ -561,20 +568,21 @@ async fn stream_handler() -> Body {
 ```rust
 use camber::http::{Request, Router, StreamResponse};
 
-router.get_stream("/stream", |_req: &Request| {
-    Box::pin(async {
-        let (resp, sender) = StreamResponse::new(200);
-        camber::spawn_async(async move {
-            sender.send("chunk 1\n").await.ok();
-            sender.send("chunk 2\n").await.ok();
-        });
-        resp.with_header("Content-Type", "text/plain")
-    })
+router.get_stream("/stream", |_req: &Request| async {
+    let (resp, sender) = StreamResponse::new(200);
+    camber::spawn_async(async move {
+        sender.send("chunk 1\n").await?;
+        sender.send("chunk 2\n").await
+    });
+    resp.with_header("Content-Type", "text/plain")
 });
 ```
 
 `StreamResponse::new()` returns both the response (for the handler to return) and a `StreamSender` (for pushing chunks asynchronously).
 If a stream needs different backpressure tuning, use `StreamResponse::with_buffer(status, cap)`.
+The handler can also return a buffered `Response`, or use `?` in a `Result` return type.
+When one handler chooses between buffered and streamed answers, convert the buffered branch with `response.into()` to `StreamResponse`.
+This conversion retains headers and body storage without creating a channel. Both branches keep the route's download policy.
 
 ## Async Handlers
 
@@ -596,7 +604,8 @@ router.get("/data", |_req| async {
 });
 ```
 
-All handlers return futures. The closure receives `&Request`; parse or copy its data before returning `async move`.
+All handlers return futures. Capture owned metadata before returning `async move`.
+Use `req.body_shared()` to retain buffered bytes without copying the payload.
 The future returns `Response` or `Result<Response, RuntimeError>`. Use the latter for `?` propagation.
 
 ## OpenTelemetry Tracing
@@ -712,7 +721,16 @@ router.post("/numbers", |req| {
 });
 ```
 
-`IntoResponse` carries the result to the router's rejection boundary rather than converting it. That boundary answers `RuntimeError::BadRequest` with 400 and your message, `RuntimeError::MalformedBody` and `RuntimeError::Multipart` with 400 and fixed text, `RuntimeError::ScopeClosed` with 503, and every other error with a redacted 500 whose body is exactly `internal server error` — your error text and its source chain go to the operator log instead. `ScopeClosed` means the runtime refused a spawn inside the shutdown window, which is an orderly drain rather than a server fault — 503 is what a load balancer reads as "drain this instance". Handlers returning `Response` pass through unchanged. `Router::rejection_mapper` replaces every one of those answers.
+`IntoResponse` carries errors to the router's rejection boundary. `BadRequest`
+produces `400` with its declared message. `MalformedBody` and `Multipart` produce
+`400` with fixed text. `ScopeClosed` and `Turn` refusals produce `503`.
+`Turn` retains the distinct `TurnAdmission` category.
+
+Internal faults produce a redacted `500` with the body `internal server error`.
+Their error text and source chains go to the operator log. See the
+[rejection categories](../reference/http.md#categories) for body and transport failures.
+Handlers returning `Response` pass through unchanged. `Router::rejection_mapper`
+can replace these default answers.
 
 ## Concurrent Work in Handlers
 
@@ -754,8 +772,47 @@ router.get("/fan-out", |_req| async {
 
 ## Direct Tokio Boundaries
 
-Camber runs on Tokio. It wraps the parts where opinionated defaults reduce ceremony. It
-leaves the rest alone. This section is the explicit boundary.
+Camber runs on Tokio. It wraps service policies and leaves lower-level
+coordination available through Tokio's APIs.
+
+### Queue access to a service resource
+
+Use `camber::Turn` when requests must share a resource with limited capacity.
+`Turn::new()` admits one holder; `Turn::with_capacity(n)?` admits up to `n`.
+Clones share a FIFO queue, and the owned guard releases capacity when dropped.
+Queue order follows acquisition registration, not HTTP arrival time.
+
+```rust,no_run
+use camber::{RuntimeError, Turn};
+use std::time::{Duration, Instant};
+
+async fn sorted(turn: &Turn, mut values: Vec<u64>) -> Result<Vec<u64>, RuntimeError> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let guard = turn.acquire_until(Some(deadline), camber::on_shutdown()).await?;
+    camber::spawn(move || {
+        values.sort_unstable();
+        drop(guard);
+        values
+    }).await
+}
+```
+
+Run this function inside a Camber runtime. Moving the guard into blocking work
+keeps capacity occupied if its result waiter disappears. The guard belongs to
+the resource operation, which may outlive the request.
+
+`queued()` counts registered waits that have not completed. `close()` stops
+admission and wakes queued callers; delivered guards remain valid. Turn refusals
+retain their typed `Cancelled`, `Deadline`, or `Closed` cause through
+`RuntimeError::Turn`. HTTP maps them to `TurnAdmission` and `503` before commitment.
+A rejection mapper reads the cause from `Rejection::turn_refusal()`, so it can
+answer only `Deadline` with `429`.
+
+Keep `tokio::sync::Mutex` and `RwLock` for shared data. Use Tokio's semaphore
+directly when you need its lower-level permit operations. See
+[Fair Service Turns](../reference/tasks-and-channels.md#fair-service-turns) and
+[HTTP admission examples](../reference/http.md#waiting-for-a-service-turn) for
+request cancellation, timer requirements, and heartbeats that retain queue position.
 
 ### Wrapped by Camber
 
@@ -763,6 +820,7 @@ leaves the rest alone. This section is the explicit boundary.
 |------|-----------|-----------------|
 | Runtime bootstrap | `runtime::run`, `RuntimeBuilder` | `#[tokio::main]`, manual runtime config |
 | Task spawning | `spawn`, `spawn_async` | `tokio::spawn`, `tokio::task::spawn_blocking` |
+| Service admission | `Turn`, `TurnGuard` | Fair semaphore admission with queue counts and typed refusals |
 | Shutdown coordination | `on_shutdown`, `on_cancel`, `request_shutdown` | Manual signal handling + cancellation tokens |
 | Sync channels | `channel::bounded`, `channel::new`, `select!` | `crossbeam-channel` (same underneath) |
 | Async MPSC | `channel::mpsc` | `tokio::sync::mpsc` (same underneath) |

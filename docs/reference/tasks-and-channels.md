@@ -17,8 +17,27 @@ let value = handle.join()?;
 
 `JoinHandle<T>` supports:
 
+- `.await`
 - `.join()`
 - `.cancel()`
+
+In async code, await blocking work so the runtime worker stays available:
+
+```rust
+use camber::RuntimeError;
+
+async fn count_words(input: Box<str>) -> Result<usize, RuntimeError> {
+    camber::spawn(move || input.split_whitespace().count()).await
+}
+```
+
+Both wait forms return the same result and errors: `NoRuntime`, `ScopeClosed`, or
+`TaskPanicked`. `join()` blocks the calling thread. `.await` yields the worker until the result arrives.
+Dropping the handle or its future discards the result. The runtime scope still owns
+the closure until it finishes, because Camber cannot preempt blocking work.
+To request cancellation at a cooperating Camber IO boundary, call `cancel()` before you await the handle.
+
+The future type is `camber::task::JoinFuture`, beside `camber::task::AsyncJoinFuture`.
 
 ### `spawn_async`
 
@@ -42,6 +61,71 @@ let value = handle.await?;
 ## Structured Concurrency
 
 Tasks spawned inside `runtime::run(...)` or `RuntimeBuilder::run(...)` are part of the runtime scope. Camber waits for them before returning.
+
+## Fair Service Turns
+
+Use `Turn` to share a limited service resource across requests. `Turn::new()`
+admits one holder. `Turn::with_capacity(n)?` admits up to `n` holders and rejects
+zero or values above Tokio's semaphore limit. Clones share capacity and closure.
+
+`acquire().await` returns `Result<TurnGuard, RuntimeError>`. Hold the owned guard
+for the resource operation; dropping it releases capacity. Admission follows
+the order in which acquisition futures register, rather than HTTP arrival order.
+An unpolled future has no queue position.
+
+`queued()` counts acquisitions that returned `Pending` and have not completed.
+This includes a reserved permit whose future has not yet delivered its guard.
+It excludes holders and unpolled futures. Dropping a waiting future removes its
+queue entry and releases any reserved capacity.
+
+### Deadlines, cancellation, and closure
+
+`acquire_until(deadline, cancel).await` accepts an optional absolute
+`std::time::Instant` and a cancellation future with any output type. It returns
+the same result type as `acquire()`. Ready cancellation wins over an expired
+deadline; an expired deadline wins over a grant.
+
+Refusals are `RuntimeError::Turn(TurnRefused::Cancelled)`, `Deadline`, or `Closed`.
+`close()` stops admission and wakes queued callers. Closure affects every clone;
+`is_closed()` reports it. Delivered guards remain valid until dropped.
+
+Untimed acquisition needs no runtime. A pending timed wait needs Tokio's timer
+driver, as `tokio::time::sleep` does. Without Tokio, it returns `NoRuntime`. On a
+Tokio runtime with the timer driver disabled, it panics inside Tokio. Camber
+runtimes always enable the timer driver.
+
+Ready cancellation, expiry, closure, and immediate grants need no timer. A
+refusal leaves no queue entry behind.
+
+Cancellation is explicit. Pass `camber::on_shutdown()` to stop waiting when the
+Camber runtime begins shutdown. Without a Camber runtime, `on_shutdown()` remains
+pending. A peer disconnect drops the handler future, and the dropped acquisition
+leaves the queue. [HTTP admission examples](http.md#waiting-for-a-service-turn)
+show request work, typed refusal answers, and a heartbeat loop.
+
+### Keep the guard with blocking work
+
+Move the guard into the closure when blocking work owns the resource. Dropping
+the result waiter does not stop that closure. Releasing its guard earlier could
+admit another operation while the first one still runs.
+
+```rust,no_run
+use camber::{RuntimeError, Turn};
+
+async fn sort_with_turn(turn: &Turn, mut values: Vec<u64>) -> Result<Vec<u64>, RuntimeError> {
+    let guard = turn.acquire_until(None, camber::on_shutdown()).await?;
+    camber::spawn(move || {
+        values.sort_unstable();
+        drop(guard);
+        values
+    })
+    .await
+}
+```
+
+Call this function inside a Camber runtime so `spawn` can admit the closure.
+`Turn` creates no background task and does not cancel admitted work. The work
+owner decides when to release its guard.
 
 ## Channels
 
@@ -126,8 +210,14 @@ Methods:
 
 ## Primitives That Stay Direct Tokio
 
-Two coordination primitives are intentionally left to Tokio because wrapping
-them adds indirection without meaningful DX improvement.
+Use Tokio directly for locks and channel operations that need no service
+admission policy.
+
+### `tokio::sync::Mutex` and `RwLock` — Shared Data
+
+Use these locks to protect shared data. `Turn` controls access to a service
+resource; it does not wrap or expose protected data. Keep using Tokio's semaphore
+when you need its lower-level permit operations.
 
 ### `tokio::sync::broadcast` — Multi-Subscriber Event Fanout
 

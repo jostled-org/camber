@@ -16,7 +16,7 @@
 //! wherever the handler left its access handle.
 
 use super::body::HyperResponseBody;
-use super::body_admission::{self, AdmittedBody, ResolvedBodyPlan};
+use super::body_admission::{self, BodyGrant, ResolvedBodyPlan};
 use super::dispatch::{FrozenRouter, PreBodyScope, StreamingMultipartTarget};
 use super::handle::{
     RequestDispatch, answer, answer_framework, answer_inbound_failure, gate_outcome,
@@ -181,7 +181,7 @@ async fn settled_answer(
 /// observer, and the operation whose transfer policy the upload runs under move
 /// together or not at all.
 struct Opening<'a> {
-    admitted: AdmittedBody,
+    admitted: BodyGrant,
     boundary: &'a str,
     limits: super::multipart::MultipartLimits,
     observer: SessionObserver,
@@ -234,7 +234,7 @@ async fn admit(
     plan: &ResolvedBodyPlan,
     origin: RequestOrigin<'_>,
     observer: Option<&Arc<LifecycleScript>>,
-) -> Result<AdmittedBody, Rejected> {
+) -> Result<BodyGrant, Rejected> {
     let head = RequestHead::from_hyper_request(hyper_req, origin);
     body_admission::admit(plan, &head, observer).await
 }

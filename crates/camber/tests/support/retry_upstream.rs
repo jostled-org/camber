@@ -1678,3 +1678,27 @@ fn client_closed(closed: std::io::Result<()>, shared: &PacedShared) -> Result<bo
     shared.advance(|seen| seen.client_closes += 1);
     Ok(false)
 }
+
+/// Read either client terminal through its public API, including streamed settlement.
+pub async fn client_answer(
+    request: camber::http::ClientRequest<'_>,
+    streaming: bool,
+) -> Result<(u16, Vec<u8>), camber::RuntimeError> {
+    match streaming {
+        false => {
+            let response = request.send().await?;
+            Ok((response.status(), response.body_bytes().to_vec()))
+        }
+        true => {
+            let response = request.send_streaming().await?;
+            let status = response.status();
+            let mut body = response.into_body();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = body.next().await? {
+                bytes.extend_from_slice(&chunk);
+            }
+            body.close().await?;
+            Ok((status, bytes))
+        }
+    }
+}

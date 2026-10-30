@@ -4,10 +4,11 @@
 //! Every helper here is the production function itself, reached through the
 //! doc-hidden `__private` surface. Each reads its arguments and owns nothing:
 //!
-//! - `client_redirect_destination(initial, current, location)` resolves one
-//!   `Location` value against the current URL. It returns the URL the next
-//!   send goes to, with no fragment, or the refusal. The origin it compares
-//!   against is the initial URL's.
+//! - `client_redirect_destination(policy, initial, current, location)`
+//!   resolves one `Location` value against the current URL. It returns the URL
+//!   the next send goes to, with no fragment, or the refusal. Same-origin
+//!   policy compares against the initial URL's origin. Cross-origin policy
+//!   also admits its allowlist and refuses an HTTPS-to-HTTP hop.
 //! - `client_next_redirect(policy, followed)` returns the ordinal of the
 //!   redirect a follow would spend, or `None` when the allowance is spent.
 //! - `client_send_total(retries_sent, redirects_followed)` returns how many
@@ -101,8 +102,24 @@ fn parsed(url: &str) -> Url {
 /// Resolve `location` for a call that began at `initial` and is now at
 /// `current`.
 fn destination(initial: &str, current: &str, location: &str) -> Result<String, ClientRedirect> {
-    client_redirect_destination(&parsed(initial), &parsed(current), location.as_bytes())
-        .map(String::from)
+    decided(&same_origin(1), initial, current, location)
+}
+
+/// Resolve `location` under `policy` for a call that began at `initial` and
+/// is now at `current`.
+fn decided(
+    policy: &RedirectPolicy,
+    initial: &str,
+    current: &str,
+    location: &str,
+) -> Result<String, ClientRedirect> {
+    client_redirect_destination(
+        policy,
+        &parsed(initial),
+        &parsed(current),
+        location.as_bytes(),
+    )
+    .map(String::from)
 }
 
 /// One pair of the matrix: a call that began at `initial`, answered with an
@@ -115,8 +132,12 @@ fn assert_origin_pair(initial: Origin, target: Origin) {
     let location = target.url("/next?page=2#fragment");
     let context = format!("{start} redirected to {location}");
 
-    let admitted =
-        client_redirect_destination(&parsed(&start), &parsed(&start), location.as_bytes());
+    let admitted = client_redirect_destination(
+        &same_origin(1),
+        &parsed(&start),
+        &parsed(&start),
+        location.as_bytes(),
+    );
 
     match (initial.same_as(target), admitted) {
         (true, Ok(next)) => {
@@ -283,7 +304,7 @@ fn same_origin(max_hops: usize) -> RedirectPolicy {
 fn assert_none_admits_no_redirect() {
     for followed in [0, 1, usize::MAX] {
         assert_eq!(
-            client_next_redirect(RedirectPolicy::None, followed),
+            client_next_redirect(&RedirectPolicy::None, followed),
             None,
             "None after {followed} redirects"
         );
@@ -295,24 +316,237 @@ fn assert_none_admits_no_redirect() {
 fn assert_hop_allowance_boundary(max_hops: usize) {
     let policy = same_origin(max_hops);
     assert_eq!(
-        client_next_redirect(policy, 0),
+        client_next_redirect(&policy, 0),
         Some(1),
         "the first of {max_hops} hops"
     );
     assert_eq!(
-        client_next_redirect(policy, max_hops - 1),
+        client_next_redirect(&policy, max_hops - 1),
         Some(max_hops),
         "the last of {max_hops} hops"
     );
     assert_eq!(
-        client_next_redirect(policy, max_hops),
+        client_next_redirect(&policy, max_hops),
         None,
         "a hop past {max_hops}"
     );
     assert_eq!(
-        client_next_redirect(policy, usize::MAX),
+        client_next_redirect(&policy, usize::MAX),
         None,
         "a full counter under {max_hops} hops"
+    );
+}
+
+/// The allowlist every cross-origin row reads.
+const CDN: &str = "https://cdn.example";
+
+/// A cross-origin policy that permits `origins`.
+fn cross_origin(origins: &[&str]) -> RedirectPolicy {
+    RedirectPolicy::cross_origin(2, origins).unwrap()
+}
+
+/// One cross-origin row: the allowlist, the URL the call is at, the
+/// `Location`, and the decision.
+type CrossRow = (
+    &'static [&'static str],
+    &'static str,
+    &'static str,
+    Result<&'static str, ClientRedirect>,
+);
+
+/// The URL every cross-origin call began at.
+const START: &str = "https://api.example/start";
+
+/// Every cross-origin decision row.
+const CROSS_ROWS: [CrossRow; 27] = [
+    (
+        &[CDN],
+        START,
+        "https://cdn.example/file",
+        Ok("https://cdn.example/file"),
+    ),
+    (
+        &[CDN],
+        START,
+        "https://cdn.example:443/f#x",
+        Ok("https://cdn.example/f"),
+    ),
+    (
+        &[CDN],
+        START,
+        "https://cdn.example:8443/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &["https://cdn.example:8443"],
+        START,
+        "https://cdn.example/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &["https://cdn.example:8443"],
+        START,
+        "https://cdn.example:8443/f",
+        Ok("https://cdn.example:8443/f"),
+    ),
+    (
+        &[CDN],
+        START,
+        "https://cdn.example.evil/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &[CDN],
+        START,
+        "https://evil-cdn.example/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &[CDN],
+        START,
+        "https://sub.cdn.example/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &[CDN],
+        START,
+        "https://CDN.Example/f",
+        Ok("https://cdn.example/f"),
+    ),
+    (
+        &["https://bücher.example"],
+        START,
+        "https://xn--bcher-kva.example/f",
+        Ok("https://xn--bcher-kva.example/f"),
+    ),
+    (
+        &["https://xn--bcher-kva.example"],
+        START,
+        "https://BÜCHER.example/f",
+        Ok("https://xn--bcher-kva.example/f"),
+    ),
+    (
+        &[CDN],
+        START,
+        "https://cdn.example./f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &["https://cdn.example."],
+        START,
+        "https://cdn.example/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &["https://cdn.example."],
+        START,
+        "https://cdn.example./f",
+        Ok("https://cdn.example./f"),
+    ),
+    (
+        &[CDN],
+        START,
+        "//cdn.example/f",
+        Ok("https://cdn.example/f"),
+    ),
+    (
+        &[CDN],
+        "http://api.example/start",
+        "//cdn.example/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &[CDN],
+        START,
+        "//evil.example/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &[CDN],
+        START,
+        "ftp://cdn.example/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &[CDN],
+        START,
+        "data:text/plain,cdn.example",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &[CDN],
+        START,
+        "https://user:pw@cdn.example/f",
+        Err(ClientRedirect::InvalidLocation),
+    ),
+    (
+        &[CDN],
+        START,
+        "https://cdn.example@evil.example/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &[CDN],
+        START,
+        "https://evil.example\\@cdn.example/f",
+        Err(ClientRedirect::OriginChanged),
+    ),
+    (
+        &["http://cdn.example"],
+        START,
+        "http://cdn.example/f",
+        Err(ClientRedirect::Downgrade),
+    ),
+    (
+        &[CDN],
+        "https://cdn.example/f",
+        "http://api.example/start",
+        Err(ClientRedirect::Downgrade),
+    ),
+    (
+        &[CDN],
+        "https://cdn.example/f",
+        "/again",
+        Ok("https://cdn.example/again"),
+    ),
+    (
+        &[CDN],
+        "https://cdn.example/f",
+        "https://api.example/back",
+        Ok("https://api.example/back"),
+    ),
+    (
+        &["http://cdn.example"],
+        "http://api.example/start",
+        "http://cdn.example/f",
+        Ok("http://cdn.example/f"),
+    ),
+];
+
+/// A cross-origin destination is admitted only when its scheme, normalized
+/// host, and effective port equal those of the initial origin or one entry.
+fn assert_cross_origin_decisions() {
+    for (origins, current, location, expected) in CROSS_ROWS {
+        assert_eq!(
+            decided(&cross_origin(origins), START, current, location),
+            expected.map(str::to_owned),
+            "allowlist {origins:?} at {current}: Location {location:?}"
+        );
+    }
+}
+
+/// An HTTP call that reaches HTTPS can never return to HTTP, even to its own
+/// initial origin.
+fn assert_secure_hop_never_returns_to_http() {
+    let start = "http://api.example/start";
+    assert_eq!(
+        decided(
+            &cross_origin(&[CDN]),
+            start,
+            "https://cdn.example/f",
+            "http://api.example/back"
+        ),
+        Err(ClientRedirect::Downgrade)
     );
 }
 
@@ -353,6 +587,8 @@ fn origin_and_send_accounting_share_production_predicates() {
     assert_relative_locations_resolve_against_the_current_url();
     assert_malformed_locations_are_invalid();
     assert_unsendable_locations_are_refused();
+    assert_cross_origin_decisions();
+    assert_secure_hop_never_returns_to_http();
 
     assert_none_admits_no_redirect();
     for max_hops in [1, 2, 7, usize::MAX] {

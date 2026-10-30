@@ -14,6 +14,8 @@ pub mod error_chain;
 pub mod halt;
 #[path = "support/http.rs"]
 pub mod http;
+#[path = "component_http_routing/turn_admission.rs"]
+mod turn_admission;
 // Mounted for the private child the connect-retry rows read their global
 // capture in, and for the one the egress rows give a proxy environment.
 #[path = "support/process.rs"]
@@ -83,6 +85,8 @@ mod hyper_transport;
 mod operation_commitment;
 #[path = "component_http_routing/path_parameters.rs"]
 mod path_parameters;
+#[path = "component_http_routing/policy_inspection.rs"]
+mod policy_inspection;
 #[path = "component_http_routing/query_parameters.rs"]
 mod query_parameters;
 #[path = "component_http_routing/response_metadata.rs"]

@@ -184,14 +184,35 @@ Past thirty years both refuse like the policy setters, and `run` returns
 `RuntimeError::InvalidArgument` naming the dimension. Set the deadline on a `ServerPolicy`
 when you want zero refused rather than raised.
 
-The runtime's policy is the outer ceiling for every server started inside it. A
-`ServerBuilder` may narrow any dimension and can never widen one; under bare Tokio its
-own `ServerPolicy` is the sole authority. The single-field setters above write onto the
-one stored `ServerPolicy`, so the last write to a field wins and the others keep what
-`server_policy` set. `shutdown_timeout` is the runtime's aggregate deadline: its servers
-and its root scope consume the same duration rather than one each.
+The runtime's policy contains every server started inside it, per dimension:
+
+- If both set a dimension explicitly, the narrower value applies.
+- If only one sets it explicitly, that value applies. A default never narrows an
+  explicit setting.
+- If neither sets it, the narrower default applies.
+
+`shutdown_timeout` is the exception. It is the runtime's aggregate deadline, and the
+runtime enforces it on every participant. A server drain can shorten it but never
+outlive it, even when the runtime uses its 30-second default. Under bare Tokio a
+server's own `ServerPolicy` is the sole authority. The single-field setters above write
+onto the one stored `ServerPolicy`, so the last write to a field wins and the others keep
+what `server_policy` set.
 
 ### One aggregate shutdown deadline
+
+An embedded server with a default drain takes an explicit runtime `shutdown_timeout`.
+A 120-second runtime deadline gives a default server a 120-second drain.
+An explicit server drain can shorten that. An explicit server drain longer than a default
+runtime deadline is cut to the runtime's 30 seconds, and startup reports a diagnostic.
+To drain longer, set the runtime's `shutdown_timeout`.
+
+The startup policy report exposes `runtime_shutdown_timeout()`, `local_shutdown_timeout()`, and the effective `shutdown_timeout()`.
+`runtime_shutdown_timeout()` is `None` without a configured runtime. `serve(addr)` builds
+its own runtime from the server's policy, and that runtime is not reported as a layer.
+`local_shutdown_timeout()` is the server's own drain limit, configured or default.
+`ServerBuilder::on_policy_resolved` can reject unwanted effective settings before accepting connections.
+The server handle and its join future retain that exact report.
+These inspection values do not start or reset the shared absolute shutdown deadline.
 
 The first graceful transition anywhere — `runtime::request_shutdown()`, a signal the
 watcher delivers, `ServerHandle::shutdown()`, a server's own fatal drain, or the `run`
@@ -201,7 +222,7 @@ admitted request, a registered upgrade, the root scope, a registered resource, a
 Tokio executor all narrow one expiry instead of each starting a fresh copy of the grace.
 
 A participant may be narrower and never wider. A `ServerBuilder` inside the runtime
-narrows `shutdown_timeout` like any other dimension, and a resource callback receives the
+drains no longer than `shutdown_timeout`, and a resource callback receives the
 smaller of its `ResourceBudget` phase deadline and the time the aggregate has left. No
 participant is cut below the fixed 100 ms forced-join grace, which is what a forced stop
 gives an owner it has just told to end.
@@ -295,9 +316,15 @@ public server result still follows the accepted server command.
 Every terminal requires an active Tokio runtime and captures its Camber or
 plain-Tokio context synchronously, before it returns. A Camber call site
 captures runtime shutdown, the containing `ServerPolicy`, and observability
-state; the server's own policy narrows that envelope and can never widen it. A
+state; the server's own policy resolves inside that envelope as
+[Runtime Builder](#runtime-builder) describes. A
 plain-Tokio call site uses per-server control and its own `ServerPolicy` as the
 sole authority, with no Camber task accounting.
+
+HTTP/1.1 handlers and HTTP/2 stream futures carry that captured context, including polls after `.await` and response-body work.
+Their `spawn` and `spawn_async` calls admit children to the same owning runtime.
+Once its scope closes, new spawn handles report `ScopeClosed`; captured context does not reopen admission.
+A server created on bare Tokio keeps reporting `NoRuntime` for those calls, even when a Camber runtime later polls its future.
 
 `serve_async*` returns an owned future, not an `async fn`: routing is frozen and
 the context captured before the future exists, so moving it to another executor

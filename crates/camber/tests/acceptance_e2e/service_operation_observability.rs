@@ -160,17 +160,17 @@ fn serve(policy: ServerPolicy) -> http_support::ObservedServer<ScopedUnwatched> 
     http_support::reserve_unwatched().serve_with_policy(served_routes(), policy)
 }
 
-/// The unnamed spelling is not a spelling of unbounded.
+/// A server that names no profiling spelling freezes the maximum its runtime supplies.
 ///
 /// A profile rendered from this fixture's load is orders of magnitude under
 /// eight MiB, so what a defaulted server answers with is byte for byte what the
 /// opt-out row beside it answers with: a bound assertion on the body would hold
-/// with no ceiling wired at all. The two spellings are told apart by the maximum
-/// production froze — this server names no profiling spelling and renders under
-/// the documented default, and only the named opt-out renders under none.
+/// with no ceiling wired at all. The spellings are told apart by the maximum
+/// production froze. Under a defaulted runtime this server renders under the
+/// documented default. Under a runtime that names the opt-out, the server's
+/// default yields to that explicit choice and renders under none.
 #[cfg(feature = "profiling")]
-async fn assert_the_unnamed_spelling_freezes_the_documented_maximum() {
-    let label = "the defaulted render";
+async fn assert_the_unnamed_spelling_freezes(expected: usize, label: &str) {
     let controller = mock::profiling_worker().expect("one profiling observer");
     let server = serve(base_policy());
     let addr = server.addr();
@@ -186,8 +186,8 @@ async fn assert_the_unnamed_spelling_freezes_the_documented_maximum() {
 
     let rendered = Rendered::of(&controller);
     assert_eq!(
-        rendered.ceiling, DEFAULT_PROFILING_RESPONSE_LIMIT,
-        "{label}: the unnamed spelling renders under the documented maximum",
+        rendered.ceiling, expected,
+        "{label}: the unnamed spelling renders under the maximum its runtime supplies",
     );
     assert_eq!(
         rendered.peak,
@@ -213,8 +213,8 @@ async fn assert_the_unnamed_spelling_freezes_the_documented_maximum() {
 /// The worker is held at its entry, before it has sampled anything. While it is
 /// held, the one Tokio worker this fixture has answers an ordinary request — so
 /// the sampling window that follows is provably not standing on it. Released,
-/// the render is retained whole because this server named the opt-out and the
-/// runtime containing it named the same.
+/// the render is retained whole because this server named the opt-out, and a
+/// defaulted runtime never narrows an explicit server choice.
 ///
 /// Returns what the first accounted write left retained, which is the exact
 /// maximum the crossing row freezes.
@@ -418,10 +418,14 @@ fn assert_profiling_sampling_and_rendering_are_bounded_off_workers() {
     // Dropping the load stops and joins it too, which is what covers a row that
     // unwinds; `stop` is the success path, where the join is asserted.
     let load = common::CpuLoad::start(LOAD_THREADS);
-    let boundary = profiling_runtime(base_policy().unbounded_profiling_response())
+    let boundary = profiling_runtime(base_policy())
         .run(|| {
             let boundary = common::block_on(async {
-                assert_the_unnamed_spelling_freezes_the_documented_maximum().await;
+                assert_the_unnamed_spelling_freezes(
+                    DEFAULT_PROFILING_RESPONSE_LIMIT,
+                    "the defaulted render",
+                )
+                .await;
                 let boundary = assert_held_entry_renders_whole_under_the_opt_out().await;
                 assert_the_crossing_write_is_dropped_and_named(
                     base_policy()
@@ -440,8 +444,8 @@ fn assert_profiling_sampling_and_rendering_are_bounded_off_workers() {
 
     // The containing policy is resolved when a server starts inside a runtime, so
     // naming a finite outer maximum takes a second runtime. The server inside this
-    // one opts out and renders under the runtime's maximum anyway: an inner
-    // opt-out inherits an outer bound rather than erasing it.
+    // one opts out and renders under the runtime's maximum anyway: an explicit
+    // outer maximum contains an explicit inner opt-out.
     profiling_runtime(
         base_policy()
             .profiling_response_limit(boundary)
@@ -456,6 +460,18 @@ fn assert_profiling_sampling_and_rendering_are_bounded_off_workers() {
         runtime::request_shutdown();
     })
     .expect("the containing fixture runtime ran to completion");
+
+    // A third runtime names the opt-out itself. The server inside it names no
+    // spelling, so its default yields to the runtime's explicit choice.
+    profiling_runtime(base_policy().unbounded_profiling_response())
+        .run(|| {
+            common::block_on(assert_the_unnamed_spelling_freezes(
+                UNBOUNDED,
+                "the defaulted render under a runtime opt-out",
+            ));
+            runtime::request_shutdown();
+        })
+        .expect("the opt-out runtime ran to completion");
 
     load.stop();
 }

@@ -34,9 +34,9 @@ use crate::error_chain::assert_safe;
 use crate::retry_upstream::{
     Answer, CHUNKED, Call, Pace, PacedUpstream, PeerEvent, Recorded, Recording, RecordingUpstream,
     RunnableDriver, ScriptedUpstream, StreamHead, StreamNext, TIMER_ROUNDING, WATCHDOG, answer,
-    answered, assert_released, close, demand, failed_as, failure, must_settle, on_peers,
-    paced_chunk, paced_end, paced_head, peer_runtime, read_out, required, saw_each, settle_wakeups,
-    settled, watch_streams, within_watchdog, yielded_until,
+    answered, assert_released, client_answer, close, demand, failed_as, failure, must_settle,
+    on_peers, paced_chunk, paced_end, paced_head, peer_runtime, read_out, required, saw_each,
+    settle_wakeups, settled, watch_streams, within_watchdog, yielded_until,
 };
 use crate::untrusted_tls::{TlsPeerEvent, untrusted_tls_peer};
 
@@ -1132,6 +1132,7 @@ fn bare_rows() {
         local_conversions_record_nothing().await;
         retries_are_counted_as_attempts().await;
         redirects_are_counted_and_refusals_recorded().await;
+        cross_origin_completions_count_the_whole_operation().await;
         crossed_limit_is_recorded().await;
         send_time_refusal_records_zero_attempts().await;
         egress_refusals_record_zero_attempts().await;
@@ -1143,6 +1144,64 @@ fn bare_rows() {
         // Last, because it is the one row that holds the clock still.
         expired_operation_is_recorded().await;
     });
+}
+
+async fn cross_origin_completions_count_the_whole_operation() {
+    for streaming in [false, true] {
+        cross_origin_completion(streaming).await;
+    }
+}
+
+async fn cross_origin_completion(streaming: bool) {
+    let row = format!("cross-origin redirect then retry, streaming={streaming}");
+    let destination = RecordingUpstream::bind_responder(respond).await;
+    let location = secret_url(&destination.url(""), FLAKY);
+    let source = RecordingUpstream::bind(redirect(&location)).await;
+    let policy = RedirectPolicy::cross_origin(1, [&destination.url("")]).unwrap();
+    let client = retrying_client().redirect_policy(policy);
+    let url = secret_url(&source.url(""), FOLLOWED);
+    let request = described(&client, "GET", &url)
+        .sensitive_header("x-private", HEADER_SECRET)
+        .unwrap()
+        .header("Cookie", &format!("session={TOKEN_SECRET}"))
+        .unwrap();
+    let capture = common::capture_events(COMPLETED);
+    let (status, payload) = must_settle(
+        &row,
+        "both destinations and retry",
+        client_answer(request, streaming),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(payload, REPLY_BODY_SECRET.as_bytes(), "{row}");
+    let first = source.finish_probed(&row).await;
+    let second = destination.finish_probed(&row).await;
+    assert_eq!(first.requests.len(), 1, "{row}");
+    assert_eq!(second.requests.len(), 2, "{row}");
+    assert_cross_origin_wire_sentinels(&first, &second);
+    assert_completion(
+        &row,
+        &capture,
+        &Completion::answered("GET", "200", first.requests.len() + second.requests.len())
+            .redirects(1),
+    );
+}
+
+fn assert_cross_origin_wire_sentinels(first: &Recording, second: &Recording) {
+    let sent = &first.requests[0];
+    assert_eq!(
+        *sent.header_values("authorization"),
+        [format!("Bearer {TOKEN_SECRET}").as_str()]
+    );
+    assert_eq!(*sent.header_values("x-private"), [HEADER_SECRET]);
+    assert!(sent.target().contains(PATH_SECRET));
+    for request in &second.requests {
+        assert!(request.header_values("authorization").is_empty());
+        assert!(request.header_values("cookie").is_empty());
+        assert!(request.header_values("x-private").is_empty());
+        assert!(request.target().contains(QUERY_SECRET));
+    }
 }
 
 /// The route whose handler returns its refused call as its own failure.

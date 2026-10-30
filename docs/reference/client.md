@@ -87,8 +87,10 @@ Under `public_internet()`, each call does these steps:
    `Address`. An empty or failed lookup is `Dns`.
 5. It dials only the checked addresses.
 
-Every retry and every followed redirect of that call uses the same checked
-addresses. No second lookup replaces them. The request keeps its host name, so
+Retries and same-origin redirects use the current checked addresses.
+A change of origin resolves and checks the new destination before sending.
+A return to an earlier origin also requires a fresh lookup and admission.
+The request keeps its host name, so
 the `Host` header, the TLS server name, and certificate verification read the
 name and not the address.
 
@@ -102,7 +104,8 @@ the client's reusable connection pool.
 **Cost.** A call under `public_internet()` builds a transport of its own and
 uses no proxy from the environment or the system. Camber closes its
 connections when the call ends. Each call therefore pays a lookup, a connect,
-and a TLS handshake. No restricted call reuses a connection from another call.
+and a TLS handshake for each origin it admits. No restricted call reuses a
+connection from another call.
 A streamed call holds its transport until its body is released.
 
 **Limits.** The ranges are conservative application policy. Camber cannot
@@ -216,10 +219,41 @@ let once = client
     .await?;
 ```
 
+To permit a cross-origin chain, provide exact origins and a positive hop bound:
+
+```rust
+use camber::http::{self, RedirectPolicy};
+
+let follow = RedirectPolicy::cross_origin(3, [
+    "https://downloads.example",
+    "https://storage.example:8443",
+])?;
+let client = http::client().redirect_policy(follow);
+```
+
+`cross_origin` takes any iterable of strings, such as an array or a
+`Vec<String>` read from configuration. The initial origin is always permitted.
+Every other origin must appear in the allowlist. An entry cannot contain
+credentials, a query, a fragment, or a path beyond `/`. A refusal returns
+`ClientError::InvalidRequest(ClientInput::RedirectPolicy(reason))`. The
+`ClientRedirectPolicy` reason is `ZeroHops`, `EmptyAllowlist`, or
+`Origin(index)` for the first invalid entry. The reason names the position of an entry and never its text.
+
+Camber sorts the allowlist and removes repeated origins, so two policies with
+the same hop bound and origins are equal in any order. `max_hops()` and
+`origins()` on `CrossOriginRedirects` read them back. `Debug` prints the hop
+bound and the origins. The policy shares immutable allowlist storage.
+`RedirectPolicy` implements `Clone` and no longer implements `Copy`; clone a
+policy when reusing its value.
+
 The origin is the scheme, the host, and the port. The host is compared without
-regard to case, and a port that is not written is the default port of the
-scheme. Each `Location` is resolved against the URL of the request it answers
-and is compared with the origin of the first request. Its fragment is removed.
+regard to case or IDN spelling, and a port that is not written is the default
+port of the scheme. A root dot makes another origin: `cdn.example.` and
+`cdn.example` are two redirect origins. An egress exception treats them as one
+origin, because they resolve alike. Both rules fail closed.
+
+Each `Location` is resolved against the URL of the request it answers and must
+pass the chosen origin policy. Its fragment is removed.
 
 Camber follows a 301, 302, 303, 307, or 308 answer that has one `Location`. An
 answer with no `Location`, and every other 3xx status, is returned as the
@@ -230,7 +264,8 @@ names:
 | Redirect | `ClientRedirect` |
 | --- | --- |
 | A repeated `Location`, one that is not a URL, or one with a user name or password | `InvalidLocation` |
-| Another scheme, host, or port, including HTTPS to HTTP | `OriginChanged` |
+| Another origin under `SameOrigin`, or an origin outside the cross-origin allowlist | `OriginChanged` |
+| HTTPS to HTTP under the cross-origin policy, even when allowlisted | `Downgrade` |
 | More redirects than `max_hops` in one call | `HopLimit` |
 | A method the status does not let Camber send again | `UnsafeMethod` |
 
@@ -246,13 +281,26 @@ The status decides the method and the body of the next request:
 | 307, 308 | any other, under `RetryPolicy::Replayable` | The same method, body, and headers |
 | 307, 308 | any other | Refused as `UnsafeMethod` |
 
+The same rules apply under both policies. When a hop changes origin, the body
+goes to the allowlisted origin, and the headers lose their credentials as
+described below. A refused `POST` dials nothing at the new origin.
+
 `RetryPolicy::Never` stops retries. It does not stop a redirect.
 
-A followed redirect carries every header of the request, credentials
-included. Camber never removes credentials to send to another origin: it
-refuses the redirect. A redirect policy compares origins and reads no
-address. A [destination policy](#destination-policy) reads the address. Under
-one, a followed redirect uses the addresses its call already checked.
+A same-origin hop keeps the current headers. On each origin change, Camber
+permanently removes `Authorization`, `Cookie`, and every header marked sensitive.
+An ordinary header setter cannot clear an earlier sensitive mark. Retries and
+return hops cannot restore removed headers. Other headers stay on the request.
+
+> **Set secrets with `sensitive_header`.** Camber does not guess which other
+> headers are secret. A key set with plain `header`, such as `X-Api-Key`, goes
+> to every allowlisted origin.
+
+A [destination policy](#destination-policy) still checks each destination.
+The operation retains its TLS trust, connect bound, timer profile, and egress
+policy. Under address restrictions, each origin change gets a new checked pin.
+Retries and same-origin hops reuse the current pin. Scheme restrictions apply
+to every hop, including clients that restrict no addresses.
 
 Each redirect spends one hop. Each retry spends one retry. A redirect does not
 return a spent retry, and a retry does not return a spent hop, so one call
@@ -261,8 +309,8 @@ the last redirect led to. For example, a `POST` that a 303 changed to a `GET`
 is not sent again when that `GET` is retried.
 
 Every followed redirect runs under the same `total_timeout`, with its own
-`request_timeout`. Camber releases a redirect answer before the next request
-and does not read its body. Only the final answer is collected, under the
+`request_timeout`. Camber releases a redirect answer before any new DNS lookup
+or request and does not read its body. Only the final answer is collected, under the
 response maximum.
 
 ### Ambient Headers
@@ -498,7 +546,7 @@ and it has no source.
 | One pending `ClientBody::next` outlived `response_idle_timeout` | `Timeout(ClientTimeout::ResponseIdle)` |
 | Any other send or read failure, including a truncated body | `Transport` |
 | The response crossed its maximum | `ResponseTooLarge { limit }` |
-| A redirect was refused under `RedirectPolicy::SameOrigin` | `Redirect(ClientRedirect)` |
+| A redirect was refused under the selected redirect policy | `Redirect(ClientRedirect)` |
 | The client's destination policy refused the call | `Egress(ClientEgress)` |
 
 A status is not a failure. A call that receives a `404` or a `503` returns
@@ -787,7 +835,7 @@ handler sends carries the `traceparent` of that handler's request.
   and every followed redirect of that call sends the same value.
 - `trace_context(false)` on a request adds no `traceparent`.
 - A `traceparent` that you set with `header` is sent unchanged under either
-  setting.
+  setting. Marking it sensitive removes it on an origin change.
 - A call outside the middleware has no context and adds no header.
 - Without the `otel` feature, no call adds a `traceparent`.
 

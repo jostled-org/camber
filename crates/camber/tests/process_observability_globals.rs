@@ -51,6 +51,10 @@ mod event_rows;
 mod nats_ack_events;
 
 #[cfg(all(feature = "dns01", feature = "nats", feature = "sqs"))]
+#[path = "process_observability_globals/nats_forced_events.rs"]
+mod nats_forced_events;
+
+#[cfg(all(feature = "dns01", feature = "nats", feature = "sqs"))]
 #[path = "process_observability_globals/nats_events.rs"]
 mod nats_events;
 

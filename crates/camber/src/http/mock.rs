@@ -5246,16 +5246,16 @@ impl MultipartSessionBuilder {
     }
 }
 
-/// Build the admitted body one controlled session reads under.
+/// Build the body grant one controlled session reads under.
 fn admitted_controlled_body(
     limit: usize,
     permit: Option<WitnessedPermit>,
-) -> super::body_admission::AdmittedBody {
+) -> super::body_admission::BodyGrant {
     let admission = match permit {
         Some(probe) => super::BodyAdmission::with_permit(limit, probe),
         None => super::BodyAdmission::new(limit),
     };
-    super::body_admission::AdmittedBody {
+    super::body_admission::BodyGrant {
         limit,
         permit: admission.into_permit(None),
     }

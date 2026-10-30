@@ -2,6 +2,9 @@ use super::body_admission::{BodyPolicy, ConfiguredCeiling, RequestBodyMode, Reso
 use super::host_router::FrozenHostRouter;
 use super::method::Method;
 use super::middleware::{MiddlewareFn, Next, ResponseFuture, Terminal, TerminalEntry};
+use super::policy_report::{EffectiveProxyPolicy, EffectiveRoutePolicy, PolicyReport};
+use super::policy_resolution::Located;
+use super::policy_sources::{PolicyBound, PolicyLayer, PolicyLayers};
 use super::proxy_upstream::ProxyUpstream;
 use super::rejection::{
     Rejected, RejectionMapper, RejectionProtocol, RejectionScope, RequestIdentity,
@@ -9,18 +12,15 @@ use super::rejection::{
 use super::request::{Params as RequestParams, RequestHead};
 use super::response_commitment::ResponseOrigin;
 use super::route_budgets::RouteBudgets;
-use super::stream::StreamResponse;
 pub(super) use super::trie::Handler;
 pub(super) use super::trie::SseHandler;
 #[cfg(feature = "ws")]
 pub(super) use super::trie::WsLauncher;
 use super::trie::{
     FrozenNode, MultipartRegistration, PATH_SEGMENT_LIMIT, RouteHandler, RouteLookup, Selected,
-    split_path_segments,
+    StreamHandler, split_path_segments,
 };
 use super::{Request, Response};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -143,11 +143,11 @@ pub(super) struct Classified<'a> {
     /// could not parse never leaves here as `None` — it leaves as
     /// [`RouteClass::Refused`], answered from the head.
     pub(super) router: Option<&'a FrozenRouter>,
-    /// The budgets this head resolved to, narrowed outer-to-inner exactly once.
+    /// The budgets this head's router resolved to when the server froze.
     ///
-    /// Resolved here because this is where host and route authority is
-    /// selected: every later owner reads the answer rather than re-deriving it
-    /// from a layer it happens to hold.
+    /// Read here because this is where host and route authority is selected:
+    /// every later owner reads the answer rather than re-deriving it from a
+    /// layer it happens to hold.
     pub(super) budgets: RouteBudgets,
 }
 
@@ -250,10 +250,105 @@ fn upstream_unhealthy(healthy: &Option<Arc<AtomicBool>>) -> bool {
         .is_some_and(|flag| !flag.load(Ordering::Relaxed))
 }
 
+/// The budgets one registration configured beneath its router.
+fn registration_budgets(handler: &RouteHandler) -> RouteBudgets {
+    match handler {
+        RouteHandler::Sse(registration) => registration
+            .configured_budget()
+            .map_or_else(RouteBudgets::default, |budget| {
+                RouteBudgets::default().with_download(budget)
+            }),
+        RouteHandler::ProxyStream { budgets, .. } => *budgets,
+        _ => RouteBudgets::default(),
+    }
+}
+
+fn registration_proxy(handler: &RouteHandler) -> Option<EffectiveProxyPolicy> {
+    match handler {
+        RouteHandler::Proxy { upstream, .. } => {
+            Some(EffectiveProxyPolicy::new(upstream.policy(), false))
+        }
+        RouteHandler::ProxyStream { upstream, .. } => {
+            Some(EffectiveProxyPolicy::new(upstream.policy(), true))
+        }
+        _ => None,
+    }
+}
+
+/// The ceiling one registration admits under its router's resolved ceiling.
+///
+/// A proxy route's own upload maximum is a second bound on the same bytes, so
+/// the smaller of the two applies. A request reads this; it does no provenance work.
+fn registration_ceiling(handler: &RouteHandler, ceiling: usize) -> usize {
+    registration_upload_limit(handler).map_or(ceiling, |bytes| ceiling.min(bytes))
+}
+
+/// [`registration_ceiling`] with the layers that supplied it, for the report.
+fn registration_body_bound(
+    handler: &RouteHandler,
+    ceiling: PolicyBound<usize>,
+) -> PolicyBound<usize> {
+    registration_upload_limit(handler).map_or(ceiling, |bytes| {
+        ceiling.narrowed_by(PolicyBound::new(
+            bytes,
+            PolicyLayers::one(PolicyLayer::Route, false),
+        ))
+    })
+}
+
+fn registration_upload_limit(handler: &RouteHandler) -> Option<usize> {
+    match handler {
+        RouteHandler::Proxy { upstream, .. } | RouteHandler::ProxyStream { upstream, .. } => {
+            upstream.upload().max_bytes()
+        }
+        _ => None,
+    }
+}
+
+fn registration_reads_body(handler: &RouteHandler) -> bool {
+    match handler {
+        RouteHandler::Sse(registration) => registration.reads_body(),
+        #[cfg(feature = "ws")]
+        RouteHandler::WebSocket(_) => false,
+        _ => true,
+    }
+}
+
+/// Whether route-aware body admission counts this registration's upload bytes.
+///
+/// Such a registration applies only the deadlines of its upload budget.
+fn admission_counts_upload(handler: &RouteHandler) -> bool {
+    matches!(
+        handler,
+        RouteHandler::Multipart(_) | RouteHandler::ProxyStream { .. }
+    )
+}
+
+/// What contains one router when it freezes.
+#[derive(Clone, Copy)]
+pub(in crate::http) struct RouterEnvelope<'a> {
+    /// The resolved budgets of the server, or of the host router.
+    pub(in crate::http) budgets: Located<RouteBudgets>,
+    /// The host router's ceiling, or `None` for a single router.
+    pub(in crate::http) host_ceiling: Option<ConfiguredCeiling>,
+    /// The server's resolved request-body hard cap.
+    pub(in crate::http) cap: PolicyBound<usize>,
+    /// The host this router serves, or `None` for a single or fallback router.
+    pub(in crate::http) host: Option<&'a str>,
+}
+
+/// One frozen router's resolved policy, which each registration resolves inside.
+pub(in crate::http) struct RouteReportBase {
+    pub(in crate::http) budgets: Located<RouteBudgets>,
+    /// The router's own requested ceiling.
+    pub(in crate::http) configured: Option<usize>,
+    pub(in crate::http) ceiling: PolicyBound<usize>,
+}
+
 /// Immutable trie-based router. Created from Router::freeze().
 pub(super) struct FrozenRouter {
     pub(super) root: FrozenNode,
-    /// The budgets this router was configured with, frozen with it.
+    /// The budgets this router resolved to inside its server and host.
     pub(super) budgets: RouteBudgets,
     pub(super) middleware: Box<[MiddlewareFn]>,
     pub(super) skip_middleware_for_internal: bool,
@@ -262,10 +357,9 @@ pub(super) struct FrozenRouter {
     /// One immutable shared allocation per router, because every concurrent
     /// request that reaches this router calls the same closure.
     pub(super) mapper: Option<Arc<RejectionMapper>>,
-    /// The request-body ceiling this router was configured with, and whether it
-    /// was configured at all. The distinction is what lets a host ceiling
-    /// contain a child that set none.
-    pub(super) body_ceiling: ConfiguredCeiling,
+    /// The request-body ceiling this router resolved to under its host's
+    /// ceiling and the server's hard cap.
+    pub(super) body_ceiling: usize,
     /// The body-admission policy this router was configured with, frozen with
     /// it. One immutable shared allocation, read by every concurrent request
     /// this router answers.
@@ -278,10 +372,8 @@ pub(super) struct FrozenRouter {
 pub(super) enum DispatchResult {
     /// A buffered answer, and the producer whose head it is.
     Async(AsyncDispatch),
-    Stream(
-        Pin<Box<dyn Future<Output = StreamResponse> + Send>>,
-        Request,
-    ),
+    /// A stream route, and the handler that runs once its gate passes.
+    Stream(StreamHandler, Request),
     Sse(SseHandler, Request),
     #[cfg(feature = "ws")]
     WebSocket(WsLauncher, Request),
@@ -387,8 +479,8 @@ impl DispatchResult {
         matches!(self, Self::WebSocket(..) | Self::ProxyWebSocket(..))
     }
 
-    /// Borrow the request from any variant.
-    pub(super) fn request_ref(&self) -> &Request {
+    /// Borrow the request from any variant, to lend it to a middleware gate.
+    pub(super) fn request_mut(&mut self) -> &mut Request {
         match self {
             Self::Async(AsyncDispatch { req, .. }) | Self::Stream(_, req) | Self::Sse(_, req) => {
                 req
@@ -407,6 +499,41 @@ impl DispatchResult {
 pub(super) type GateCheck = ResponseFuture;
 
 impl FrozenRouter {
+    /// Report every stored registration inside this router's resolved policy.
+    pub(super) fn report_routes(
+        &self,
+        host: Option<&str>,
+        base: RouteReportBase,
+        report: &mut PolicyReport,
+    ) {
+        let host = host.map(Arc::<str>::from);
+        self.root
+            .visit_registrations(&mut |method, pattern, handler| {
+                let local = registration_budgets(handler);
+                let budgets = local.located(PolicyLayer::Route).contained_by(base.budgets);
+                report.budgets(PolicyLayer::Route, &local, &budgets);
+                let budgets = match admission_counts_upload(handler) {
+                    true => budgets.upload_deadlines_only(),
+                    false => budgets,
+                };
+                let body = registration_reads_body(handler)
+                    .then(|| registration_body_bound(handler, base.ceiling));
+                if let Some(body) = body {
+                    report.body_limit(PolicyLayer::Route, registration_upload_limit(handler), body);
+                }
+                report.route(
+                    EffectiveRoutePolicy::new(
+                        host.clone(),
+                        method,
+                        Arc::clone(pattern),
+                        budgets,
+                        registration_proxy(handler),
+                    )
+                    .with_body(base.configured, body),
+                );
+            });
+    }
+
     /// Classify a route before body collection.
     ///
     /// Returns `StreamingProxy` for proxy_stream routes so the incoming body
@@ -424,7 +551,6 @@ impl FrozenRouter {
         &self,
         head: &RequestHead<'_>,
         upgrade: HeadUpgrade,
-        outer: Option<ConfiguredCeiling>,
     ) -> (RouteClass, Option<Established>) {
         let path = head.path();
         let selected = match (head.routable_method(), split_path_segments(path)) {
@@ -441,7 +567,7 @@ impl FrozenRouter {
                     protocol: protocol_of(selected.handler),
                 };
                 (
-                    self.classify_matched(selected, method, upgrade, outer),
+                    self.classify_matched(selected, method, upgrade),
                     Some(established),
                 )
             }
@@ -466,10 +592,10 @@ impl FrozenRouter {
         selected: Selected<'_, '_>,
         method: Method,
         upgrade: HeadUpgrade,
-        outer: Option<ConfiguredCeiling>,
     ) -> RouteClass {
         let handler = selected.handler;
         let route = selected.route;
+        let ceiling = registration_ceiling(handler, self.body_ceiling);
         match handler {
             RouteHandler::Proxy { healthy, .. } | RouteHandler::ProxyStream { healthy, .. }
                 if upstream_unhealthy(healthy) =>
@@ -499,33 +625,29 @@ impl FrozenRouter {
                 upstream: Arc::clone(upstream),
                 params: self.gate_params(selected),
                 method,
-                plan: self
-                    .body_plan(route, RequestBodyMode::Streaming, outer)
-                    .narrowed_to(upstream.upload().max_bytes()),
+                plan: self.body_plan(route, RequestBodyMode::Streaming, ceiling),
             }),
             RouteHandler::Multipart(registration) => {
                 RouteClass::StreamingMultipart(StreamingMultipartTarget {
                     registration: Arc::clone(registration),
                     params: selected.bind_params(),
-                    plan: self.body_plan(route, RequestBodyMode::Streaming, outer),
+                    plan: self.body_plan(route, RequestBodyMode::Streaming, ceiling),
                 })
             }
             RouteHandler::Sse(registration) if registration.reads_body() => RouteClass::Buffered {
                 method,
-                plan: self.body_plan(route, RequestBodyMode::Buffered, outer),
+                plan: self.body_plan(route, RequestBodyMode::Buffered, ceiling),
             },
             RouteHandler::Sse(_) => RouteClass::HeadOnly,
             #[cfg(feature = "ws")]
             RouteHandler::WebSocket(_) => RouteClass::HeadOnly,
-            RouteHandler::Proxy { upstream, .. } => RouteClass::Buffered {
+            RouteHandler::Proxy { .. } => RouteClass::Buffered {
                 method,
-                plan: self
-                    .body_plan(route, RequestBodyMode::Buffered, outer)
-                    .narrowed_to(upstream.upload().max_bytes()),
+                plan: self.body_plan(route, RequestBodyMode::Buffered, ceiling),
             },
             RouteHandler::Async(..) | RouteHandler::Stream(_) => RouteClass::Buffered {
                 method,
-                plan: self.body_plan(route, RequestBodyMode::Buffered, outer),
+                plan: self.body_plan(route, RequestBodyMode::Buffered, ceiling),
             },
         }
     }
@@ -533,21 +655,19 @@ impl FrozenRouter {
     /// The body plan a matched body-consuming route resolves to.
     ///
     /// Minted here, immediately after selection, because holding the authority
-    /// token is what a plan is built from. `outer` is the ceiling containing
-    /// this router — a host router's own, or nothing for a single router — and
-    /// this router's configured ceiling can only narrow it.
+    /// token is what a plan is built from. The ceiling includes every containing
+    /// policy and this route's specialized upload bound.
     fn body_plan(
         &self,
         route: &Arc<str>,
         mode: RequestBodyMode,
-        outer: Option<ConfiguredCeiling>,
+        ceiling: usize,
     ) -> ResolvedBodyPlan {
         ResolvedBodyPlan::new(
             &self.resolved_route(),
             Arc::clone(route),
             mode,
-            self.body_ceiling,
-            outer,
+            ceiling,
             self.body_policy.clone(),
         )
     }
@@ -633,10 +753,7 @@ impl FrozenRouter {
             RouteHandler::Async(handler, origin) => self
                 .dispatch_async(handler, req, scope.clone(), *origin)
                 .into(),
-            RouteHandler::Stream(handler) => {
-                let fut = handler(&req);
-                DispatchResult::Stream(fut, req)
-            }
+            RouteHandler::Stream(handler) => DispatchResult::Stream(Arc::clone(handler), req),
             RouteHandler::Multipart(_) => Self::misdispatched(req, scope),
             RouteHandler::Sse(handler) => DispatchResult::Sse(Arc::clone(handler), req),
             #[cfg(feature = "ws")]
@@ -662,6 +779,7 @@ impl FrozenRouter {
                 prefix,
                 healthy,
                 upstream,
+                ..
             } => self.dispatch_proxy_route(
                 ProxyKind::Streaming,
                 req,
@@ -723,7 +841,7 @@ impl FrozenRouter {
     /// handler's own failure takes.
     fn terminal(
         &self,
-        req: Request,
+        mut req: Request,
         mapper: Option<Arc<RejectionMapper>>,
         identity: RequestIdentity,
         rejected: Rejected,
@@ -735,7 +853,7 @@ impl FrozenRouter {
             scope.clone(),
         );
         let entry = next.entry();
-        let fut = next.call(&req);
+        let fut = req.lend(|req| next.call(req));
         (
             DispatchResult::Async(AsyncDispatch {
                 fut,
@@ -812,13 +930,13 @@ impl FrozenRouter {
     pub(super) fn dispatch_async(
         &self,
         handler: &Handler,
-        req: Request,
+        mut req: Request,
         scope: RejectionScope,
         origin: ResponseOrigin,
     ) -> AsyncDispatch {
         let next = Next::new(&self.middleware, Terminal::Handler(handler), scope);
         let entry = next.entry();
-        let fut = next.call(&req);
+        let fut = req.lend(|req| next.call(req));
         AsyncDispatch {
             fut,
             req,
@@ -907,7 +1025,7 @@ struct ProxyRoute<'a> {
 /// boxing a closure per request.
 fn dispatch_proxy_through_middleware(
     router: &FrozenRouter,
-    req: Request,
+    mut req: Request,
     route: ProxyRoute<'_>,
     scope: &RejectionScope,
 ) -> AsyncDispatch {
@@ -918,7 +1036,7 @@ fn dispatch_proxy_through_middleware(
     };
     let next = Next::new(&router.middleware, terminal, scope.clone());
     let entry = next.entry();
-    let fut = next.call(&req);
+    let fut = req.lend(|req| next.call(req));
     AsyncDispatch {
         fut,
         req,
@@ -969,13 +1087,10 @@ impl ServerDispatch {
         &'a self,
         head: &RequestHead<'_>,
         upgrade: HeadUpgrade,
-        policy: super::ServerPolicy,
     ) -> Classified<'a> {
-        let outer = self.outer_budgets(policy);
         match self.resolve_from_head(head) {
             Ok(Some(router)) => {
-                let (class, established) =
-                    router.classify_route(head, upgrade, self.outer_ceiling());
+                let (class, established) = router.classify_route(head, upgrade);
                 Classified {
                     class,
                     scope: PreBodyScope {
@@ -983,14 +1098,14 @@ impl ServerDispatch {
                         established,
                     },
                     router: Some(router),
-                    budgets: router.budgets.narrowed_by(outer),
+                    budgets: router.budgets,
                 }
             }
             Ok(None) => Classified {
                 class: RouteClass::Terminal,
                 scope: PreBodyScope::unrouted(self.select_mapper(None)),
                 router: None,
-                budgets: outer,
+                budgets: self.unrouted_budgets(),
             },
             // Carried, not folded into the terminal above. An authority Camber
             // could not parse is answered from the head: reading it as "no
@@ -1001,32 +1116,19 @@ impl ServerDispatch {
                 class: RouteClass::Refused(rejected),
                 scope: PreBodyScope::unrouted(self.select_mapper(None)),
                 router: None,
-                budgets: outer,
+                budgets: self.unrouted_budgets(),
             },
         }
     }
 
-    /// The budgets that contain every route here.
+    /// The resolved budgets a request runs under when no router claims it.
     ///
-    /// The server's policy is the outermost layer either dispatch shape starts
-    /// from; a host router adds its own between that policy and its children.
-    fn outer_budgets(&self, policy: super::ServerPolicy) -> RouteBudgets {
-        let server = RouteBudgets::from_policy(policy);
+    /// A single router claims every request, so its own budgets answer. A host
+    /// router's budgets contain every child it holds.
+    fn unrouted_budgets(&self) -> RouteBudgets {
         match self {
-            Self::Single(_) => server,
-            Self::Host(hosts) => hosts.budgets().narrowed_by(server),
-        }
-    }
-
-    /// The request-body ceiling that contains every child router here.
-    ///
-    /// `None` for a single router: nothing contains it, so its own configured
-    /// ceiling is the whole answer. A host router's ceiling applies to every
-    /// child, and a child that configured one can only narrow it.
-    fn outer_ceiling(&self) -> Option<ConfiguredCeiling> {
-        match self {
-            Self::Single(_) => None,
-            Self::Host(hosts) => Some(hosts.body_ceiling()),
+            Self::Single(router) => router.budgets,
+            Self::Host(hosts) => hosts.budgets(),
         }
     }
 
@@ -1051,18 +1153,13 @@ impl ServerDispatch {
     /// resolved child router's — read from the resolution the caller already
     /// made rather than from a second one.
     #[cfg(feature = "grpc")]
-    pub(super) fn resolved_budgets(
-        &self,
-        resolved: &Resolution<'_>,
-        policy: super::ServerPolicy,
-    ) -> RouteBudgets {
-        let outer = self.outer_budgets(policy);
+    pub(super) fn resolved_budgets(&self, resolved: &Resolution<'_>) -> RouteBudgets {
         resolved
             .as_ref()
             .ok()
             .copied()
             .flatten()
-            .map_or(outer, |router| router.budgets.narrowed_by(outer))
+            .map_or_else(|| self.unrouted_budgets(), |router| router.budgets)
     }
 
     /// Find the router a built request names, or the refusal it earned.

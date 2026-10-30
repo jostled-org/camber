@@ -381,6 +381,37 @@ fn admission_after_close_from_the_closure_thread_is_refused() {
     );
 }
 
+/// Row A, awaited: a blocking spawn refused after the close resolves its
+/// future to the same refusal `join()` reports, and its body does not run.
+#[test]
+fn awaited_blocking_admission_after_close_is_refused() {
+    let ran = Arc::new(AtomicBool::new(false));
+    let closure_ran = Arc::clone(&ran);
+    let (controller, builder) = probed_runtime(BOUND);
+
+    let (drained, blocking) = builder
+        .run(|| {
+            runtime::request_shutdown();
+            let drained = wait_scope_drained(&controller.scope_settlement(), BOUND);
+            let handle = camber::spawn(move || closure_ran.store(true, Ordering::SeqCst));
+            (drained, runtime::block_on(async { handle.await }))
+        })
+        .unwrap();
+
+    assert!(
+        drained,
+        "the scope never reached Closed: its count was still above zero"
+    );
+    assert!(
+        matches!(blocking, Err(RuntimeError::ScopeClosed)),
+        "an awaited blocking admission after the close was not refused: {blocking:?}"
+    );
+    assert!(
+        !ran.load(Ordering::SeqCst),
+        "the refused blocking task ran its body"
+    );
+}
+
 /// Row B: a descendant admission from inside an already-admitted child, with
 /// the scope in Closing (one live child, count >= 1), is refused too.
 #[test]

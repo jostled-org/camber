@@ -203,7 +203,8 @@ impl<'a> ClientRequest<'a> {
     /// [`send`](Self::send). Every retry and every followed redirect of the
     /// call carries that one value. `false` adds none. A `traceparent` set
     /// through [`header`](Self::header) is sent as it is under either
-    /// setting. Without the `otel` feature no request adds one.
+    /// setting. A sensitive trace header is removed on an origin change.
+    /// Without the `otel` feature no request adds one.
     #[must_use]
     pub fn trace_context(mut self, enabled: bool) -> Self {
         self.policy.trace_context = enabled;

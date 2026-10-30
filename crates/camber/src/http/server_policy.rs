@@ -1,10 +1,14 @@
 //! The complete operating envelope one HTTP server serves under.
 
 use super::health_route::HealthRoute;
-#[cfg(feature = "profiling")]
+use super::policy_dimension::{DimensionSet, DimensionSources, PolicyDimension};
+use super::policy_report::PolicyValue;
+use super::policy_resolution::{Located, PolicyValues};
+use super::policy_sources::{PolicyLayer, PolicyLayers};
 use super::policy_value::positive_limit;
 use super::policy_value::{MAX_POLICY_DEADLINE, finite_duration, limit_within, narrow};
 use super::request_budget::RequestBudget;
+use super::route_budgets::RouteBudgets;
 use super::server::MAX_CONNECTION_LIMIT;
 use super::transfer_budget::TransferBudget;
 use crate::RuntimeError;
@@ -16,6 +20,8 @@ pub(crate) const DEFAULT_HEADER_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// The default body-idle and request-total deadlines.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The default ceiling that contains every configured request-body limit.
+const DEFAULT_REQUEST_BODY_HARD_CAP: usize = 256 * 1024 * 1024;
 /// The default maximum a rendered profiling response is retained under: eight
 /// MiB, the same ceiling Camber's ordinary buffered collections use.
 #[cfg(feature = "profiling")]
@@ -24,8 +30,16 @@ pub const DEFAULT_PROFILING_RESPONSE_LIMIT: usize = 8 * 1024 * 1024;
 /// Every bound one server applies to the work it admits.
 ///
 /// A server policy is the sole authority under bare Tokio. Inside a Camber
-/// runtime the runtime's own policy contains it: a server may narrow an outer
-/// bound and can never widen one, per dimension.
+/// runtime the runtime's own policy contains it, per dimension:
+///
+/// - When both set a dimension explicitly, the narrower value applies.
+/// - When only one sets it explicitly, that value applies. A default never
+///   narrows an explicit setting.
+/// - When neither sets it, the narrower default applies.
+///
+/// The runtime shutdown deadline is the one exception. The runtime enforces it
+/// on every participant, so a server drain never outlives it, even when it is
+/// the runtime's default.
 ///
 /// | Dimension | Default |
 /// | --- | --- |
@@ -34,14 +48,14 @@ pub const DEFAULT_PROFILING_RESPONSE_LIMIT: usize = 8 * 1024 * 1024;
 /// | request `total` | 30 seconds |
 /// | `upload_budget` | [`TransferBudget::unbounded`] |
 /// | `download_budget` | [`TransferBudget::unbounded`] |
+/// | `request_body_hard_cap` | 256 MiB |
 /// | `shutdown_timeout` | 30 seconds |
 /// | `profiling_response_limit` | eight MiB |
 /// | `connection_limit` | none — unbounded |
 /// | `health_route` | [`HealthRoute::Default`] — `/health` |
 ///
-/// The rendered-profile maximum is finite by default and is removed only by
-/// [`unbounded_profiling_response`](Self::unbounded_profiling_response), which
-/// is deliberately named so its absence cannot be mistaken for a default.
+/// With the `profiling` feature, the rendered-profile maximum is finite by default.
+/// Only `unbounded_profiling_response` removes it; omission keeps the finite default.
 ///
 /// The two streaming defaults are unbounded on purpose: a long-lived stream
 /// that its registration did not bound stays open. Their channels remain
@@ -67,6 +81,11 @@ pub const DEFAULT_PROFILING_RESPONSE_LIMIT: usize = 8 * 1024 * 1024;
 /// # Ok(())
 /// # }
 /// ```
+///
+/// Equality compares configuration, which includes intent: a setter that
+/// restates a documented default still records an explicit choice. Compare
+/// [`EffectiveServerPolicy::same_bounds`](super::EffectiveServerPolicy::same_bounds)
+/// when only the enforced values matter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ServerPolicy {
     header_timeout: Duration,
@@ -80,6 +99,9 @@ pub struct ServerPolicy {
     profiling_response: Option<usize>,
     connection_limit: Option<usize>,
     health_route: HealthRoute,
+    request_body_hard_cap: usize,
+    /// The dimensions a setter chose rather than left at their defaults.
+    explicit: DimensionSet,
 }
 
 /// The pre-head wait a test runtime serves under.
@@ -117,6 +139,8 @@ impl ServerPolicy {
             profiling_response: Some(DEFAULT_PROFILING_RESPONSE_LIMIT),
             connection_limit: None,
             health_route: HealthRoute::Default,
+            request_body_hard_cap: DEFAULT_REQUEST_BODY_HARD_CAP,
+            explicit: DimensionSet::EMPTY,
         }
     }
 
@@ -155,6 +179,7 @@ impl ServerPolicy {
     pub fn header_timeout(self, timeout: Duration) -> Result<Self, RuntimeError> {
         Ok(Self {
             header_timeout: finite_duration(timeout, "header_timeout")?,
+            explicit: self.explicit.with(PolicyDimension::HeaderTimeout),
             ..self
         })
     }
@@ -164,8 +189,27 @@ impl ServerPolicy {
     pub fn request_budget(self, budget: RequestBudget) -> Self {
         Self {
             request: budget,
+            explicit: self.explicit.union(DimensionSet::REQUEST),
             ..self
         }
+    }
+
+    /// Set the finite ceiling containing every router's request-body limit.
+    ///
+    /// Defaults to 256 MiB. The cap always contains router and host limits,
+    /// even at its default, so a limit above 256 MiB needs this setting too.
+    /// Raising this ceiling does not raise an unconfigured router's 8 MiB
+    /// request limit. An explicit runtime cap may narrow this value.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError::InvalidArgument`] when `bytes` is zero.
+    /// A router may still select a zero-byte request limit.
+    pub fn request_body_hard_cap(self, bytes: usize) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            request_body_hard_cap: positive_limit(bytes, "request_body_hard_cap")?,
+            explicit: self.explicit.with(PolicyDimension::RequestBodyHardCap),
+            ..self
+        })
     }
 
     /// Set the default budget for streaming uploads.
@@ -173,6 +217,7 @@ impl ServerPolicy {
     pub fn upload_budget(self, budget: TransferBudget) -> Self {
         Self {
             upload: budget,
+            explicit: self.explicit.union(DimensionSet::UPLOAD),
             ..self
         }
     }
@@ -182,11 +227,17 @@ impl ServerPolicy {
     pub fn download_budget(self, budget: TransferBudget) -> Self {
         Self {
             download: budget,
+            explicit: self.explicit.union(DimensionSet::DOWNLOAD),
             ..self
         }
     }
 
     /// Set the one deadline every graceful shutdown participant shares.
+    ///
+    /// Inside a Camber runtime this is the server's own drain limit. The
+    /// runtime's shutdown deadline still bounds it, because the runtime stops
+    /// every participant when its deadline expires. An unset server drain
+    /// takes an explicit runtime deadline.
     ///
     /// Cooperative work may finish until it expires. It bounds Camber's own
     /// waiting and escalation; it cannot stop an async task that never yields
@@ -201,6 +252,7 @@ impl ServerPolicy {
     pub fn shutdown_timeout(self, timeout: Duration) -> Result<Self, RuntimeError> {
         Ok(Self {
             shutdown_timeout: finite_duration(timeout, "shutdown_timeout")?,
+            explicit: self.explicit.with(PolicyDimension::ShutdownTimeout),
             ..self
         })
     }
@@ -228,6 +280,7 @@ impl ServerPolicy {
                 MAX_CONNECTION_LIMIT,
                 "connection_limit",
             )?),
+            explicit: self.explicit.with(PolicyDimension::ConnectionLimit),
             ..self
         })
     }
@@ -248,6 +301,7 @@ impl ServerPolicy {
     pub fn profiling_response_limit(self, max_bytes: usize) -> Result<Self, RuntimeError> {
         Ok(Self {
             profiling_response: Some(positive_limit(max_bytes, "profiling_response_limit")?),
+            explicit: self.explicit.with(PolicyDimension::ProfilingResponseLimit),
             ..self
         })
     }
@@ -262,14 +316,14 @@ impl ServerPolicy {
     /// where a number is known. This is the only spelling that removes the
     /// maximum.
     ///
-    /// A server inside a Camber runtime is still contained by that runtime's
-    /// policy: opting out here inherits an outer finite maximum rather than
-    /// erasing it.
+    /// Inside a Camber runtime, an explicit runtime maximum still contains
+    /// this choice. The runtime's default maximum does not.
     #[must_use]
     #[cfg(feature = "profiling")]
     pub const fn unbounded_profiling_response(self) -> Self {
         Self {
             profiling_response: None,
+            explicit: self.explicit.with(PolicyDimension::ProfilingResponseLimit),
             ..self
         }
     }
@@ -287,6 +341,7 @@ impl ServerPolicy {
     pub fn health_route(self, route: HealthRoute) -> Result<Self, RuntimeError> {
         Ok(Self {
             health_route: route.validated()?,
+            explicit: self.explicit.with(PolicyDimension::HealthRoute),
             ..self
         })
     }
@@ -302,19 +357,8 @@ impl ServerPolicy {
         self.header_timeout
     }
 
-    /// The configured default request deadlines.
-    pub(crate) const fn request_budget_value(&self) -> RequestBudget {
-        self.request
-    }
-
-    /// The configured default streaming-upload budget.
-    pub(crate) const fn upload_budget_value(&self) -> TransferBudget {
-        self.upload
-    }
-
-    /// The configured default streaming-download budget.
-    pub(crate) const fn download_budget_value(&self) -> TransferBudget {
-        self.download
+    pub(crate) const fn request_body_hard_cap_value(&self) -> usize {
+        self.request_body_hard_cap
     }
 
     /// The configured aggregate shutdown deadline.
@@ -332,23 +376,115 @@ impl ServerPolicy {
         self.health_route
     }
 
-    /// This policy applied under the one that contains it.
-    ///
-    /// Every dimension narrows independently through the shared rule, so a
-    /// server started inside a Camber runtime can tighten that runtime's
-    /// envelope and can never escape it.
-    pub(super) fn narrowed_by(self, outer: Self) -> Self {
-        Self {
-            header_timeout: self.header_timeout.min(outer.header_timeout),
-            request: self.request.narrowed_by(outer.request),
-            upload: self.upload.narrowed_by(outer.upload),
-            download: self.download.narrowed_by(outer.download),
-            shutdown_timeout: self.shutdown_timeout.min(outer.shutdown_timeout),
-            #[cfg(feature = "profiling")]
-            profiling_response: narrow(self.profiling_response, outer.profiling_response),
-            connection_limit: narrow(self.connection_limit, outer.connection_limit),
-            health_route: self.health_route.narrowed_by(outer.health_route),
+    /// The request and transfer budgets this policy supplies to every route.
+    pub(super) fn route_budgets(self) -> RouteBudgets {
+        RouteBudgets::new(
+            self.request,
+            self.upload,
+            self.download,
+            self.explicit.intersection(DimensionSet::ROUTE),
+        )
+    }
+
+    /// This policy at `layer`: every dimension names that layer, defaulted or not.
+    pub(super) fn located(self, layer: PolicyLayer) -> Located<Self> {
+        Located::new(
+            self,
+            DimensionSources::collect(Self::dimensions(), |dimension| {
+                PolicyLayers::one(layer, !self.explicit.contains(dimension))
+            }),
+        )
+    }
+}
+
+impl PolicyValues for ServerPolicy {
+    fn dimensions() -> impl Iterator<Item = PolicyDimension> {
+        PolicyDimension::server()
+    }
+
+    fn explicit(&self) -> DimensionSet {
+        self.explicit
+    }
+
+    fn value(&self, dimension: PolicyDimension) -> Option<PolicyValue> {
+        match dimension {
+            PolicyDimension::RequestBodyIdle
+            | PolicyDimension::RequestTotal
+            | PolicyDimension::UploadMaxBytes
+            | PolicyDimension::UploadIdle
+            | PolicyDimension::UploadTotal
+            | PolicyDimension::DownloadMaxBytes
+            | PolicyDimension::DownloadIdle
+            | PolicyDimension::DownloadTotal => self.route_budgets().value(dimension),
+            PolicyDimension::HeaderTimeout => {
+                Some(PolicyValue::Duration(Some(self.header_timeout)))
+            }
+            PolicyDimension::ShutdownTimeout => {
+                Some(PolicyValue::Duration(Some(self.shutdown_timeout)))
+            }
+            PolicyDimension::ConnectionLimit => Some(PolicyValue::Bytes(self.connection_limit)),
+            PolicyDimension::HealthRoute => Some(PolicyValue::Health(self.health_route)),
+            PolicyDimension::ProfilingResponseLimit => self.profiling_value(),
+            PolicyDimension::RequestBodyHardCap => {
+                Some(PolicyValue::Bytes(Some(self.request_body_hard_cap)))
+            }
+            PolicyDimension::RequestBodyLimit => None,
         }
+    }
+
+    /// Every dimension resolves independently through its containment rule.
+    ///
+    /// The health route keeps its own exposure rule, which already lets a
+    /// server that named nothing take the runtime's choice.
+    fn contained_by(self, outer: Self) -> Self {
+        let budgets = self.route_budgets().contained_by(outer.route_budgets());
+        let supplier = |dimension| self.supplier(&outer, dimension);
+        Self {
+            header_timeout: supplier(PolicyDimension::HeaderTimeout).choose(
+                self.header_timeout,
+                outer.header_timeout,
+                Ord::min,
+            ),
+            request: budgets.request(),
+            upload: budgets.upload(),
+            download: budgets.download(),
+            shutdown_timeout: supplier(PolicyDimension::ShutdownTimeout).choose(
+                self.shutdown_timeout,
+                outer.shutdown_timeout,
+                Ord::min,
+            ),
+            #[cfg(feature = "profiling")]
+            profiling_response: supplier(PolicyDimension::ProfilingResponseLimit).choose(
+                self.profiling_response,
+                outer.profiling_response,
+                narrow,
+            ),
+            connection_limit: supplier(PolicyDimension::ConnectionLimit).choose(
+                self.connection_limit,
+                outer.connection_limit,
+                narrow,
+            ),
+            health_route: self.health_route.narrowed_by(outer.health_route),
+            request_body_hard_cap: supplier(PolicyDimension::RequestBodyHardCap).choose(
+                self.request_body_hard_cap,
+                outer.request_body_hard_cap,
+                Ord::min,
+            ),
+            explicit: self.explicit.union(outer.explicit),
+        }
+    }
+}
+
+impl ServerPolicy {
+    #[cfg(feature = "profiling")]
+    const fn profiling_value(&self) -> Option<PolicyValue> {
+        Some(PolicyValue::Bytes(self.profiling_response))
+    }
+
+    /// No profiler is compiled in, so no server resolves this dimension.
+    #[cfg(not(feature = "profiling"))]
+    const fn profiling_value(&self) -> Option<PolicyValue> {
+        None
     }
 }
 

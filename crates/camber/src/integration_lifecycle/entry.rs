@@ -619,6 +619,14 @@ pub(super) struct OperationGuard {
 }
 
 impl OperationGuard {
+    /// Whether the runtime that admitted this operation began forced teardown.
+    pub(super) fn runtime_forced(&self) -> bool {
+        self.entry
+            .runtime
+            .upgrade()
+            .is_some_and(|runtime| runtime.scope_was_forced())
+    }
+
     /// Read `cleanup` when the operation ends: records it still owes make
     /// the entry's close incomplete.
     #[cfg(feature = "dns01")]

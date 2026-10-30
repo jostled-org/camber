@@ -137,6 +137,7 @@
 //! - [`self::mock`]: HTTP client interception for tests
 //! - `otel`: OpenTelemetry propagation and spans when the feature is enabled
 
+mod admitted_body;
 mod async_proxy;
 mod body;
 pub(crate) mod body_admission;
@@ -154,6 +155,7 @@ pub mod cors;
 mod crossed_deadline;
 mod disconnect;
 mod dispatch;
+mod effective_budget;
 mod encoding;
 #[cfg(feature = "grpc")]
 mod grpc_handoff;
@@ -176,6 +178,10 @@ mod operation;
 #[cfg(feature = "otel")]
 /// OpenTelemetry request propagation and tracing hooks.
 pub mod otel;
+mod policy_dimension;
+mod policy_report;
+mod policy_resolution;
+mod policy_sources;
 pub(crate) mod policy_value;
 #[cfg(feature = "profiling")]
 mod profiling;
@@ -191,6 +197,7 @@ mod response;
 mod response_commitment;
 mod route_budgets;
 pub(crate) mod router;
+mod runtime_executor;
 mod server;
 mod server_lifecycle;
 pub(crate) mod server_policy;
@@ -211,6 +218,7 @@ mod websocket;
 #[cfg(feature = "ws")]
 mod ws_proxy;
 
+pub use admitted_body::AdmittedBody;
 pub use async_proxy::proxy_forward;
 pub use body_admission::{BodyAdmission, BodyAdmissionContext, RequestBodyMode};
 pub use boundary::{ByteBoundary, DeadlineBoundary};
@@ -222,12 +230,14 @@ pub use boundary::{ByteBoundary, DeadlineBoundary};
 pub use bytes::Bytes;
 pub use client::{
     Client, ClientBody, ClientDecode, ClientEgress, ClientError, ClientInput, ClientRedirect,
-    ClientRequest, ClientResponse, ClientStreamResponse, ClientTimeout, EgressPolicy,
-    RedirectPolicy, RetryPolicy, client, delete, delete_with_body, get, head, options, patch,
-    patch_form, patch_json, post, post_form, post_json, put, put_form, put_json,
+    ClientRedirectPolicy, ClientRequest, ClientResponse, ClientStreamResponse, ClientTimeout,
+    CrossOriginRedirects, EgressPolicy, RedirectPolicy, RetryPolicy, client, delete,
+    delete_with_body, get, head, options, patch, patch_form, patch_json, post, post_form,
+    post_json, put, put_form, put_json,
 };
 pub use cookie::{CookieOptions, SameSite};
 pub use disconnect::{DisconnectCause, DisconnectSignal};
+pub use effective_budget::{EffectiveRequestBudget, EffectiveTransferBudget};
 #[cfg(feature = "grpc")]
 pub use grpc_handoff::GrpcRequestBody;
 pub use health::{ProxyHealthResource, spawn_health_checker};
@@ -238,6 +248,12 @@ pub use middleware::{MiddlewareFn, MiddlewareFuture, Next, ResponseFuture};
 pub use multipart::{
     MultipartField, MultipartLimits, MultipartLimitsBuilder, MultipartReader, MultipartStream, Part,
 };
+pub use policy_dimension::PolicyDimension;
+pub use policy_report::{
+    BufferedResponseLimit, EffectivePolicies, EffectiveProxyPolicy, EffectiveRoutePolicy,
+    EffectiveServerPolicy, PolicyDiagnostic, PolicyValue,
+};
+pub use policy_sources::{LayerSource, PolicyBound, PolicyLayer, PolicyLayers};
 pub use proxy_policy::ProxyPolicy;
 pub use rejection::{
     NegotiatedResponseMetadata, Rejection, RejectionContext, RejectionKind, RejectionProtocol,
@@ -258,7 +274,7 @@ pub use server::{
 pub use server_policy::ServerPolicy;
 pub use sse::{AsyncSseWriter, SseWriter};
 pub use static_files::{serve_file, serve_file_unbounded, serve_file_with_limit};
-pub use stream::{StreamResponse, StreamSender};
+pub use stream::{IntoStreamResponse, StreamResponse, StreamSender};
 pub use transfer_budget::TransferBudget;
 #[cfg(feature = "ws")]
 pub use websocket::{WsCloseCause, WsConn, WsMessage, WsReceive, WsReceiver, WsSender};

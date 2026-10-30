@@ -19,6 +19,8 @@
 
 use super::dispatch::ResolvedRouteAuthority;
 use super::mock::{LifecycleScript, ResponseCommitmentEdge};
+use super::policy_dimension::PolicyDimension;
+use super::policy_sources::{Layered, PolicyBound, PolicyLayer};
 use super::rejection::{Rejected, RequestId};
 use super::request::RequestHead;
 use crate::RuntimeError;
@@ -28,8 +30,6 @@ use std::sync::Arc;
 
 /// Default maximum request body size (8 MB).
 const DEFAULT_MAX_BODY: usize = 8 * 1024 * 1024;
-/// Hard ceiling for request body size (256 MB).
-const MAX_BODY_LIMIT: usize = 256 * 1024 * 1024;
 
 /// How a matched route consumes the payload bytes a peer sends.
 ///
@@ -164,6 +164,11 @@ impl BodyAdmission {
     /// upload ends, drained or stopped or refused, which is before the upstream
     /// answers.
     ///
+    /// A buffered handler can release it earlier. It calls
+    /// [`Request::take_body`](super::Request::take_body), and dropping the
+    /// returned [`AdmittedBody`](super::AdmittedBody) drops the permit. The
+    /// request then has no permit left to release at its end.
+    ///
     /// `T: Send + Sync + 'static` is narrower than this crate's usual public
     /// bound because the permit travels with an HTTP request across runtime
     /// workers while its shared erasure must stay thread-safe.
@@ -241,42 +246,62 @@ pub(super) enum ConfiguredCeiling {
     /// contains this router wins.
     #[default]
     Unset,
-    /// The application configured this ceiling, already clamped to the hard cap.
+    /// The application's requested ceiling, preserved until policy resolution.
     Set(usize),
 }
 
 impl ConfiguredCeiling {
-    /// Record a configured ceiling, clamped to the hard cap.
+    /// Preserve a configured ceiling for policy resolution.
     pub(super) fn configured(bytes: usize) -> Self {
-        Self::Set(bytes.min(MAX_BODY_LIMIT))
+        Self::Set(bytes)
     }
 
-    /// The bytes this ceiling admits with nothing containing it.
-    fn bytes(self) -> usize {
+    /// The bytes this ceiling requested, or `None` when the router set none.
+    pub(super) const fn configured_value(self) -> Option<usize> {
         match self {
-            Self::Unset => DEFAULT_MAX_BODY,
-            Self::Set(bytes) => bytes,
+            Self::Unset => None,
+            Self::Set(bytes) => Some(bytes),
         }
     }
 
-    /// The bytes this ceiling admits inside the one containing it.
+    /// The ceiling this router admits under the ceiling that contains it.
     ///
-    /// `None` is a single router, which nothing contains. Under host routing an
-    /// unset child inherits the containing ceiling outright, and a configured
-    /// child can only narrow it.
-    fn inside(self, outer: Option<Self>) -> usize {
-        match outer {
-            None => self.bytes(),
-            Some(outer) => self.narrowed_by(outer),
+    /// `outer` is the host router's ceiling, or `None` for a single router.
+    /// An unset child takes the host's ceiling. A host and a child ceiling
+    /// resolve by the intent rule: a default never narrows an explicit limit.
+    /// The hard `cap` then always applies, even at its default.
+    pub(super) fn resolved(
+        self,
+        outer: Option<Self>,
+        cap: PolicyBound<usize>,
+    ) -> PolicyBound<usize> {
+        self.inside(outer).bound().narrowed_by(cap)
+    }
+
+    /// The host router's own ceiling under the hard `cap`.
+    pub(super) fn resolved_host(self, cap: PolicyBound<usize>) -> PolicyBound<usize> {
+        self.located(PolicyLayer::Host).bound().narrowed_by(cap)
+    }
+
+    fn inside(self, outer: Option<Self>) -> Layered<usize> {
+        match (self, outer) {
+            (Self::Unset, Some(outer)) => outer.located(PolicyLayer::Host),
+            (Self::Set(_), Some(outer)) => self.located(PolicyLayer::Router).contained_by(
+                outer.located(PolicyLayer::Host),
+                PolicyDimension::RequestBodyLimit.containment(),
+                Ord::min,
+            ),
+            (_, None) => self.located(PolicyLayer::Router),
         }
     }
 
-    /// The bytes this ceiling admits under a ceiling that contains it.
-    fn narrowed_by(self, outer: Self) -> usize {
-        match self {
-            Self::Unset => outer.bytes(),
-            Self::Set(bytes) => bytes.min(outer.bytes()),
-        }
+    fn located(self, layer: PolicyLayer) -> Layered<usize> {
+        let configured = self.configured_value();
+        Layered::at(
+            configured.unwrap_or(DEFAULT_MAX_BODY),
+            layer,
+            configured.is_some(),
+        )
     }
 }
 
@@ -298,43 +323,26 @@ impl ResolvedBodyPlan {
     /// The authority token is taken by reference and read for nothing: holding
     /// one is the proof that the existing trie and host resolver selected this
     /// route, and no other module can mint it.
-    /// `outer` is the ceiling containing this router — a host router's own, or
-    /// `None` for a single router. Resolving the precedence here keeps the one
-    /// rule about how ceilings narrow in the module that owns limits.
+    /// The ceiling includes the runtime, server, host, router, and specialized
+    /// registration that own this selection.
     pub(super) fn new(
         _authority: &ResolvedRouteAuthority,
         route: Arc<str>,
         mode: RequestBodyMode,
-        ceiling: ConfiguredCeiling,
-        outer: Option<ConfiguredCeiling>,
+        ceiling: usize,
         policy: Option<Arc<BodyPolicy>>,
     ) -> Self {
         Self {
             route,
             mode,
-            ceiling: ceiling.inside(outer),
+            ceiling,
             policy,
-        }
-    }
-
-    /// This plan under a specialized route policy's own payload maximum.
-    ///
-    /// A proxy route's upload budget narrows the bytes its route admits and can
-    /// never widen them, so the two are one ceiling here rather than two
-    /// counters over the same frames: route-aware admission stays the single
-    /// authority over request payload bytes, and this is the number it enforces.
-    /// `None` is a specialized policy that named no maximum of its own.
-    #[must_use]
-    pub(super) fn narrowed_to(self, max_bytes: Option<usize>) -> Self {
-        Self {
-            ceiling: max_bytes.map_or(self.ceiling, |max| self.ceiling.min(max)),
-            ..self
         }
     }
 }
 
 /// The bounded read one admitted request was granted.
-pub(super) struct AdmittedBody {
+pub(super) struct BodyGrant {
     /// The effective observed-byte maximum for this request.
     pub(super) limit: usize,
     /// The application permit this request retains, when one was supplied.
@@ -355,7 +363,7 @@ pub(super) async fn admit(
     plan: &ResolvedBodyPlan,
     head: &RequestHead<'_>,
     observer: Option<&Arc<LifecycleScript>>,
-) -> Result<AdmittedBody, Rejected> {
+) -> Result<BodyGrant, Rejected> {
     let admitted = match head.undecodable_transfer_coding() {
         Some(coding) => return Err(Rejected::undecodable_transfer_coding(coding)),
         None => admit_declared(plan, head, observer)?,
@@ -377,7 +385,7 @@ fn admit_declared(
     plan: &ResolvedBodyPlan,
     head: &RequestHead<'_>,
     observer: Option<&Arc<LifecycleScript>>,
-) -> Result<AdmittedBody, Rejected> {
+) -> Result<BodyGrant, Rejected> {
     let declared = head.declared_length();
     match declares_over(declared, plan.ceiling) {
         true => Err(Rejected::body_too_large(plan.ceiling)),
@@ -396,10 +404,10 @@ fn admit_under_policy(
     head: &RequestHead<'_>,
     declared: Option<u64>,
     observer: Option<&Arc<LifecycleScript>>,
-) -> Result<AdmittedBody, Rejected> {
+) -> Result<BodyGrant, Rejected> {
     let policy = match &plan.policy {
         None => {
-            return Ok(AdmittedBody {
+            return Ok(BodyGrant {
                 limit: plan.ceiling,
                 permit: None,
             });
@@ -412,7 +420,7 @@ fn admit_under_policy(
     let permit = admission.into_permit(observer);
     match declares_over(declared, limit) {
         true => Err(Rejected::body_too_large(limit)),
-        false => Ok(AdmittedBody { limit, permit }),
+        false => Ok(BodyGrant { limit, permit }),
     }
 }
 
@@ -486,7 +494,7 @@ impl BodyBudget {
     /// along: the bound a body is read under is the one its own admission
     /// selected, and a consumer that could name a different one would be a
     /// second authority over the same request.
-    pub(super) fn new(admitted: &AdmittedBody) -> Self {
+    pub(super) fn new(admitted: &BodyGrant) -> Self {
         Self {
             limit: admitted.limit,
             observed: 0,

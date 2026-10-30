@@ -179,12 +179,20 @@ described request with `.send_streaming().await?`. Call
 body cancels it, and `body.close().await?` waits for the release. See
 [Streaming A Response](../reference/client.md#streaming-a-response).
 
+Camber follows no redirects by default. Select `RedirectPolicy::SameOrigin`
+or a validated `RedirectPolicy::cross_origin(max_hops, origins)?` allowlist.
+Cross-origin hops remove credentials permanently and cannot downgrade HTTPS
+to HTTP. Redirects and retries share the call's deadline and keep separate
+operation-wide counters. See
+[Redirects](../reference/client.md#redirects).
+
 **Warning.** A default client sends to every address, private ones included,
 as Go's `http.DefaultClient` does. Do not give it a URL you do not trust.
 Give that client an `EgressPolicy` with `Client::egress_policy`:
 `EgressPolicy::public_internet()` admits ordinary public unicast addresses
-only, for buffered and streamed calls. Each restricted call resolves the host
-once and builds its own transport. Connections are not shared across calls. See
+only, for buffered and streamed calls. Each restricted call checks its first
+destination and each changed origin, including return hops. Retries reuse the
+current checked addresses. Connections are not shared across calls. See
 [Destination Policy](../reference/client.md#destination-policy).
 
 ### HTTP Client with Retries
@@ -576,5 +584,5 @@ router.post("/users", |req| {
 ## What Changes
 
 - **Compile times are slower.** Incremental rebuilds are 2-3 seconds. Clean builds take longer. The tradeoff: once it compiles, it works.
-- **Ownership is explicit.** A handler borrows `Request` during its call and returns an owned future. Parse or copy request data before `async move`.
+- **Ownership is explicit.** A handler borrows `Request` during its call and returns an owned future. Capture metadata and `req.body_shared()` before `async move`.
 - **The ecosystem is different.** Go's `net/http` is standard library. Camber is a runtime built on Tokio. The Rust ecosystem is fragmented but powerful.

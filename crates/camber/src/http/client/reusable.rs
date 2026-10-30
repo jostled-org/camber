@@ -5,7 +5,6 @@ use super::super::policy_value::clamped_duration;
 use super::super::transfer_budget::TransferBudget;
 use super::dns_edge::ClientDnsEdge;
 use super::egress::{EgressPolicy, egress_refused};
-use super::lifetime::Lifetime;
 use super::policy::OperationPolicy;
 use super::projection::client_error_projection;
 use super::redirect::RedirectPolicy;
@@ -13,13 +12,12 @@ use super::replay::RetryPolicy;
 use super::request::ClientRequest;
 use super::response::ClientResponse;
 use super::transport::{
-    BuiltClient, Dialer, OperationTransport, PinnedDialer, Profile, TransportCache,
-    TransportSettings, build_client, pinned_transport,
+    BuiltClient, Dialer, Profile, TransportCache, TransportSettings, build_client,
 };
 use crate::RuntimeError;
 use reqwest::header::HeaderValue;
 use reqwest::{Method, Url};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 /// Hand every verb the client sends to `$generator`, so the client methods and
@@ -169,7 +167,7 @@ pub fn client_dns_edge(mut client: Client, edge: &ClientDnsEdge) -> Client {
 pub fn client_test_root(mut client: Client, pem: &[u8]) -> Result<Client, RuntimeError> {
     let root = reqwest::Certificate::from_pem(pem)
         .map_err(|error| RuntimeError::Client(client_error_projection(&error)))?;
-    client.test_root = Some(root);
+    client.test_root = Some(Arc::new(root));
     client.discard_transport();
     Ok(client)
 }
@@ -311,8 +309,9 @@ pub struct Client {
     egress: EgressPolicy,
     /// The lookup answers a test chose, in place of the system resolver's.
     dns_edge: Option<ClientDnsEdge>,
-    /// The one local trust root a test added to every transport.
-    test_root: Option<reqwest::Certificate>,
+    /// The one local trust root a test added to every transport. Shared, so
+    /// an operation's settings copy no certificate.
+    test_root: Option<Arc<reqwest::Certificate>>,
     /// The reusable transports, one for each terminal. Only a call whose
     /// policy pins no address sends through one.
     cached: TransportCache,
@@ -526,8 +525,8 @@ impl Client {
     /// 64 addresses returns `ClientEgress::ResolutionLimit`. One refused
     /// address refuses the whole answer with `ClientEgress::Address`, and an
     /// empty or failed lookup returns `ClientError::Dns`. The call then dials
-    /// only the checked addresses: every retry and every followed redirect
-    /// of that call uses them, and no second lookup replaces them. The
+    /// only the checked addresses. Retries and same-origin hops reuse that
+    /// pin. Each origin change requires fresh admission, including return hops. The
     /// request keeps its host name, so the `Host` header, the TLS server
     /// name, and certificate verification read the name and not the address.
     ///
@@ -576,14 +575,14 @@ impl Client {
     /// The settings a transport of `profile` is built from.
     ///
     /// Only the buffered profile arms the quiet interval on its transport.
-    fn transport_settings(&self, profile: Profile) -> TransportSettings<'_> {
+    fn transport_settings(&self, profile: Profile) -> TransportSettings {
         TransportSettings {
             connect_timeout: self.connect_timeout,
             idle: match profile {
                 Profile::Buffered => self.response.idle(),
                 Profile::Streaming => None,
             },
-            test_root: self.test_root.as_ref(),
+            test_root: self.test_root.clone(),
         }
     }
 
@@ -594,51 +593,36 @@ impl Client {
         self.egress.admit_scheme(target).map_err(egress_refused)
     }
 
-    /// The transport one buffered operation to `target` sends through.
+    /// How one operation of `profile` admits and reaches its destinations.
     ///
-    /// A policy that pins no address uses the reusable buffered transport.
-    /// Any other resolves and checks `target` under `lifetime`, then builds a
-    /// transport that dials only the checked addresses. That transport is
-    /// never cached: it belongs to the operation that asked for it.
-    pub(super) async fn operation_transport(
-        &self,
-        target: &Url,
-        lifetime: &Lifetime,
-    ) -> Result<OperationTransport<'_>, RuntimeError> {
+    /// The dialer borrows this client's policy. A policy that pins no address
+    /// shares the reusable transport of `profile` and its pool. Any other
+    /// builds a checked transport for each origin under the timer profile and
+    /// TLS trust fixed here. Nothing is resolved here.
+    fn dialer(&self, profile: Profile) -> Result<Dialer<'_>, RuntimeError> {
         match self.egress.pins_addresses() {
             false => self
-                .transport(Profile::Buffered)
-                .map(OperationTransport::Reusable),
-            true => pinned_transport(
+                .transport(profile)
+                .map(|shared| Dialer::reusable(&self.egress, shared)),
+            true => Ok(Dialer::pinned(
                 &self.egress,
-                self.dns_edge.as_ref(),
-                &self.transport_settings(Profile::Buffered),
-                target,
-                lifetime,
-            )
-            .await
-            .map(OperationTransport::Pinned),
+                self.dns_edge.clone(),
+                self.transport_settings(profile),
+            )),
         }
     }
 
-    /// How one streaming operation gets its transport.
+    /// The dialer of one buffered operation, which borrows this client.
+    pub(super) fn operation_dialer(&self) -> Result<Dialer<'_>, RuntimeError> {
+        self.dialer(Profile::Buffered)
+    }
+
+    /// The dialer of one streamed operation.
     ///
-    /// The operation's task outlives this borrow, so the answer is owned. A
-    /// policy that pins no address shares the reusable streaming transport
-    /// and its pool. Any other copies what the task resolves, checks, and
-    /// builds its own pinned transport from. Nothing is resolved here.
-    pub(super) fn stream_dialer(&self) -> Result<Dialer, RuntimeError> {
-        match self.egress.pins_addresses() {
-            false => self
-                .transport(Profile::Streaming)
-                .map(|shared| Dialer::Reusable(shared.clone())),
-            true => Ok(Dialer::Pinned(PinnedDialer {
-                policy: self.egress.clone(),
-                edge: self.dns_edge.clone(),
-                connect_timeout: self.connect_timeout,
-                test_root: self.test_root.clone(),
-            })),
-        }
+    /// The operation's task outlives this borrow, so the dialer holds shared
+    /// handles to the policy, the reusable transport, and the trust root.
+    pub(super) fn stream_dialer(&self) -> Result<Dialer<'static>, RuntimeError> {
+        self.dialer(Profile::Streaming).map(Dialer::into_owned)
     }
 
     /// Forget both built transports after a transport setting changed.
@@ -665,7 +649,7 @@ impl Client {
             retries: self.retries,
             backoff: self.backoff,
             permission: RetryPolicy::default(),
-            redirect: self.redirect,
+            redirect: self.redirect.clone(),
             trace_context: true,
         }
     }

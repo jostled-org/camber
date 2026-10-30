@@ -64,11 +64,11 @@ async fn started(
     match mock_answer(&description) {
         Some(answer) => admit_recorded(answer, description.response_limit(), completion),
         None => {
-            let transport = client
-                .operation_transport(description.url(), &lifetime)
-                .await?;
+            let dialer = client.operation_dialer()?;
+            let transport = dialer.open(description.url(), &lifetime).await?;
             description.carry_trace_context(policy.trace_context);
-            collect(final_head(transport, description, policy, lifetime, completion).await?).await
+            collect(final_head(transport, dialer, description, policy, lifetime, completion).await?)
+                .await
         }
     }
 }

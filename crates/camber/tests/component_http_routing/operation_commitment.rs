@@ -573,19 +573,19 @@ fn served_root() -> TempRoot {
 /// shapes here keeps every row on the one serve, status, commitment, and
 /// teardown sequence below.
 enum Served {
-    Routes(Router),
-    Hosts(HostRouter),
+    Routes(Box<Router>),
+    Hosts(Box<HostRouter>),
 }
 
 impl From<Router> for Served {
     fn from(routes: Router) -> Self {
-        Self::Routes(routes)
+        Self::Routes(Box::new(routes))
     }
 }
 
 impl From<HostRouter> for Served {
     fn from(hosts: HostRouter) -> Self {
-        Self::Hosts(hosts)
+        Self::Hosts(Box::new(hosts))
     }
 }
 
@@ -615,13 +615,13 @@ fn serve_under_total(
     total: Option<Duration>,
 ) -> wire::ObservedServer<ScopedCommittedAnswer> {
     match (served, total) {
-        (Served::Routes(routes), None) => port.serve(routes),
+        (Served::Routes(routes), None) => port.serve(*routes),
         (Served::Routes(routes), Some(total)) => {
-            port.serve_with_policy(routes, total_policy(total))
+            port.serve_with_policy(*routes, total_policy(total))
         }
-        (Served::Hosts(hosts), None) => port.serve_hosts(hosts),
+        (Served::Hosts(hosts), None) => port.serve_hosts(*hosts),
         (Served::Hosts(hosts), Some(total)) => {
-            port.serve_hosts_with_policy(hosts, total_policy(total))
+            port.serve_hosts_with_policy(*hosts, total_policy(total))
         }
     }
 }

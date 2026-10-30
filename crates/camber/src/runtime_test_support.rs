@@ -84,6 +84,8 @@ pub enum RuntimeCheckpoint {
     /// The root scope released one child's slot, and the drain can now see
     /// the lower count.
     ScopeChildReleased,
+    /// Forced teardown requested one child's abort, before requesting the next.
+    ScopeChildAbortRequested,
 }
 
 /// The one aggregate shutdown deadline production minted, as the transition
@@ -1047,9 +1049,8 @@ pub fn install_runtime_context() -> TestRuntimeContext {
 /// runtime idles, which is exactly while such a fixture waits on the socket I/O
 /// its observation is built on.
 ///
-/// It has to be set here rather than on the server, because the runtime is the
-/// outer authority: an inner unbounded server policy inherits the outer bound
-/// instead of erasing it, which is the precedence rule working as designed.
+/// It is set on the runtime so that every fixture server keeps its default
+/// policy: a defaulted server value yields to the runtime's explicit one.
 #[doc(hidden)]
 pub fn install_runtime_context_without_request_deadlines() -> TestRuntimeContext {
     let mut config = RuntimeConfig::default();

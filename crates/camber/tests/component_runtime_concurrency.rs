@@ -30,6 +30,8 @@ pub mod scope_builders;
 mod async_channels;
 #[path = "component_runtime_concurrency/async_tasks.rs"]
 mod async_tasks;
+#[path = "component_runtime_concurrency/blocking_results.rs"]
+mod blocking_results;
 #[path = "component_runtime_concurrency/lifecycle_test_support.rs"]
 mod lifecycle_test_support;
 #[path = "component_runtime_concurrency/no_runtime.rs"]
@@ -62,6 +64,8 @@ mod task_lifecycle;
 mod task_racing;
 #[path = "component_runtime_concurrency/test_runtime_macro.rs"]
 mod test_runtime_macro;
+#[path = "component_runtime_concurrency/turn.rs"]
+mod turn;
 #[path = "component_runtime_concurrency/watch_channels.rs"]
 mod watch_channels;
 

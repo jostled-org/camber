@@ -5,11 +5,11 @@ use crate::lifecycle_kinds::resource_phase_name;
 use camber::__private::{DEFAULT_PROFILING_RESPONSE_LIMIT, frozen_profiling_response_limit};
 use camber::__private::{
     DEFAULT_RESOURCE_PHASE_DEADLINE, DEFAULT_STATIC_FILE_LIMIT, frozen_buffered_response_limit,
-    frozen_static_file_limit,
+    frozen_proxy_client_identities, frozen_static_file_limit,
 };
 use camber::http::{
-    ByteBoundary, DeadlineBoundary, HealthRoute, HostRouter, ProxyPolicy, RequestBudget, Router,
-    ServerPolicy, TransferBudget,
+    ByteBoundary, DeadlineBoundary, EffectivePolicies, HealthRoute, HostRouter, ProxyPolicy,
+    RequestBudget, Router, ServerPolicy, TransferBudget,
 };
 use camber::{ResourceBudget, ResourcePhase, RuntimeError};
 use std::collections::HashSet;
@@ -294,6 +294,39 @@ fn assert_connection_limit_contract(default: ServerPolicy) {
     );
 }
 
+/// Resolve `router` under `policy` as a standalone server, without serving it.
+///
+/// The observer refuses, so the report is the one production froze and no
+/// listener ever accepts.
+fn resolved_with(policy: ServerPolicy, router: Router) -> EffectivePolicies {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a current-thread executor");
+    executor.block_on(async move {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let capture = Arc::clone(&captured);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a refused listener");
+        let refused = camber::http::server(router)
+            .policy(policy)
+            .on_policy_resolved(move |report| {
+                *capture.lock().expect("capture lock") = Some(report.clone());
+                Err(RuntimeError::InvalidArgument("inspect only".into()))
+            })
+            .serve_background(listener);
+        assert!(refused.is_err(), "the inspecting observer refuses serving");
+        let report = captured.lock().expect("capture lock").take();
+        report.expect("the observer saw the frozen report")
+    })
+}
+
+/// [`resolved_with`] for an empty router.
+fn resolved(policy: ServerPolicy) -> EffectivePolicies {
+    resolved_with(policy, Router::new())
+}
+
 /// Every health route a server can expose, and every path it cannot.
 ///
 /// The default is `/health`, so naming it changes nothing. A path Camber's
@@ -301,11 +334,16 @@ fn assert_connection_limit_contract(default: ServerPolicy) {
 /// route matches the raw request path, and a pattern or an unnormalized
 /// spelling would answer a request no router registration could conflict with.
 fn assert_health_route_contract(default: ServerPolicy) {
+    let restated = default
+        .health_route(HealthRoute::Default)
+        .expect("the default health route");
+    // Restating the default records intent and enforces the same route.
+    assert_ne!(default, restated);
+    let documented = resolved(default);
+    assert!(documented.same_bounds(&resolved(restated)));
     assert_eq!(
-        default,
-        default
-            .health_route(HealthRoute::Default)
-            .expect("the default health route"),
+        documented.server().health_route().value(),
+        HealthRoute::Default
     );
     let moved = default
         .health_route(HealthRoute::Path("/camber/health"))
@@ -385,25 +423,46 @@ fn assert_deadline_ceiling_contract() {
     );
 }
 
+/// Restating every documented default records intent for startup
+/// diagnostics, and enforces exactly the bounds the default resolves to.
+fn assert_documented_server_defaults(default: ServerPolicy) {
+    let restated = default
+        .header_timeout(Duration::from_secs(60))
+        .expect("default header timeout")
+        .shutdown_timeout(Duration::from_secs(30))
+        .expect("default shutdown timeout")
+        .request_budget(
+            RequestBudget::bounded(Duration::from_secs(30), Duration::from_secs(30))
+                .expect("default request budget"),
+        )
+        .upload_budget(TransferBudget::unbounded())
+        .download_budget(TransferBudget::unbounded())
+        .request_body_hard_cap(256 * 1024 * 1024)
+        .expect("default request body hard cap");
+    assert_ne!(default, restated);
+    let documented = resolved(default);
+    assert!(documented.same_bounds(&resolved(restated)));
+    let server = documented.server();
+    assert_eq!(server.header_timeout().value(), Duration::from_secs(60));
+    assert_eq!(server.shutdown_timeout().value(), Duration::from_secs(30));
+    assert_eq!(
+        server.request_budget().value(),
+        RequestBudget::bounded(Duration::from_secs(30), Duration::from_secs(30))
+            .expect("default request budget"),
+    );
+    assert_eq!(server.upload_budget().value(), TransferBudget::unbounded());
+    assert_eq!(
+        server.download_budget().value(),
+        TransferBudget::unbounded()
+    );
+    assert_eq!(server.request_body_hard_cap().value(), 256 * 1024 * 1024);
+    assert_eq!(server.connection_limit().value(), None);
+}
+
 fn assert_server_policy_contract() {
     let default = ServerPolicy::default();
 
-    // Documented defaults, read back through the setters that write them.
-    assert_eq!(
-        default,
-        default
-            .header_timeout(Duration::from_secs(60))
-            .expect("default header timeout")
-            .shutdown_timeout(Duration::from_secs(30))
-            .expect("default shutdown timeout")
-            .request_budget(
-                RequestBudget::bounded(Duration::from_secs(30), Duration::from_secs(30))
-                    .expect("default request budget"),
-            )
-            .upload_budget(TransferBudget::unbounded())
-            .download_budget(TransferBudget::unbounded()),
-    );
-
+    assert_documented_server_defaults(default);
     assert_connection_limit_contract(default);
     assert_health_route_contract(default);
     expect_invalid(default.header_timeout(ZERO), "header_timeout");
@@ -426,13 +485,17 @@ fn assert_server_policy_contract() {
 
     #[cfg(feature = "profiling")]
     {
-        // The published eight-MiB ceiling, read back through the setter that
-        // writes it.
+        // An explicit profiling ceiling differs from the default's intent,
+        // and enforces the documented eight MiB.
+        let restated = default
+            .profiling_response_limit(8 * 1024 * 1024)
+            .expect("default profiling response limit");
+        assert_ne!(default, restated);
+        let documented = resolved(default);
+        assert!(documented.same_bounds(&resolved(restated)));
         assert_eq!(
-            default,
-            default
-                .profiling_response_limit(8 * 1024 * 1024)
-                .expect("default profiling response limit"),
+            documented.server().profiling_response_limit().value(),
+            Some(8 * 1024 * 1024),
         );
         expect_invalid(
             default.profiling_response_limit(0),
@@ -502,16 +565,20 @@ fn assert_proxy_policy_contract() {
         uploading.download_budget(finite),
         downloading.upload_budget(finite),
     );
-    assert_eq!(
+    let restated = default
+        .upload_budget(TransferBudget::unbounded())
+        .download_budget(TransferBudget::unbounded());
+    assert_ne!(
         default.upload_budget(TransferBudget::unbounded()),
         default,
-        "an explicitly unbounded upload budget is the documented default",
+        "explicit upload intent differs from omission",
     );
-    assert_eq!(
+    assert_ne!(
         default.download_budget(TransferBudget::unbounded()),
         default,
-        "an explicitly unbounded download budget is the documented default",
+        "explicit download intent differs from omission",
     );
+    assert_restated_proxy_shares_and_enforces_defaults(default, restated);
     assert_eq!(
         uploading
             .buffered_response_limit(1024)
@@ -520,6 +587,45 @@ fn assert_proxy_policy_contract() {
             .buffered_response_limit(1024)
             .expect("a finite buffered ceiling")
             .upload_budget(finite),
+    );
+}
+
+/// A proxy policy that restates its unbounded transfer defaults still shares
+/// the default's upstream owner, and both report the documented bounds.
+fn assert_restated_proxy_shares_and_enforces_defaults(default: ProxyPolicy, restated: ProxyPolicy) {
+    let mut router = Router::new();
+    router.proxy_stream_with_policy("/default", "http://127.0.0.1:9", default);
+    router.proxy_stream_with_policy("/restated", "http://127.0.0.1:9", restated);
+    let owners = frozen_proxy_client_identities(&router);
+    assert_eq!(owners.len(), 2);
+    assert_eq!(
+        owners[0], owners[1],
+        "equal bounds share one upstream owner"
+    );
+    let report = resolved_with(ServerPolicy::default(), router);
+    let route = |prefix: &str| {
+        report
+            .routes()
+            .iter()
+            .find(|route| route.route() == prefix)
+            .expect("a reported proxy registration")
+    };
+    let (documented, explicit) = (route("/default"), route("/restated"));
+    assert_eq!(
+        documented.download_budget().value(),
+        TransferBudget::unbounded()
+    );
+    assert_eq!(
+        documented.upload_budget().value(),
+        TransferBudget::unbounded()
+    );
+    assert_eq!(
+        explicit.download_budget().value(),
+        documented.download_budget().value()
+    );
+    assert_eq!(
+        explicit.upload_budget().value(),
+        documented.upload_budget().value()
     );
 }
 
@@ -872,12 +978,14 @@ fn profiling_output_requires_a_limit_or_explicit_unbounded_name() {
     // maximum again restores it.
     let opted_out = default.unbounded_profiling_response();
     assert_eq!(frozen_profiling_response_limit(&opted_out), None);
+    let restored = opted_out
+        .profiling_response_limit(DEFAULT_PROFILING_RESPONSE_LIMIT)
+        .expect("the restored documented maximum");
     assert_eq!(
-        opted_out
-            .profiling_response_limit(DEFAULT_PROFILING_RESPONSE_LIMIT)
-            .expect("the restored documented maximum"),
-        default,
+        frozen_profiling_response_limit(&restored),
+        frozen_profiling_response_limit(&default),
     );
+    assert_ne!(restored, default, "an explicit limit retains its intent");
 
     for beside in policies_written_beside_the_profiling_ceiling(default) {
         assert_eq!(
