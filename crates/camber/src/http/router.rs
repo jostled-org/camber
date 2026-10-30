@@ -4,15 +4,18 @@ use super::body_admission::{
 use super::method::Method;
 use super::middleware::MiddlewareFn;
 use super::multipart::{MultipartLimits, MultipartStream};
+use super::policy_report::PolicyReport;
+use super::policy_sources::PolicyLayer;
 use super::proxy_policy::ProxyPolicy;
 use super::proxy_upstream::{ProxyClients, ProxyUpstream};
 use super::rejection::{Rejection, RejectionContext, RejectionMapper, shared_mapper};
 use super::response::HandlerOutcome;
 use super::response::IntoResponse;
 use super::response_commitment::ResponseOrigin;
+use super::route_budgets::RouteBudgets;
 use super::sse::{AsyncSseWriter, SseWriter};
 use super::static_files::{DEFAULT_STATIC_FILE_LIMIT, frozen_static_file_limit};
-use super::stream::StreamResponse;
+use super::stream::IntoStreamResponse;
 use super::trie::{
     CANONICAL_METHODS, MultipartRegistration, RouteHandler, SseFeed, SseProducer, TrieNode,
 };
@@ -34,17 +37,9 @@ pub use super::dispatch::GrpcRouter;
 #[cfg(feature = "ws")]
 pub(super) use super::dispatch::WsLauncher;
 pub(super) use super::dispatch::{
-    DispatchResult, FrozenRouter, GateCheck, Handler, ServerDispatch, SseHandler,
+    DispatchResult, FrozenRouter, GateCheck, Handler, RouteReportBase, RouterEnvelope,
+    ServerDispatch, SseHandler,
 };
-
-/// The transfer policy an SSE registration that names none is bounded by.
-///
-/// Unbounded is a statement here, not an omission: a server-sent event stream is
-/// the shape a long-lived feed is written in, so it declares no payload maximum
-/// and no lifetime of its own, and its memory stays bounded by the configured
-/// event-channel depth. Under a router, host, server, or runtime download policy
-/// it inherits that policy rather than widening it.
-const INHERITED_SSE_POLICY: super::TransferBudget = super::TransferBudget::unbounded();
 
 impl std::fmt::Debug for Router {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -75,7 +70,7 @@ pub struct Router {
     mapper: Option<Arc<RejectionMapper>>,
     body_ceiling: ConfiguredCeiling,
     body_policy: Option<Arc<BodyPolicy>>,
-    budgets: super::route_budgets::RouteBudgets,
+    budgets: RouteBudgets,
     /// The upstream owners this graph's proxy registrations were frozen with.
     proxy_clients: ProxyClients,
     #[cfg(feature = "grpc")]
@@ -92,7 +87,7 @@ impl Default for Router {
             mapper: None,
             body_ceiling: ConfiguredCeiling::default(),
             body_policy: None,
-            budgets: super::route_budgets::RouteBudgets::default(),
+            budgets: RouteBudgets::default(),
             proxy_clients: ProxyClients::default(),
             #[cfg(feature = "grpc")]
             grpc_router: None,
@@ -108,10 +103,10 @@ impl Router {
 
     /// Set the deadlines every request this router admits runs under.
     ///
-    /// This narrows the server's own request budget and can never widen it: an
-    /// unbounded dimension here inherits the containing bound rather than
-    /// erasing it. Under a [`HostRouter`](super::HostRouter) the host's budget
-    /// contains this one as well.
+    /// This budget sets both request dimensions explicitly, including an
+    /// unbounded one. Per dimension, an explicit server, runtime, or
+    /// [`HostRouter`](super::HostRouter) value still contains it, and the
+    /// narrower value applies. A default at those layers never narrows it.
     #[must_use]
     pub fn request_budget(mut self, budget: super::RequestBudget) -> Self {
         self.budgets = self.budgets.with_request(budget);
@@ -120,8 +115,9 @@ impl Router {
 
     /// Set the budget for streaming uploads this router admits.
     ///
-    /// Route-aware body admission remains the request payload byte authority;
-    /// this budget can only narrow it further.
+    /// Route-aware body admission counts request payload bytes for multipart
+    /// and streaming proxy routes. On those routes this budget applies its
+    /// deadlines only.
     #[must_use]
     pub fn upload_budget(mut self, budget: super::TransferBudget) -> Self {
         self.budgets = self.budgets.with_upload(budget);
@@ -135,12 +131,13 @@ impl Router {
         self
     }
 
-    /// Set the maximum request body size in bytes (capped at 256 MB).
+    /// Set the requested maximum body size in bytes; zero admits empty bodies only.
     ///
     /// This is a ceiling, not a target. A body-admission policy may select a
-    /// smaller maximum for one request; it can never select a larger one, and
-    /// under a [`HostRouter`](super::HostRouter) this ceiling can only narrow
-    /// the host's.
+    /// smaller maximum for one request; it can never select a larger one.
+    /// Under a [`HostRouter`](super::HostRouter) with its own ceiling, the
+    /// narrower one applies. The resolved [`ServerPolicy`](super::ServerPolicy)
+    /// hard cap always contains it, even at the cap's 256 MiB default.
     #[must_use]
     pub fn max_request_body(mut self, bytes: usize) -> Self {
         self.body_ceiling = ConfiguredCeiling::configured(bytes);
@@ -443,28 +440,32 @@ impl Router {
 
     /// Register an async streaming handler for GET requests.
     ///
-    /// The handler returns a `StreamResponse` for incremental body delivery.
-    /// Use `StreamResponse::new()` to get both the response and a sender.
-    pub fn get_stream(
-        &mut self,
-        path: &str,
-        handler: impl Fn(&Request) -> Pin<Box<dyn Future<Output = StreamResponse> + Send>>
-        + Send
-        + Sync
-        + 'static,
-    ) {
+    /// Return a `Response`, `StreamResponse`, or either wrapped in `Result`.
+    /// Use `StreamResponse::new()` to get both a response and its sender.
+    /// Convert a buffered `Response` with `into()` when one handler uses both forms.
+    ///
+    /// Middleware runs as a gate before the handler. Camber calls the handler
+    /// only after the gate passes, so a refusing gate stops it before any of
+    /// its code runs, and the gate reads the whole body before the handler can
+    /// take it with [`Request::take_body`].
+    pub fn get_stream<F, Fut, R>(&mut self, path: &str, handler: F)
+    where
+        F: Fn(&Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: IntoStreamResponse,
+    {
         self.add_stream(Method::Get, path, handler);
     }
 
     /// Register an async streaming handler for POST requests.
-    pub fn post_stream(
-        &mut self,
-        path: &str,
-        handler: impl Fn(&Request) -> Pin<Box<dyn Future<Output = StreamResponse> + Send>>
-        + Send
-        + Sync
-        + 'static,
-    ) {
+    /// Accepts the same buffered, streamed, and fallible answers as [`Self::get_stream`],
+    /// and runs the handler after its middleware gate in the same way.
+    pub fn post_stream<F, Fut, R>(&mut self, path: &str, handler: F)
+    where
+        F: Fn(&Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: IntoStreamResponse,
+    {
         self.add_stream(Method::Post, path, handler);
     }
 
@@ -487,7 +488,7 @@ impl Router {
         self.add_sse(
             Method::Get,
             path,
-            INHERITED_SSE_POLICY,
+            None,
             SseProducer::Blocking(Arc::new(handler)),
         );
     }
@@ -511,7 +512,7 @@ impl Router {
         self.add_sse(
             Method::Get,
             path,
-            budget,
+            Some(budget),
             SseProducer::Blocking(Arc::new(handler)),
         );
     }
@@ -531,12 +532,7 @@ impl Router {
         F: Fn(&Request, AsyncSseWriter) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
     {
-        self.add_sse(
-            Method::Get,
-            path,
-            INHERITED_SSE_POLICY,
-            async_sse_producer(handler),
-        );
+        self.add_sse(Method::Get, path, None, async_sse_producer(handler));
     }
 
     /// Register an async SSE handler for GET requests under the transfer
@@ -552,7 +548,7 @@ impl Router {
         F: Fn(&Request, AsyncSseWriter) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
     {
-        self.add_sse(Method::Get, path, budget, async_sse_producer(handler));
+        self.add_sse(Method::Get, path, Some(budget), async_sse_producer(handler));
     }
 
     /// Register an async SSE handler for POST requests.
@@ -577,12 +573,7 @@ impl Router {
         F: Fn(&Request, AsyncSseWriter) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
     {
-        self.add_sse(
-            Method::Post,
-            path,
-            INHERITED_SSE_POLICY,
-            async_sse_producer(handler),
-        );
+        self.add_sse(Method::Post, path, None, async_sse_producer(handler));
     }
 
     /// Register an async SSE handler for POST requests under the transfer
@@ -598,7 +589,12 @@ impl Router {
         F: Fn(&Request, AsyncSseWriter) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), RuntimeError>> + Send + 'static,
     {
-        self.add_sse(Method::Post, path, budget, async_sse_producer(handler));
+        self.add_sse(
+            Method::Post,
+            path,
+            Some(budget),
+            async_sse_producer(handler),
+        );
     }
 
     /// Insert one SSE registration under the policy its caller selected.
@@ -606,7 +602,7 @@ impl Router {
         &mut self,
         method: Method,
         path: &str,
-        budget: super::TransferBudget,
+        budget: Option<super::TransferBudget>,
         producer: SseProducer,
     ) {
         self.root.insert_route(
@@ -818,7 +814,10 @@ impl Router {
 
     /// Freeze one streaming registration's upstream owner on this graph.
     fn streaming_registration(&mut self, policy: ProxyPolicy) -> ProxyRegistration {
-        ProxyRegistration::Streaming(self.proxy_clients.frozen(policy))
+        ProxyRegistration::Streaming(
+            self.proxy_clients.frozen(policy),
+            policy.configured_budgets(),
+        )
     }
 
     fn insert_proxy_routes(
@@ -940,32 +939,62 @@ impl Router {
         );
     }
 
-    fn add_stream(
-        &mut self,
-        method: Method,
-        path: &str,
-        handler: impl Fn(&Request) -> Pin<Box<dyn Future<Output = StreamResponse> + Send>>
-        + Send
-        + Sync
-        + 'static,
-    ) {
-        self.root
-            .insert_route(method, path, RouteHandler::Stream(Box::new(handler)));
+    fn add_stream<F, Fut, R>(&mut self, method: Method, path: &str, handler: F)
+    where
+        F: Fn(&Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: IntoStreamResponse,
+    {
+        self.root.insert_route(
+            method,
+            path,
+            RouteHandler::Stream(Arc::new(move |req| {
+                let entered = handler(req);
+                Box::pin(async move { entered.await.into_stream_response() })
+            })),
+        );
     }
 
-    /// Freeze routes into an immutable trie for serving.
-    pub(super) fn freeze(self) -> FrozenRouter {
-        FrozenRouter {
+    /// Freeze routes into an immutable trie under the policy that contains it.
+    ///
+    /// Policy resolution and its report run once here, so a request only reads
+    /// the resolved budgets and ceiling.
+    pub(super) fn freeze(
+        self,
+        envelope: &RouterEnvelope<'_>,
+        report: &mut PolicyReport,
+    ) -> FrozenRouter {
+        let budgets = self
+            .budgets
+            .located(PolicyLayer::Router)
+            .contained_by(envelope.budgets);
+        report.budgets(PolicyLayer::Router, &self.budgets, &budgets);
+        let configured = self.body_ceiling.configured_value();
+        let ceiling = self
+            .body_ceiling
+            .resolved(envelope.host_ceiling, envelope.cap);
+        report.body_limit(PolicyLayer::Router, configured, ceiling);
+        let frozen = FrozenRouter {
             root: self.root.freeze(),
             middleware: self.middleware.into_boxed_slice(),
             skip_middleware_for_internal: self.skip_middleware_for_internal,
             mapper: self.mapper,
-            body_ceiling: self.body_ceiling,
+            body_ceiling: ceiling.value(),
             body_policy: self.body_policy,
-            budgets: self.budgets,
+            budgets: budgets.values(),
             #[cfg(feature = "grpc")]
             grpc_router: self.grpc_router,
-        }
+        };
+        frozen.report_routes(
+            envelope.host,
+            RouteReportBase {
+                budgets,
+                configured,
+                ceiling,
+            },
+            report,
+        );
+        frozen
     }
 }
 
@@ -1039,8 +1068,10 @@ fn static_route_handler(
 enum ProxyRegistration {
     /// Buffered, under the maximum this route's owner froze.
     Buffered(Arc<ProxyUpstream>),
-    /// Streamed to the peer with backpressure.
-    Streaming(Arc<ProxyUpstream>),
+    /// Streamed to the peer with backpressure, under the transfer budgets this
+    /// registration configured. They stay with the registration because an
+    /// upstream owner is shared by every registration with equal bounds.
+    Streaming(Arc<ProxyUpstream>, RouteBudgets),
 }
 
 impl ProxyRegistration {
@@ -1058,11 +1089,12 @@ impl ProxyRegistration {
                 healthy,
                 upstream: Arc::clone(upstream),
             },
-            Self::Streaming(upstream) => RouteHandler::ProxyStream {
+            Self::Streaming(upstream, budgets) => RouteHandler::ProxyStream {
                 backend,
                 prefix,
                 healthy,
                 upstream: Arc::clone(upstream),
+                budgets: *budgets,
             },
         }
     }

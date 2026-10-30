@@ -8,6 +8,10 @@
 //! the attempt timer and the operation deadline, and the Reqwest client owns
 //! the connect and quiet-interval timers.
 //!
+//! An exchange is the one owner of an origin change. A hop to another origin
+//! replaces the transport and removes the request's credentials together, so
+//! no send reaches the new origin with either one left over.
+//!
 //! An exchange sends and does not collect. It ends at the final head, where it
 //! gives up its transport and drops its request.
 
@@ -16,10 +20,18 @@ use super::redirect::Carried;
 use super::transport::OperationTransport;
 use reqwest::{Method, Url};
 
+/// Where an admitted redirect sends the next attempt.
+pub(super) enum Next<'t> {
+    /// Another URL at the current origin, through the current transport.
+    SameOrigin(Url),
+    /// A URL at another origin, through the transport admitted for it.
+    NewOrigin(Url, OperationTransport<'t>),
+}
+
 /// One request as every attempt of it is sent.
 pub(super) struct Exchange<'t> {
-    /// The transport every attempt and every hop of this operation sends
-    /// through. The exchange owns it until the final head takes it.
+    /// The current destination's transport. Retries reuse it; an admitted
+    /// origin change replaces it. The final head takes ownership.
     transport: OperationTransport<'t>,
     /// The validated request. Each attempt clones its headers and shares its
     /// frozen body, so no attempt parses or copies a payload.
@@ -52,7 +64,18 @@ impl<'t> Exchange<'t> {
     }
 
     /// Make the request the one an authorized redirect asks for.
-    pub(super) fn follow(&mut self, url: Url, carried: Carried) {
+    ///
+    /// A new origin replaces the transport and permanently removes the
+    /// credentials. A retry or a later return hop restores neither.
+    pub(super) fn follow(&mut self, next: Next<'t>, carried: Carried) {
+        let url = match next {
+            Next::SameOrigin(url) => url,
+            Next::NewOrigin(url, transport) => {
+                self.transport = transport;
+                self.description.strip_credentials();
+                url
+            }
+        };
         self.description.retarget(url);
         match carried {
             Carried::Whole => {}
@@ -73,9 +96,8 @@ impl<'t> Exchange<'t> {
     /// An empty body is no body: the transport then declares no content.
     pub(super) async fn send(&self) -> Result<reqwest::Response, reqwest::Error> {
         let description = &self.description;
-        let mut builder = self
-            .transport
-            .client()
+        let transport: &reqwest::Client = &self.transport;
+        let mut builder = transport
             .request(description.method().clone(), description.url().clone())
             .headers(description.headers().clone());
         if !description.body().is_empty() {

@@ -63,6 +63,7 @@ impl MapperLog {
             RejectionKind::Routing
             | RejectionKind::MethodSelection
             | RejectionKind::BodyAdmission
+            | RejectionKind::TurnAdmission
             | RejectionKind::BodyUnreadable
             | RejectionKind::MalformedBody
             | RejectionKind::Multipart

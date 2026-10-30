@@ -12,6 +12,7 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+use tokio::task::futures::TaskLocalFuture;
 
 pub(crate) const DEFAULT_HEALTH_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -384,6 +385,11 @@ impl RuntimeInner {
         self.scope.is_open()
     }
 
+    /// Whether forced teardown has swept this runtime's async child registry.
+    pub(crate) fn scope_was_forced(&self) -> bool {
+        self.scope.is_stopped()
+    }
+
     /// This runtime's integration registry.
     pub(crate) fn integrations(&self) -> &crate::integration_lifecycle::IntegrationRegistry {
         &self.integrations
@@ -478,12 +484,10 @@ impl RuntimeInner {
         let slot = self.admit(ChildKind::Async, subsystem)?;
         let id = slot.id;
         let gate = Arc::new(tokio::sync::Notify::new());
-        // The task-local scope is built here rather than through the
-        // `scope_runtime` async fn: that wrapper would construct the same
-        // future again on its first poll, and child futures can be large.
-        let handle = executor.spawn(
-            TASK_RUNTIME.scope(Arc::clone(self), gated_child(Arc::clone(&gate), body, slot)),
-        );
+        let handle = executor.spawn(carry_runtime(
+            Some(Arc::clone(self)),
+            gated_child(Arc::clone(&gate), body, slot),
+        ));
         // Aborted outside the guard: `abort` can drop a never-polled task
         // inline, and the dropped child's `ScopeSlot` retakes the same lock.
         //
@@ -758,10 +762,6 @@ struct ScopeState {
     /// before it could register leaves nothing behind.
     async_children: BTreeMap<TaskId, Option<tokio::task::JoinHandle<()>>>,
     blocking_children: BTreeSet<TaskId>,
-    /// Set once the escalation has swept the registry, so a handle registered
-    /// after that sweep is stopped by its registrar rather than retained by an
-    /// owner that will never look again.
-    stopped: bool,
 }
 
 impl ScopeState {
@@ -791,20 +791,19 @@ impl ScopeState {
     /// Fill a seeded entry with the child's joinable handle.
     ///
     /// Hands the handle back when there is no entry to fill: the child was
-    /// dropped before it could register, or the escalation already swept the
-    /// registry. Either way no owner will look at that handle again, so its
-    /// registrar stops the child instead.
+    /// dropped before it could register. No owner will look at that handle
+    /// again, so its registrar stops the child instead.
     fn fill_async_handle(
         &mut self,
         id: TaskId,
         handle: tokio::task::JoinHandle<()>,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        match (self.stopped, self.async_children.get_mut(&id)) {
-            (false, Some(entry)) => {
+        match self.async_children.get_mut(&id) {
+            Some(entry) => {
                 *entry = Some(handle);
                 None
             }
-            _ => Some(handle),
+            None => Some(handle),
         }
     }
 
@@ -831,6 +830,14 @@ struct TaskScope {
     /// internal panic is the normal case, and first-write-wins because the
     /// runtime reports one fault, not a list.
     internal_panic: Mutex<Option<crate::RuntimeError>>,
+    /// Set once the escalation has swept the registry, so a handle registered
+    /// after that sweep is stopped by its registrar rather than retained by an
+    /// owner that will never look again.
+    ///
+    /// Written only under the state guard, so a registration reads it in
+    /// order with the sweep. It is atomic so that an operation completion can
+    /// read it without the guard that every admission also takes.
+    stopped: AtomicBool,
 }
 
 impl TaskScope {
@@ -842,11 +849,11 @@ impl TaskScope {
                 next_id: 0,
                 async_children: BTreeMap::new(),
                 blocking_children: BTreeSet::new(),
-                stopped: false,
             }),
             idle: Condvar::new(),
             closing: LatchSignal::new(),
             internal_panic: Mutex::new(None),
+            stopped: AtomicBool::new(false),
         }
     }
 
@@ -921,7 +928,16 @@ impl TaskScope {
         id: TaskId,
         handle: tokio::task::JoinHandle<()>,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        self.lock().fill_async_handle(id, handle)
+        let mut state = self.lock();
+        match self.is_stopped() {
+            true => Some(handle),
+            false => state.fill_async_handle(id, handle),
+        }
+    }
+
+    /// Whether forced teardown has swept the async child registry.
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
     }
 
     fn count(&self) -> usize {
@@ -946,7 +962,7 @@ impl TaskScope {
     /// which child came back.
     fn take_async_children(&self) -> Box<[(TaskId, tokio::task::JoinHandle<()>)]> {
         let mut state = self.lock();
-        state.stopped = true;
+        self.stopped.store(true, Ordering::Release);
         std::mem::take(&mut state.async_children)
             .into_iter()
             .filter_map(|(id, handle)| handle.map(|handle| (id, handle)))
@@ -974,6 +990,9 @@ impl TaskScope {
         let aborted = handles.len();
         for (_, handle) in handles.iter() {
             handle.abort();
+            if let Some(schedule) = schedule {
+                schedule.pause(RuntimeCheckpoint::ScopeChildAbortRequested);
+            }
         }
         let mut joins: futures_util::stream::FuturesUnordered<_> = handles
             .into_vec()
@@ -1163,7 +1182,7 @@ where
 }
 
 tokio::task_local! {
-    static TASK_RUNTIME: Arc<RuntimeInner>;
+    static TASK_RUNTIME: Option<Arc<RuntimeInner>>;
 }
 
 thread_local! {
@@ -1293,8 +1312,8 @@ where
 /// Absence is a value the caller dispositions — no path fills it by minting a
 /// default runtime, which would hand back an orphan no owner ever awaits.
 pub(crate) fn try_current_runtime() -> Option<Arc<RuntimeInner>> {
-    match TASK_RUNTIME.try_with(Arc::clone) {
-        Ok(inner) => Some(inner),
+    match TASK_RUNTIME.try_with(Clone::clone) {
+        Ok(inner) => inner,
         Err(_) => RUNTIME.with(|cell| cell.borrow().as_ref().map(Arc::clone)),
     }
 }
@@ -1336,7 +1355,10 @@ pub fn is_shutting_down() -> bool {
 /// cloning one to immediately drop it moves the refcount on every caller —
 /// including `reject_nested_runtime`, which runs on every entry point.
 pub(crate) fn has_runtime() -> bool {
-    TASK_RUNTIME.try_with(|_| ()).is_ok() || RUNTIME.with(|cell| cell.borrow().is_some())
+    match TASK_RUNTIME.try_with(Option::is_some) {
+        Ok(present) => present,
+        Err(_) => RUNTIME.with(|cell| cell.borrow().is_some()),
+    }
 }
 
 /// Bridge an async future to synchronous context.
@@ -1361,28 +1383,25 @@ pub(crate) fn install_runtime(inner: Arc<RuntimeInner>) -> RuntimeContextGuard {
     RuntimeContextGuard { previous }
 }
 
-/// Scope runtime context to a future so it follows that future across workers.
-pub(crate) async fn scope_runtime<F>(inner: Arc<RuntimeInner>, future: F) -> F::Output
-where
-    F: Future,
-{
-    TASK_RUNTIME.scope(inner, future).await
-}
-
-/// Run a detached task under the runtime context its spawner captured.
+/// Scope `future` to the runtime context `context` names, so the context
+/// follows the future across workers and detached tasks.
 ///
 /// Tokio task-locals do not cross `tokio::spawn`, so a task that must keep
 /// seeing the runtime it was launched under carries the context in by value.
 /// A captured `None` runs the future with no context — absence propagates, it
-/// is never filled.
-pub(crate) async fn carry_runtime<F>(context: Option<Arc<RuntimeInner>>, future: F) -> F::Output
+/// is never filled from the thread-local fallback.
+///
+/// This is not an `async fn`. That wrapper would keep `future` in its own state
+/// and build the scope future beside it on the first poll, which doubles the
+/// allocation of every spawned task and copies the future on that poll.
+pub(crate) fn carry_runtime<F>(
+    context: Option<Arc<RuntimeInner>>,
+    future: F,
+) -> TaskLocalFuture<Option<Arc<RuntimeInner>>, F>
 where
     F: Future,
 {
-    match context {
-        Some(inner) => scope_runtime(inner, future).await,
-        None => future.await,
-    }
+    TASK_RUNTIME.scope(context, future)
 }
 
 /// Abort a lingering external cancellation watcher for this runtime.

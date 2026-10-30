@@ -21,7 +21,7 @@ use super::response::{
     HeaderPair, Response, ResponseProvenance, UnrepresentableResponse, validate_status,
 };
 use super::source_chain::SourceChain;
-use crate::RuntimeError;
+use crate::{RuntimeError, TurnRefused};
 use arrayvec::ArrayString;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -217,6 +217,10 @@ pub enum RejectionKind {
     /// [`RejectionKind::BodyUnreadable`]: a transport account of a request
     /// nothing refused, not a refusal.
     BodyAdmission,
+    /// A service turn was cancelled, expired, or closed before acquisition.
+    ///
+    /// [`Rejection::turn_refusal`] names which of the three it was.
+    TurnAdmission,
     /// The body stopped arriving for a reason that is not the limit.
     BodyUnreadable,
     /// The body collection deadline expired.
@@ -263,11 +267,12 @@ impl RejectionKind {
     /// sits against the variants it names, so adding one is a single edit in a
     /// single place.
     #[doc(hidden)]
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Routing,
         Self::MethodSelection,
         Self::BodyLimit,
         Self::BodyAdmission,
+        Self::TurnAdmission,
         Self::BodyUnreadable,
         Self::BodyTimeout,
         Self::RequestTimeout,
@@ -291,6 +296,7 @@ impl RejectionKind {
             Self::MethodSelection => "method_selection",
             Self::BodyLimit => "body_limit",
             Self::BodyAdmission => "body_admission",
+            Self::TurnAdmission => "turn_admission",
             Self::BodyUnreadable => "body_unreadable",
             Self::BodyTimeout => "body_timeout",
             Self::RequestTimeout => "request_timeout",
@@ -321,6 +327,7 @@ pub struct Rejection {
     status: u16,
     message: Cow<'static, str>,
     headers: Box<[HeaderPair]>,
+    turn: Option<TurnRefused>,
 }
 
 impl Rejection {
@@ -349,6 +356,7 @@ impl Rejection {
             status,
             message: message.into(),
             headers: Box::new([]),
+            turn: None,
         }
     }
 
@@ -426,6 +434,26 @@ impl Rejection {
             headers: headers.into_boxed_slice(),
             ..self
         }
+    }
+
+    /// Name the turn refusal behind a [`RejectionKind::TurnAdmission`] category.
+    ///
+    /// Camber sets it for every turn refusal it classifies. Applications use it
+    /// to build the rejection their own mapper tests expect.
+    #[must_use]
+    pub fn with_turn_refusal(self, refusal: TurnRefused) -> Self {
+        Self {
+            turn: Some(refusal),
+            ..self
+        }
+    }
+
+    /// The turn refusal behind this rejection, if a service turn caused it.
+    ///
+    /// A mapper reads it to answer a deadline differently from a closure or a
+    /// cancellation, which share the `TurnAdmission` category.
+    pub fn turn_refusal(&self) -> Option<TurnRefused> {
+        self.turn
     }
 
     /// The category this refusal was classified as.
@@ -1380,6 +1408,10 @@ fn classify(error: RuntimeError, kinds: ProducerKinds) -> Rejected {
     match error {
         RuntimeError::BadRequest(message) => Rejected::declared(kinds.declared, message),
         RuntimeError::ScopeClosed => Rejected::unavailable(RuntimeError::ScopeClosed),
+        refused @ RuntimeError::Turn(refusal) => Rejected::plain(
+            Rejection::service_unavailable(RejectionKind::TurnAdmission).with_turn_refusal(refusal),
+            Arc::new(refused),
+        ),
         parsed @ RuntimeError::MalformedBody(_) => {
             Rejected::unparseable(RejectionKind::MalformedBody, UNPARSEABLE_BODY, parsed)
         }

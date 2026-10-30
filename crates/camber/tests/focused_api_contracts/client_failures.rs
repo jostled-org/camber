@@ -99,7 +99,7 @@ struct Row {
     build: fn() -> ClientError,
 }
 
-const ROWS: [Row; 30] = [
+const ROWS: [Row; 34] = [
     Row {
         label: "configuration",
         category: "configuration",
@@ -149,6 +149,26 @@ const ROWS: [Row; 30] = [
         label: "encode",
         category: "encode",
         build: || ClientError::Encode,
+    },
+    Row {
+        label: "redirect policy with zero hops",
+        category: "invalid-request/redirect-policy",
+        build: || redirect_policy_refusal(0, &["https://allowed.example"]),
+    },
+    Row {
+        label: "redirect policy with an empty allowlist",
+        category: "invalid-request/redirect-policy",
+        build: || redirect_policy_refusal(1, &[]),
+    },
+    Row {
+        label: "redirect policy with an invalid origin",
+        category: "invalid-request/redirect-policy",
+        build: || redirect_policy_refusal(1, &["https://allowed.example/path"]),
+    },
+    Row {
+        label: "redirect downgrade",
+        category: "redirect/downgrade",
+        build: || ClientError::Redirect(ClientRedirect::Downgrade),
     },
     Row {
         label: "dns",
@@ -252,6 +272,15 @@ const ROWS: [Row; 30] = [
     },
 ];
 
+/// The failure a cross-origin redirect policy is refused with, built by its
+/// public constructor.
+fn redirect_policy_refusal(max_hops: usize, origins: &[&str]) -> ClientError {
+    match camber::http::RedirectPolicy::cross_origin(max_hops, origins) {
+        Err(RuntimeError::Client(error)) => error,
+        other => panic!("expected a redirect policy refusal, got {other:?}"),
+    }
+}
+
 /// A table with no rows would build no category and still report success.
 const _: () = assert!(!ROWS.is_empty());
 
@@ -287,6 +316,7 @@ categories! {
     ClientError::InvalidRequest(ClientInput::Body) => "invalid-request/body",
     ClientError::InvalidRequest(ClientInput::ResponseLimit) => "invalid-request/response-limit",
     ClientError::InvalidRequest(ClientInput::EgressPolicy) => "invalid-request/egress-policy",
+    ClientError::InvalidRequest(ClientInput::RedirectPolicy(_)) => "invalid-request/redirect-policy",
     ClientError::InvalidRequest(ClientInput::StreamBudget) => "invalid-request/stream-budget",
     ClientError::Encode => "encode",
     ClientError::Dns => "dns",
@@ -299,6 +329,7 @@ categories! {
     ClientError::Timeout(ClientTimeout::ResponseIdle) => "timeout/response-idle",
     ClientError::Redirect(ClientRedirect::InvalidLocation) => "redirect/invalid-location",
     ClientError::Redirect(ClientRedirect::OriginChanged) => "redirect/origin-changed",
+    ClientError::Redirect(ClientRedirect::Downgrade) => "redirect/downgrade",
     ClientError::Redirect(ClientRedirect::HopLimit) => "redirect/hop-limit",
     ClientError::Redirect(ClientRedirect::UnsafeMethod) => "redirect/unsafe-method",
     ClientError::Status(_) => "status",
@@ -353,18 +384,68 @@ macro_rules! assert_closed_enum {
     }};
 }
 
+/// The input a refused redirect policy names, with its reason.
+fn redirect_policy_input(max_hops: usize, origins: &[&str]) -> ClientInput {
+    match redirect_policy_refusal(max_hops, origins) {
+        ClientError::InvalidRequest(input) => input,
+        other => panic!("expected an invalid redirect policy, got {other:?}"),
+    }
+}
+
+/// Every refused input, the redirect policy reasons included, prints a name
+/// of its own.
+///
+/// The match has no wildcard over `ClientInput`, so a new input fails to
+/// compile until it is listed.
+fn assert_client_inputs_are_named() {
+    let reasons = [
+        redirect_policy_input(0, &["https://allowed.example"]),
+        redirect_policy_input(1, &[]),
+        redirect_policy_input(1, &["https://allowed.example/path"]),
+        redirect_policy_input(2, &["https://allowed.example", "ftp://allowed.example"]),
+    ];
+    let values = [
+        ClientInput::Method,
+        ClientInput::Url,
+        ClientInput::Header,
+        ClientInput::ReservedHeader,
+        ClientInput::Body,
+        ClientInput::ResponseLimit,
+        ClientInput::EgressPolicy,
+        ClientInput::StreamBudget,
+    ]
+    .into_iter()
+    .chain(reasons)
+    .collect::<Vec<_>>();
+    for value in &values {
+        match value {
+            ClientInput::Method
+            | ClientInput::Url
+            | ClientInput::Header
+            | ClientInput::ReservedHeader
+            | ClientInput::Body
+            | ClientInput::ResponseLimit
+            | ClientInput::EgressPolicy
+            | ClientInput::RedirectPolicy(_)
+            | ClientInput::StreamBudget => (),
+        }
+    }
+    assert_closed_names(&values, "ClientInput");
+    let shown: Vec<String> = reasons.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        shown,
+        [
+            "redirect policy: zero hops",
+            "redirect policy: empty allowlist",
+            "redirect policy: origin at index 0",
+            "redirect policy: origin at index 1",
+        ]
+    );
+}
+
 /// Every nested category is a value with its own safe name.
 fn assert_nested_categories_are_named() {
-    assert_closed_enum!(ClientInput {
-        Method,
-        Url,
-        Header,
-        ReservedHeader,
-        Body,
-        ResponseLimit,
-        EgressPolicy,
-        StreamBudget,
-    });
+    assert_client_inputs_are_named();
     assert_closed_enum!(ClientTimeout {
         Operation,
         Attempt,
@@ -374,6 +455,7 @@ fn assert_nested_categories_are_named() {
     assert_closed_enum!(ClientRedirect {
         InvalidLocation,
         OriginChanged,
+        Downgrade,
         HopLimit,
         UnsafeMethod,
     });
@@ -1271,6 +1353,7 @@ fn outcome_of(error: &ClientError) -> Option<&'static str> {
             | ClientInput::Body
             | ClientInput::ResponseLimit
             | ClientInput::EgressPolicy
+            | ClientInput::RedirectPolicy(_)
             | ClientInput::StreamBudget,
         ) => Some("invalid-request"),
         ClientError::Dns => Some("dns"),
@@ -1286,6 +1369,7 @@ fn outcome_of(error: &ClientError) -> Option<&'static str> {
         ClientError::Redirect(
             ClientRedirect::InvalidLocation
             | ClientRedirect::OriginChanged
+            | ClientRedirect::Downgrade
             | ClientRedirect::HopLimit
             | ClientRedirect::UnsafeMethod,
         ) => Some("redirect"),

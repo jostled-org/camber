@@ -28,6 +28,8 @@ pub mod trace_capture;
 mod binary_bodies;
 #[path = "component_body_files/body_admission.rs"]
 mod body_admission;
+#[path = "component_body_files/body_hard_cap.rs"]
+mod body_hard_cap;
 #[path = "component_body_files/body_limits.rs"]
 mod body_limits;
 #[path = "component_body_files/bounded_collections.rs"]

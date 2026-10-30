@@ -563,7 +563,7 @@ impl H2RequestStream {
     }
 
     /// Take this stream's pending answer, which only one reader may read.
-    fn take_response(&mut self) -> h2::client::ResponseFuture {
+    pub fn take_response(&mut self) -> h2::client::ResponseFuture {
         self.response
             .take()
             .expect("this HTTP/2 stream's answer was already read")

@@ -56,7 +56,7 @@ pub(in crate::http) struct ServerContextSnapshot {
     runtime: Option<Arc<RuntimeInner>>,
     buffers: BufferConfig,
     is_tls: bool,
-    policy: super::super::ServerPolicy,
+    effective: super::super::EffectiveServerPolicy,
     health: Option<HealthEndpoint>,
 }
 
@@ -73,12 +73,17 @@ impl ServerContextSnapshot {
     pub(in crate::http) fn capture(
         buffers: BufferConfig,
         policy: super::super::ServerPolicy,
+        origin: super::super::server::RuntimeOrigin,
     ) -> Self {
         let runtime = runtime::try_current_runtime();
-        let policy = match runtime.as_ref() {
-            Some(runtime) => policy.narrowed_by(runtime.config.server_policy),
-            None => policy,
+        let outer = match origin {
+            super::super::server::RuntimeOrigin::Ambient => {
+                runtime.as_ref().map(|runtime| runtime.config.server_policy)
+            }
+            super::super::server::RuntimeOrigin::Minted => None,
         };
+        let effective = super::super::EffectiveServerPolicy::resolve(policy, outer);
+        let policy = effective.policy();
         let registry = runtime
             .as_ref()
             .and_then(|runtime| runtime.resources.as_ref());
@@ -87,9 +92,18 @@ impl ServerContextSnapshot {
             runtime,
             buffers,
             is_tls: false,
-            policy,
+            effective,
             health,
         }
+    }
+
+    pub(in crate::http) const fn effective_policy(&self) -> &super::super::EffectiveServerPolicy {
+        &self.effective
+    }
+
+    /// The resolved values this server enforces.
+    const fn policy(&self) -> super::super::ServerPolicy {
+        self.effective.policy()
     }
 
     /// Every path one of Camber's internal routes answers on this server.
@@ -156,15 +170,15 @@ impl ServerContextSnapshot {
     }
 
     fn shutdown_timeout(&self) -> Duration {
-        self.policy.shutdown_timeout_value()
+        self.policy().shutdown_timeout_value()
     }
 
     fn header_timeout(&self) -> Duration {
-        self.policy.header_timeout_value()
+        self.policy().header_timeout_value()
     }
 
     fn connection_limit(&self) -> Option<usize> {
-        self.policy.connection_limit_value()
+        self.policy().connection_limit_value()
     }
 
     fn connection_context(&self) -> super::super::handle::ConnCtx {
@@ -173,7 +187,7 @@ impl ServerContextSnapshot {
                 runtime,
                 self.buffers,
                 self.is_tls,
-                self.policy,
+                self.policy(),
                 self.health.clone(),
             ),
             None => self.standalone_context(),
@@ -194,7 +208,7 @@ impl ServerContextSnapshot {
             ws_buffer_size: self.buffers.ws_buffer_size,
             health: None,
             is_tls: self.is_tls,
-            policy: self.policy,
+            policy: self.policy(),
         }
     }
 }
@@ -644,6 +658,7 @@ impl ServerSupervisor {
             lifecycle,
             self.header_timeout,
             remote_addr.map(|addr| addr.ip()),
+            self.runtime.clone(),
         );
         let future = super::super::conn::serve_owned_connection(
             stream,
@@ -1259,7 +1274,10 @@ pub(in crate::http) fn supervisor_join_probe(
             SupervisorJoin::Tokio(tokio::spawn(opaque_panic_probe()))
         }
     };
-    super::super::server::ServerHandleFuture::from_join(join)
+    let local = super::super::ServerPolicy::default();
+    let effective = super::super::EffectiveServerPolicy::resolve(local, None);
+    let policies = super::super::policy_report::PolicyReport::new(effective, &local).finish();
+    super::super::server::ServerHandleFuture::from_join(join, policies)
 }
 
 async fn string_panic_probe() -> Result<(), RuntimeError> {

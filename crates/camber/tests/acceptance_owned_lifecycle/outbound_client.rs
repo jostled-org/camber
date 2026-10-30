@@ -64,12 +64,13 @@ use crate::disconnect::peer::start_request;
 use crate::disconnect::routes::probe_router;
 use crate::disconnect::servers::with_owned_server;
 use crate::retry_upstream::{
-    Answer, CHUNKED, Call, Pace, Paced, PacedUpstream, PeerEvent, Recording, RunnableDriver,
-    ScriptedUpstream, StreamHead, StreamNext, advance_to, answered, assert_released, close, demand,
-    describe, failed_as, must_settle, on_peers, owner_must_reach, owner_parked, owner_reached,
-    paced_chunk, paced_end, paced_head, parked, peer_runtime, poll_once, read_out, saw_each,
-    settle_wakeups, settled, spawn_get, spawn_stream_get, stream_get, wait_for_body_collection,
-    was_cancelled, watch_streams, within_watchdog,
+    Answer, CHUNKED, Call, Pace, Paced, PacedUpstream, PeerEvent, Recording, RecordingUpstream,
+    RunnableDriver, ScriptedUpstream, StreamHead, StreamNext, advance_to, answer, answered,
+    assert_released, client_answer, close, demand, describe, failed_as, must_settle, on_peers,
+    owner_must_reach, owner_parked, owner_reached, paced_chunk, paced_end, paced_head, parked,
+    peer_runtime, poll_once, read_out, saw_each, settle_wakeups, settled, spawn_get,
+    spawn_stream_get, stream_get, wait_for_body_collection, was_cancelled, watch_streams,
+    within_watchdog,
 };
 
 use camber::__private::ClientBodyObservation;
@@ -114,6 +115,140 @@ const CROSSED_BACKOFF: Duration = Duration::from_millis(5);
 
 /// The retry count of every row that has retries to spare.
 const SPARE_RETRIES: u32 = 2;
+
+#[test]
+fn cross_origin_second_destination_dns_obeys_runtime_shutdown() {
+    crate::common::run_in_child(
+        "outbound_client::cross_origin_second_destination_dns_obeys_runtime_shutdown",
+        "cross-origin-shutdown-completion",
+        "CROSS_ORIGIN_SHUTDOWN_COMPLETE",
+        Duration::from_secs(60),
+        cross_origin_shutdown_rows,
+    );
+}
+
+fn cross_origin_shutdown_rows() {
+    for streaming in [false, true] {
+        cancel_cross_origin_second_lookup(streaming);
+    }
+}
+
+const REDIRECT_CANCEL_SECRET: &str = "redirect-shutdown-secret-31fc";
+
+fn cancel_cross_origin_second_lookup(streaming: bool) {
+    let row = format!("runtime shutdown during second-destination DNS, streaming={streaming}");
+    let capture = crate::common::capture_events("http.client.completed");
+    let private = crate::common::capture_events(REDIRECT_CANCEL_SECRET);
+    let peers = peer_runtime();
+    let destination = on_peers(
+        &peers,
+        RecordingUpstream::bind(answer("200 OK", &[], b"unreached")),
+    );
+    let origin = format!("http://second.shutdown.test:{}", destination.addr().port());
+    let redirect = paced_head(
+        "302 Found",
+        &[
+            (
+                "Location",
+                &format!("{origin}/target?token={REDIRECT_CANCEL_SECRET}"),
+            ),
+            ("Content-Length", "64"),
+        ],
+    );
+    let mut source = on_peers(
+        &peers,
+        PacedUpstream::bind_steps(vec![Pace::Send(redirect), Pace::UntilClosed]),
+    );
+    let initial = format!("http://first.shutdown.test:{}", source.addr().port());
+    let edge = ClientDnsEdge::new();
+    edge.answer(&[LOOPBACK]);
+    edge.hold();
+    let policy = EgressPolicy::public_internet()
+        .allow_destination(&initial, LOOPBACK)
+        .unwrap()
+        .allow_destination(&origin, LOOPBACK)
+        .unwrap();
+    let client = client_dns_edge(unbounded_client().egress_policy(policy), &edge)
+        .redirect_policy(http::RedirectPolicy::cross_origin(1, [&origin]).unwrap());
+    let request = client
+        .request(
+            "GET",
+            &format!("{initial}/start?token={REDIRECT_CANCEL_SECRET}"),
+        )
+        .unwrap()
+        .sensitive_header("authorization", REDIRECT_CANCEL_SECRET)
+        .unwrap();
+    let result = cancelled_second_lookup(&row, request, streaming, &edge, &mut source);
+    assert!(
+        matches!(result, Err(RuntimeError::Cancelled)),
+        "{row}: {result:?}"
+    );
+    edge.release(&[LOOPBACK]);
+    let first = on_peers(&peers, source.finish(&row));
+    let second = on_peers(&peers, destination.finish_probed(&row));
+    assert_eq!(first.requests.len(), 1, "{row}");
+    assert_eq!(
+        *first.requests[0].header_values("authorization"),
+        [REDIRECT_CANCEL_SECRET]
+    );
+    assert_eq!(
+        second.connections, 0,
+        "{row}: cancelled DNS permitted a dial"
+    );
+    assert!(second.requests.is_empty(), "{row}");
+    assert_eq!(
+        edge.lookups(),
+        2,
+        "{row}: cancellation started another lookup"
+    );
+    assert_redirect_shutdown_completion(&row, &capture, &private);
+}
+
+fn cancelled_second_lookup(
+    row: &str,
+    request: http::ClientRequest<'_>,
+    streaming: bool,
+    edge: &ClientDnsEdge,
+    source: &mut PacedUpstream,
+) -> Result<(u16, Vec<u8>), RuntimeError> {
+    runtime::builder().run(|| runtime::block_on(async {
+        let call = client_answer(request, streaming);
+        tokio::pin!(call);
+        must_settle(row, "second destination lookup", async {
+            tokio::select! {
+                _ = edge.held() => {},
+                result = &mut call => panic!("{row}: operation ended before second lookup: {result:?}"),
+            }
+        }).await;
+        assert_eq!(edge.lookups(), 2, "{row}");
+        assert!(source.client_left().await.is_ok(), "{row}: redirect retained its unread body during the next lookup");
+        runtime::request_shutdown();
+        must_settle(row, "cancelled operation", call).await
+    })).unwrap()
+}
+
+fn assert_redirect_shutdown_completion(
+    row: &str,
+    capture: &crate::common::TraceCapture,
+    private: &crate::common::TraceCapture,
+) {
+    let events = capture.events();
+    assert_eq!(events.len(), 1, "{row}: {events:?}");
+    for (name, value) in [
+        ("method", "GET"),
+        ("host", "first.shutdown.test"),
+        ("status", "none"),
+        ("attempts", "1"),
+        ("redirects", "0"),
+        ("outcome", "cancelled"),
+    ] {
+        crate::common::assert_field_value(&events[0], name, value, row);
+    }
+    assert!(
+        private.is_empty() && !private.truncated(),
+        "{row}: recorded a request or redirect secret"
+    );
+}
 
 /// A client whose every bound outlasts the row that sends through it.
 fn unbounded_client() -> Client {

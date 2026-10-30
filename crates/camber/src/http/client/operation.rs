@@ -26,18 +26,18 @@ use super::completion::{Completion, method_label};
 use super::delay::{retry_delay, stated_retry_after};
 use super::description::Description;
 use super::error::{ClientError, ClientRedirect};
-use super::exchange::Exchange;
+use super::exchange::{Exchange, Next};
 use super::handoff::FinalHead;
 use super::lifetime::{ATTEMPT_EXPIRED, Lifetime};
 use super::policy::OperationPolicy;
 use super::projection::client_error_projection;
 use super::redirect::{
-    Hop, client_next_redirect, client_redirect_destination, client_send_total, redirect_carried,
-    redirect_location,
+    Carried, Destination, Hop, client_send_total, next_redirect, redirect_carried,
+    redirect_destination, redirect_location,
 };
 use super::replay::{client_retryable_failure, client_retryable_status};
 use super::reusable::Client;
-use super::transport::OperationTransport;
+use super::transport::{Dialer, OperationTransport};
 use crate::RuntimeError;
 use crate::runtime;
 use reqwest::Url;
@@ -76,6 +76,7 @@ pub(super) fn first_poll(
 /// borrow ends here.
 pub(super) async fn final_head<'t>(
     transport: OperationTransport<'t>,
+    dialer: Dialer<'t>,
     description: Description,
     policy: OperationPolicy,
     lifetime: Lifetime,
@@ -84,6 +85,7 @@ pub(super) async fn final_head<'t>(
     Operation {
         initial: description.url().clone(),
         exchange: Exchange::new(transport, description),
+        dialer,
         policy,
         lifetime,
         retries_sent: 0,
@@ -111,12 +113,12 @@ enum Answered {
 /// borrow of the terminal record. They are separate so that the final head
 /// keeps the first and cannot keep the second.
 struct Operation<'t, 'c> {
-    /// The URL the call began at. Its origin is the only one a redirect may
-    /// name, and no hop changes it.
+    /// The initial URL. Its origin remains permitted throughout the operation.
     initial: Url,
     /// The current request: the first one, or the one the last followed
     /// redirect asked for.
     exchange: Exchange<'t>,
+    dialer: Dialer<'t>,
     policy: OperationPolicy,
     lifetime: Lifetime,
     /// How many retries this operation has sent, across every hop.
@@ -126,6 +128,14 @@ struct Operation<'t, 'c> {
     /// The terminal record. The operation reports each send, each followed
     /// redirect, and its final head, and reads nothing back.
     completion: &'c mut Completion,
+}
+
+/// Release an unread answer, which closes its connection, and keep its
+/// status.
+fn released(resp: reqwest::Response) -> u16 {
+    let status = resp.status().as_u16();
+    drop(resp);
+    status
 }
 
 impl<'t> Operation<'t, '_> {
@@ -143,7 +153,7 @@ impl<'t> Operation<'t, '_> {
             match head.map(|resp| (self.answered(&resp), resp)) {
                 Ok((Answered::Final, resp)) => return Ok(self.accept(resp, bound)),
                 Ok((Answered::Retry(retry), resp)) => self.retry_status(resp, retry).await?,
-                Ok((Answered::Redirect(decision), resp)) => self.follow(resp, decision)?,
+                Ok((Answered::Redirect(decision), resp)) => self.follow(resp, decision).await?,
                 Err(failure) => self.retry_failure(failure).await?,
             }
         }
@@ -166,25 +176,28 @@ impl<'t> Operation<'t, '_> {
     /// head is not a redirect this request follows.
     fn redirect(&self, resp: &reqwest::Response) -> Option<Result<Hop, ClientRedirect>> {
         let status = resp.status().as_u16();
-        redirect_location(self.policy.redirect, status, resp.headers())
+        redirect_location(&self.policy.redirect, status, resp.headers())
             .map(|location| location.and_then(|location| self.hop(status, location)))
     }
 
     /// Admit one redirect: its destination, then its method, then its hop.
     ///
     /// Every check runs before a request to the destination exists, so a
-    /// refused redirect dials nothing. The destination has the initial origin:
-    /// its scheme is the one the egress policy admitted, and its host is the
-    /// one a pinned transport holds checked addresses for. A followed redirect
-    /// therefore starts no lookup.
+    /// refused redirect dials nothing. An admitted hop still needs destination
+    /// admission before it can replace the current request.
     fn hop(&self, status: u16, location: &[u8]) -> Result<Hop, ClientRedirect> {
-        let url = client_redirect_destination(&self.initial, self.exchange.url(), location)?;
+        let destination = redirect_destination(
+            &self.policy.redirect,
+            &self.initial,
+            self.exchange.url(),
+            location,
+        )?;
         let carried = redirect_carried(status, self.exchange.method(), self.policy.permission)?;
-        let ordinal = client_next_redirect(self.policy.redirect, self.redirects_followed)
+        let ordinal = next_redirect(&self.policy.redirect, self.redirects_followed)
             .filter(|hop| client_send_total(self.retries_sent, *hop).is_some())
             .ok_or(ClientRedirect::HopLimit)?;
         Ok(Hop {
-            url,
+            destination,
             carried,
             ordinal,
         })
@@ -197,26 +210,49 @@ impl<'t> Operation<'t, '_> {
     /// connection: a redirect body is never drained, and a refused one is not
     /// held past the refusal. No delay follows, and the next send starts under
     /// the operation's own deadline.
-    fn follow(
+    async fn follow(
         &mut self,
         resp: reqwest::Response,
         decision: Result<Hop, ClientRedirect>,
     ) -> Result<(), RuntimeError> {
-        let status = resp.status().as_u16();
-        drop(resp);
+        let status = released(resp);
         let hop =
             decision.map_err(|refusal| RuntimeError::Client(ClientError::Redirect(refusal)))?;
+        let next = self.dial(hop.destination).await?;
+        self.take(next, hop.carried, hop.ordinal, status);
+        Ok(())
+    }
+
+    /// Admit and dial a destination at another origin, or keep the current
+    /// transport for one at the same origin.
+    ///
+    /// The same origin has the same scheme, which the operation already
+    /// admitted. A new origin, a return to an earlier one included, passes
+    /// the scheme check and, under address restrictions, a fresh lookup and
+    /// pin.
+    async fn dial(&self, destination: Destination) -> Result<Next<'t>, RuntimeError> {
+        let Destination { url, new_origin } = destination;
+        match new_origin {
+            false => Ok(Next::SameOrigin(url)),
+            true => {
+                let transport = self.dialer.open(&url, &self.lifetime).await?;
+                Ok(Next::NewOrigin(url, transport))
+            }
+        }
+    }
+
+    /// Make `next` the current request and spend the hop numbered `ordinal`.
+    fn take(&mut self, next: Next<'t>, carried: Carried, ordinal: usize, status: u16) {
         tracing::debug!(
             method = method_label(self.exchange.method()),
             host = self.exchange.host(),
             status,
-            redirect = hop.ordinal,
-            "following same-origin HTTP redirect"
+            redirect = ordinal,
+            "following HTTP redirect"
         );
-        self.exchange.follow(hop.url, hop.carried);
-        self.redirects_followed = hop.ordinal;
+        self.exchange.follow(next, carried);
+        self.redirects_followed = ordinal;
         self.completion.followed();
-        Ok(())
     }
 
     /// Release a transient answer, then wait to send `retry`.

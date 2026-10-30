@@ -10,7 +10,7 @@ use std::time::Duration;
 /// writes here and never to the client or to a sibling request. Every call has
 /// one: a call with zero retries runs under the same total and the same
 /// absolute deadline as a call with retries to spare.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct OperationPolicy {
     /// The bound on the whole operation, measured from its first poll.
     pub(super) total: Duration,

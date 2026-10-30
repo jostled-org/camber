@@ -35,12 +35,14 @@ pub(in crate::http) use description::request_target;
 pub use dns_edge::ClientDnsEdge;
 pub use egress::{EgressPolicy, client_egress_decision};
 pub use error::{
-    ClientDecode, ClientEgress, ClientError, ClientInput, ClientRedirect, ClientTimeout,
+    ClientDecode, ClientEgress, ClientError, ClientInput, ClientRedirect, ClientRedirectPolicy,
+    ClientTimeout,
 };
 pub(in crate::http) use head::{HeaderEntry, text_headers};
 pub use projection::client_error_projection;
 pub use redirect::{
-    RedirectPolicy, client_next_redirect, client_redirect_destination, client_send_total,
+    CrossOriginRedirects, RedirectPolicy, client_next_redirect, client_redirect_destination,
+    client_send_total,
 };
 pub use replay::{RetryPolicy, client_retryable_failure};
 pub use request::{ClientRequest, client_header_sensitivity};

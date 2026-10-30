@@ -18,7 +18,7 @@ use super::grammar::malformed;
 use super::limits::MultipartLimits;
 use super::parser::{FieldMetadata, IncrementalParser, ParserEvent};
 use crate::RuntimeError;
-use crate::http::body_admission::{AdmittedBody, BodyBudget, BodyPermit};
+use crate::http::body_admission::{BodyBudget, BodyGrant, BodyPermit};
 use crate::http::mock::{LifecycleScript, MultipartOwnerEdge};
 use crate::http::operation::InboundTerminal;
 use crate::http::transfer::{IncomingSource, Transfer, TransferFailure, TransferOwner};
@@ -1214,14 +1214,14 @@ impl MultipartRevocation {
     }
 }
 
-/// Build one streaming multipart session over an admitted body.
+/// Build one streaming multipart session under a body grant.
 ///
 /// The three values it hands back are the whole ownership split: the driver owns
 /// the request, the revocation belongs to the coordinator, and the stream is all
 /// the application ever sees.
 pub(in crate::http) fn open<B>(
     body: B,
-    admitted: AdmittedBody,
+    admitted: BodyGrant,
     boundary: &str,
     limits: MultipartLimits,
     observer: SessionObserver,

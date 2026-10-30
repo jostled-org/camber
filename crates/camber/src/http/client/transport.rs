@@ -10,14 +10,15 @@
 //! clients with two pools, and one write discards both.
 
 use super::dns_edge::ClientDnsEdge;
-use super::egress::EgressPolicy;
+use super::egress::{EgressPolicy, egress_refused};
 use super::error::ClientError;
 use super::lifetime::Lifetime;
 use super::pinned::PinnedDestination;
 use super::projection::client_error_projection;
 use crate::RuntimeError;
 use reqwest::Url;
-use std::sync::OnceLock;
+use std::borrow::Cow;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 /// A built client, or the category its build failed with.
@@ -67,36 +68,28 @@ impl TransportCache {
 }
 
 /// The client settings every transport of that client is built from.
-pub(super) struct TransportSettings<'a> {
+///
+/// Each field is a copy or a shared handle, so a streamed operation keeps its
+/// own settings for a cost of one reference count at most.
+#[derive(Clone)]
+pub(super) struct TransportSettings {
     pub(super) connect_timeout: Duration,
     /// The quiet interval, or `None` to arm no read timer.
     pub(super) idle: Option<Duration>,
     /// The one local trust root a test added. It adds trust and removes no
     /// check.
-    pub(super) test_root: Option<&'a reqwest::Certificate>,
+    pub(super) test_root: Option<Arc<reqwest::Certificate>>,
 }
 
 /// The transport one operation sends through.
-pub(super) enum OperationTransport<'a> {
-    /// The client's reusable transport, and the pool every unrestricted call
-    /// of that client and profile shares.
-    Reusable(&'a reqwest::Client),
-    /// A handle to that same reusable transport, for a task that outlives the
-    /// borrow of its client. The pool is the shared one.
-    Held(reqwest::Client),
-    /// A transport built for this operation and pinned to its checked
-    /// addresses. Its pool is released when the operation ends.
-    Pinned(reqwest::Client),
-}
-
-impl OperationTransport<'_> {
-    pub(super) fn client(&self) -> &reqwest::Client {
-        match self {
-            Self::Reusable(shared) => shared,
-            Self::Held(owned) | Self::Pinned(owned) => owned,
-        }
-    }
-}
+///
+/// A borrowed one is the client's reusable transport, and its pool is the
+/// one every unrestricted buffered call of that client shares. An owned one
+/// is either a handle to that same reusable transport, held by a streamed
+/// call that outlives the borrow of its client, or a transport pinned to
+/// this operation's checked addresses, whose pool closes when the operation
+/// ends.
+pub(super) type OperationTransport<'a> = Cow<'a, reqwest::Client>;
 
 /// Resolve and check `target` under `lifetime`, and build the transport that
 /// dials only its checked addresses.
@@ -104,10 +97,10 @@ impl OperationTransport<'_> {
 /// Every restricted operation of either terminal gets its transport here. The
 /// lookup wait ends with the operation, and a transport is built only for an
 /// answer the policy admitted whole.
-pub(super) async fn pinned_transport(
+async fn pinned_transport(
     policy: &EgressPolicy,
     edge: Option<&ClientDnsEdge>,
-    settings: &TransportSettings<'_>,
+    settings: &TransportSettings,
     target: &Url,
     lifetime: &Lifetime,
 ) -> Result<reqwest::Client, RuntimeError> {
@@ -118,50 +111,77 @@ pub(super) async fn pinned_transport(
     build_client(settings, Some(&pinned)).map_err(RuntimeError::Client)
 }
 
-/// What a restricted streaming operation resolves, checks, and builds its
-/// transport from, copied out of its client.
+/// How one operation reaches each origin it is sent to.
+enum Route<'a> {
+    /// Through the client's reusable transport and the pool it shares.
+    Reusable(Cow<'a, reqwest::Client>),
+    /// Through a transport built for each origin and pinned to that origin's
+    /// checked addresses. The timer profile and TLS trust stay fixed.
+    Pinned {
+        edge: Option<ClientDnsEdge>,
+        settings: TransportSettings,
+    },
+}
+
+/// How one operation admits destinations and builds their transports.
 ///
-/// The operation's task outlives the borrow of the client, so it owns these
-/// values. It arms no read timer.
-pub(super) struct PinnedDialer {
-    pub(super) policy: EgressPolicy,
-    pub(super) edge: Option<ClientDnsEdge>,
-    pub(super) connect_timeout: Duration,
-    pub(super) test_root: Option<reqwest::Certificate>,
+/// A buffered operation borrows its client's policy and reusable transport.
+/// A streamed one runs in a task that outlives that borrow, so
+/// [`into_owned`](Self::into_owned) gives it shared handles instead. Neither
+/// one copies the policy's exceptions.
+pub(super) struct Dialer<'a> {
+    policy: Cow<'a, EgressPolicy>,
+    route: Route<'a>,
 }
 
-/// How one streaming operation gets its transport, fixed at its first poll.
-pub(super) enum Dialer {
-    /// The client's reusable streaming transport.
-    Reusable(reqwest::Client),
-    /// A transport pinned to the operation's own checked addresses.
-    Pinned(PinnedDialer),
-}
+impl<'a> Dialer<'a> {
+    /// A dialer that sends every destination through `shared`.
+    pub(super) const fn reusable(policy: &'a EgressPolicy, shared: &'a reqwest::Client) -> Self {
+        Self {
+            policy: Cow::Borrowed(policy),
+            route: Route::Reusable(Cow::Borrowed(shared)),
+        }
+    }
 
-impl Dialer {
-    /// The transport of one operation to `target`.
+    /// A dialer that pins each destination to the addresses `policy` admits.
+    pub(super) const fn pinned(
+        policy: &'a EgressPolicy,
+        edge: Option<ClientDnsEdge>,
+        settings: TransportSettings,
+    ) -> Self {
+        Self {
+            policy: Cow::Borrowed(policy),
+            route: Route::Pinned { edge, settings },
+        }
+    }
+
+    /// The same dialer, holding shared handles instead of borrows.
+    pub(super) fn into_owned(self) -> Dialer<'static> {
+        Dialer {
+            policy: Cow::Owned(self.policy.into_owned()),
+            route: match self.route {
+                Route::Reusable(shared) => Route::Reusable(Cow::Owned(shared.into_owned())),
+                Route::Pinned { edge, settings } => Route::Pinned { edge, settings },
+            },
+        }
+    }
+
+    /// The transport of one operation to `target`, after its scheme passes.
+    ///
+    /// The scheme is checked for every destination, under a policy that
+    /// restricts no address too.
     pub(super) async fn open(
-        self,
+        &self,
         target: &Url,
         lifetime: &Lifetime,
-    ) -> Result<OperationTransport<'static>, RuntimeError> {
-        match self {
-            Self::Reusable(shared) => Ok(OperationTransport::Held(shared)),
-            Self::Pinned(dialer) => {
-                let settings = TransportSettings {
-                    connect_timeout: dialer.connect_timeout,
-                    idle: None,
-                    test_root: dialer.test_root.as_ref(),
-                };
-                pinned_transport(
-                    &dialer.policy,
-                    dialer.edge.as_ref(),
-                    &settings,
-                    target,
-                    lifetime,
-                )
-                .await
-                .map(OperationTransport::Pinned)
+    ) -> Result<OperationTransport<'a>, RuntimeError> {
+        self.policy.admit_scheme(target).map_err(egress_refused)?;
+        match &self.route {
+            Route::Reusable(shared) => Ok(shared.clone()),
+            Route::Pinned { edge, settings } => {
+                pinned_transport(&self.policy, edge.as_ref(), settings, target, lifetime)
+                    .await
+                    .map(Cow::Owned)
             }
         }
     }
@@ -201,7 +221,7 @@ impl Dialer {
 /// host, which is the name the `Host` header, the TLS server name, and
 /// certificate verification read.
 pub(super) fn build_client(
-    settings: &TransportSettings<'_>,
+    settings: &TransportSettings,
     pinned: Option<&PinnedDestination>,
 ) -> BuiltClient {
     let builder = reqwest::Client::builder()
@@ -213,7 +233,7 @@ pub(super) fn build_client(
         .no_brotli()
         .no_deflate()
         .no_zstd()
-        .tls_certs_merge(settings.test_root.cloned());
+        .tls_certs_merge(settings.test_root.as_deref().cloned());
     let builder = match settings.idle {
         Some(idle) => builder.read_timeout(idle),
         None => builder,

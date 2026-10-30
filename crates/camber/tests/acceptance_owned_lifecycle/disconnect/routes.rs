@@ -83,6 +83,7 @@ pub(super) enum Hold {
     /// Pass the request on to its route.
     PassThrough,
     /// Keep the request in flight, so nothing can produce a response for it.
+    #[cfg(feature = "ws")]
     InFlight,
 }
 
@@ -115,6 +116,7 @@ pub(super) fn gate_probe(router: &mut Router, path: &'static str, hold: Hold) ->
                     sinks.watch(&subject, signal, 1);
                     downstream.await
                 }
+                #[cfg(feature = "ws")]
                 (true, Hold::InFlight) => {
                     sinks.watch(&subject, signal, 1);
                     std::future::pending::<Response>().await

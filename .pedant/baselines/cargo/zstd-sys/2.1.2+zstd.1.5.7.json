@@ -1,0 +1,139 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "f5d45d8db7bf45cd0b190b4dbec533ee92ec02f3ca20f4824626885f2fee1554",
+  "crate_name": "zstd-sys",
+  "crate_version": "2.1.2+zstd.1.5.7",
+  "analysis_tier": "syntactic",
+  "timestamp": 1793333558,
+  "analysis_completeness": {
+    "analyzed_files": 3,
+    "skipped_files": 0
+  },
+  "rust_version": "1.64",
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./build.rs",
+          "line": 4,
+          "column": 1
+        },
+        "evidence": "std::fs",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "env_access",
+        "location": {
+          "file": "./build.rs",
+          "line": 323,
+          "column": 9
+        },
+        "evidence": "std::env::var",
+        "origin": "import",
+        "execution_context": "build_hook"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/wasm_shim.rs",
+          "line": 8,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/wasm_shim.rs",
+          "line": 14,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/wasm_shim.rs",
+          "line": 26,
+          "column": 1
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/wasm_shim.rs",
+          "line": 49,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/wasm_shim.rs",
+          "line": 55,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/wasm_shim.rs",
+          "line": 95,
+          "column": 5
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/wasm_shim.rs",
+          "line": 115,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/wasm_shim.rs",
+          "line": 135,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/wasm_shim.rs",
+          "line": 145,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/wasm_shim.rs",
+          "line": 155,
+          "column": 5
+        },
+        "evidence": "unsafe fn",
+        "origin": "code_site"
+      }
+    ]
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "spec_version": "0.1.0",
+  "source_hash": "e413f073f88f02344497c77f9bf40543b206c253d9a7e9b6534d4641bcd07f93",
+  "crate_name": "zstd",
+  "crate_version": "0.14.3",
+  "analysis_tier": "syntactic",
+  "timestamp": 1793333558,
+  "analysis_completeness": {
+    "analyzed_files": 17,
+    "skipped_files": 0
+  },
+  "rust_version": "1.64",
+  "profile": {
+    "findings": [
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/dict.rs",
+          "line": 317,
+          "column": 29
+        },
+        "evidence": "std::fs::File::open",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/dict.rs",
+          "line": 325,
+          "column": 5
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/dict.rs",
+          "line": 329,
+          "column": 5
+        },
+        "evidence": "walkdir",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/dict.rs",
+          "line": 334,
+          "column": 29
+        },
+        "evidence": "walkdir::WalkDir::new",
+        "origin": "import"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/stream/functions.rs",
+          "line": 222,
+          "column": 16
+        },
+        "evidence": "std::fs::File::open",
+        "origin": "import"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/raw.rs",
+          "line": 100,
+          "column": 19
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/raw.rs",
+          "line": 109,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "unsafe_code",
+        "location": {
+          "file": "./src/stream/raw.rs",
+          "line": 111,
+          "column": 9
+        },
+        "evidence": "unsafe block",
+        "origin": "code_site"
+      },
+      {
+        "capability": "file_read",
+        "location": {
+          "file": "./src/stream/tests.rs",
+          "line": 195,
+          "column": 5
+        },
+        "evidence": "std::fs",
+        "origin": "import"
+      }
+    ]
+  }
+}

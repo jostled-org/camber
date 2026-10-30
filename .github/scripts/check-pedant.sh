@@ -15,11 +15,11 @@ pedant_tree() {
 }
 
 known_package() {
-    local expected="$1" package
+    local expected="$1" package matched=1
     while IFS= read -r package; do
-        [ "${package}" = "${expected}" ] && return 0
+        [ "${package}" != "${expected}" ] || matched=0
     done < <(camber_pedant_packages)
-    return 1
+    return "${matched}"
 }
 
 check_package_tree() {

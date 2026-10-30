@@ -1621,3 +1621,428 @@ async fn restricted_tls_authenticates_the_requested_host() {
     https_only_refuses_http_before_a_mock_answers().await;
     scheme_only_policy_keeps_private_access().await;
 }
+
+fn cross_origin_client(
+    first: &RecordingUpstream,
+    second: &RecordingUpstream,
+    edge: &ClientDnsEdge,
+) -> Client {
+    let first_origin = format!("http://first.egress.test:{}", first.addr().port());
+    let second_origin = format!("http://second.egress.test:{}", second.addr().port());
+    let policy = EgressPolicy::public_internet()
+        .allow_destination(&first_origin, V4)
+        .unwrap()
+        .allow_destination(&second_origin, V4)
+        .unwrap();
+    restricted(policy, edge)
+        .redirect_policy(RedirectPolicy::cross_origin(3, [&second_origin]).unwrap())
+        .retries(1)
+        .backoff(CROSSED_BACKOFF)
+}
+
+fn cross_origin_url(peer: &RecordingUpstream, name: &str) -> String {
+    format!("http://{name}.egress.test:{}/start", peer.addr().port())
+}
+
+#[tokio::test]
+async fn cross_origin_new_destination_rejects_forbidden_and_mixed_dns_answers() {
+    use crate::retry_upstream::client_answer;
+    for streaming in [false, true] {
+        for addresses in [vec![V6], vec![V4, V6]] {
+            let second = RecordingUpstream::bind(answer("200 OK", &[], b"must not arrive")).await;
+            let away = cross_origin_url(&second, "second");
+            let first =
+                RecordingUpstream::bind(answer("302 Found", &[("Location", &away)], b"")).await;
+            let edge = ClientDnsEdge::new();
+            edge.answer(&[V4]);
+            edge.answer(&addresses);
+            let client = cross_origin_client(&first, &second, &edge);
+            let result = within_watchdog(client_answer(
+                client
+                    .request("GET", &cross_origin_url(&first, "first"))
+                    .unwrap(),
+                streaming,
+            ))
+            .await
+            .unwrap();
+            assert!(matches!(
+                result,
+                Err(RuntimeError::Client(ClientError::Egress(
+                    ClientEgress::Address
+                )))
+            ));
+            assert_eq!(edge.lookups(), 2);
+            assert_eq!(first.finish_probed("first origin").await.requests.len(), 1);
+            let refused = second.finish_probed("forbidden second origin").await;
+            assert_eq!(refused.connections, 0);
+            assert!(refused.requests.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn cross_origin_retry_reuses_the_new_destination_pin() {
+    use crate::retry_upstream::client_answer;
+    for streaming in [false, true] {
+        let attempts = AtomicUsize::new(0);
+        let second = RecordingUpstream::bind_responder(move |_| {
+            match attempts.fetch_add(1, Ordering::SeqCst) {
+                0 => answer("503 Service Unavailable", &[("Connection", "close")], b""),
+                _ => answer("200 OK", &[], b"pinned"),
+            }
+        })
+        .await;
+        let away = cross_origin_url(&second, "second");
+        let first = RecordingUpstream::bind(answer("302 Found", &[("Location", &away)], b"")).await;
+        let edge = ClientDnsEdge::new();
+        edge.answer(&[V4]);
+        edge.answer(&[V4]);
+        let client = cross_origin_client(&first, &second, &edge);
+        let result = within_watchdog(client_answer(
+            client
+                .request("GET", &cross_origin_url(&first, "first"))
+                .unwrap(),
+            streaming,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, (200, b"pinned".to_vec()));
+        assert_eq!(edge.lookups(), 2, "the retry must reuse the second pin");
+        assert!(!client_transport_is_built(&client));
+        assert_eq!(first.finish("initial pin").await.requests.len(), 1);
+        let landed = second.finish("second pin").await;
+        assert_eq!(landed.requests.len(), 2);
+        for request in &landed.requests {
+            assert_eq!(
+                request.header_values("host").as_ref(),
+                [format!(
+                    "second.egress.test:{}",
+                    reqwest::Url::parse(&away).unwrap().port().unwrap()
+                )
+                .as_str()]
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cross_origin_pending_destination_ends_with_its_original_operation() {
+    for streaming in [false, true] {
+        for deadline in [false, true] {
+            cross_origin_held_destination(streaming, deadline).await;
+        }
+    }
+}
+
+async fn cross_origin_held_destination(streaming: bool, deadline: bool) {
+    use crate::retry_upstream::client_answer;
+    let second = RecordingUpstream::bind(answer("200 OK", &[], b"too late")).await;
+    let away = cross_origin_url(&second, "second");
+    let first = RecordingUpstream::bind(answer("302 Found", &[("Location", &away)], b"")).await;
+    let edge = ClientDnsEdge::new();
+    edge.answer(&[V4]);
+    edge.hold();
+    let client = cross_origin_client(&first, &second, &edge).total_timeout(HELD_TOTAL);
+    let url = cross_origin_url(&first, "first");
+    tokio::time::pause();
+    let driver = RunnableDriver::start();
+    let call = tokio::spawn(async move {
+        client_answer(client.request("GET", &url).unwrap(), streaming).await
+    });
+    assert!(within_watchdog(edge.held()).await.is_some());
+    match deadline {
+        true => {
+            tokio::time::advance(HELD_TOTAL + TIMER_ROUNDING).await;
+            let result = within_watchdog(call).await.unwrap().unwrap();
+            assert!(matches!(
+                result,
+                Err(RuntimeError::Client(ClientError::Timeout(
+                    ClientTimeout::Operation
+                )))
+            ));
+        }
+        false => {
+            call.abort();
+            assert!(
+                within_watchdog(call)
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .is_cancelled()
+            );
+        }
+    }
+    edge.release(&[V4]);
+    settle_wakeups().await;
+    assert_eq!(edge.lookups(), 2);
+    tokio::time::resume();
+    driver.stop().await;
+    assert_eq!(
+        first.finish_probed("initial redirect").await.requests.len(),
+        1
+    );
+    assert_eq!(
+        second
+            .finish_probed("abandoned destination")
+            .await
+            .connections,
+        0
+    );
+}
+
+#[tokio::test]
+async fn cross_origin_https_downgrade_is_refused_even_when_allowlisted() {
+    use crate::retry_upstream::client_answer;
+    for streaming in [false, true] {
+        let second = RecordingUpstream::bind(answer("200 OK", &[], b"must stay private")).await;
+        let away = second.url("/downgraded");
+        let (cert, key) = generate_cert_with_san(NAME);
+        let mut first = named_tls_peer(
+            &cert,
+            &key,
+            answer("302 Found", &[("Location", &away)], b""),
+        )
+        .await;
+        let first_origin = format!("https://{NAME}:{}", first.addr().port());
+        let edge = ClientDnsEdge::new();
+        edge.answer(&[V4]);
+        let policy = EgressPolicy::public_internet()
+            .allow_destination(&first_origin, V4)
+            .unwrap()
+            .allow_destination(&second.url(""), V4)
+            .unwrap();
+        let client = client_test_root(restricted(policy, &edge), &cert)
+            .unwrap()
+            .redirect_policy(RedirectPolicy::cross_origin(2, [&second.url("")]).unwrap());
+        let result = within_watchdog(client_answer(
+            client.request("GET", &first_origin).unwrap(),
+            streaming,
+        ))
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Client(ClientError::Redirect(
+                ClientRedirect::Downgrade
+            )))
+        ));
+        let event = within_watchdog(first.recv()).await;
+        assert_completed_handshake("redirect downgrade", &event);
+        first.finish("secure first origin", within_watchdog).await;
+        assert_eq!(edge.lookups(), 1);
+        assert_eq!(
+            second.finish_probed("downgrade target").await.connections,
+            0
+        );
+    }
+}
+
+/// HTTPS A to HTTPS B to HTTP C: the second hop leaves HTTPS, so it is
+/// refused although C is allowlisted and admitted by egress policy.
+#[tokio::test]
+async fn cross_origin_https_chain_never_downgrades_on_a_later_hop() {
+    use crate::retry_upstream::client_answer;
+    for streaming in [false, true] {
+        let third = RecordingUpstream::bind(answer("200 OK", &[], b"must stay private")).await;
+        let third_origin = format!("http://{NAME}:{}", third.addr().port());
+        let (cert, key) = generate_cert_with_san(NAME);
+        let mut second = named_tls_peer(
+            &cert,
+            &key,
+            answer(
+                "302 Found",
+                &[("Location", &format!("{third_origin}/c"))],
+                b"",
+            ),
+        )
+        .await;
+        let second_origin = format!("https://{NAME}:{}", second.addr().port());
+        let mut first = named_tls_peer(
+            &cert,
+            &key,
+            answer(
+                "307 Temporary Redirect",
+                &[("Location", &second_origin)],
+                b"",
+            ),
+        )
+        .await;
+        let first_origin = format!("https://{NAME}:{}", first.addr().port());
+        let edge = ClientDnsEdge::new();
+        edge.answer(&[V4]);
+        edge.answer(&[V4]);
+        let policy = EgressPolicy::public_internet()
+            .allow_destination(&first_origin, V4)
+            .unwrap()
+            .allow_destination(&second_origin, V4)
+            .unwrap()
+            .allow_destination(&third_origin, V4)
+            .unwrap();
+        let client = client_test_root(restricted(policy, &edge), &cert)
+            .unwrap()
+            .redirect_policy(
+                RedirectPolicy::cross_origin(3, [&second_origin, &third_origin]).unwrap(),
+            );
+        let result = within_watchdog(client_answer(
+            client.request("GET", &first_origin).unwrap(),
+            streaming,
+        ))
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeError::Client(ClientError::Redirect(
+                    ClientRedirect::Downgrade
+                )))
+            ),
+            "streaming {streaming}: {result:?}"
+        );
+        assert_completed_handshake("chain first hop", &within_watchdog(first.recv()).await);
+        assert_completed_handshake("chain second hop", &within_watchdog(second.recv()).await);
+        first.finish("chain first origin", within_watchdog).await;
+        second.finish("chain second origin", within_watchdog).await;
+        assert_eq!(edge.lookups(), 2, "the refused HTTP origin was resolved");
+        assert_eq!(third.finish_probed("downgrade target").await.connections, 0);
+    }
+}
+
+#[tokio::test]
+async fn cross_origin_return_requires_fresh_dns_admission() {
+    use crate::retry_upstream::client_answer;
+    for streaming in [false, true] {
+        let first_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let second_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let first_origin = format!(
+            "http://first.egress.test:{}",
+            first_listener.local_addr().unwrap().port()
+        );
+        let second_origin = format!(
+            "http://second.egress.test:{}",
+            second_listener.local_addr().unwrap().port()
+        );
+        let away = format!("{second_origin}/away");
+        let returned = format!("{first_origin}/returned");
+        let first = RecordingUpstream::adopt_responder(first_listener, move |_| {
+            answer("302 Found", &[("Location", &away)], b"")
+        });
+        let second = RecordingUpstream::adopt_responder(second_listener, move |_| {
+            answer("302 Found", &[("Location", &returned)], b"")
+        });
+        let edge = ClientDnsEdge::new();
+        edge.answer(&[V4]);
+        edge.answer(&[V4]);
+        edge.answer(&[V6]);
+        let client = cross_origin_client(&first, &second, &edge);
+        let result = within_watchdog(client_answer(
+            client.request("GET", &first_origin).unwrap(),
+            streaming,
+        ))
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Client(ClientError::Egress(
+                ClientEgress::Address
+            )))
+        ));
+        assert_eq!(edge.lookups(), 3, "returning to A must check A again");
+        assert_eq!(
+            first.finish_probed("return refused").await.requests.len(),
+            1
+        );
+        assert_eq!(
+            second.finish_probed("away admitted").await.requests.len(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn cross_origin_releases_unread_response_before_destination_dns() {
+    use crate::retry_upstream::{Pace, PacedUpstream, client_answer, paced_head};
+    for streaming in [false, true] {
+        let second = RecordingUpstream::bind(answer("200 OK", &[], b"landed")).await;
+        let second_origin = format!("http://second.egress.test:{}", second.addr().port());
+        let mut first = PacedUpstream::bind_steps(vec![
+            Pace::Send(paced_head(
+                "302 Found",
+                &[("Location", &second_origin), ("Content-Length", "100")],
+            )),
+            Pace::UntilClosed,
+        ])
+        .await;
+        let first_origin = format!("http://first.egress.test:{}", first.addr().port());
+        let edge = ClientDnsEdge::new();
+        edge.answer(&[V4]);
+        edge.hold();
+        let policy = EgressPolicy::public_internet()
+            .allow_destination(&first_origin, V4)
+            .unwrap()
+            .allow_destination(&second_origin, V4)
+            .unwrap();
+        let client = restricted(policy, &edge)
+            .redirect_policy(RedirectPolicy::cross_origin(1, [&second_origin]).unwrap());
+        let call = tokio::spawn(async move {
+            client_answer(client.request("GET", &first_origin).unwrap(), streaming).await
+        });
+        assert!(within_watchdog(edge.held()).await.is_some());
+        first
+            .must_see_client_left("DNS cannot retain the unread redirect body")
+            .await;
+        edge.release(&[V4]);
+        assert_eq!(
+            within_watchdog(call).await.unwrap().unwrap().unwrap(),
+            (200, b"landed".to_vec())
+        );
+        assert_eq!(edge.lookups(), 2);
+        first.finish("released redirect").await;
+        assert_eq!(second.finish("checked destination").await.requests.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn cross_origin_retains_tls_trust_at_the_checked_destination() {
+    use crate::retry_upstream::client_answer;
+    for streaming in [false, true] {
+        let (cert, key) = generate_cert_with_san(NAME);
+        let mut second = named_tls_peer(&cert, &key, answer("200 OK", &[], b"trusted")).await;
+        let second_origin = format!("https://{NAME}:{}", second.addr().port());
+        let mut first = named_tls_peer(
+            &cert,
+            &key,
+            answer("302 Found", &[("Location", &second_origin)], b""),
+        )
+        .await;
+        let first_origin = format!("https://{NAME}:{}", first.addr().port());
+        let edge = ClientDnsEdge::new();
+        edge.answer(&[V4]);
+        edge.answer(&[V4]);
+        let policy = EgressPolicy::public_internet()
+            .allow_destination(&first_origin, V4)
+            .unwrap()
+            .allow_destination(&second_origin, V4)
+            .unwrap();
+        let client = client_test_root(restricted(policy, &edge), &cert)
+            .unwrap()
+            .redirect_policy(RedirectPolicy::cross_origin(1, [&second_origin]).unwrap());
+        let result = within_watchdog(client_answer(
+            client.request("GET", &first_origin).unwrap(),
+            streaming,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, (200, b"trusted".to_vec()));
+        assert_eq!(edge.lookups(), 2);
+        let first_event = within_watchdog(first.recv()).await;
+        let second_event = within_watchdog(second.recv()).await;
+        assert_completed_handshake("initial TLS origin", &first_event);
+        assert_completed_handshake("checked TLS destination", &second_event);
+        first.finish("initial TLS origin", within_watchdog).await;
+        second
+            .finish("checked TLS destination", within_watchdog)
+            .await;
+    }
+}

@@ -625,6 +625,9 @@ enum Delivery<T> {
 /// waiter's drop is published rather than discarded. The terminal is
 /// reported before the result is published, and the guard ends last, so the
 /// entry settles only after the result is fixed.
+///
+/// Forced teardown can end a dependency before aborting this task. A failure
+/// returned in that window still belongs to the owning runtime's forced stop.
 async fn operate<T, W>(
     work: W,
     account: OperationAccount,
@@ -646,7 +649,8 @@ async fn operate<T, W>(
             return;
         }
     };
-    deliver(settled(finished, account, owed, false), guard, delivery);
+    let forced = guard.runtime_forced();
+    deliver(settled(finished, account, owed, forced), guard, delivery);
 }
 
 /// What one retained operation's task owns beside its work.

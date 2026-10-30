@@ -184,6 +184,7 @@ pub mod task;
 pub mod time;
 /// TLS certificate and connection helpers.
 pub mod tls;
+mod turn;
 
 #[cfg(feature = "acme")]
 pub use acme::AcmeConfig;
@@ -203,6 +204,7 @@ pub use task::{AsyncJoinHandle, JoinHandle, on_shutdown, race, race_all, spawn, 
 pub use time::timeout;
 pub use tls::CertStore;
 pub use tracing;
+pub use turn::{Turn, TurnGuard, TurnRefused};
 
 /// Internal re-exports for macro hygiene. Not part of the public API.
 #[doc(hidden)]

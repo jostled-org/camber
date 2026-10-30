@@ -75,6 +75,9 @@ pub enum ClientInput {
     /// An [`EgressPolicy`](super::EgressPolicy) exception is not one exact
     /// origin at one address the policy can admit.
     EgressPolicy,
+    /// A cross-origin [`RedirectPolicy`](super::RedirectPolicy) is invalid,
+    /// for the reason it holds.
+    RedirectPolicy(ClientRedirectPolicy),
     /// A streamed response has no finite byte maximum or no finite idle
     /// interval.
     StreamBudget,
@@ -91,6 +94,7 @@ impl ClientInput {
             Self::Body => "body",
             Self::ResponseLimit => "response limit",
             Self::EgressPolicy => "egress policy",
+            Self::RedirectPolicy(_) => "redirect policy",
             Self::StreamBudget => "stream budget",
         }
     }
@@ -98,7 +102,36 @@ impl ClientInput {
 
 impl std::fmt::Display for ClientInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
+        match self {
+            Self::RedirectPolicy(reason) => write!(f, "{}: {reason}", self.label()),
+            _ => f.write_str(self.label()),
+        }
+    }
+}
+
+/// Why [`RedirectPolicy::cross_origin`](super::RedirectPolicy::cross_origin)
+/// refused its arguments.
+///
+/// An invalid entry is named by its position, not its text: the text can
+/// hold credentials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClientRedirectPolicy {
+    /// The hop bound is zero.
+    ZeroHops,
+    /// The allowlist has no entry.
+    EmptyAllowlist,
+    /// The entry at this zero-based position is not one exact HTTP or HTTPS
+    /// origin.
+    Origin(usize),
+}
+
+impl std::fmt::Display for ClientRedirectPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroHops => f.write_str("zero hops"),
+            Self::EmptyAllowlist => f.write_str("empty allowlist"),
+            Self::Origin(index) => write!(f, "origin at index {index}"),
+        }
     }
 }
 
@@ -141,8 +174,10 @@ pub enum ClientRedirect {
     /// The `Location` is malformed or repeated, or it holds a user name or a
     /// password.
     InvalidLocation,
-    /// The destination is not the initial origin.
+    /// The destination is outside the selected origin policy.
     OriginChanged,
+    /// An HTTPS response asks for an HTTP destination.
+    Downgrade,
     /// The redirect allowance is spent.
     HopLimit,
     /// The method may not be sent again with its body.
@@ -155,6 +190,7 @@ impl ClientRedirect {
         match self {
             Self::InvalidLocation => "invalid location",
             Self::OriginChanged => "origin changed",
+            Self::Downgrade => "scheme downgrade",
             Self::HopLimit => "hop limit",
             Self::UnsafeMethod => "unsafe method",
         }

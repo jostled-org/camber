@@ -50,6 +50,10 @@ static DEFAULT_UPSTREAM: std::sync::LazyLock<ProxyUpstream> =
     std::sync::LazyLock::new(|| ProxyUpstream::frozen(ProxyPolicy::default()));
 
 impl ProxyUpstream {
+    pub(super) const fn policy(&self) -> ProxyPolicy {
+        self.policy
+    }
+
     /// The owner a forward under the documented default policy runs through.
     pub(super) fn defaults() -> &'static Self {
         &DEFAULT_UPSTREAM
@@ -130,7 +134,7 @@ fn build_client(policy: ProxyPolicy) -> Result<reqwest::Client, RuntimeError> {
 /// router owns. Nothing looks a client up per request.
 #[derive(Default)]
 pub(super) struct ProxyClients {
-    /// The distinct owners this graph has frozen, keyed by the policy each was
+    /// The distinct owners this graph has frozen, keyed by the bounds each was
     /// built from.
     frozen: Vec<(ProxyPolicy, Arc<ProxyUpstream>)>,
     /// The owner each registration took, in registration order.
@@ -145,10 +149,13 @@ pub(super) struct ProxyClients {
 impl ProxyClients {
     /// The owner one registration under `policy` forwards through.
     ///
-    /// A policy this graph already froze is shared; anything else is frozen
-    /// now. The search is linear over a router's distinct proxy policies, which
-    /// is registration-time work over a handful of values.
+    /// Bounds this graph already froze are shared; anything else is frozen
+    /// now. The key is the enforced bounds alone, so a policy that restates a
+    /// default explicitly still shares. The search is linear over a router's
+    /// distinct proxy bounds, which is registration-time work over a handful
+    /// of values.
     pub(super) fn frozen(&mut self, policy: ProxyPolicy) -> Arc<ProxyUpstream> {
+        let policy = policy.bounds();
         let existing = self
             .frozen
             .iter()

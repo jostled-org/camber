@@ -45,6 +45,7 @@ pub const fn label_of(kind: RejectionKind) -> &'static str {
         RejectionKind::MethodSelection => "method_selection",
         RejectionKind::BodyLimit => "body_limit",
         RejectionKind::BodyAdmission => "body_admission",
+        RejectionKind::TurnAdmission => "turn_admission",
         RejectionKind::BodyUnreadable => "body_unreadable",
         RejectionKind::BodyTimeout => "body_timeout",
         RejectionKind::RequestTimeout => "request_timeout",

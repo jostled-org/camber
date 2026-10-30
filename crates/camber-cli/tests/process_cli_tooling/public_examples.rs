@@ -174,7 +174,7 @@ fn inventory(snippets: &[Snippet]) -> Box<str> {
 fn write_project(project_dir: &Path, snippets: &[Snippet]) -> Result<(), FixtureError> {
     std::fs::create_dir_all(project_dir.join("src"))?;
     let manifest = format!(
-        "[package]\nname = \"camber-public-examples\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[lib]\npath = \"src/lib.rs\"\n\n[dependencies]\ncamber = {{ path = \"{}\", features = [\"ws\"] }}\n",
+        "[package]\nname = \"camber-public-examples\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[lib]\npath = \"src/lib.rs\"\n\n[dependencies]\ncamber = {{ path = \"{}\", features = [\"ws\"] }}\ntokio = {{ version = \"1\", features = [\"macros\", \"time\"] }}\n",
         workspace_crate_path("camber")?.display()
     );
     std::fs::write(project_dir.join("Cargo.toml"), manifest)?;

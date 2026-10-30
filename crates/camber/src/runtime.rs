@@ -107,7 +107,11 @@ impl RuntimeBuilder {
     /// starts.
     ///
     /// A [`ServerBuilder`](crate::http::ServerBuilder) started inside the
-    /// runtime may narrow any dimension of this policy and can never widen one.
+    /// runtime resolves each dimension against this policy. When both set a
+    /// dimension explicitly, the narrower value applies. A default on either
+    /// side yields to an explicit value on the other, so a runtime default
+    /// never narrows an explicit server setting. The shutdown deadline is the
+    /// exception: the runtime enforces it on every server, default or not.
     /// The single-field setters below write onto this same value, so the last
     /// write to one field wins and the others keep what this policy set.
     #[must_use]
@@ -119,7 +123,9 @@ impl RuntimeBuilder {
     /// Set the graceful shutdown timeout. Minimum: 100ms. Zero values are clamped.
     ///
     /// This is the runtime's aggregate deadline: its servers, root scope, and
-    /// resources consume the same duration rather than one each.
+    /// resources consume the same duration rather than one each. A server that
+    /// sets no drain limit of its own drains for this duration. A server drain
+    /// limit can shorten it but never extend it.
     ///
     /// The clamp only raises the low end. A deadline past the policy ceiling is
     /// refused, and `run` returns that error naming this dimension.
@@ -604,8 +610,8 @@ where
     Fut: std::future::Future,
 {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tokio_rt.block_on(crate::runtime_state::scope_runtime(
-            Arc::clone(inner),
+        tokio_rt.block_on(crate::runtime_state::carry_runtime(
+            Some(Arc::clone(inner)),
             body(),
         ))
     }))

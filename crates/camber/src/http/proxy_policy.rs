@@ -1,6 +1,8 @@
 //! The bounds one proxy route applies to its upstream.
 
+use super::policy_dimension::DimensionSet;
 use super::policy_value::{finite_duration, positive_limit};
+use super::route_budgets::RouteBudgets;
 use super::transfer_budget::TransferBudget;
 use crate::RuntimeError;
 use std::time::Duration;
@@ -43,6 +45,8 @@ pub struct ProxyPolicy {
     buffered_response: Option<usize>,
     upload: TransferBudget,
     download: TransferBudget,
+    /// The transfer dimensions a setter chose rather than left at their defaults.
+    explicit: DimensionSet,
 }
 
 impl Default for ProxyPolicy {
@@ -54,6 +58,7 @@ impl Default for ProxyPolicy {
             buffered_response: Some(DEFAULT_BUFFERED_RESPONSE_LIMIT),
             upload: TransferBudget::unbounded(),
             download: TransferBudget::unbounded(),
+            explicit: DimensionSet::EMPTY,
         }
     }
 }
@@ -131,6 +136,7 @@ impl ProxyPolicy {
     pub fn upload_budget(self, budget: TransferBudget) -> Self {
         Self {
             upload: budget,
+            explicit: self.explicit.union(DimensionSet::UPLOAD),
             ..self
         }
     }
@@ -140,6 +146,7 @@ impl ProxyPolicy {
     pub fn download_budget(self, budget: TransferBudget) -> Self {
         Self {
             download: budget,
+            explicit: self.explicit.union(DimensionSet::DOWNLOAD),
             ..self
         }
     }
@@ -172,6 +179,27 @@ impl ProxyPolicy {
     /// The budget this route's streaming download runs under.
     pub(super) const fn download(self) -> TransferBudget {
         self.download
+    }
+
+    /// The transfer budgets this policy configured, with their intent.
+    pub(super) fn configured_budgets(self) -> RouteBudgets {
+        RouteBudgets::new(
+            super::RequestBudget::unbounded(),
+            self.upload,
+            self.download,
+            self.explicit,
+        )
+    }
+
+    /// This policy's enforced values, with no record of which were explicit.
+    ///
+    /// Two registrations whose bounds match share one upstream owner, whatever
+    /// intent each recorded.
+    pub(super) const fn bounds(self) -> Self {
+        Self {
+            explicit: DimensionSet::EMPTY,
+            ..self
+        }
     }
 }
 

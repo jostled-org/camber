@@ -247,8 +247,12 @@ Each NATS operation reports one [terminal](#telemetry).
 - A delivered slow-consumer event reports one `receive` terminal with
   `limit_exceeded`, and no close terminal.
 - `shutdown=true` means the runtime's stop settled the terminal: the stop
-  committed the close, or a forced stop dropped the work. Work that a forced
-  stop drops reports one terminal with an unknown outcome.
+  committed the close, or a forced stop ended the work. This includes a
+  publish that fails because forced teardown ended its reply receiver before
+  aborting the publish task. The connection's owning runtime determines this
+  field, even when another runtime awaits the result. A failure during ordinary
+  graceful drain does not set this field. Work that a forced stop drops reports
+  one terminal with an unknown outcome.
 - Reading a result again, or moving it into the runtime aggregate, adds no
   terminal. A publish dropped after it was submitted reports one `cancelled`
   terminal with an unknown outcome.
@@ -362,6 +366,11 @@ receipt handle is a label or an event field.
 - A loaded client reports one close terminal. A repeated or concurrent close
   read adds none, and a client whose connect failed reports no close. If the
   runtime's stop commits the close, the close terminal has `shutdown=true`.
+- A forced stop can end an operation's dependency before it aborts that
+  operation's task. A failure that the operation returns in that window has
+  `shutdown=true`. The client's owning runtime determines this field, even
+  when another runtime awaits the result. A failure during ordinary graceful
+  drain does not set this field.
 - An operation that close cuts reports one `cancelled` terminal. Its outcome is
   unknown only when the request reached the transport.
 - A waiter dropped after submission reports one `cancelled` terminal with an

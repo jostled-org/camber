@@ -104,12 +104,12 @@ fn spawn_sse_producer(
 /// feed, as it does for a blocking producer.
 fn spawn_async_sse_producer(
     start: &AsyncSseProducer,
-    req: Request,
+    mut req: Request,
     buffer_size: usize,
     owner: super::transfer::TransferOwner,
 ) -> StreamBody {
     let (watch, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(buffer_size);
-    let feed = start(&req, AsyncSseWriter::new(watch.clone()));
+    let feed = req.lend(|req| start(req, AsyncSseWriter::new(watch.clone())));
     let uri = req.uri_owned();
     crate::task::spawn_internal_async("sse", uri.path(), async move {
         tokio::select! {
@@ -308,29 +308,77 @@ pub(super) fn handle_stream_response(
     download: super::transfer::TransferOwner,
     operation: &OperationEnvelope,
 ) -> Result<hyper::Response<HyperResponseBody>, std::convert::Infallible> {
-    let parts = stream_resp.into_parts();
-    let response = match build_streaming_response(
-        parts.status,
-        &parts.headers,
-        StreamBody::channel(download, parts.rx),
+    let response = match stream_resp.into_parts() {
+        super::stream::StreamParts::Buffered(response) => {
+            finish_buffered_stream(response, ctx, scope, account, download, operation)
+        }
+        super::stream::StreamParts::Channel {
+            status,
+            headers,
+            rx,
+        } => finish_channel_stream(
+            build_streaming_response(status, &headers, StreamBody::channel(download, rx), scope),
+            ctx,
+            scope,
+            account,
+            operation,
+        ),
+    };
+    drop(held_request);
+    Ok(response)
+}
+
+/// Keep mapped delivery rules and application download bounds after conversion.
+fn finish_buffered_stream(
+    response: super::Response,
+    ctx: &ConnCtx,
+    scope: &RejectionScope,
+    account: &CompletionAccount,
+    download: super::transfer::TransferOwner,
+    operation: &OperationEnvelope,
+) -> hyper::Response<HyperResponseBody> {
+    let finalized = super::handle::finalize_response(
+        ctx,
+        response,
+        account,
         scope,
-    ) {
+        super::boundary::CrossedBound::None,
+    );
+    let mapped = finalized.refused.is_some();
+    let origin = match mapped {
+        true => ResponseOrigin::Framework,
+        false => ResponseOrigin::Application,
+    };
+    operation.commit_response(origin);
+    finalized.response.map(|body| match mapped {
+        true => HyperResponseBody::Full(body),
+        false => HyperResponseBody::Streaming(StreamBody::buffered(download, body)),
+    })
+}
+
+/// Commit a valid channel head, or map its construction failure once.
+fn finish_channel_stream(
+    built: Result<hyper::Response<HyperResponseBody>, hyper::http::Error>,
+    ctx: &ConnCtx,
+    scope: &RejectionScope,
+    account: &CompletionAccount,
+    operation: &OperationEnvelope,
+) -> hyper::Response<HyperResponseBody> {
+    let response = match built {
         Ok(response) => response,
         Err(error) => {
-            return Ok(answer_framework(
+            return answer_framework(
                 ctx,
                 scope,
                 Rejected::unrepresentable(error),
                 account,
                 operation,
-            ));
+            );
         }
     };
     operation.commit_response(ResponseOrigin::Application);
     account.commit(scope, response.status().as_u16());
-    drop(held_request);
-
-    Ok(response)
+    response
 }
 
 /// The outbound request one streaming forward is built from, and its payload.
@@ -451,7 +499,7 @@ pub(super) async fn dispatch_streaming_proxy(
 /// half-started behind it.
 enum Cleared {
     /// The payload is admitted, and this is what a passing chain stated.
-    Forward(super::body_admission::AdmittedBody, HeadProjection),
+    Forward(super::body_admission::BodyGrant, HeadProjection),
     /// Admission or the chain answered instead.
     Answered(hyper::Response<HyperResponseBody>),
 }
@@ -540,7 +588,7 @@ struct Forwarding<'a> {
 async fn forwarded_stream(
     proxy_parts: super::async_proxy::IncomingProxyParts,
     body: hyper::body::Incoming,
-    admitted: super::body_admission::AdmittedBody,
+    admitted: super::body_admission::BodyGrant,
     forwarding: Forwarding<'_>,
 ) -> hyper::Response<HyperResponseBody> {
     let Forwarding {

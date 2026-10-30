@@ -1,4 +1,4 @@
-use super::response::HeaderPair;
+use super::response::{HeaderPair, Response};
 use super::sse::AsyncSseWriter;
 use super::transfer_budget::TransferBudget;
 use crate::RuntimeError;
@@ -46,21 +46,26 @@ impl StreamSender {
 
 impl std::fmt::Debug for StreamResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (status, header_count) = match &self.body {
+            StreamParts::Buffered(response) => (response.status(), response.headers().len()),
+            StreamParts::Channel {
+                status, headers, ..
+            } => (*status, headers.len()),
+        };
         f.debug_struct("StreamResponse")
-            .field("status", &self.status)
-            .field("header_count", &self.headers.len())
+            .field("status", &status)
+            .field("header_count", &header_count)
             .finish()
     }
 }
 
-/// A streaming HTTP response returned from async handlers.
+/// A buffered or streaming HTTP response returned from async handlers.
 ///
 /// Created via `StreamResponse::new()`, which returns both the response
 /// (to return from the handler) and a `StreamSender` (to push chunks).
+/// Convert a [`Response`] with `into()` to answer before opening a stream.
 pub struct StreamResponse {
-    status: u16,
-    headers: Vec<HeaderPair>,
-    rx: mpsc::Receiver<Bytes>,
+    body: StreamParts,
     /// The download policy this response states for itself, narrowed under the
     /// route's when the body is built.
     budget: TransferBudget,
@@ -159,9 +164,11 @@ impl StreamResponse {
     fn over(status: u16, cap: usize, budget: TransferBudget) -> (Self, StreamSender) {
         let (tx, rx) = mpsc::channel(cap);
         let resp = Self {
-            status,
-            headers: Vec::new(),
-            rx,
+            body: StreamParts::Channel {
+                status,
+                headers: Vec::new(),
+                rx,
+            },
             budget,
         };
         (resp, StreamSender { tx })
@@ -169,8 +176,23 @@ impl StreamResponse {
 
     /// Add a custom header to the streaming response.
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
-        self.headers
-            .push((Cow::Owned(name.to_owned()), Cow::Owned(value.to_owned())));
+        self.body = match self.body {
+            StreamParts::Buffered(response) => {
+                StreamParts::Buffered(response.with_header(name, value))
+            }
+            StreamParts::Channel {
+                status,
+                mut headers,
+                rx,
+            } => {
+                headers.push((Cow::Owned(name.to_owned()), Cow::Owned(value.to_owned())));
+                StreamParts::Channel {
+                    status,
+                    headers,
+                    rx,
+                }
+            }
+        };
         self
     }
 
@@ -180,16 +202,52 @@ impl StreamResponse {
     }
 
     pub(crate) fn into_parts(self) -> StreamParts {
-        StreamParts {
-            status: self.status,
-            headers: self.headers.into_boxed_slice(),
-            rx: self.rx,
+        self.body
+    }
+}
+
+impl From<Response> for StreamResponse {
+    /// Retain the complete response without copying its body or creating a channel.
+    fn from(response: Response) -> Self {
+        Self {
+            body: StreamParts::Buffered(response),
+            budget: INHERITED_STREAM_POLICY,
         }
     }
 }
 
-pub(crate) struct StreamParts {
-    pub(crate) status: u16,
-    pub(crate) headers: Box<[HeaderPair]>,
-    pub(crate) rx: mpsc::Receiver<Bytes>,
+/// Convert a handler's buffered or streamed answer into a streaming-route outcome.
+///
+/// Implemented for [`Response`], [`StreamResponse`], and their `Result` forms.
+/// Typed errors reach the route's rejection mapper before any response commits.
+pub trait IntoStreamResponse {
+    /// Retain the answer or the typed failure for the route's response boundary.
+    fn into_stream_response(self) -> Result<StreamResponse, RuntimeError>;
+}
+
+impl IntoStreamResponse for Response {
+    fn into_stream_response(self) -> Result<StreamResponse, RuntimeError> {
+        Ok(self.into())
+    }
+}
+
+impl IntoStreamResponse for StreamResponse {
+    fn into_stream_response(self) -> Result<StreamResponse, RuntimeError> {
+        Ok(self)
+    }
+}
+
+impl<T: Into<StreamResponse>> IntoStreamResponse for Result<T, RuntimeError> {
+    fn into_stream_response(self) -> Result<StreamResponse, RuntimeError> {
+        self.map(Into::into)
+    }
+}
+
+pub(crate) enum StreamParts {
+    Buffered(Response),
+    Channel {
+        status: u16,
+        headers: Vec<HeaderPair>,
+        rx: mpsc::Receiver<Bytes>,
+    },
 }

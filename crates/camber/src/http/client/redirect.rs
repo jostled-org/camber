@@ -5,17 +5,19 @@
 //! the body, and whether an allowance has a hop left. The operation that acts
 //! on them holds no second copy of any.
 //!
-//! The origin a destination is compared against is the origin the call began
-//! at. A hop never widens it, so a chain of authorized hops cannot walk a
-//! credential to another origin. A refused destination is never repaired by
-//! removing headers: the call ends with the refusal.
+//! Same-origin policy admits only the initial origin. Cross-origin policy adds
+//! an explicit allowlist and refuses HTTPS downgrades. Each admitted hop says
+//! whether it changes origin. The exchange that applies it removes the
+//! credentials and replaces the transport on that change.
 
-use super::description::{parsed_url, sendable};
-use super::error::ClientRedirect;
+use super::description::{exact_origin, parsed_url, same_origin, sendable};
+use super::error::{ClientError, ClientInput, ClientRedirect, ClientRedirectPolicy};
 use super::replay::{RetryPolicy, client_resendable};
+use crate::RuntimeError;
 use reqwest::header::{HeaderMap, LOCATION};
 use reqwest::{Method, Url};
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 /// Which redirect answers a request follows.
 ///
@@ -24,11 +26,10 @@ use std::num::NonZeroUsize;
 /// replaces its own with
 /// [`ClientRequest::redirect_policy`](super::ClientRequest::redirect_policy).
 ///
-/// A followed redirect is one more send. It carries the request's headers,
-/// credentials included, so it goes only to the origin the call began at.
-/// Camber compares the scheme, the host, and the port. It makes no claim about
-/// the address a permitted host resolves to.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// A followed redirect is one more send. Camber compares scheme, host, and
+/// effective port. Destination egress policy checks resolved addresses separately.
+/// A change of origin permanently removes credentials and sensitive headers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum RedirectPolicy {
     /// Follow nothing. Every 3xx answer is returned as the response, with its
     /// `Location` header and its body. This is the default.
@@ -52,6 +53,160 @@ pub enum RedirectPolicy {
         /// call, and a retry does not return a spent hop.
         max_hops: NonZeroUsize,
     },
+    /// Follow redirects to the initial origin and an explicit allowlist.
+    /// Construct with [`Self::cross_origin`]. Credentials are removed permanently
+    /// on each origin change. HTTPS never redirects to HTTP.
+    ///
+    /// The method and body rules are those of [`Self::SameOrigin`]. A 307 or
+    /// 308 that repeats the body sends it to the allowlisted origin.
+    CrossOrigin(CrossOriginRedirects),
+}
+
+/// A validated, finite cross-origin redirect allowance.
+///
+/// The allowlist is sorted and has no repeated origin, so two allowances
+/// with the same hop bound and the same origins are equal in any order.
+/// `Debug` prints the hop bound and the origins. An origin holds no
+/// credentials, path, or query, so it is not secret.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct CrossOriginRedirects {
+    max_hops: NonZeroUsize,
+    /// Bare origins: a scheme, a host, an optional port, and the root path.
+    origins: Arc<[Url]>,
+}
+
+impl CrossOriginRedirects {
+    /// The most redirects one call follows.
+    #[must_use]
+    pub const fn max_hops(&self) -> NonZeroUsize {
+        self.max_hops
+    }
+
+    /// The allowlisted origins in sorted order, as the URL parser serialized
+    /// them: `https://cdn.example:8443`. A name is in lower case, an IDN is in
+    /// its ASCII form, and a default port is not written.
+    pub fn origins(&self) -> impl ExactSizeIterator<Item = &str> + '_ {
+        self.origins.iter().map(origin_text)
+    }
+
+    /// Whether a hop from `current` to `resolved` stays inside this allowance:
+    /// it does not leave HTTPS for HTTP, and it reaches the initial origin,
+    /// which `returns` says, or an allowlisted one.
+    fn admits(&self, returns: bool, current: &Url, resolved: &Url) -> Result<(), ClientRedirect> {
+        let downgrade = current.scheme() == "https" && resolved.scheme() == "http";
+        let permitted = returns
+            || self
+                .origins
+                .iter()
+                .any(|origin| same_origin(origin, resolved));
+        match (downgrade, permitted) {
+            (true, _) => Err(ClientRedirect::Downgrade),
+            (false, true) => Ok(()),
+            (false, false) => Err(ClientRedirect::OriginChanged),
+        }
+    }
+}
+
+/// One bare origin without the root path its URL serializes.
+fn origin_text(origin: &Url) -> &str {
+    let text = origin.as_str();
+    text.strip_suffix('/').unwrap_or(text)
+}
+
+impl std::fmt::Debug for CrossOriginRedirects {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CrossOriginRedirects")
+            .field("max_hops", &self.max_hops)
+            .field("origins", &OriginList(&self.origins))
+            .finish()
+    }
+}
+
+/// The `Debug` form of an allowlist: its origin texts.
+struct OriginList<'a>(&'a [Url]);
+
+impl std::fmt::Debug for OriginList<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(origin_text))
+            .finish()
+    }
+}
+
+/// The refusal one invalid cross-origin argument returns.
+const fn refused(reason: ClientRedirectPolicy) -> RuntimeError {
+    RuntimeError::Client(ClientError::InvalidRequest(ClientInput::RedirectPolicy(
+        reason,
+    )))
+}
+
+impl RedirectPolicy {
+    /// Permit exact HTTP(S) origins under one positive hop bound.
+    ///
+    /// Each origin is a scheme, a host, and an optional port, with at most a
+    /// root path. It has no credentials, query, or fragment. The initial
+    /// origin is always permitted. Egress policy still checks every
+    /// destination, including returns to an earlier origin.
+    ///
+    /// Origins compare by scheme, normalized host, and effective port. Case,
+    /// IDN spelling, and a default port do not make another origin. A root
+    /// dot does: `cdn.example.` and `cdn.example` are two origins here,
+    /// although an egress exception treats them as one.
+    ///
+    /// On each origin change, Camber removes `Authorization`, `Cookie`, and
+    /// every header set with `sensitive_header`. A secret set with plain
+    /// `header`, such as `X-Api-Key`, is not marked and goes to the next
+    /// origin. Set such secrets with `sensitive_header`.
+    ///
+    /// ```
+    /// use camber::http::{self, RedirectPolicy};
+    /// # fn main() -> Result<(), camber::RuntimeError> {
+    /// let follow = RedirectPolicy::cross_origin(3, ["https://downloads.example"])?;
+    /// let client = http::client().redirect_policy(follow);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientInput::RedirectPolicy` with the reason: `ZeroHops` for
+    /// a zero hop bound, `Origin(index)` for the first invalid entry, or
+    /// `EmptyAllowlist` for no entry. The reason never repeats an entry's
+    /// text.
+    pub fn cross_origin(
+        max_hops: usize,
+        origins: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Self, RuntimeError> {
+        let max_hops =
+            NonZeroUsize::new(max_hops).ok_or(refused(ClientRedirectPolicy::ZeroHops))?;
+        let mut origins = origins
+            .into_iter()
+            .enumerate()
+            .map(|(index, origin)| {
+                exact_origin(origin.as_ref()).ok_or(refused(ClientRedirectPolicy::Origin(index)))
+            })
+            .collect::<Result<Vec<Url>, RuntimeError>>()?;
+        origins.sort_unstable();
+        origins.dedup();
+        match origins.is_empty() {
+            true => Err(refused(ClientRedirectPolicy::EmptyAllowlist)),
+            false => Ok(Self::CrossOrigin(CrossOriginRedirects {
+                max_hops,
+                origins: origins.into(),
+            })),
+        }
+    }
+
+    /// Whether a hop from `current` to `resolved` stays inside the origins
+    /// this policy permits. Every policy but `CrossOrigin` permits only the
+    /// initial origin.
+    fn admits(&self, initial: &Url, current: &Url, resolved: &Url) -> Result<(), ClientRedirect> {
+        match (self, same_origin(initial, resolved)) {
+            (Self::CrossOrigin(allowance), returns) => allowance.admits(returns, current, resolved),
+            (Self::None | Self::SameOrigin { .. }, true) => Ok(()),
+            (Self::None | Self::SameOrigin { .. }, false) => Err(ClientRedirect::OriginChanged),
+        }
+    }
 }
 
 /// What a followed redirect carries from the request it answers.
@@ -62,10 +217,18 @@ pub(super) enum Carried {
     Bodiless(Method),
 }
 
+/// One admitted destination, and whether it changes origin.
+pub(super) struct Destination {
+    /// The admitted URL, without a fragment.
+    pub(super) url: Url,
+    /// Whether `url` is at another origin than the send it answers. Such a
+    /// hop needs a fresh transport and loses the request's credentials.
+    pub(super) new_origin: bool,
+}
+
 /// One authorized redirect: the next send, and the allowance it spends.
 pub(super) struct Hop {
-    /// The destination, at the initial origin and without a fragment.
-    pub(super) url: Url,
+    pub(super) destination: Destination,
     pub(super) carried: Carried,
     /// How many redirects the call has followed once this one is.
     pub(super) ordinal: usize,
@@ -77,47 +240,73 @@ pub(super) struct Hop {
 /// nothing, the status is not one a redirect is followed for, or the answer
 /// names no destination. A repeated `Location` names no single destination and
 /// is refused.
-pub(super) fn redirect_location(
-    policy: RedirectPolicy,
+pub(super) fn redirect_location<'a>(
+    policy: &RedirectPolicy,
     status: u16,
-    headers: &HeaderMap,
-) -> Option<Result<&[u8], ClientRedirect>> {
+    headers: &'a HeaderMap,
+) -> Option<Result<&'a [u8], ClientRedirect>> {
     let mut locations = headers.get_all(LOCATION).iter();
     match (policy, status, locations.next(), locations.next()) {
-        (RedirectPolicy::SameOrigin { .. }, 301..=303 | 307 | 308, Some(only), None) => {
-            Some(Ok(only.as_bytes()))
-        }
-        (RedirectPolicy::SameOrigin { .. }, 301..=303 | 307 | 308, Some(_), Some(_)) => {
-            Some(Err(ClientRedirect::InvalidLocation))
-        }
-        (RedirectPolicy::None | RedirectPolicy::SameOrigin { .. }, ..) => None,
+        (
+            RedirectPolicy::SameOrigin { .. } | RedirectPolicy::CrossOrigin(_),
+            301..=303 | 307 | 308,
+            Some(only),
+            None,
+        ) => Some(Ok(only.as_bytes())),
+        (
+            RedirectPolicy::SameOrigin { .. } | RedirectPolicy::CrossOrigin(_),
+            301..=303 | 307 | 308,
+            Some(_),
+            Some(_),
+        ) => Some(Err(ClientRedirect::InvalidLocation)),
+        _ => None,
     }
 }
 
-/// The URL one `Location` value sends the call to, or the refusal.
+/// The destination one `Location` value sends the call to under `policy`, or
+/// the refusal.
 ///
 /// `location` is resolved against `current`, the URL of the send it answers.
-/// The result must have the origin of `initial`, the URL the call began at:
-/// the same scheme, the same normalized host, and the same effective port. A
-/// change of scheme is a change of origin in both directions. The admitted URL
-/// has no fragment and passes the checks a request's own target passes, so a
-/// destination with a user name or a password is refused.
-///
-/// Semver-unsupported. It reads its arguments and changes nothing.
-#[doc(hidden)]
-pub fn client_redirect_destination(
+/// The policy then admits the origin: the initial origin always, and an
+/// allowlisted one under `CrossOrigin`, which also refuses HTTPS to HTTP. Only
+/// then must the URL be sendable, so a destination with a user name or a
+/// password is refused as invalid. The admitted URL has no fragment.
+pub(super) fn redirect_destination(
+    policy: &RedirectPolicy,
     initial: &Url,
     current: &Url,
     location: &[u8],
-) -> Result<Url, ClientRedirect> {
+) -> Result<Destination, ClientRedirect> {
     let resolved = std::str::from_utf8(location)
         .ok()
         .and_then(|text| parsed_url(text, Some(current)))
         .ok_or(ClientRedirect::InvalidLocation)?;
-    match resolved.origin() == initial.origin() {
-        true => sendable(resolved).ok_or(ClientRedirect::InvalidLocation),
-        false => Err(ClientRedirect::OriginChanged),
-    }
+    policy.admits(initial, current, &resolved)?;
+    let new_origin = !same_origin(current, &resolved);
+    sendable(resolved)
+        .map(|url| Destination { url, new_origin })
+        .ok_or(ClientRedirect::InvalidLocation)
+}
+
+/// The URL one `Location` value sends a call under `policy` to, or the
+/// refusal.
+///
+/// The call began at `initial` and is now at `current`. The decision is
+/// `redirect_destination`'s: the origin must be the initial one or, under
+/// `CrossOrigin`, an allowlisted one with no HTTPS-to-HTTP step. A change of
+/// scheme is a change of origin. The admitted URL has no fragment and passes
+/// the checks a request's own target passes, so a destination with a user
+/// name or a password is refused.
+///
+/// Semver-unsupported. It reads its arguments and changes nothing.
+#[doc(hidden)]
+pub fn client_redirect_destination(
+    policy: &RedirectPolicy,
+    initial: &Url,
+    current: &Url,
+    location: &[u8],
+) -> Result<Url, ClientRedirect> {
+    redirect_destination(policy, initial, current, location).map(|destination| destination.url)
 }
 
 /// What a redirect with `status` carries from a request with `method`, or the
@@ -150,10 +339,15 @@ pub(super) fn redirect_carried(
 ///
 /// Semver-unsupported. It reads its arguments and changes nothing.
 #[doc(hidden)]
-pub fn client_next_redirect(policy: RedirectPolicy, followed: usize) -> Option<usize> {
+pub fn client_next_redirect(policy: &RedirectPolicy, followed: usize) -> Option<usize> {
+    next_redirect(policy, followed)
+}
+
+pub(super) fn next_redirect(policy: &RedirectPolicy, followed: usize) -> Option<usize> {
     match policy {
         RedirectPolicy::None => None,
-        RedirectPolicy::SameOrigin { max_hops } => followed
+        RedirectPolicy::SameOrigin { max_hops }
+        | RedirectPolicy::CrossOrigin(CrossOriginRedirects { max_hops, .. }) => followed
             .checked_add(1)
             .filter(|ordinal| *ordinal <= max_hops.get()),
     }

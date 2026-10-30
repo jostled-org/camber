@@ -10,6 +10,7 @@ propagation without converting between framework-specific error types.
 The variants cluster into a few stable buckets:
 
 - runtime and coordination: `Io`, `Timeout`, `Cancelled`, `TaskPanicked`, `ChannelClosed`, `ChannelFull`, `BlockingInAsyncContext`
+- service resource admission: `Turn(TurnRefused)`
 - configured service deadlines: `DeadlineExceeded(DeadlineBoundary)`
 - configured byte maximums: `LimitExceeded(ByteBoundary)`
 - runtime context and task lifecycle: `NoRuntime`, `ScopeClosed`, `ScopeDrainTimeout`, `Lifecycle`
@@ -34,6 +35,30 @@ The exact enum is documented in rustdoc. The useful public rule is that Camber k
 - `ScopeDrainTimeout(n)` — the graceful drain expired with `n` children that had not exited on their own. `n` counts children that failed to exit cooperatively, not children still running when the entry point returned. It reaches a caller inside a `Lifecycle` aggregate rather than on its own.
 
 `NoRuntime` and `ScopeClosed` are distinct so a caller can tell "no runtime at all" from "too late".
+
+## Service Turn Refusals
+
+`Turn` returns `RuntimeError::Turn` with one of three `TurnRefused` causes:
+`Deadline`, `Cancelled`, or `Closed`. All three reach the HTTP rejection boundary
+as `RejectionKind::TurnAdmission`, with status `503` and fixed text
+`service unavailable`. No retry delay is inferred.
+
+`Rejection::turn_refusal()` returns the cause. A rejection mapper can answer
+`Deadline` with `429` and an application-defined `Retry-After`, and keep `503`
+for `Closed` and `Cancelled`. A handler can instead match
+`RuntimeError::Turn(TurnRefused::Deadline)` and return its own response. See
+[Waiting for a service turn](http.md#waiting-for-a-service-turn) for both forms.
+
+Invalid capacity returns `InvalidArgument`. A pending timed wait needs Tokio's
+timer driver, as `tokio::time::sleep` does. With no Tokio context, it returns
+`NoRuntime`. With the timer driver disabled, it panics inside Tokio. Camber
+runtimes always enable the timer driver. Ready outcomes and untimed acquisition
+need no timer.
+See [Fair Service Turns](tasks-and-channels.md#fair-service-turns) for queue and
+guard lifetimes.
+
+`RuntimeError::Turn` and `RejectionKind::TurnAdmission` extend exhaustive enums.
+Downstream exhaustive matches must add these variants.
 
 ## Lifecycle Aggregates
 
@@ -128,7 +153,8 @@ Like every variant the boundary has no client-safe answer for, it reaches the ro
 
 ## Handler Behavior
 
-A handler error is not converted where it is raised. `IntoResponse` carries it to the router's rejection boundary, which answers:
+A handler error is not converted where it is raised. `IntoResponse` and
+`IntoStreamResponse` carry it to the router's rejection boundary, which answers:
 
 - `RuntimeError::BadRequest` with `400` and the message you supplied, which you are declaring client-safe
 - `RuntimeError::MalformedBody` with `400` and exactly `malformed request body`
@@ -136,6 +162,7 @@ A handler error is not converted where it is raised. `IntoResponse` carries it t
 - `RuntimeError::RequestBodyLimit` with `413` and exactly `request body too large`
 - `RuntimeError::RequestBodyUnreadable` with `400` and exactly `request body could not be read`
 - `RuntimeError::ScopeClosed` with `503` and `service unavailable`
+- `RuntimeError::Turn` with `503` and `service unavailable`
 - every other `RuntimeError` with `500` and exactly `internal server error`
 
 The `500` body is fixed, and so is each parse refusal's. Your error's text and its whole source chain go to the operator log, never to the peer. The chain stops at an `IntegrationError`: the log records its redacted account and not the third-party source below it. `Integration` always answers `500` as an internal-service refusal, including from a middleware frame, and the rejection mapper never receives its source. A parser names which part of the grammar failed; that account is operator detail, so the peer reads fixed text instead.
@@ -274,14 +301,14 @@ number. None holds a URL, a header value, a body, or transport error text, and
 | `ClientError` | Meaning |
 | --- | --- |
 | `Configuration` | The underlying client could not be constructed |
-| `InvalidRequest(ClientInput)` | `Method`, `Url`, `Header`, `ReservedHeader`, `Body`, or `ResponseLimit` was refused before any send. `StreamBudget` is a streamed response with no finite byte maximum or no finite idle interval. `EgressPolicy` is an `EgressPolicy` exception that was refused when it was configured |
+| `InvalidRequest(ClientInput)` | `Method`, `Url`, `Header`, `ReservedHeader`, `Body`, or `ResponseLimit` was refused before any send. `StreamBudget` is a streamed response with no finite byte maximum or no finite idle interval. `EgressPolicy` is an invalid destination exception. `RedirectPolicy(ClientRedirectPolicy)` is a refused cross-origin policy: `ZeroHops`, `EmptyAllowlist`, or `Origin(index)`, the zero-based position of the first invalid entry |
 | `Encode` | Request JSON serialization failed |
 | `Dns` | The target name did not resolve |
 | `Connect` | The connection was not established, with no more specific typed cause |
 | `Tls` | A Rustls error identifies a TLS validation or protocol failure |
 | `Transport` | Any other send or response-read failure, including a truncated body |
 | `Timeout(ClientTimeout)` | `Operation`, `Attempt`, `Transport`, or `ResponseIdle` expired |
-| `Redirect(ClientRedirect)` | `InvalidLocation`, `OriginChanged`, `HopLimit`, or `UnsafeMethod` |
+| `Redirect(ClientRedirect)` | `InvalidLocation`, `OriginChanged`, `Downgrade`, `HopLimit`, or `UnsafeMethod` |
 | `Status(u16)` | An explicit status conversion rejected a 400–599 status |
 | `Decode(ClientDecode)` | `Utf8` or `Json` decoding of a completed response failed |
 | `ResponseTooLarge { limit }` | The response declared or delivered more than `limit` bytes |

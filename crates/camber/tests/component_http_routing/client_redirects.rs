@@ -636,7 +636,7 @@ fn assert_second_origin_untouched(recording: &Recording) {
 }
 
 /// One request of a sibling row.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Sibling {
     /// The target the request names, under `/sibling/`.
     target: &'static str,
@@ -648,19 +648,19 @@ struct Sibling {
 
 impl Sibling {
     /// The target the redirect this request gets names.
-    fn landing(self) -> String {
+    fn landing(&self) -> String {
         format!("/landed{}", self.target)
     }
 
     /// Send this request's GET through the shared `client`.
     async fn send(
-        self,
+        &self,
         client: &Client,
         first: &RecordingUpstream,
     ) -> Result<ClientResponse, RuntimeError> {
         let request: ClientRequest<'_> = client.request("GET", &first.url(self.target))?;
-        let request = match self.policy {
-            Some(policy) => request.redirect_policy(policy),
+        let request = match &self.policy {
+            Some(policy) => request.redirect_policy(policy.clone()),
             None => request,
         };
         request.send().await
@@ -668,7 +668,7 @@ impl Sibling {
 
     /// Require this request's own answer and its own sends at the peer.
     fn assert(
-        self,
+        &self,
         context: &str,
         result: Result<ClientResponse, RuntimeError>,
         recording: &Recording,
@@ -710,7 +710,7 @@ impl Sibling {
 async fn assert_siblings(context: &str, client: Client, siblings: [Sibling; 3]) {
     let first_origin =
         RecordingUpstream::bind_responder(|request| first_origin_reply(request, 0)).await;
-    let [first, second, later] = siblings;
+    let [first, second, later] = &siblings;
 
     let (first_result, second_result) = within_bound(context, async {
         tokio::join!(
@@ -1576,4 +1576,383 @@ fn redirect_methods_and_retries_keep_one_effective_request() {
         .build()
         .unwrap();
     held.block_on(assert_expired_operation_starts_no_hop());
+}
+
+/// The text a refused cross-origin policy prints, without its error prefix.
+fn policy_refusal(result: Result<RedirectPolicy, RuntimeError>) -> String {
+    use camber::http::ClientInput;
+    match result {
+        Err(RuntimeError::Client(ClientError::InvalidRequest(ClientInput::RedirectPolicy(
+            reason,
+        )))) => reason.to_string(),
+        other => panic!("expected a redirect policy refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn cross_origin_policy_validates_exact_origins_and_hops() {
+    for origin in [
+        "",
+        "https://user@example.test",
+        "https://@example.test",
+        "https://:@example.test",
+        "https://example.test/path",
+        "https://example.test/path/..",
+        "https://example.test/path/%2e%2e",
+        "https://example.test/.",
+        "https://example.test\\",
+        "https:\\example.test",
+        "https:////example.test",
+        "https:/example.test",
+        "https:example.test",
+        " https://example.test ",
+        "https://example.test/?secret",
+        "https://example.test/#fragment",
+        "file:///tmp",
+        "https://exa\nmple.test",
+    ] {
+        assert_eq!(
+            policy_refusal(RedirectPolicy::cross_origin(
+                2,
+                ["https://valid.example", origin]
+            )),
+            "origin at index 1",
+            "{origin:?}"
+        );
+    }
+    assert_eq!(
+        policy_refusal(RedirectPolicy::cross_origin(0, ["https://example.test"])),
+        "zero hops"
+    );
+    assert_eq!(
+        policy_refusal(RedirectPolicy::cross_origin(2, Vec::<String>::new())),
+        "empty allowlist"
+    );
+    let refused =
+        RedirectPolicy::cross_origin(2, ["https://user:secret-c4a1@example.test"]).unwrap_err();
+    assert!(!format!("{refused} {refused:?}").contains("secret-c4a1"));
+}
+
+#[test]
+fn cross_origin_policy_normalizes_and_reports_its_allowlist() {
+    let policy = RedirectPolicy::cross_origin(
+        2,
+        vec![
+            String::from("https://storage.example:8443/"),
+            String::from("https://EXAMPLE.test:443/"),
+            String::from("https://example.test"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        policy,
+        RedirectPolicy::cross_origin(2, ["https://example.test", "https://storage.example:8443"])
+            .unwrap()
+    );
+    let RedirectPolicy::CrossOrigin(allowance) = &policy else {
+        panic!("expected a cross-origin policy, got {policy:?}");
+    };
+    assert_eq!(allowance.max_hops().get(), 2);
+    assert_eq!(
+        allowance.origins().collect::<Vec<_>>(),
+        ["https://example.test", "https://storage.example:8443"]
+    );
+    let shown = format!("{policy:?}");
+    assert!(shown.contains("https://example.test"), "{shown}");
+    assert!(shown.contains("https://storage.example:8443"), "{shown}");
+    assert_eq!(
+        RedirectPolicy::cross_origin(1, ["https://[::1]:443/"]).unwrap(),
+        RedirectPolicy::cross_origin(1, ["https://[0:0:0:0:0:0:0:1]"]).unwrap(),
+    );
+    assert_ne!(
+        RedirectPolicy::cross_origin(1, ["https://example.test"]).unwrap(),
+        RedirectPolicy::cross_origin(2, ["https://example.test"]).unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn cross_origin_return_hops_and_retries_never_restore_credentials() {
+    for streaming in [false, true] {
+        cross_origin_credentials_row(streaming).await;
+    }
+}
+
+async fn cross_origin_credentials_row(streaming: bool) {
+    use crate::retry_upstream::client_answer;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let first_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let second_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let first_origin = format!("http://{}", first_listener.local_addr().unwrap());
+    let second_origin = format!("http://{}", second_listener.local_addr().unwrap());
+    let return_url = format!("{first_origin}/returned");
+    let away_url = format!("{second_origin}/away");
+    let first =
+        RecordingUpstream::adopt_responder(first_listener, move |request| match request.target() {
+            "/start" => answer("307 Temporary Redirect", &[("Location", &away_url)], b""),
+            _ => answer("200 OK", &[], b"landed"),
+        });
+    let attempts = AtomicUsize::new(0);
+    let second = RecordingUpstream::adopt_responder(second_listener, move |_| {
+        match attempts.fetch_add(1, Ordering::SeqCst) {
+            0 => answer(
+                "503 Service Unavailable",
+                &[("Connection", "close")],
+                b"retry",
+            ),
+            _ => answer("307 Temporary Redirect", &[("Location", &return_url)], b""),
+        }
+    });
+    let policy = RedirectPolicy::cross_origin(2, [&second_origin]).unwrap();
+    let client = http::client()
+        .retries(1)
+        .backoff(BACKOFF)
+        .redirect_policy(policy);
+    let request = client
+        .request("GET", &format!("{first_origin}/start"))
+        .unwrap()
+        .header("Authorization", TOKEN)
+        .unwrap()
+        .header("Cookie", "session=credential")
+        .unwrap()
+        .sensitive_header("x-secret", "first")
+        .unwrap()
+        .header("x-secret", "overwritten-secret")
+        .unwrap()
+        .header("x-tenant", TENANT)
+        .unwrap();
+    let result = within_bound(
+        "cross-origin credentials",
+        client_answer(request, streaming),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result, (200, b"landed".to_vec()));
+    let first = first.finish("cross-origin first").await;
+    let second = second.finish("cross-origin second").await;
+    assert_eq!(*first.targets(), ["/start", "/returned"]);
+    assert_eq!(*second.targets(), ["/away", "/away"]);
+    assert_eq!(
+        first.requests[0].header_values("authorization").as_ref(),
+        [TOKEN]
+    );
+    for request in second.requests.iter().chain(first.requests.iter().skip(1)) {
+        for name in ["authorization", "cookie", "x-secret"] {
+            assert!(
+                request.header_values(name).is_empty(),
+                "{name} survived an origin change"
+            );
+        }
+        assert_eq!(request.header_values("x-tenant").as_ref(), [TENANT]);
+    }
+}
+
+#[tokio::test]
+async fn cross_origin_allowlist_and_hop_limit_prevent_extra_sends() {
+    use crate::retry_upstream::client_answer;
+    for (streaming, allowed) in [(false, false), (false, true), (true, false), (true, true)] {
+        let second =
+            RecordingUpstream::bind(answer("302 Found", &[("Location", "/again")], b"")).await;
+        let destination = second.url("/away");
+        let first =
+            RecordingUpstream::bind(answer("302 Found", &[("Location", &destination)], b"")).await;
+        let origin = second.url("");
+        let origins = match allowed {
+            true => [origin.as_str()],
+            false => ["http://elsewhere.example"],
+        };
+        let client = http::client()
+            .retries(3)
+            .redirect_policy(RedirectPolicy::cross_origin(1, origins).unwrap());
+        let request = client.request("GET", &first.url("/start")).unwrap();
+        let result =
+            within_bound("cross-origin allowance", client_answer(request, streaming)).await;
+        let expected = match allowed {
+            true => ClientRedirect::HopLimit,
+            false => ClientRedirect::OriginChanged,
+        };
+        assert!(
+            matches!(result, Err(RuntimeError::Client(ClientError::Redirect(reason))) if reason == expected)
+        );
+        assert_eq!(
+            first
+                .finish_probed("cross-origin first")
+                .await
+                .requests
+                .len(),
+            1
+        );
+        assert_eq!(
+            second
+                .finish_probed("cross-origin denied or spent")
+                .await
+                .requests
+                .len(),
+            usize::from(allowed)
+        );
+    }
+}
+
+/// One cross-origin method row: what the first origin answers a request with
+/// `method` under `permission`, and whether the second origin receives it.
+struct CrossMethod {
+    status_line: &'static str,
+    method: &'static str,
+    permission: camber::http::RetryPolicy,
+    /// `true` when the existing replay rule repeats the method and body.
+    delivered: bool,
+}
+
+const CROSS_METHODS: [CrossMethod; 6] = [
+    CrossMethod {
+        status_line: "307 Temporary Redirect",
+        method: "POST",
+        permission: camber::http::RetryPolicy::Idempotent,
+        delivered: false,
+    },
+    CrossMethod {
+        status_line: "308 Permanent Redirect",
+        method: "POST",
+        permission: camber::http::RetryPolicy::Idempotent,
+        delivered: false,
+    },
+    CrossMethod {
+        status_line: "307 Temporary Redirect",
+        method: "PUT",
+        permission: camber::http::RetryPolicy::Idempotent,
+        delivered: true,
+    },
+    CrossMethod {
+        status_line: "308 Permanent Redirect",
+        method: "PUT",
+        permission: camber::http::RetryPolicy::Idempotent,
+        delivered: true,
+    },
+    CrossMethod {
+        status_line: "307 Temporary Redirect",
+        method: "POST",
+        permission: camber::http::RetryPolicy::Replayable,
+        delivered: true,
+    },
+    CrossMethod {
+        status_line: "308 Permanent Redirect",
+        method: "POST",
+        permission: camber::http::RetryPolicy::Replayable,
+        delivered: true,
+    },
+];
+
+/// The body every cross-origin method row sends.
+const CROSS_BODY: &[u8] = b"upload-body-7d0e";
+
+/// A 307 or 308 to an allowlisted origin repeats the method and the body only
+/// when the request's replay rule lets it. A refused hop dials nothing at the
+/// second origin. A delivered one reaches it without credentials.
+#[tokio::test]
+async fn cross_origin_307_and_308_keep_the_method_and_replay_rules() {
+    for streaming in [false, true] {
+        for row in &CROSS_METHODS {
+            cross_origin_method_row(row, streaming).await;
+        }
+    }
+}
+
+async fn cross_origin_method_row(row: &CrossMethod, streaming: bool) {
+    use crate::retry_upstream::client_answer;
+    let context = format!(
+        "{} {} under {:?}, streaming {streaming}",
+        row.status_line, row.method, row.permission
+    );
+    let second = RecordingUpstream::bind(answer("200 OK", &[], b"stored")).await;
+    let destination = second.url("/upload");
+    let first =
+        RecordingUpstream::bind(answer(row.status_line, &[("Location", &destination)], b"")).await;
+    let client =
+        http::client().redirect_policy(RedirectPolicy::cross_origin(1, [second.url("")]).unwrap());
+    let request = client
+        .request(row.method, &first.url("/start"))
+        .unwrap()
+        .retry_policy(row.permission)
+        .header("Authorization", TOKEN)
+        .unwrap()
+        .sensitive_header("x-api-secret", "secret")
+        .unwrap()
+        .header("x-tenant", TENANT)
+        .unwrap()
+        .body(CROSS_BODY);
+    let result = within_bound(&context, client_answer(request, streaming)).await;
+    let first = first.finish_probed(&context).await;
+    let second = second.finish_probed(&context).await;
+    assert_eq!(first.requests.len(), 1, "{context}");
+    match row.delivered {
+        true => {
+            assert_eq!(result.unwrap(), (200, b"stored".to_vec()), "{context}");
+            let landed = second.only_sent_to(&context, "/upload");
+            assert_eq!(landed.method(), row.method, "{context}");
+            assert_eq!(&*landed.body, CROSS_BODY, "{context}");
+            for name in ["authorization", "x-api-secret"] {
+                assert!(
+                    landed.header_values(name).is_empty(),
+                    "{context}: {name} reached the second origin"
+                );
+            }
+            assert_eq!(landed.header_values("x-tenant").as_ref(), [TENANT]);
+        }
+        false => {
+            assert!(
+                matches!(
+                    result,
+                    Err(RuntimeError::Client(ClientError::Redirect(
+                        ClientRedirect::UnsafeMethod
+                    )))
+                ),
+                "{context}: {result:?}"
+            );
+            assert_eq!(second.connections, 0, "{context}");
+        }
+    }
+}
+
+/// A cross-origin loop spends no hop it cannot count and resets no deadline:
+/// with an allowance it cannot exhaust, the operation deadline ends it.
+#[tokio::test]
+async fn cross_origin_loop_ends_at_the_operation_deadline() {
+    use crate::retry_upstream::client_answer;
+    for streaming in [false, true] {
+        let first_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let second_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let first_origin = format!("http://{}", first_listener.local_addr().unwrap());
+        let second_origin = format!("http://{}", second_listener.local_addr().unwrap());
+        let to_second = format!("{second_origin}/away");
+        let to_first = format!("{first_origin}/back");
+        let first = RecordingUpstream::adopt_responder(first_listener, move |_| {
+            answer("302 Found", &[("Location", &to_second)], b"")
+        });
+        let second = RecordingUpstream::adopt_responder(second_listener, move |_| {
+            answer("302 Found", &[("Location", &to_first)], b"")
+        });
+        let policy = RedirectPolicy::cross_origin(usize::MAX, [&second_origin]).unwrap();
+        let client = http::client()
+            .total_timeout(Duration::from_millis(300))
+            .redirect_policy(policy);
+        let request = client
+            .request("GET", &format!("{first_origin}/start"))
+            .unwrap();
+        let result = within_bound("cross-origin loop", client_answer(request, streaming)).await;
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeError::Client(ClientError::Timeout(
+                    ClientTimeout::Operation
+                )))
+            ),
+            "streaming {streaming}: {result:?}"
+        );
+        let first = first.finish("loop first origin").await;
+        let second = second.finish("loop second origin").await;
+        assert!(
+            first.targets().contains(&"/back"),
+            "the loop never returned"
+        );
+        assert!(!second.requests.is_empty());
+    }
 }

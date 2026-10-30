@@ -2,7 +2,9 @@
 //! one stored response policy. Outbound 4.T3: no write to that policy removes
 //! the operation total.
 
-use crate::retry_upstream::watch_streams;
+use crate::retry_upstream::{
+    RunnableDriver, TIMER_ROUNDING, must_settle, wait_for_body_collection, watch_streams,
+};
 
 use camber::__private::client_transport_is_built;
 use camber::RuntimeError;
@@ -762,9 +764,8 @@ const SETTER_INSIDE: Duration = Duration::from_secs(7);
 /// The operation total the stored-policy rows write.
 const FIELD_OPERATION: Duration = Duration::from_secs(15);
 
-/// The operation total of the live expiry row: far below every row bound, so
-/// a call no total ended fails at its row bound instead of passing late.
-const LIVE_OPERATION: Duration = Duration::from_millis(100);
+/// The operation total crossed after collection starts under paused time.
+const HELD_OPERATION: Duration = Duration::from_millis(100);
 
 /// Require `client` to project the duration `field` as `expected`.
 ///
@@ -936,23 +937,35 @@ fn operation_total_is_outside_the_response_policy() {
 ///
 /// The peer sends a partial body and goes quiet. No attempt bound, quiet
 /// interval, or ceiling is left to end the call, so only the operation total
-/// can, and it names itself.
+/// can, and it names itself. Advance time only after the collector has read
+/// the prefix, so request setup cannot spend the deadline first.
+#[tokio::test(start_paused = true)]
 async fn unbounded_policy_keeps_the_operation_total() {
-    let row = "unbounded policy, live total";
+    let row = "unbounded policy, held total";
+    let driver = RunnableDriver::start();
     let upstream = quiet_upstream().await;
+    let observed = watch_streams(upstream.addr);
     let quiet = format!("http://{}/unbounded", upstream.addr);
-
-    let refused: Result<ClientResponse, RuntimeError> = within_bound(
-        row,
+    let call = tokio::spawn(async move {
         http::client()
-            .total_timeout(LIVE_OPERATION)
+            .total_timeout(HELD_OPERATION)
             .response_budget(TransferBudget::unbounded())
-            .get(&quiet),
-    )
-    .await;
+            .get(&quiet)
+            .await
+    });
+
+    wait_for_body_collection(&observed)
+        .await
+        .expect("the client collects the prefix before the deadline");
+    assert!(!call.is_finished(), "{row}: the partial body stays open");
+    tokio::time::advance(HELD_OPERATION + TIMER_ROUNDING).await;
+    let refused = must_settle(row, "the operation deadline", call)
+        .await
+        .expect("the client task joins");
 
     assert_client_timeout(row, ClientTimeout::Operation, refused);
-    upstream.finish(row).await;
+    must_settle(row, "the upstream owner", upstream.finish(row)).await;
+    driver.stop().await;
 }
 
 /// An upstream that answers with [`ABOVE_CEILING`] and closes.
@@ -1137,7 +1150,6 @@ async fn client_budget_writes_preserve_outer_lifetime() {
     every_duration_setter_clamps_to_the_policy_range();
     operation_total_is_outside_the_response_policy();
 
-    unbounded_policy_keeps_the_operation_total().await;
     request_limit_overrides_one_request().await;
     transport_writes_reach_a_used_client().await;
 }

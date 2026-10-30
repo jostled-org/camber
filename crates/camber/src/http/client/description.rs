@@ -67,8 +67,58 @@ pub(super) fn parsed_url(text: &str, base: Option<&Url>) -> Option<Url> {
     }
 }
 
-/// `target` as this client sends to it, without its fragment, or `None` when
-/// it is not a target this client sends to.
+/// One parsed HTTP(S) origin, with no credentials or resource-specific parts.
+pub(super) fn bare_origin(text: &str) -> Option<Url> {
+    let url = parsed_url(text, None)?;
+    let bare = url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == "/";
+    match bare {
+        true => sendable(url),
+        false => None,
+    }
+}
+
+/// An origin whose original spelling contains only scheme, authority, and optional `/`.
+/// Check delimiters before URL normalization can discard userinfo or dot paths.
+pub(super) fn exact_origin(text: &str) -> Option<Url> {
+    let (_, authority_and_path) = text.split_once("://")?;
+    let end = authority_and_path
+        .find(['/', '?', '#'])
+        .unwrap_or(authority_and_path.len());
+    let (authority, path) = authority_and_path.split_at(end);
+    let exact = text.trim() == text
+        && !text.contains('\\')
+        && !authority.is_empty()
+        && !authority.contains('@')
+        && matches!(path, "" | "/");
+    match exact {
+        true => bare_origin(text),
+        false => None,
+    }
+}
+
+/// Whether `a` and `b` share one origin: the same scheme, the same normalized
+/// host, and the same effective port.
+///
+/// For HTTP(S) URLs this equals `Url::origin` equality, and it allocates
+/// nothing. The host is compared as the URL parser serialized it, so case and
+/// IDN spelling do not make another origin, and a root dot does. A URL with
+/// no host or no known port shares an origin with no URL.
+pub(super) fn same_origin(a: &Url, b: &Url) -> bool {
+    match (a.host(), a.port_or_known_default()) {
+        (Some(host), Some(port)) => {
+            a.scheme() == b.scheme()
+                && b.host() == Some(host)
+                && b.port_or_known_default() == Some(port)
+        }
+        _ => false,
+    }
+}
+
+/// A sendable HTTP(S) target with its fragment removed.
 pub(super) fn sendable(mut target: Url) -> Option<Url> {
     match is_sendable(&target) {
         true => {
@@ -198,9 +248,24 @@ impl Description {
         }
     }
 
-    /// Send to `url` from now on. The caller has admitted it.
+    /// Send to `url` from now on. The caller has admitted it, and has removed
+    /// the credentials when `url` is at another origin.
     pub(super) fn retarget(&mut self, url: Url) {
         self.url = url;
+    }
+
+    /// Permanently remove `Authorization`, `Cookie`, and every header marked
+    /// sensitive, before a change of origin.
+    pub(super) fn strip_credentials(&mut self) {
+        let sensitive: Box<[HeaderName]> = self
+            .headers
+            .iter()
+            .filter(|(name, value)| ALWAYS_SENSITIVE.contains(name) || value.is_sensitive())
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in sensitive {
+            self.headers.remove(name);
+        }
     }
 
     /// Send `method` from now on, with no body and no `Content-Type`.

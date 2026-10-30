@@ -41,6 +41,7 @@ use camber::{
 };
 use std::error::Error;
 use std::pin::pin;
+use std::sync::mpsc;
 use std::time::Duration;
 
 const NATS: IntegrationKind = IntegrationKind::Nats;
@@ -640,6 +641,91 @@ pub(crate) fn nats_acknowledged_forced_stop_settles_under_shutdown() -> Row {
 }
 
 // ── 4.T2 redaction ───────────────────────────────────────────────────
+
+/// An ordinary failure during graceful shutdown remains the operation's
+/// result, even when a foreign runtime submitted it.
+pub(crate) fn nats_ordinary_failure_during_graceful_stop() -> Row {
+    use IntegrationOperation::{Close, Connect};
+    let peer = NatsPeer::start();
+    let builder = acknowledged(&peer.url());
+    let control = peer.control();
+    let observation = Observation::start();
+    let outcome = runtime::builder().run(move || -> Row {
+        let connection = settled("connect", builder.connect())?;
+        fail_publish_across_owner_stop(connection, control)
+    });
+    let observed = observation.finish();
+    let verdict = all([
+        clean_run(outcome),
+        expect_one_connection(
+            &observed,
+            &[
+                success(NATS, Connect),
+                failed_as(NATS, unknown(PUBLISH)),
+                success(NATS, Close).under_shutdown(),
+            ],
+        ),
+    ]);
+    peer.finished(ROW_BOUND, verdict)
+}
+
+fn fail_publish_across_owner_stop(connection: Connection, control: PeerControl) -> Row {
+    let (pending, pending_rx) = mpsc::channel();
+    let (stopped, stopped_rx) = mpsc::channel();
+    std::thread::scope(|threads| {
+        let foreign = threads.spawn(move || {
+            publish_failure_from_foreign_runtime(connection, control, pending, stopped_rx)
+        });
+        pending_rx
+            .recv_timeout(ROW_BOUND)
+            .map_err(|error| format!("foreign publish did not enter: {error}"))?;
+        runtime::request_shutdown();
+        stopped
+            .send(())
+            .map_err(|error| format!("owner stop was not received: {error}"))?;
+        foreign
+            .join()
+            .map_err(|_| "foreign runtime panicked".to_owned())?
+    })
+}
+
+fn publish_failure_from_foreign_runtime(
+    connection: Connection,
+    control: PeerControl,
+    pending: mpsc::Sender<()>,
+    stopped: mpsc::Receiver<()>,
+) -> Row {
+    clean_run(runtime::builder().run(move || -> Row {
+        let mut publish = pin!(connection.publish(SUBJECT, b"owner-stop"));
+        let read = runtime::block_on(expect_withheld(
+            "foreign publish",
+            &control,
+            0,
+            publish.as_mut(),
+        ))?;
+        pending
+            .send(())
+            .map_err(|error| format!("publish entry was not received: {error}"))?;
+        stopped
+            .recv_timeout(ROW_BOUND)
+            .map_err(|error| format!("owner stop did not arrive: {error}"))?;
+        expect(
+            "the foreign runtime stopped before the failure",
+            !runtime::is_shutting_down(),
+        )?;
+        control.reply(reply_to(&read)?, &Reply::Message(b"invalid-ack"))?;
+        expect_refused(
+            "failure after owner stop",
+            row_bounded("publish", publish)?,
+            unknown(PUBLISH),
+        )?;
+        expect(
+            "the foreign runtime stopped while reading the failure",
+            !runtime::is_shutting_down(),
+        )?;
+        settled("close", connection.close())
+    }))
+}
 
 /// A stream name no event, sample, or rendering may repeat.
 const STREAM_MARKER: &str = "STREAM_MARK_51C3";

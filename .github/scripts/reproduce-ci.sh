@@ -122,12 +122,12 @@ ran_one_passing_test() {
 # Succeed when the inventory function `producer`, called with any further
 # arguments, lists `expected`.
 listed() {
-    local expected="$1" producer="$2" item
+    local expected="$1" producer="$2" item matched=1
     shift 2
     while IFS= read -r item; do
-        [ "${item}" = "${expected}" ] && return 0
+        [ "${item}" != "${expected}" ] || matched=0
     done < <("${producer}" "$@")
-    return 1
+    return "${matched}"
 }
 
 # The executable Cargo or the workflow resolves for `tool`.

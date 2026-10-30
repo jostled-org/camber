@@ -110,7 +110,7 @@ impl StreamBounds {
 /// Where the task of one streamed call gets its answer.
 enum Answerer {
     /// The network, through this dialer.
-    Network(Dialer),
+    Network(Dialer<'static>),
     /// A registered mock. Its answer is already whole.
     Mock(ClientResponse),
 }
@@ -430,7 +430,8 @@ impl Work {
             }
             Answerer::Network(dialer) => {
                 let transport = dialer.open(description.url(), &lifetime).await?;
-                let head = final_head(transport, description, policy, lifetime, completion).await?;
+                let head = final_head(transport, dialer, description, policy, lifetime, completion)
+                    .await?;
                 Opened::wire(head, bounds.limit)
             }
         }

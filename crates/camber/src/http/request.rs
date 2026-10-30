@@ -1,3 +1,4 @@
+use super::admitted_body::{AdmittedBody, BodyClaim};
 use super::cookie::{self, CookiePairs};
 use super::disconnect::DisconnectSignal;
 use super::encoding::decode_hex_pair;
@@ -5,11 +6,11 @@ use super::method::{Method, RequestMethod};
 use super::multipart::{self, MultipartReader};
 use super::rejection::RequestId;
 use crate::RuntimeError;
+use crate::runtime_state::recover_poisoned;
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use std::fmt;
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Boxed slice of (name, value) pairs for path parameters.
 /// Keys are Arc<str> — shared with the frozen trie, cloned as refcount bumps.
@@ -175,7 +176,7 @@ impl<'a> RequestHead<'a> {
             request_id: self.origin.request_id,
             version: self.origin.version,
             disconnect: self.origin.disconnect.clone(),
-            _admission: None,
+            body_claim: Mutex::new(BodyClaim::Unbuffered),
         }
     }
 }
@@ -207,10 +208,10 @@ pub struct Request {
     request_id: RequestId,
     version: hyper::Version,
     disconnect: DisconnectSignal,
-    /// The admission permit this request was granted, held for exactly as long
-    /// as the request is. Underscored because nothing reads it and nothing may:
-    /// its whole contract is that dropping this request releases it once.
-    _admission: Option<super::body_admission::BodyPermit>,
+    /// The buffered body's take-once cell, with the admission permit this
+    /// request was granted. The permit is released once: by request end, or
+    /// by the [`AdmittedBody`] a handler took.
+    body_claim: Mutex<BodyClaim>,
 }
 
 impl Request {
@@ -248,7 +249,7 @@ impl Request {
             request_id: origin.request_id,
             version: origin.version,
             disconnect: origin.disconnect.clone(),
-            _admission: admission,
+            body_claim: Mutex::new(BodyClaim::Held(admission)),
         }
     }
 
@@ -391,9 +392,38 @@ impl Request {
         &self.body_raw
     }
 
-    /// Return a ref-counted handle to the body bytes (zero-copy).
-    pub(crate) fn body_raw(&self) -> Bytes {
+    /// Share the buffered body without copying its payload.
+    ///
+    /// The returned bytes remain valid after this request is released. They do
+    /// not retain the request's admission permit or delay disconnect signaling.
+    /// Account separately for bodies retained beyond the request's lifetime.
+    pub fn body_shared(&self) -> Bytes {
         self.body_raw.clone()
+    }
+
+    /// Take the buffered body and its admission place, once.
+    ///
+    /// Use this to release a [`BodyAdmission::with_permit`] place before the
+    /// request ends. Dropping the returned [`AdmittedBody`] returns the place;
+    /// [`AdmittedBody::into_bytes`] returns it and keeps the bytes.
+    ///
+    /// Returns `None` after the first take, and on any request that carries no
+    /// buffered body. Camber builds such a request from the head alone: for a
+    /// route that reads no body (a streaming proxy, a streaming multipart route,
+    /// a WebSocket upgrade, or a GET SSE route), for a routing refusal such as
+    /// `404` or `405`, and for the middleware gate of a gRPC or streaming proxy
+    /// route. An empty buffered body is still taken once. A request built with
+    /// [`Request::builder`] carries a buffered body and no permit.
+    ///
+    /// The borrowed accessors keep returning the taken bytes until the handler
+    /// or middleware chain that took them returns its future. Then the request
+    /// drops its own reference. The bytes are freed when the `AdmittedBody`,
+    /// every [`Request::body_shared`] handle, and every part from
+    /// [`Request::multipart`] are dropped. Each of these shares one allocation.
+    ///
+    /// [`BodyAdmission::with_permit`]: super::BodyAdmission::with_permit
+    pub fn take_body(&self) -> Option<AdmittedBody> {
+        recover_poisoned(self.body_claim.lock()).take(&self.body_raw)
     }
 
     /// Deserialize the request body as JSON.
@@ -523,6 +553,28 @@ impl Request {
 
     pub(crate) fn set_params(&mut self, params: Params) {
         self.params = Some(params);
+    }
+
+    /// Lend this request to application code, then drop a taken body.
+    ///
+    /// Every handler and middleware chain over a buffered request reaches it
+    /// only through the borrow this lends, and `call`'s result cannot hold that
+    /// borrow. When `call` returns, no accessor can still point into the body.
+    /// The request's own reference to a taken body, and every cache derived
+    /// from it, is then dropped under exclusive access, so the bytes are freed
+    /// when the [`AdmittedBody`], every shared handle, and every multipart part
+    /// drop. A request built from the head alone has no body to take, so the
+    /// gates that borrow it directly skip this step.
+    ///
+    /// A body nobody took stays with the request, as before.
+    pub(super) fn lend<T>(&mut self, call: impl FnOnce(&Self) -> T) -> T {
+        let answer = call(self);
+        if recover_poisoned(self.body_claim.get_mut()).is_taken() {
+            self.body_raw = Bytes::new();
+            self.body_text = OnceLock::new();
+            self.form_params = OnceLock::new();
+        }
+        answer
     }
 
     /// Create a `RequestBuilder` for constructing test requests.
@@ -657,7 +709,8 @@ impl RequestBuilder {
             request_id: RequestId::generate(),
             disconnect: DisconnectSignal::detached(),
             // A built request was admitted by nothing, so it holds no permit.
-            _admission: None,
+            // Its body is still a buffered body a handler can take.
+            body_claim: Mutex::new(BodyClaim::Held(None)),
         })
     }
 }

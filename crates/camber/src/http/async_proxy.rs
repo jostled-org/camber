@@ -1,4 +1,4 @@
-use super::body_admission::{AdmittedBody, BodyBudget, BodyPermit};
+use super::body_admission::{BodyBudget, BodyGrant, BodyPermit};
 use super::boundary::DeadlineBoundary;
 use super::encoding::decode_hex_pair;
 use super::map_reqwest_error;
@@ -248,7 +248,7 @@ impl ProxyRequest {
                 .headers()
                 .map(|(k, v)| (Cow::Owned(k.to_owned()), Cow::Owned(v.to_owned())))
                 .collect(),
-            body: req.body_raw(),
+            body: req.body_shared(),
             remote_addr: req.remote_addr(),
             scheme: match req.is_tls() {
                 true => "https",
@@ -964,7 +964,7 @@ async fn stream_upstream(
 pub(super) async fn forward_incoming_streaming(
     parts: IncomingProxyParts,
     incoming: hyper::body::Incoming,
-    admitted: AdmittedBody,
+    admitted: BodyGrant,
     upload: TransferOwner,
     target: &ProxyTarget<'_>,
     commitment: &OperationCommitment,
@@ -1089,7 +1089,7 @@ struct UploadSignals {
 /// Split one admitted incoming body into the upload and its coordinator.
 fn bounded_upload(
     incoming: hyper::body::Incoming,
-    admitted: AdmittedBody,
+    admitted: BodyGrant,
     upload: TransferOwner,
     observer: Option<&Arc<LifecycleScript>>,
 ) -> (reqwest::Body, UploadCoordinator) {
@@ -1130,7 +1130,7 @@ fn drained_upload(permit: Option<BodyPermit>, signals: UploadSignals) -> reqwest
 /// Wrap an incoming body that still has frames to poll.
 fn live_upload(
     incoming: hyper::body::Incoming,
-    admitted: AdmittedBody,
+    admitted: BodyGrant,
     upload: TransferOwner,
     signals: UploadSignals,
     coordinator: UploadCoordinator,

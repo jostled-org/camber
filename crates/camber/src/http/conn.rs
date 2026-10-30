@@ -2,6 +2,7 @@ use super::body::GuardedBody;
 use super::disconnect::ConnectionLiveness;
 use super::handle::{ConnCtx, handle_request};
 use super::router::ServerDispatch;
+use super::runtime_executor::RuntimeExecutor;
 use super::server_lifecycle::{ConnectionLifecycle, ServerControl, wait_shutdown_control};
 use crate::net::accept;
 use std::sync::Arc;
@@ -16,6 +17,7 @@ pub(super) struct ConnectionState {
     lifecycle: ConnectionLifecycle,
     header_timeout: std::time::Duration,
     remote_addr: Option<std::net::IpAddr>,
+    runtime: Option<Arc<crate::runtime_state::RuntimeInner>>,
 }
 
 impl ConnectionState {
@@ -25,6 +27,7 @@ impl ConnectionState {
         lifecycle: ConnectionLifecycle,
         header_timeout: std::time::Duration,
         remote_addr: Option<std::net::IpAddr>,
+        runtime: Option<Arc<crate::runtime_state::RuntimeInner>>,
     ) -> Self {
         Self {
             router,
@@ -32,6 +35,7 @@ impl ConnectionState {
             lifecycle,
             header_timeout,
             remote_addr,
+            runtime,
         }
     }
 }
@@ -699,7 +703,10 @@ fn build_connection<I>(
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let builder = connection_builder(state.header_timeout);
+    let builder = connection_builder(
+        state.header_timeout,
+        RuntimeExecutor::new(state.runtime.clone()),
+    );
     let service = connection_service(state, liveness);
     builder
         .serve_connection_with_upgrades(io, service)
@@ -1059,9 +1066,9 @@ async fn serve_request(
 
 fn connection_builder(
     header_timeout: std::time::Duration,
-) -> hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor> {
-    let mut builder =
-        hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+    executor: RuntimeExecutor,
+) -> hyper_util::server::conn::auto::Builder<RuntimeExecutor> {
+    let mut builder = hyper_util::server::conn::auto::Builder::new(executor);
     builder
         .http1()
         .keep_alive(true)

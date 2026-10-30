@@ -28,6 +28,10 @@ pub enum RuntimeError {
     #[error("channel full")]
     ChannelFull,
 
+    /// A service turn was refused before the caller acquired its resource.
+    #[error("turn refused: {0}")]
+    Turn(#[from] crate::TurnRefused),
+
     /// A blocking operation was requested from a single-thread async executor.
     #[error("blocking operation is unavailable in a current-thread async context")]
     BlockingInAsyncContext,

@@ -982,6 +982,39 @@ fn declared_limit_refuses_before_buffered_collection() {
         .unwrap();
 }
 
+/// Routes that retain shared bytes while admission stays owned by the request.
+fn retained_body_routes(
+    gate: Arc<tokio::sync::Notify>,
+    entered_tx: std::sync::mpsc::SyncSender<(camber::http::Bytes, camber::http::DisconnectSignal)>,
+    drops: Arc<AtomicUsize>,
+) -> Router {
+    let mut router = Router::new();
+    router.post("/held/:id", move |request: &Request| {
+        let gate = Arc::clone(&gate);
+        let entered_tx = entered_tx.clone();
+        let body = request.body_shared();
+        let retained = body.clone();
+        let disconnect = request.on_disconnect();
+        async move {
+            entered_tx
+                .send((retained, disconnect))
+                .expect("the case is still waiting for handler entry");
+            gate.notified().await;
+            Response::bytes(200, body).expect("valid held status")
+        }
+    });
+    router.post("/after/:id", |request: &Request| {
+        let body: Box<str> = request.body().into();
+        async move { Response::text(200, &body).expect("valid control status") }
+    });
+    router.body_admission(move |_context: &BodyAdmissionContext<'_>| {
+        Ok(BodyAdmission::with_permit(
+            4096,
+            DropProbe(Arc::clone(&drops)),
+        ))
+    })
+}
+
 #[test]
 fn buffered_permit_stays_owned_through_handler_and_drops_afterward() {
     common::test_runtime()
@@ -992,44 +1025,16 @@ fn buffered_permit_stays_owned_through_handler_and_drops_afterward() {
             let (entered_tx, entered) = std::sync::mpsc::sync_channel(1);
 
             let port = wire::reserve_request_body_owner();
-            let mut router = Router::new();
-            router.post("/held/:id", {
-                let gate = Arc::clone(&gate);
-                move |request: &Request| {
-                    let gate = Arc::clone(&gate);
-                    let entered_tx = entered_tx.clone();
-                    let body: Box<str> = request.body().into();
-                    Box::pin(async move {
-                        entered_tx
-                            .send(())
-                            .expect("the case is still waiting for handler entry");
-                        gate.notified().await;
-                        Response::text(200, &body).expect("valid held status")
-                    }) as Pin<Box<dyn Future<Output = Response> + Send>>
-                }
-            });
-            router.post("/after/:id", |request: &Request| {
-                let body: Box<str> = request.body().into();
-                Box::pin(async move { Response::text(200, &body).expect("valid control status") })
-                    as Pin<Box<dyn Future<Output = Response> + Send>>
-            });
-            let router = router.body_admission({
-                let drops = Arc::clone(&drops);
-                move |_context: &BodyAdmissionContext<'_>| {
-                    Ok(BodyAdmission::with_permit(
-                        4096,
-                        DropProbe(Arc::clone(&drops)),
-                    ))
-                }
-            });
+            let router = retained_body_routes(Arc::clone(&gate), entered_tx, Arc::clone(&drops));
             let server = port.serve(router);
             let addr = server.addr();
 
             let held =
                 std::thread::spawn(move || wire::send(addr, "POST", "/held/1", &[], b"held-body"));
-            entered
+            let (retained, disconnect) = entered
                 .recv_timeout(HANDSHAKE_BOUND)
                 .expect("the handler reported entry");
+            assert_eq!(retained.as_ref(), b"held-body");
             assert_eq!(
                 drops.load(Ordering::Acquire),
                 0,
@@ -1052,11 +1057,759 @@ fn buffered_permit_stays_owned_through_handler_and_drops_afterward() {
             );
             assert_eq!(server.controller().observed().permit_owners_dropped, 1);
 
+            let cause = runtime::block_on(async {
+                tokio::time::timeout(HANDSHAKE_BOUND, disconnect.cancelled())
+                    .await
+                    .expect("retained bytes must not delay disconnect signaling")
+            });
+            assert_eq!(cause, camber::http::DisconnectCause::Completed);
+            assert_eq!(retained.as_ref(), b"held-body");
+            assert_eq!(drops.load(Ordering::Acquire), 1);
+
             let control = wire::send(addr, "POST", "/after/2", &[], b"after-body");
             assert_eq!(control.status, 200);
             assert_eq!(control.body.as_ref(), b"after-body");
             assert_eq!(drops.load(Ordering::Acquire), 2);
             assert_eq!(server.controller().observed().permit_owners_dropped, 2);
+
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+// ── Early release through a taken body ───────────────────────────────
+
+/// Register `routes` under a policy that hands every request a [`DropProbe`].
+fn probed_admission(router: Router, drops: &Arc<AtomicUsize>) -> Router {
+    let drops = Arc::clone(drops);
+    router.body_admission(move |_context: &BodyAdmissionContext<'_>| {
+        Ok(BodyAdmission::with_permit(
+            4096,
+            DropProbe(Arc::clone(&drops)),
+        ))
+    })
+}
+
+/// One place in an application pool of one. Dropping it returns the place.
+struct PoolPlace(Arc<AtomicUsize>);
+
+impl Drop for PoolPlace {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// A policy that grants the pool's only place, or refuses while it is held.
+fn pool_of_one(
+    in_use: &Arc<AtomicUsize>,
+) -> impl Fn(&BodyAdmissionContext<'_>) -> Result<BodyAdmission, RuntimeError> + Send + Sync + 'static
+{
+    let in_use = Arc::clone(in_use);
+    move |_context: &BodyAdmissionContext<'_>| match in_use.compare_exchange(
+        0,
+        1,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => Ok(BodyAdmission::with_permit(
+            4096,
+            PoolPlace(Arc::clone(&in_use)),
+        )),
+        Err(_) => Err(RuntimeError::InvalidArgument(
+            "the pool has no free place".into(),
+        )),
+    }
+}
+
+/// Routes that share a pool of one: one keeps its body, one takes it early.
+fn pooled_routes(
+    gate: &Arc<tokio::sync::Notify>,
+    entered: &std::sync::mpsc::SyncSender<()>,
+    in_use: &Arc<AtomicUsize>,
+) -> Router {
+    let mut router = Router::new();
+    let (hold_gate, hold_entered) = (Arc::clone(gate), entered.clone());
+    router.post("/hold/:id", move |_request: &Request| {
+        let gate = Arc::clone(&hold_gate);
+        let entered = hold_entered.clone();
+        async move {
+            entered.send(()).expect("the case waits for handler entry");
+            gate.notified().await;
+            Response::empty(204)
+        }
+    });
+    let (take_gate, take_entered) = (Arc::clone(gate), entered.clone());
+    router.post("/take/:id", move |request: &Request| {
+        let body = request
+            .take_body()
+            .expect("a buffered route has a body to take");
+        let parsed = body.to_vec();
+        drop(body);
+        let gate = Arc::clone(&take_gate);
+        let entered = take_entered.clone();
+        async move {
+            entered.send(()).expect("the case waits for handler entry");
+            gate.notified().await;
+            Response::bytes(200, parsed)
+        }
+    });
+    router.post("/quick/:id", |request: &Request| {
+        let body = request.body_shared();
+        async move { Response::bytes(200, body) }
+    });
+    router.body_admission(pool_of_one(in_use))
+}
+
+/// Assert the pool settles with no place in use.
+fn assert_pool_empty(in_use: &Arc<AtomicUsize>, label: &str) {
+    let settled = wire::poll_until(RELEASE_BOUND, || in_use.load(Ordering::Acquire) == 0);
+    assert!(
+        settled,
+        "{label}: the pool still has {} places in use",
+        in_use.load(Ordering::Acquire)
+    );
+}
+
+#[test]
+fn taken_body_returns_its_pool_place_while_the_handler_still_works() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let in_use = Arc::new(AtomicUsize::new(0));
+            let gate = Arc::new(tokio::sync::Notify::new());
+            let (entered_tx, entered) = std::sync::mpsc::sync_channel(1);
+            let addr = common::spawn_server(pooled_routes(&gate, &entered_tx, &in_use));
+
+            let held =
+                std::thread::spawn(move || wire::send(addr, "POST", "/hold/1", &[], b"held"));
+            entered
+                .recv_timeout(HANDSHAKE_BOUND)
+                .expect("the holding handler reported entry");
+            let refused = wire::send(addr, "POST", "/quick/2", &[], b"refused");
+            assert_eq!(
+                refused.status, 503,
+                "a handler that keeps its body keeps the pool's only place"
+            );
+            gate.notify_one();
+            assert_eq!(held.join().expect("the held request completed").status, 204);
+            assert_pool_empty(&in_use, "after the holding request");
+
+            let taking = std::thread::spawn(move || {
+                wire::send(addr, "POST", "/take/3", &[], b"parsed-early")
+            });
+            entered
+                .recv_timeout(HANDSHAKE_BOUND)
+                .expect("the taking handler reported entry");
+            let admitted = wire::send(addr, "POST", "/quick/4", &[], b"admitted");
+            assert_eq!(
+                admitted.status, 200,
+                "a taken and dropped body returns the place while its handler still works"
+            );
+            assert_eq!(admitted.body.as_ref(), b"admitted");
+            gate.notify_one();
+            let taken = taking.join().expect("the taking request completed");
+            assert_eq!(taken.status, 200);
+            assert_eq!(taken.body.as_ref(), b"parsed-early");
+            assert_pool_empty(&in_use, "after the taking request");
+
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+/// Stop `server`, join it, and read how many permit owners it released.
+///
+/// The join is the signal that every request the server took has ended, so no
+/// release at request end can come after this read. The owner count, not the
+/// application permit, shows a second owner: the policy's permit sits behind
+/// one shared reference, so it drops once however many owners held it.
+fn owners_released_after_stop(
+    server: wire::ObservedServer<ScopedRequestBodyOwner>,
+    owners: &ScopedRequestBodyOwner,
+) -> usize {
+    server
+        .shutdown_bounded(RELEASE_BOUND)
+        .expect("the fixture stopped and joined");
+    owners.observed().permit_owners_dropped
+}
+
+/// What a handler that takes its body twice saw before it answered.
+struct TakeReport {
+    first: Option<Vec<u8>>,
+    second_is_none: bool,
+    readable_after_take: Vec<u8>,
+    released_in_handler: usize,
+    disconnect: camber::http::DisconnectSignal,
+}
+
+/// A route that takes its body twice and reports what it saw, beside a GET
+/// SSE route that reads no body.
+fn take_twice_routes(
+    report_tx: &std::sync::mpsc::SyncSender<TakeReport>,
+    drops: &Arc<AtomicUsize>,
+) -> Router {
+    let mut router = Router::new();
+    let seen = Arc::clone(drops);
+    let report_tx = report_tx.clone();
+    router.post("/twice/:id", move |request: &Request| {
+        let first = request.take_body();
+        let second = request.take_body();
+        let report = TakeReport {
+            first: first.as_deref().map(<[u8]>::to_vec),
+            second_is_none: second.is_none(),
+            readable_after_take: request.body_bytes().to_vec(),
+            released_in_handler: {
+                drop(first);
+                seen.load(Ordering::Acquire)
+            },
+            disconnect: request.on_disconnect(),
+        };
+        report_tx
+            .send(report)
+            .expect("the case waits for the report");
+        async { Response::empty(204) }
+    });
+    router.get_sse("/feed", |request: &Request, sse| {
+        sse.data(match request.take_body() {
+            Some(_) => "some",
+            None => "none",
+        })
+    });
+    router
+}
+
+#[test]
+fn taken_body_releases_once_and_keeps_disconnect_signaling() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (report_tx, reports) = std::sync::mpsc::sync_channel(1);
+            let router = take_twice_routes(&report_tx, &drops);
+            let port = wire::reserve_request_body_owner();
+            let owners = port.controller();
+            let server = port.serve(probed_admission(router, &drops));
+
+            let answered = wire::send(server.addr(), "POST", "/twice/1", &[], b"taken-once");
+            assert_eq!(answered.status, 204);
+            let report = reports
+                .recv_timeout(HANDSHAKE_BOUND)
+                .expect("the handler reported what it took");
+            assert_eq!(report.first.as_deref(), Some(&b"taken-once"[..]));
+            assert!(report.second_is_none, "a second take returns None");
+            assert_eq!(
+                report.readable_after_take, b"taken-once",
+                "the borrowed accessors stay valid for the handler's synchronous part"
+            );
+            assert_eq!(
+                report.released_in_handler, 1,
+                "dropping the taken body returns the place at once"
+            );
+
+            let cause = runtime::block_on(async {
+                tokio::time::timeout(HANDSHAKE_BOUND, report.disconnect.cancelled())
+                    .await
+                    .expect("an early release must not stop disconnect signaling")
+            });
+            assert_eq!(cause, camber::http::DisconnectCause::Completed);
+
+            let feed = wire::send(server.addr(), "GET", "/feed", &[], b"");
+            assert_eq!(feed.status, 200);
+            assert!(
+                feed.text().contains("data: none"),
+                "a route that buffers no body has none to take: {:?}",
+                feed.text()
+            );
+
+            assert_eq!(
+                owners_released_after_stop(server, &owners),
+                1,
+                "the take and the request end released one owner between them"
+            );
+            assert_eq!(
+                drops.load(Ordering::Acquire),
+                1,
+                "the application permit was released once"
+            );
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+/// Routes that take their body, then refuse or park until the peer leaves.
+///
+/// Each parked handler reports its disconnect signal on entry. `/held` keeps
+/// the taken body in its future. `/released` drops it before it parks.
+fn take_terminal_routes(
+    parked: &std::sync::mpsc::SyncSender<camber::http::DisconnectSignal>,
+    in_use: &Arc<AtomicUsize>,
+) -> Router {
+    let mut router = Router::new();
+    router.post("/refuse/:id", |request: &Request| {
+        let body = request
+            .take_body()
+            .expect("a buffered route has a body to take");
+        async move {
+            Err::<Response, RuntimeError>(RuntimeError::BadRequest(
+                format!("refused {} bytes", body.len()).into(),
+            ))
+        }
+    });
+    let held_tx = parked.clone();
+    router.post("/held/:id", move |request: &Request| {
+        let body = request
+            .take_body()
+            .expect("a buffered route has a body to take");
+        held_tx
+            .send(request.on_disconnect())
+            .expect("the case waits for handler entry");
+        async move {
+            std::future::pending::<()>().await;
+            Response::bytes(200, body.into_bytes())
+        }
+    });
+    let released_tx = parked.clone();
+    router.post("/released/:id", move |request: &Request| {
+        drop(request.take_body());
+        released_tx
+            .send(request.on_disconnect())
+            .expect("the case waits for handler entry");
+        async {
+            std::future::pending::<()>().await;
+            Response::empty(204)
+        }
+    });
+    router.post("/quick/:id", |request: &Request| {
+        let body = request.body_shared();
+        async move { Response::bytes(200, body) }
+    });
+    router.body_admission(pool_of_one(in_use))
+}
+
+/// Send one request to a parked route, and wait for its handler to enter.
+fn park(
+    addr: SocketAddr,
+    path: &str,
+    parked: &std::sync::mpsc::Receiver<camber::http::DisconnectSignal>,
+) -> (std::net::TcpStream, camber::http::DisconnectSignal) {
+    let mut peer = wire::connect(addr).expect("the peer connected");
+    wire::write_request(&mut peer, "POST", path, &[], b"parked-body")
+        .expect("the request reached the server");
+    let signal = parked
+        .recv_timeout(HANDSHAKE_BOUND)
+        .expect("the parked handler reported entry");
+    (peer, signal)
+}
+
+/// Wait for one request's lifetime to end, and return its cause.
+fn ended_cause(signal: &camber::http::DisconnectSignal) -> camber::http::DisconnectCause {
+    runtime::block_on(async {
+        tokio::time::timeout(HANDSHAKE_BOUND, signal.cancelled())
+            .await
+            .expect("the request's lifetime ended")
+    })
+}
+
+/// Assert the pool's place came back, and that the next request gets it.
+fn assert_place_returned(addr: SocketAddr, in_use: &Arc<AtomicUsize>, id: u32, label: &str) {
+    assert_pool_empty(in_use, label);
+    let admitted = wire::send(addr, "POST", &format!("/quick/{id}"), &[], b"next");
+    assert_eq!(
+        admitted.status, 200,
+        "{label}: the next request gets the place"
+    );
+}
+
+#[test]
+fn taken_body_releases_once_through_refusal_and_cancellation() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let in_use = Arc::new(AtomicUsize::new(0));
+            let (parked_tx, parked) = std::sync::mpsc::sync_channel(1);
+            let port = wire::reserve_request_body_owner();
+            let owners = port.controller();
+            let server = port.serve(take_terminal_routes(&parked_tx, &in_use));
+            let addr = server.addr();
+
+            let refused = wire::send(addr, "POST", "/refuse/1", &[], b"refused-body");
+            assert_eq!(
+                refused.status, 400,
+                "the handler's refusal after a take is mapped"
+            );
+            assert_place_returned(addr, &in_use, 2, "refusal after a take");
+
+            let (peer, held) = park(addr, "/held/3", &parked);
+            assert_eq!(
+                in_use.load(Ordering::Acquire),
+                1,
+                "the handler future still holds the taken body"
+            );
+            drop(peer);
+            assert_eq!(
+                ended_cause(&held),
+                camber::http::DisconnectCause::PeerDisconnect
+            );
+            assert_place_returned(
+                addr,
+                &in_use,
+                4,
+                "peer abort while the future holds the body",
+            );
+
+            let (peer, released) = park(addr, "/released/5", &parked);
+            assert_eq!(
+                in_use.load(Ordering::Acquire),
+                0,
+                "the early release returned the place before the peer left"
+            );
+            drop(peer);
+            assert_eq!(
+                ended_cause(&released),
+                camber::http::DisconnectCause::PeerDisconnect,
+                "an early release must not stop peer-abort signaling"
+            );
+            assert_place_returned(addr, &in_use, 6, "peer abort after an early release");
+
+            assert_eq!(
+                owners_released_after_stop(server, &owners),
+                6,
+                "each of the six requests released exactly one owner"
+            );
+            assert_eq!(in_use.load(Ordering::Acquire), 0, "the pool is whole");
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn taken_body_in_blocking_work_returns_its_place_when_the_work_ends() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let mut router = Router::new();
+            let seen = Arc::clone(&drops);
+            router.post("/blocking/:id", move |request: &Request| {
+                let body = request
+                    .take_body()
+                    .expect("a buffered route has a body to take");
+                let seen = Arc::clone(&seen);
+                async move {
+                    let during = Arc::clone(&seen);
+                    let (held_during, checksum) = camber::spawn(move || {
+                        let checksum = body.iter().map(|byte| u64::from(*byte)).sum::<u64>();
+                        let held_during = during.load(Ordering::Acquire);
+                        drop(body);
+                        (held_during, checksum)
+                    })
+                    .await?;
+                    let after = seen.load(Ordering::Acquire);
+                    Response::text(200, &format!("{held_during} {after} {checksum}"))
+                }
+            });
+            let addr = common::spawn_server(probed_admission(router, &drops));
+
+            let body: Vec<u8> = (0u8..=255).collect();
+            let answered = wire::send(addr, "POST", "/blocking/1", &[], &body);
+            assert_eq!(answered.status, 200);
+            assert_eq!(
+                answered.text().as_ref(),
+                "0 1 32640",
+                "the place is held through the blocking work and returned when it ends"
+            );
+            assert_released(&drops, 1, "request end after blocking work");
+
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn into_bytes_returns_the_place_at_once_and_keeps_the_bytes() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let mut router = Router::new();
+            let seen = Arc::clone(&drops);
+            router.post("/bytes/:id", move |request: &Request| {
+                let body = request
+                    .take_body()
+                    .expect("a buffered route has a body to take");
+                let bytes = body.into_bytes();
+                let released = seen.load(Ordering::Acquire);
+                async move {
+                    tokio::task::yield_now().await;
+                    Response::bytes(200, bytes)
+                        .map(|answer| answer.with_header("x-released", &released.to_string()))
+                }
+            });
+            let addr = common::spawn_server(probed_admission(router, &drops));
+
+            let payload = [0u8, 255, 128, 13, 10, 0];
+            let answered = wire::send(addr, "POST", "/bytes/1", &[], &payload);
+            assert_eq!(answered.status, 200);
+            assert_eq!(
+                answered.header("x-released"),
+                Some("1"),
+                "into_bytes returns the place before the handler answers"
+            );
+            assert_eq!(
+                answered.body.as_ref(),
+                &payload,
+                "the bytes stay valid and unchanged"
+            );
+            assert_released(&drops, 1, "request end after into_bytes");
+
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+/// The channels and gates one probe row is driven through.
+#[derive(Clone)]
+struct ProbeGates {
+    probe_tx: std::sync::mpsc::SyncSender<camber::http::Bytes>,
+    dropped_tx: std::sync::mpsc::SyncSender<()>,
+    release: Arc<tokio::sync::Notify>,
+    finish: Arc<tokio::sync::Notify>,
+}
+
+/// Take the body behind a probe handle, and hold it until the case releases it.
+///
+/// The probe is shared before the take, so it counts every other reference to
+/// the same allocation: the request's, and the taken body's.
+fn hold_probed(request: &Request, gates: &ProbeGates) -> impl Future<Output = ()> + Send + use<> {
+    let probe = request.body_shared();
+    let body = request
+        .take_body()
+        .expect("a buffered route has a body to take");
+    gates
+        .probe_tx
+        .send(probe)
+        .expect("the case waits for the probe");
+    let gates = gates.clone();
+    async move {
+        gates.release.notified().await;
+        drop(body);
+        gates
+            .dropped_tx
+            .send(())
+            .expect("the case waits for the drop");
+        gates.finish.notified().await;
+    }
+}
+
+/// One route of every kind that lends a buffered request to application code.
+fn probe_routes(gates: &ProbeGates) -> Router {
+    let mut router = Router::new();
+    let buffered = gates.clone();
+    router.post("/probe/buffered", move |request: &Request| {
+        let held = hold_probed(request, &buffered);
+        async move {
+            held.await;
+            Response::empty(204)
+        }
+    });
+    let streamed = gates.clone();
+    router.post_stream("/probe/stream", move |request: &Request| {
+        let held = hold_probed(request, &streamed);
+        async move {
+            held.await;
+            Response::empty(204)
+        }
+    });
+    let fed = gates.clone();
+    router.post_sse("/probe/sse", move |request: &Request, _sse| {
+        let held = hold_probed(request, &fed);
+        async move {
+            held.await;
+            Ok(())
+        }
+    });
+    router.post_stream("/probe/gate", |_request: &Request| async {
+        Response::empty(204)
+    });
+    let gated = gates.clone();
+    router.use_middleware(move |request: &Request, next: camber::http::Next| {
+        match request.path() == "/probe/gate" {
+            true => {
+                let held = hold_probed(request, &gated);
+                let entered = next.call(request);
+                Box::pin(async move {
+                    held.await;
+                    entered.await
+                }) as Pin<Box<dyn Future<Output = Response> + Send>>
+            }
+            false => next.call(request),
+        }
+    });
+    router
+}
+
+#[test]
+fn taken_body_memory_is_freed_while_the_request_is_still_in_flight() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let (probe_tx, probes) = std::sync::mpsc::sync_channel(1);
+            let (dropped_tx, dropped) = std::sync::mpsc::sync_channel(1);
+            let gates = ProbeGates {
+                probe_tx,
+                dropped_tx,
+                release: Arc::new(tokio::sync::Notify::new()),
+                finish: Arc::new(tokio::sync::Notify::new()),
+            };
+            let addr = common::spawn_server(probe_routes(&gates));
+
+            for (path, status) in [
+                ("/probe/buffered", 204),
+                ("/probe/stream", 204),
+                ("/probe/sse", 200),
+                ("/probe/gate", 204),
+            ] {
+                let answered =
+                    std::thread::spawn(move || wire::send(addr, "POST", path, &[], b"probed-body"));
+                let probe = probes
+                    .recv_timeout(HANDSHAKE_BOUND)
+                    .expect("the route shared its probe");
+                assert!(
+                    !probe.is_unique(),
+                    "{path}: the taken body still holds the bytes"
+                );
+                gates.release.notify_one();
+                dropped
+                    .recv_timeout(HANDSHAKE_BOUND)
+                    .expect("the route dropped its taken body");
+                assert!(
+                    probe.is_unique(),
+                    "{path}: the request in flight still holds a taken body's bytes"
+                );
+                gates.finish.notify_one();
+                let answered = answered.join().expect("the probed request completed");
+                assert_eq!(answered.status, status, "{path}");
+                assert_eq!(probe.as_ref(), b"probed-body");
+            }
+
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn built_request_takes_its_body_once_and_debug_hides_the_payload() {
+    let request = Request::builder().body("private-payload").finish().unwrap();
+    let taken = request
+        .take_body()
+        .expect("a built request carries a buffered body");
+    assert_eq!(&*taken, b"private-payload");
+    assert_eq!(AsRef::<[u8]>::as_ref(&taken), b"private-payload");
+    assert!(request.take_body().is_none(), "a second take returns None");
+    assert_eq!(request.body_bytes(), b"private-payload");
+
+    let debug = format!("{taken:?}");
+    assert!(
+        !debug.contains("private-payload"),
+        "Debug prints no payload: {debug}"
+    );
+    assert!(debug.contains("15"), "Debug reports the length: {debug}");
+    assert_eq!(taken.into_bytes().as_ref(), b"private-payload");
+
+    let empty = Request::builder().finish().unwrap();
+    assert_eq!(
+        empty.take_body().map(|body| body.len()),
+        Some(0),
+        "an empty buffered body is still taken once"
+    );
+}
+
+// ── Stream routes run their gate before their handler ────────────────
+
+/// Stream routes behind a gate that refuses one path and reports the body it
+/// read on the other.
+fn gated_stream_routes(
+    entered: &Arc<AtomicUsize>,
+    gate_saw: &std::sync::mpsc::SyncSender<Vec<u8>>,
+) -> Router {
+    let mut router = Router::new();
+    let counted = Arc::clone(entered);
+    router.post_stream("/refused/:id", move |_request: &Request| {
+        counted.fetch_add(1, Ordering::AcqRel);
+        async { Response::empty(204) }
+    });
+    router.post_stream("/signed/:id", |request: &Request| {
+        let body = request
+            .take_body()
+            .expect("a stream route buffers its body");
+        async move { Response::bytes(200, body.into_bytes()) }
+    });
+    let gate_saw = gate_saw.clone();
+    router.use_middleware(move |request: &Request, next: camber::http::Next| {
+        match request.path().starts_with("/refused/") {
+            true => Box::pin(async {
+                Response::text(403, "the gate refused").expect("valid gate status")
+            }) as Pin<Box<dyn Future<Output = Response> + Send>>,
+            false => {
+                gate_saw
+                    .send(request.body_bytes().to_vec())
+                    .expect("the case waits for the gate");
+                next.call(request)
+            }
+        }
+    });
+    router
+}
+
+#[test]
+fn stream_gate_refusal_never_enters_the_handler() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let entered = Arc::new(AtomicUsize::new(0));
+            let (gate_tx, gate_saw) = std::sync::mpsc::sync_channel(1);
+            let addr = common::spawn_server(gated_stream_routes(&entered, &gate_tx));
+
+            let refused = wire::send(addr, "POST", "/refused/1", &[], b"unauthorized");
+            assert_eq!(refused.status, 403, "the gate answered");
+            assert_eq!(
+                entered.load(Ordering::Acquire),
+                0,
+                "a gate refusal never enters the stream handler"
+            );
+            assert!(
+                gate_saw.try_recv().is_err(),
+                "the refusing branch reported no body"
+            );
+
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn stream_gate_reads_the_body_before_the_handler_takes_it() {
+    common::test_runtime()
+        .shutdown_timeout(Duration::from_secs(5))
+        .run(|| {
+            let entered = Arc::new(AtomicUsize::new(0));
+            let (gate_tx, gate_saw) = std::sync::mpsc::sync_channel(1);
+            let addr = common::spawn_server(gated_stream_routes(&entered, &gate_tx));
+
+            let signed = wire::send(addr, "POST", "/signed/1", &[], b"signed-body");
+            assert_eq!(
+                gate_saw
+                    .recv_timeout(HANDSHAKE_BOUND)
+                    .expect("the gate reported the body it read"),
+                b"signed-body",
+                "the gate reads the whole body before the handler takes it"
+            );
+            assert_eq!(signed.status, 200);
+            assert_eq!(
+                signed.body.as_ref(),
+                b"signed-body",
+                "the handler takes the whole body after the gate passes"
+            );
 
             runtime::request_shutdown();
         })

@@ -1,6 +1,8 @@
 use super::disconnect::ResponseGuard;
 use super::operation::InboundTerminal;
-use super::transfer::{ChannelSource, Transfer, TransferDirection, TransferOwner, UpstreamSource};
+use super::transfer::{
+    ChannelSource, IncomingSource, Transfer, TransferDirection, TransferOwner, UpstreamSource,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum BodyError {
@@ -318,7 +320,7 @@ fn completes_at_construction(
     }
 }
 
-/// Streaming body backed by an mpsc channel.
+/// A buffered or channel-backed body under a download owner.
 ///
 /// Its end of stream — not its producer closing the channel — is the streaming
 /// completion point. `poll_recv` yields every queued chunk before it reports
@@ -331,13 +333,27 @@ fn completes_at_construction(
 /// `Drained` is that same nothing-to-produce stream stated directly — a HEAD
 /// response or a builder-failure fallback has no producer to hold a channel
 /// open for, and allocating one purely to close it buys nothing.
+///
+/// `Buffered` is the one variant that knows its length before the head is
+/// written, so it is the one variant that reports it. See [`BufferedBody`].
 pub(super) enum StreamBody {
+    Buffered(Box<BufferedBody>),
     Channel(Box<TransferBody<ChannelSource>>),
     Proxy(Box<TransferBody<UpstreamSource>>),
     Drained,
 }
 
 impl StreamBody {
+    /// A complete application body under the same download bounds as a channel.
+    pub(super) fn buffered(owner: TransferOwner, body: http_body_util::Full<bytes::Bytes>) -> Self {
+        use hyper::body::Body;
+        let remaining = body.size_hint().lower();
+        Self::Buffered(Box::new(BufferedBody {
+            body: TransferBody::new(owner.over(IncomingSource::new(body))),
+            remaining,
+        }))
+    }
+
     /// One channel-backed response body under the download owner bounding it.
     pub(super) fn channel(
         owner: TransferOwner,
@@ -361,7 +377,7 @@ impl StreamBody {
 
 /// One streaming response body, under the one download owner that bounds it.
 ///
-/// Held behind one allocation by both [`StreamBody`] variants. The owner carries
+/// Held behind one allocation by the [`StreamBody`] variants. The owner carries
 /// a guard, a peer-lifetime wait, and a deadline wake, which inline would set the
 /// width of every response body this server builds — including the buffered ones
 /// that stream nothing. One allocation per streaming response buys that back.
@@ -406,6 +422,47 @@ impl<S: super::transfer::TransferSource> TransferBody<S> {
     }
 }
 
+/// A complete application body under a download owner, and its exact length.
+///
+/// Hyper declares a response's framing from the body's size hint and its
+/// end-of-stream report, before the first poll. A body that reported neither
+/// would leave a stream route's buffered answer chunked, where the same answer
+/// from an ordinary route carries `content-length`. The download owner does not
+/// expose its source, so this body counts the bytes it hands out against the
+/// length the buffer held at construction.
+///
+/// Unlike a drained channel, an empty buffer reports its end: it has no
+/// producer whose `None` must establish completion, and the response wrapper
+/// completes a body Hyper will not poll.
+pub(super) struct BufferedBody {
+    body: TransferBody<IncomingSource<http_body_util::Full<bytes::Bytes>>>,
+    /// Bytes not yet handed to Hyper.
+    remaining: u64,
+}
+
+impl BufferedBody {
+    /// Produce the next admitted frame, and count its bytes as handed out.
+    fn poll_body(&mut self, cx: &mut std::task::Context<'_>) -> BodyFramePoll {
+        let polled = self.body.poll_body(cx);
+        match &polled {
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                let produced = frame.data_ref().map_or(0, |data| data.len() as u64);
+                self.remaining = self.remaining.saturating_sub(produced);
+            }
+            std::task::Poll::Ready(Some(Err(_)) | None) | std::task::Poll::Pending => {}
+        }
+        polled
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        hyper::body::SizeHint::with_exact(self.remaining)
+    }
+
+    const fn is_end_stream(&self) -> bool {
+        self.remaining == 0
+    }
+}
+
 type BodyFramePoll = std::task::Poll<Option<Result<hyper::body::Frame<bytes::Bytes>, BodyError>>>;
 
 fn impossible_body_error(never: std::convert::Infallible) -> BodyError {
@@ -436,9 +493,28 @@ impl hyper::body::Body for StreamBody {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
         match self.get_mut() {
+            StreamBody::Buffered(body) => body.poll_body(cx),
             StreamBody::Channel(body) => body.poll_body(cx),
             StreamBody::Proxy(body) => body.poll_body(cx),
             StreamBody::Drained => std::task::Poll::Ready(None),
+        }
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        match self {
+            StreamBody::Buffered(body) => body.size_hint(),
+            StreamBody::Channel(_) | StreamBody::Proxy(_) | StreamBody::Drained => {
+                hyper::body::SizeHint::default()
+            }
+        }
+    }
+
+    /// Report a buffered body's end; never a channel's, for the reason
+    /// [`StreamBody`] states.
+    fn is_end_stream(&self) -> bool {
+        match self {
+            StreamBody::Buffered(body) => body.is_end_stream(),
+            StreamBody::Channel(_) | StreamBody::Proxy(_) | StreamBody::Drained => false,
         }
     }
 }

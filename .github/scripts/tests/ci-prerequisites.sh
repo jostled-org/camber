@@ -36,6 +36,33 @@ reject_message() {
     esac
 }
 
+for inventory in workflow pedant; do
+expect_exit 0 "${inventory} membership drains its producer" "${BASH_EXE}" -s -- \
+    "${REPRODUCE}" "${FIXTURE}/${inventory}-drained" "${inventory}" \
+    "${ROOT}/.github/scripts/check-pedant.sh" <<'BASH'
+    CAMBER_HOOK_LIBRARY_MODE=1 source "$1"
+    witness="$2"
+    long_inventory() {
+        printf 'wanted\n'
+        sleep 0.02
+        for ((item = 0; item < 10000; item++)); do
+            printf 'remaining-item-%s\n' "${item}"
+        done
+        printf 'drained\n' >"${witness}"
+    }
+    case "$3" in
+        workflow) listed wanted long_inventory ;;
+        pedant)
+            CAMBER_HOOK_LIBRARY_MODE=1 source "$4"
+            camber_pedant_packages() { long_inventory; }
+            known_package wanted
+            ;;
+    esac
+    wait
+    test -f "${witness}"
+BASH
+done
+
 expect_exit 75 'self-test without ripgrep' \
     env PATH="${FIXTURE}/bin" "${BASH_EXE}" "${SELFTEST}"
 expect_message 'required workflow tool is unavailable: rg'

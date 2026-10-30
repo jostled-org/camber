@@ -12,6 +12,10 @@ mod http1_before_headers;
 mod http2_stream_reset;
 pub(crate) mod peer;
 mod probes;
+mod request_tasks;
+#[cfg(feature = "grpc")]
+mod request_tasks_body;
+mod request_tasks_ownership;
 pub(crate) mod routes;
 pub(crate) mod servers;
 mod streaming_complete;

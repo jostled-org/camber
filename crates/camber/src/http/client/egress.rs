@@ -11,11 +11,12 @@
 //! reads a registry, a resolver, or a socket. The addresses a decision is
 //! asked about are resolved and frozen by `pinned`.
 
-use super::description::{parsed_url, request_target};
+use super::description::{bare_origin, request_target};
 use super::error::{ClientEgress, ClientError, ClientInput};
 use crate::RuntimeError;
 use reqwest::Url;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 
 /// Every IPv4 network a restricted policy refuses, as its first address and
 /// its prefix length.
@@ -188,12 +189,14 @@ struct Exception {
 }
 
 /// Which addresses a policy permits.
+///
+/// The exceptions are shared, so a cloned policy copies none of them.
 #[derive(Clone)]
 enum Addresses {
     /// Every address.
     Unrestricted,
     /// Ordinary public unicast addresses, and the exact exceptions.
-    PublicInternet(Box<[Exception]>),
+    PublicInternet(Arc<[Exception]>),
 }
 
 /// The refusal an invalid exception returns.
@@ -209,16 +212,7 @@ const INVALID_POLICY: RuntimeError =
 /// A user name, a password, a query, a fragment, and any path beyond the root
 /// are refused, not removed: an exception is the origin that was written.
 fn exception_origin(text: &str) -> Option<Origin> {
-    let url = parsed_url(text, None)?;
-    let is_bare = url.username().is_empty()
-        && url.password().is_none()
-        && url.query().is_none()
-        && url.fragment().is_none()
-        && url.path() == "/";
-    match is_bare {
-        true => Origin::of(&url),
-        false => None,
-    }
+    Origin::of(&bare_origin(text)?)
 }
 
 /// The destinations one outbound client may send to.
@@ -285,7 +279,7 @@ impl EgressPolicy {
     #[must_use]
     pub fn public_internet() -> Self {
         Self {
-            addresses: Addresses::PublicInternet(Box::default()),
+            addresses: Addresses::PublicInternet(Arc::default()),
             https_only: false,
         }
     }
@@ -331,11 +325,11 @@ impl EgressPolicy {
             .ok_or(INVALID_POLICY)?;
         let exceptions = match exceptions.contains(&exception) {
             true => exceptions,
-            false => {
-                let mut grown = exceptions.into_vec();
-                grown.push(exception);
-                grown.into_boxed_slice()
-            }
+            false => exceptions
+                .iter()
+                .cloned()
+                .chain(std::iter::once(exception))
+                .collect(),
         };
         Ok(Self {
             addresses: Addresses::PublicInternet(exceptions),

@@ -1,6 +1,8 @@
 use super::BufferConfig;
+use super::EffectivePolicies;
 use super::ServerPolicy;
-use super::router::{Router, ServerDispatch};
+use super::policy_report::PolicyReport;
+use super::router::{Router, RouterEnvelope, ServerDispatch};
 use super::server_lifecycle::{
     ServerContextSnapshot, ServerSupervisor, StopAuthority, SupervisorJoin, poll_supervisor_join,
 };
@@ -39,6 +41,11 @@ use std::task::{Context, Poll};
 pub struct ServerHandle(ServerHandleFuture);
 
 impl ServerHandle {
+    /// The exact policy report validated before this server began accepting.
+    pub fn effective_policies(&self) -> &EffectivePolicies {
+        self.0.effective_policies()
+    }
+
     /// Request graceful shutdown without consuming the owner.
     ///
     /// The graceful phase is committed before this call returns. Admission
@@ -109,17 +116,27 @@ pub struct ServerHandleFuture {
     /// authority over the server it joins.
     stop: Option<StopAuthority>,
     join: SupervisorJoin,
+    policies: EffectivePolicies,
 }
 
 impl ServerHandleFuture {
     /// The join authority is held by value: it exists for as long as this
     /// future does, so there is no absent case to invent a result for.
-    fn new(stop: Option<StopAuthority>, join: SupervisorJoin) -> Self {
-        Self { stop, join }
+    fn new(stop: Option<StopAuthority>, join: SupervisorJoin, policies: EffectivePolicies) -> Self {
+        Self {
+            stop,
+            join,
+            policies,
+        }
     }
 
-    pub(super) fn from_join(join: SupervisorJoin) -> Self {
-        Self::new(None, join)
+    pub(super) fn from_join(join: SupervisorJoin, policies: EffectivePolicies) -> Self {
+        Self::new(None, join, policies)
+    }
+
+    /// The frozen policy report, retained across handle conversion.
+    pub fn effective_policies(&self) -> &EffectivePolicies {
+        &self.policies
     }
 
     /// Request graceful shutdown while retaining this join future.
@@ -192,8 +209,9 @@ pub(super) fn make_conn_limit(limit: Option<usize>) -> Option<Arc<tokio::sync::S
 /// A builder holds its router by value until a terminal `serve*` call, so the
 /// two router kinds travel through one type and freeze at the same instant.
 enum ServerRoutes {
-    Single(Router),
-    Host(super::host_router::HostRouter),
+    /// Keep routing graphs behind one pointer while the builder moves.
+    Single(Box<Router>),
+    Host(Box<super::host_router::HostRouter>),
 }
 
 impl ServerRoutes {
@@ -204,10 +222,23 @@ impl ServerRoutes {
         }
     }
 
-    fn freeze(self) -> ServerDispatch {
+    /// Freeze the routes inside the server's resolved policy, and report them.
+    fn freeze(self, report: &mut PolicyReport) -> ServerDispatch {
+        let budgets = report.server().route_budgets();
+        let cap = report.server().request_body_hard_cap();
         match self {
-            Self::Single(router) => ServerDispatch::Single(router.freeze()),
-            Self::Host(host_router) => ServerDispatch::Host(host_router.freeze()),
+            Self::Single(router) => ServerDispatch::Single(router.freeze(
+                &RouterEnvelope {
+                    budgets,
+                    host_ceiling: None,
+                    cap,
+                    host: None,
+                },
+                report,
+            )),
+            Self::Host(host_router) => {
+                ServerDispatch::Host(host_router.freeze(budgets, cap, report))
+            }
         }
     }
 
@@ -284,18 +315,33 @@ pub struct ServerBuilder {
     routes: ServerRoutes,
     policy: ServerPolicy,
     tls: Option<Arc<rustls::ServerConfig>>,
+    policy_observer: Option<Box<PolicyObserver>>,
+    runtime_origin: RuntimeOrigin,
 }
+
+/// Whether the caller configured the runtime a server is captured under.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RuntimeOrigin {
+    /// The runtime that was current at the terminal call, which the caller built.
+    Ambient,
+    /// The runtime `serve` built from this server's own policy. It is no policy
+    /// layer of its own, so the server resolves as a standalone one.
+    Minted,
+}
+
+/// The callback that validates the frozen report once, before serving.
+type PolicyObserver = dyn FnOnce(&EffectivePolicies) -> Result<(), RuntimeError> + Send + Sync;
 
 /// Start building an owned server for one router.
 #[must_use]
 pub fn server(router: Router) -> ServerBuilder {
-    ServerBuilder::new(ServerRoutes::Single(router))
+    ServerBuilder::new(ServerRoutes::Single(Box::new(router)))
 }
 
 /// Start building an owned server that dispatches by Host header.
 #[must_use]
 pub fn server_hosts(host_router: super::host_router::HostRouter) -> ServerBuilder {
-    ServerBuilder::new(ServerRoutes::Host(host_router))
+    ServerBuilder::new(ServerRoutes::Host(Box::new(host_router)))
 }
 
 impl ServerBuilder {
@@ -304,18 +350,34 @@ impl ServerBuilder {
             routes,
             policy: ServerPolicy::default(),
             tls: None,
+            policy_observer: None,
+            runtime_origin: RuntimeOrigin::Ambient,
         }
     }
 
     /// Set the bounds this server serves under.
     ///
-    /// Inside a Camber runtime the runtime's own policy contains this one: each
-    /// dimension resolves to the narrower of the two, so a server can tighten
-    /// its runtime's envelope and can never escape it. Under bare Tokio this
-    /// policy is the sole authority.
+    /// Inside a Camber runtime the runtime's own policy contains this one, per
+    /// dimension. When both set a dimension explicitly, the narrower value
+    /// applies. A default on either side yields to an explicit value on the
+    /// other. The runtime shutdown deadline always bounds the server drain.
+    /// Under bare Tokio this policy is the sole authority.
     #[must_use]
     pub fn policy(mut self, policy: ServerPolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Validate the actual frozen policies before the server accepts a connection.
+    ///
+    /// The callback runs once at the terminal `serve*` call, under the runtime
+    /// captured there. Its error prevents serving. A later call replaces it.
+    #[must_use]
+    pub fn on_policy_resolved<F>(mut self, observer: F) -> Self
+    where
+        F: FnOnce(&EffectivePolicies) -> Result<(), RuntimeError> + Send + Sync + 'static,
+    {
+        self.policy_observer = Some(Box::new(observer));
         self
     }
 
@@ -344,27 +406,28 @@ impl ServerBuilder {
     /// the difference between this terminal and
     /// [`serve_listener`](Self::serve_listener).
     pub fn serve(self, addr: &str) -> Result<(), RuntimeError> {
-        // Read before the builder moves, because the runtime this terminal may
-        // have to establish is established WITH it.
-        let policy = self.policy;
-        let bind_and_serve = move || {
-            let listener = net::listen(addr)?;
-            self.serve_listener(listener)
-        };
         match runtime::has_runtime() {
-            true => bind_and_serve(),
-            // The minted runtime carries this builder's own policy as the outer
-            // one. Serving narrows the builder's policy against whatever runtime
-            // is current, so a runtime minted from the defaults would contain
-            // this server in bounds its caller never chose — a 120-second header
-            // timeout served as the 60-second default, with no error and no log.
-            // Naming the policy here is what makes that containment real: the
-            // outer envelope and the inner one are the same value, so narrowing
-            // one against the other changes nothing.
-            false => runtime::builder()
-                .server_policy(policy)
-                .run(bind_and_serve)?,
+            true => self.bind_and_serve(addr),
+            // The minted runtime carries this builder's own policy, so its
+            // shutdown deadline is this server's drain. The caller configured
+            // no runtime, so this server resolves as a standalone one: its
+            // report names no runtime layer.
+            false => {
+                let policy = self.policy;
+                let minted = Self {
+                    runtime_origin: RuntimeOrigin::Minted,
+                    ..self
+                };
+                runtime::builder()
+                    .server_policy(policy)
+                    .run(move || minted.bind_and_serve(addr))?
+            }
         }
+    }
+
+    fn bind_and_serve(self, addr: &str) -> Result<(), RuntimeError> {
+        let listener = net::listen(addr)?;
+        self.serve_listener(listener)
     }
 
     /// Serve an already bound listener until shutdown. Blocks.
@@ -382,7 +445,7 @@ impl ServerBuilder {
     /// propagate as `RuntimeError::Io`, including a failure to remove the Unix
     /// socket path this listener owns.
     pub fn serve_listener(self, listener: net::Listener) -> Result<(), RuntimeError> {
-        let (supervisor, stop) = self.freeze(listener)?;
+        let (supervisor, stop, _) = self.freeze(listener)?;
         // The executor this server belongs to, named rather than resolved from
         // ambient context: `Handle::current()` panics with none established and
         // would silently run this supervisor on a foreign runtime when a
@@ -414,11 +477,12 @@ impl ServerBuilder {
         listener: tokio::net::TcpListener,
     ) -> Result<ServerHandleFuture, RuntimeError> {
         refuse_without_tokio()?;
-        let (supervisor, stop) = self.freeze(net::Listener::from_tcp(listener))?;
+        let (supervisor, stop, policies) = self.freeze(net::Listener::from_tcp(listener))?;
         drop(stop);
-        Ok(ServerHandleFuture::from_join(SupervisorJoin::Owned(
-            Box::pin(supervisor.run()),
-        )))
+        Ok(ServerHandleFuture::from_join(
+            SupervisorJoin::Owned(Box::pin(supervisor.run())),
+            policies,
+        ))
     }
 
     /// Spawn the server as a background task and return its lifecycle owner.
@@ -433,12 +497,16 @@ impl ServerBuilder {
         listener: tokio::net::TcpListener,
     ) -> Result<ServerHandle, RuntimeError> {
         refuse_without_tokio()?;
-        let (supervisor, stop) = self.freeze(net::Listener::from_tcp(listener))?;
+        let (supervisor, stop, policies) = self.freeze(net::Listener::from_tcp(listener))?;
         let join = match supervisor.is_camber() {
             true => SupervisorJoin::Camber(spawn_async(supervisor.run()).into_future()),
             false => SupervisorJoin::Tokio(tokio::spawn(supervisor.run())),
         };
-        Ok(ServerHandle(ServerHandleFuture::new(Some(stop), join)))
+        Ok(ServerHandle(ServerHandleFuture::new(
+            Some(stop),
+            join,
+            policies,
+        )))
     }
 
     /// Freeze routing and capture this server's context at one instant.
@@ -455,9 +523,9 @@ impl ServerBuilder {
     fn freeze(
         self,
         listener: net::Listener,
-    ) -> Result<(ServerSupervisor, StopAuthority), RuntimeError> {
+    ) -> Result<(ServerSupervisor, StopAuthority, EffectivePolicies), RuntimeError> {
         let buffers = self.routes.buffer_config();
-        let snapshot = ServerContextSnapshot::capture(buffers, self.policy);
+        let snapshot = ServerContextSnapshot::capture(buffers, self.policy, self.runtime_origin);
         self.routes.refuse_shadowed(&snapshot)?;
         let tls_acceptor =
             wrapped_transport(&listener, self.tls, &snapshot)?.map(tokio_rustls::TlsAcceptor::from);
@@ -465,12 +533,16 @@ impl ServerBuilder {
         // wrap the transport in is the only honest answer to `Request::is_tls`
         // and to the `X-Forwarded-Proto` every proxied hop reads off it.
         let snapshot = snapshot.with_tls(tls_acceptor.is_some());
-        Ok(ServerSupervisor::new(
-            listener,
-            self.routes.freeze(),
-            tls_acceptor,
-            snapshot,
-        ))
+        let mut report = PolicyReport::new(*snapshot.effective_policy(), &self.policy);
+        let dispatch = self.routes.freeze(&mut report);
+        let policies = report.finish();
+        policies.emit_diagnostics();
+        if let Some(observer) = self.policy_observer {
+            observer(&policies)?;
+        }
+        let (supervisor, authority) =
+            ServerSupervisor::new(listener, dispatch, tls_acceptor, snapshot);
+        Ok((supervisor, authority, policies))
     }
 }
 

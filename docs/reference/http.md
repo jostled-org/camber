@@ -29,12 +29,26 @@ Supported registration methods include:
 ### Request Body Admission
 
 `Router::max_request_body` and `HostRouter::max_request_body` set a ceiling in
-bytes. The default is eight MiB and the hard cap is 256 MiB. A ceiling only ever
-narrows: a host-router ceiling contains every child, a child that configures one
-can narrow it further, and a child that configures none inherits the host's.
+bytes. The default is eight MiB and the default hard cap is 256 MiB. A child that
+configures no ceiling inherits the host's. If the host and the child both configure
+one, the narrower applies. If only the child configures one, the child's applies: the
+host's eight MiB default never narrows it.
+
+`ServerPolicy::request_body_hard_cap(bytes)?` selects a nonzero finite cap. An
+explicit server cap replaces the runtime's default cap, and an explicit runtime cap
+contains it. The cap always contains host and router ceilings, even at its default.
+To admit requests above 256 MiB, raise the cap and a router ceiling. Raising the cap
+alone leaves the default request limit at eight MiB. A router ceiling above the cap
+resolves to the cap, and startup reports a diagnostic that names the cap. A router
+ceiling of zero still admits empty bodies only.
+
+The startup report exposes `server().request_body_hard_cap()` and each route's
+`configured_request_body_limit()` and `request_body_limit()`. The effective
+limit includes tied limiting sources. Bodyless registrations return `None` for
+the effective body limit; admission callbacks can narrow it for each request.
 
 `Router::body_admission` decides each body-consuming request — buffered routes
-and streaming proxy routes alike — before Camber polls a single payload frame:
+and streaming proxy and multipart routes alike — before Camber polls a single payload frame:
 
 ```rust
 use camber::RuntimeError;
@@ -68,6 +82,11 @@ stopped or refused, which is before the upstream answers and before the response
 finishes streaming. The selected maximum can only narrow the configured
 ceilings, never raise them.
 
+A buffered handler can return its place before the request ends. Call
+`req.take_body()` and drop the returned `AdmittedBody`, or call `into_bytes()` on
+it to keep the bytes. The take works once. Request end then releases nothing a
+second time. See [Taking the body](#taking-the-body).
+
 Returning `Err` refuses the request as `BodyAdmission` — `503` by default, with
 the error kept as a private diagnostic no mapper or peer sees. A panic is a
 different category: `InternalService`, answered with the fixed redacted `500`.
@@ -75,30 +94,32 @@ Neither reads a body byte or reaches the handler, and neither re-enters the
 policy.
 
 Routes that consume no body never reach the policy: WebSocket upgrades on a
-direct or proxied route, SSE, gRPC, internal routes, and routing terminals. They
-acquire no permit, read no payload byte, and run no handler.
+direct or proxied route, GET SSE, gRPC, internal routes, and routing terminals.
+They acquire no body permit and read no payload byte through body admission.
+POST SSE routes collect their body under the buffered admission limit.
 
 #### Route Modes
 
 `RequestBodyMode::Buffered` is a route whose payload is read into the owned
-`Request` before the handler runs. `RequestBodyMode::Streaming` is a streaming
-proxy route, whose payload is forwarded upstream frame by frame. Both are
-measured against the same effective limit; they differ only in where an admitted
-frame goes.
+`Request` before the handler runs. `RequestBodyMode::Streaming` covers streaming
+proxy and multipart routes. A proxy forwards payload frames upstream; a
+multipart session feeds its bounded parser. Both modes use the same effective
+request limit.
 
 #### Effective Limit Precedence
 
-A request may retain or forward the narrowest of four numbers, in this order:
+A request may retain or forward the narrowest applicable bound:
 
 | Source | Effect |
 |---|---|
-| `HostRouter::max_request_body` | Contains every child |
-| `Router::max_request_body` | Narrows further, or inherits the host's when unset |
-| The 256 MiB hard cap | Clamps every configured ceiling |
+| Runtime/server `request_body_hard_cap` | Always contains every ceiling; defaults to 256 MiB |
+| `HostRouter::max_request_body` | Contains a child that configures a ceiling; a child that configures none inherits it |
+| `Router::max_request_body` | Applies when set; the narrower of host and router applies when both are set |
+| A proxy registration's upload maximum | Narrows its request payload further |
 | `BodyAdmission::max_bytes` | Narrows the request the policy just admitted |
 
-A resolved child router uses its own policy and its own ceiling. Nothing raises
-a limit.
+A resolved child router uses its own policy and its own ceiling. A default
+ceiling never narrows an explicit one, and nothing raises a limit past the cap.
 
 #### Framing and Declared Length
 
@@ -138,6 +159,9 @@ stream; the connection carries later streams normally.
 - `req.header("host")`
 - `req.cookie("session")`
 - `req.body()`
+- `req.body_bytes()` — borrow the buffered bytes
+- `req.body_shared()` — share the buffered bytes without copying their payload
+- `req.take_body()` — take the buffered bytes and their admission place, once
 - `req.json::<T>()`
 - `req.multipart()`
 - `req.request_id()` — the identity Camber minted for this request, not the `X-Request-Id` header the peer sent
@@ -189,7 +213,7 @@ The URI owns the raw query, so `raw_query` borrows it and allocates nothing. The
 
 Handlers receive `&Request`, but the future returned by the handler must be `Send + 'static`.
 
-That means: if you need request data after an `.await`, copy out owned data before entering `async move`.
+Capture owned request data before entering `async move`. Use `body_shared()` to share the body instead of copying its payload.
 
 ```rust
 router.get("/users/:id", |req| {
@@ -202,6 +226,76 @@ router.get("/users/:id", |req| {
 ```
 
 If you only need request data before `.await`, reading directly from `req` is fine.
+
+Move a shared body into blocking work when parsing or processing would occupy a runtime worker:
+
+```rust
+use camber::http::{Request, Response, Router};
+
+let mut router = Router::new();
+router.post("/checksum", |req: &Request| {
+    let body = req.body_shared();
+    let request_id = req.request_id();
+    async move {
+        let checksum = camber::spawn(move || {
+            body.iter().map(|byte| u64::from(*byte)).sum::<u64>()
+        }).await?;
+        camber::tracing::debug!(?request_id, checksum, "body processed");
+        Response::json(200, &checksum)
+    }
+});
+```
+
+The shared bytes remain valid after the request is released. They retain neither its
+body-admission permit nor its disconnect owner. Buffered admission still releases its
+permit when the request ends. Retaining a body does not delay `on_disconnect()`.
+Applications must budget payloads retained beyond request completion separately.
+Dropping the handler's wait does not stop blocking work already admitted to the runtime.
+
+### Taking the body
+
+`req.take_body()` moves the buffered bytes and the request's admission permit into
+one owned `AdmittedBody`. Use it when a handler has parsed its body and then does
+slow work: waiting for a turn, a long computation, or collecting a reply.
+
+```rust,no_run
+use camber::http::{Request, Response, Router};
+
+let mut router = Router::new();
+router.post("/import", |req: &Request| {
+    let body = req.take_body();
+    async move {
+        let rows = match body {
+            Some(body) => camber::spawn(move || body.split(|byte| *byte == b'\n').count()).await?,
+            None => 0,
+        };
+        Response::json(200, &rows)
+    }
+});
+```
+
+These rules apply:
+
+- The first call returns `Some`, also for an empty body. Later calls return `None`.
+- A request with no buffered body returns `None`. Camber builds such a request
+  from the head alone: for a route that reads no body (streaming proxy and
+  streaming multipart routes, WebSocket upgrades, and GET SSE routes), for a
+  routing refusal such as `404` or `405`, and for the middleware gate of a gRPC or
+  streaming proxy route.
+- Dropping the `AdmittedBody` returns the place. The closure above holds it until
+  the blocking work ends.
+- `AdmittedBody::into_bytes()` returns the place at once and keeps the bytes.
+  Budget those bytes as you budget a `body_shared()` handle.
+- Request end after a take releases nothing a second time. `on_disconnect()` is
+  unchanged.
+
+Returning the place and freeing the memory are separate events. The place returns
+when the `AdmittedBody` drops or `into_bytes()` runs. The memory is freed when no
+reference to the bytes is left. `body()`, `body_bytes()`, and `body_shared()` keep
+returning the taken bytes until the handler or middleware chain that took them
+returns its future. Camber then drops the request's own reference. Every
+`body_shared()` handle and every `req.multipart()` part shares the same allocation,
+so each one taken earlier keeps the bytes alive after the place returns.
 
 ### Observing Disconnect
 
@@ -238,7 +332,17 @@ router.get("/report", |req| {
 });
 ```
 
-**The cleanup task needs a Camber runtime context.** `spawn_async` admits its future to the current runtime's root scope, so the connection task that calls it must carry that context. A `serve_background*` server started **inside** a Camber runtime propagates it: the supervisor is admitted to that runtime's root scope and runs under it, and each connection task it spawns captures that context and carries it in. The `serve_async*` entry points behave the same way: they capture the ambient context when the supervisor is built, and carry it into every connection task, so a `serve_async` server awaited inside a Camber runtime propagates it too. Started on a bare Tokio runtime, the supervisor is a plain `tokio::spawn` with nothing to capture, so its connection tasks run without a Camber context. The synchronous entry points are never in that position: `serve_listener` refuses without a runtime context and `serve` establishes one, so the same supervisor carries a Camber runtime into every connection task it spawns.
+**The cleanup task needs a Camber runtime context.** `spawn_async` admits its future to the owning runtime's root scope.
+Server terminals capture that runtime when called. They carry its context through connections and HTTP/2 stream tasks, including polls after `.await`.
+Both HTTP/1.1 and HTTP/2 handlers can use `spawn` and `spawn_async` under the same admission rules.
+
+`serve_background*` and `serve_async*` capture the ambient context when the supervisor is built.
+This happens before either terminal returns its handle or future.
+Moving the future to another executor does not change its owner. A server created on bare Tokio retains no Camber runtime authority.
+`serve_listener` requires an existing Camber runtime, while `serve` establishes one.
+
+Dropping a handler or its result waiter does not remove an admitted child from the runtime's scope.
+The scope still owns that child until it completes or the normal runtime shutdown process settles it.
 
 With no context `spawn_async` refuses with `RuntimeError::NoRuntime`, drops the cleanup future unrun, and reports the refusal only on the returned handle. The example above discards that handle, so on those paths it cleans up nothing and says nothing.
 
@@ -303,6 +407,7 @@ answers with the same status stay distinct.
 | `MethodSelection` | `405` | `method not allowed` | A route claims the path, not the method |
 | `BodyLimit` | `413` | `request body too large` | The body exceeds the effective limit, or a streaming multipart field exceeds `max_field_bytes` |
 | `BodyAdmission` | `503` | `service unavailable` | A route's body-admission policy declined the work |
+| `TurnAdmission` | `503` | `service unavailable` | A queued service turn was cancelled, expired, or closed |
 | `BodyUnreadable` | `400` | `request body could not be read` | The body stopped arriving for a reason that is not the limit |
 | `BodyTimeout` | `408` | `request body timed out` | The body left a longer quiet interval between data frames than the effective `RequestBudget` allows |
 | `RequestTimeout` | `408` | `request timed out` | The admitted request outlived its `RequestBudget` total before a response head committed |
@@ -318,7 +423,203 @@ answers with the same status stay distinct.
 A mid-body transport failure or a peer reset is not an admission refusal: it is
 `BodyUnreadable`.
 
-### Request deadlines
+### Waiting for a service turn
+
+Share a `Turn` across handlers when a resource can serve only a fixed number of
+operations at once. Pass `camber::on_shutdown()` as the cancellation future, so a
+queued request stops waiting when the runtime starts shutdown:
+
+```rust,no_run
+use camber::Turn;
+use camber::http::{Response, Router};
+use std::time::{Duration, Instant};
+
+let turn = Turn::new();
+let mut router = Router::new();
+router.post("/sort", move |req| {
+    let values = req.json::<Vec<u64>>();
+    // Parsed: return the body's admission place before waiting for a turn.
+    drop(req.take_body());
+    let turn = turn.clone();
+    async move {
+        let mut values = values?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let guard = turn.acquire_until(Some(deadline), camber::on_shutdown()).await?;
+        let sorted = camber::spawn(move || {
+            values.sort_unstable();
+            drop(guard);
+            values
+        }).await?;
+        Response::json(200, &sorted)
+    }
+});
+```
+
+Serve this router inside a Camber runtime so the blocking closure can join its
+task scope. The handler takes and drops its body before it queues, so a queued
+request does not hold a body-admission place. The closure owns the guard until
+sorting ends, even if the request or its result waiter disappears. Cancellation
+of a queued request removes its queue entry. It does not stop work that already
+owns a guard.
+
+`Turn` does not subscribe to request or runtime cancellation itself. When the
+peer disconnects, Camber drops the handler future. The dropped acquisition
+removes its queue entry at once, so a handler needs no disconnect branch.
+A handler's own `req.on_disconnect()` signal cannot wake that handler, as
+[Observing Disconnect](#observing-disconnect) explains. Pass that signal as the
+cancellation future only in a task that outlives the handler.
+
+Before response commitment, `RuntimeError::Turn(TurnRefused::Deadline)`,
+`Cancelled`, and `Closed` map to `RejectionKind::TurnAdmission` with status `503`
+and fixed text, `service unavailable`. Camber adds no `Retry-After` estimate.
+`Rejection::turn_refusal()` names the cause. A rejection mapper can answer an
+expired deadline with `429` and a retry delay that the application knows, and
+keep `503` for closure and cancellation:
+
+```rust
+use camber::TurnRefused;
+use camber::http::{Rejection, RejectionContext, Response, Router};
+
+let router = Router::new().rejection_mapper(|rejection: &Rejection, _: &RejectionContext| {
+    match rejection.turn_refusal() {
+        Some(TurnRefused::Deadline) => Response::text(429, "queue full")
+            .map(|response| response.with_header("Retry-After", "2")),
+        Some(TurnRefused::Cancelled | TurnRefused::Closed) | None => {
+            Response::text(rejection.status(), rejection.message())
+        }
+    }
+});
+```
+
+A handler can also answer one cause itself. Match the error before it reaches the
+rejection boundary:
+
+```rust
+use camber::{RuntimeError, Turn, TurnRefused};
+use camber::http::{Response, Router};
+use std::time::{Duration, Instant};
+
+let turn = Turn::new();
+let mut router = Router::new();
+router.get("/report", move |_req| {
+    let turn = turn.clone();
+    async move {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        match turn.acquire_until(Some(deadline), camber::on_shutdown()).await {
+            Ok(guard) => {
+                drop(guard);
+                Response::text(200, "report ready")
+            }
+            Err(RuntimeError::Turn(TurnRefused::Deadline)) => Response::text(429, "queue full")
+                .map(|response| response.with_header("Retry-After", "2")),
+            Err(other) => Err(other),
+        }
+    }
+});
+```
+
+The enclosing request deadline still applies while the handler waits.
+
+For FIFO ordering, queue counts, and closure, see
+[Fair Service Turns](tasks-and-channels.md#fair-service-turns).
+
+### Inspecting effective policies
+
+Policies nest: the runtime contains the server, the server contains a host
+router, the host router contains its routers, and a router contains a
+specialized route. Each dimension resolves at each edge by one rule:
+
+| Outer | Inner | Applies |
+| --- | --- | --- |
+| explicit | explicit | the narrower value |
+| default | explicit | the inner value |
+| explicit | default | the outer value |
+| default | default | the narrower value |
+
+A default never narrows an explicit setting. Two bounds always apply, even at
+their defaults. The request-body hard cap contains every host and router ceiling.
+The runtime's `shutdown_timeout` bounds every server drain, because the runtime
+stops every participant when it expires. A standalone server keeps its documented
+defaults. The health route keeps its own exposure rule: either side disabling it
+wins, and a server that names no path takes the runtime's.
+
+#### Long-running handlers and shutdown
+
+This service lets an answer take as long as it needs, stops a quiet upload after
+60 seconds, and drains for up to two minutes when the process stops:
+
+```rust,no_run
+use camber::http::{self, RequestBudget, Response, Router, ServerPolicy};
+use camber::{RuntimeError, runtime};
+use std::time::Duration;
+
+fn main() -> Result<(), RuntimeError> {
+    runtime::builder()
+        .shutdown_timeout(Duration::from_secs(120))
+        .run(|| -> Result<(), RuntimeError> {
+            let mut router = Router::new();
+            router.post("/summarize", |_req| async { Response::text(200, "done") });
+            let router = router.request_budget(
+                RequestBudget::unbounded().with_body_idle(Duration::from_secs(60))?,
+            );
+            let listener = camber::net::listen("0.0.0.0:8080")?;
+            http::server(router)
+                .policy(ServerPolicy::default())
+                .on_policy_resolved(|report| {
+                    let total = report.routes()[0].request_budget().total().value();
+                    let drain = report.server().shutdown_timeout().value();
+                    match (total, drain) {
+                        (None, drain) if drain == Duration::from_secs(120) => Ok(()),
+                        _ => Err(RuntimeError::InvalidArgument(
+                            "this service needs no request total and a two-minute drain".into(),
+                        )),
+                    }
+                })
+                .serve_listener(listener)
+        })?
+}
+```
+
+The runtime sets the drain explicitly, so the server's 30-second default drain
+yields to it. The router sets both request deadlines explicitly: no total, and a
+60-second body idle. The 30-second defaults at the runtime and the server yield
+to them. An explicit server or runtime request budget would still contain the
+router, and the narrower value would apply. After response headers commit, the
+download budget controls response time.
+
+#### The startup report
+
+`ServerBuilder::on_policy_resolved` receives the actual startup report. The
+callback runs once, before any connection is accepted, at the terminal `serve*`
+call. It sees the runtime captured at that call. Returning an error prevents
+serving. `ServerHandle::effective_policies()` and
+`ServerHandleFuture::effective_policies()` retain the same immutable report.
+
+The report exposes server bounds and frozen route registrations, including host, method, and normalized pattern.
+Each bound exposes its value and every tied limiting layer through `sources()`.
+Each `LayerSource` says whether that layer used its default.
+`serve(addr)` builds a runtime from the server's own policy; the report does not name that runtime as a layer.
+Implicit HEAD fallback is not a separate registration.
+Handler-created response budgets and request-dependent admission decisions can narrow the startup envelope later.
+Route upload and download budgets describe the envelope used by streaming-transfer owners.
+Multipart and streaming proxy upload budgets expose idle and total deadlines. Their
+`max_bytes()` is `None`, with no byte-limit source, because `request_body_limit()`
+owns payload-byte admission. A proxy registration's own upload maximum narrows that limit.
+`route.proxy()` reports upstream phase timeouts and a `BufferedResponseLimit`:
+`Streamed`, `Bytes(max)`, or `Unbounded`.
+
+`diagnostics()` records each explicit setting that resolution narrowed, with its
+layer, `PolicyDimension`, configured value, effective value, and limiting layers.
+An explicit outer value, the hard cap, or the runtime shutdown deadline can narrow
+a setting. A default never produces a diagnostic. Startup also emits each one as
+a `camber.http.policy.narrowed` warning with the fields `layer`, `dimension`,
+`configured`, `effective`, and `limiting_layers`.
+
+Policy equality includes configuration intent, so a setter that restates a default
+makes a different `ServerPolicy`. Use `same_bounds` on `EffectivePolicies`,
+`EffectiveServerPolicy`, or `EffectiveRoutePolicy` to compare only enforced values.
+
+### Request deadline enforcement
 
 An admitted request carries two independent deadlines from the effective
 `RequestBudget`, and neither is derived from the other.
@@ -1021,6 +1322,49 @@ releases the stream. So a feed that waits on something other than its writer
 still stops. A handler error ends the feed after the events it already sent.
 A `HEAD` request gets the `200` head and runs no handler.
 
+### Heartbeats while queued
+
+Pin one acquisition before the heartbeat loop. Recreating it on each tick drops
+its queue entry and registers again at the back of the queue.
+
+```rust,no_run
+use camber::Turn;
+use camber::http::Router;
+use std::time::{Duration, Instant};
+
+let turn = Turn::new();
+let mut router = Router::new();
+router.get_sse_async("/turn", move |_req, sse| {
+    let turn = turn.clone();
+    async move {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let acquisition = turn.acquire_until(Some(deadline), camber::on_shutdown());
+        tokio::pin!(acquisition);
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
+        let guard = loop {
+            tokio::select! {
+                biased;
+                result = &mut acquisition => break result?,
+                result = async {
+                    heartbeat.tick().await;
+                    sse.comment().await
+                } => result?,
+            }
+        };
+        sse.event("admitted", "your turn").await?;
+        drop(guard);
+        Ok(())
+    }
+});
+```
+
+The acquisition stays active while a heartbeat waits for channel capacity.
+Shutdown, deadline expiry, or a peer disconnect removes the waiter. A disconnect
+drops the feed future and the acquisition with it. An SSE route has already
+committed `200` before its callback runs, so a turn refusal ends this feed.
+It cannot replace that status with `503`. If admission must choose the HTTP
+status, acquire before returning a stream from `get_stream` or `post_stream`.
+
 ### Bounding an event stream
 
 `get_sse` states `TransferBudget::unbounded()` for the feed it registers: an event
@@ -1049,16 +1393,16 @@ starts a feed:
 ```rust
 router.post_stream("/jobs", |req: &Request| {
     let job: Box<str> = req.body().into();
-    Box::pin(async move {
+    async move {
         if job.is_empty() {
-            let (resp, body) = StreamResponse::new(400);
-            let _ = body.send(&br#"{"error":"empty job"}"#[..]).await;
-            return resp.with_header("Content-Type", "application/json");
+            return Ok::<StreamResponse, camber::RuntimeError>(
+                Response::json(400, &serde_json::json!({"error": "empty job"}))?.into(),
+            );
         }
         let (resp, sse) = StreamResponse::sse();
-        tokio::spawn(async move { sse.event("queued", &job).await });
-        resp.with_header("X-Request-Id", "req-7")
-    }) as Pin<Box<dyn Future<Output = StreamResponse> + Send>>
+        camber::spawn_async(async move { sse.event("queued", &job).await });
+        Ok(resp)
+    }
 });
 ```
 
@@ -1070,7 +1414,23 @@ policy, as `with_budget` does.
 
 ## Streaming Responses
 
-Use `router.get_stream(...)` for chunked async responses.
+Use `router.get_stream(...)` or `router.post_stream(...)` when a handler can stream its answer.
+Both accept ordinary async futures returning `Response`, `StreamResponse`, or either type wrapped in
+`Result<_, RuntimeError>`. `IntoStreamResponse` supplies this conversion, as `IntoResponse` does for buffered routes.
+
+Use `StreamResponse::from(response)` or `response.into()` when one handler chooses between the two body forms.
+A buffered answer declares its exact `Content-Length`, as it does on an ordinary route.
+The conversion retains the complete response, including headers and rejection provenance, without a channel or body copy.
+Typed errors reach the selected rejection mapper once before commitment. Buffered application answers keep the route's download bounds;
+mapped rejections keep the framework's rejection delivery rules. Both body forms suppress payloads for `HEAD`.
+
+Streaming routes run middleware as a gate. The gate runs first. Camber calls the
+handler only after the gate passes, so a refusing gate stops the handler before
+any of its code runs, and the gate reads the whole body before the handler can
+take it. Passing middleware can project headers onto either response form;
+body-transforming middleware does not wrap these handlers, even when they return a buffered answer.
+
+Migrating from boxed handlers: a closure whose branches return different `Box::pin(async { ... })` values no longer compiles. Return one `async move` block, or annotate the closure's return type as `Pin<Box<dyn Future<Output = StreamResponse> + Send>>`.
 
 `StreamResponse::new(status)` uses the default stream buffer. Use
 `StreamResponse::with_buffer(status, cap)` when you need explicit channel depth control.

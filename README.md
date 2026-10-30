@@ -45,7 +45,7 @@ fn main() -> Result<(), RuntimeError> {
 
 Use `http::serve(...)` by itself for the default case. Wrap it in `runtime::builder().run(...)` only when you need runtime configuration such as worker counts, shutdown timeouts, or registered resources.
 
-`http::server(router)` returns a `ServerBuilder`, the canonical owned path: it takes a `ServerPolicy` and a TLS configuration, validates them synchronously, and freezes the router, the policy, and the serving context at the terminal `serve*` call. Every dimension has a default; the connection limit is the one that is unbounded when omitted, and a production service should set a finite limit. Shutdown is one aggregate deadline shared by the runtime and every server inside it — no nested owner restarts it — and `RuntimeBuilder::run` returns one `RuntimeError::Lifecycle` account of every participant that could not finish. See the [Runtime Reference](docs/reference/runtime.md) and [HTTP Reference](docs/reference/http.md).
+`http::server(router)` returns a `ServerBuilder`, the canonical owned path: it takes a `ServerPolicy` and a TLS configuration, validates them synchronously, and freezes the router, the policy, and the serving context at the terminal `serve*` call. Every dimension has a default; the connection limit is the one that is unbounded when omitted, and a production service should set a finite limit. Inside a runtime, runtime, server, host, and router policies resolve per dimension: a default never narrows an explicit setting, and two explicit values resolve to the narrower one. `on_policy_resolved` and `effective_policies()` report each effective bound and the layers that set it. Shutdown is one aggregate deadline shared by the runtime and every server inside it — no nested owner restarts it — and `RuntimeBuilder::run` returns one `RuntimeError::Lifecycle` account of every participant that could not finish. See the [Runtime Reference](docs/reference/runtime.md) and [HTTP Reference](docs/reference/http.md).
 
 ## Docs
 
@@ -146,7 +146,8 @@ router.use_middleware(|req, next| {
 });
 ```
 
-Copy request data before `async move`. Call `next.call(req)` before the async block, and only after authorization succeeds; await its returned future inside.
+Capture owned request metadata before `async move`. Use `req.body_shared()` to retain buffered bytes without copying the payload. Use `req.take_body()` to return the body's admission place before slow work. The bytes are freed when the taken body, every `body_shared()` handle, and every multipart part drop.
+Call `next.call(req)` before the async block, and only after authorization succeeds; await its returned future inside.
 
 For normal HTTP handlers, middleware wraps the full owned `Request` and `Response`.
 For gRPC and `proxy_stream`, middleware acts as a request gate before streaming begins.
@@ -222,8 +223,9 @@ router.post_sse("/jobs", |req, sse| {
 
 For generic chunked responses, use `StreamResponse::new()` for the default buffer or
 `StreamResponse::with_buffer(status, cap)` when you need explicit backpressure tuning.
-A stream handler that must choose between an error and a feed returns
-`StreamResponse::sse()` to start the feed.
+Stream handlers accept ordinary async futures returning `Response`, `StreamResponse`, or either wrapped in `Result`.
+To choose between a buffered answer and a feed, convert the buffered response with `into()`
+or return `StreamResponse::sse()` to start the feed. Typed failures reach the route's rejection mapper before commitment.
 
 ## HTTP Client
 

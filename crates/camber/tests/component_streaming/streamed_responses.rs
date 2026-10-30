@@ -30,6 +30,322 @@ const INCREMENTAL_BYTES: usize = 21;
 /// `with_buffer` spelling inherited, not a crossing.
 const BUFFERED_MAX_BYTES: usize = 64;
 
+fn mixed_response_routes() -> Router {
+    let mut router = Router::new();
+    router.use_middleware(|req: &Request, next: camber::http::Next| {
+        let entered = next.call(req);
+        async move {
+            entered
+                .await
+                .with_header("X-Projected", "applied")
+                .with_header("Set-Cookie", "first=1")
+                .with_header("Set-Cookie", "second=2")
+        }
+    });
+    router.post_stream("/choose", |req: &Request| {
+        let streaming = req.body() == "stream";
+        async move {
+            match streaming {
+                false => Ok::<StreamResponse, RuntimeError>(
+                    Response::json(200, &serde_json::json!({"ready": true}))?.into(),
+                ),
+                true => {
+                    let (response, writer) = StreamResponse::sse();
+                    writer.data("ready").await?;
+                    Ok(response)
+                }
+            }
+        }
+    });
+    router.post_stream("/validate", |req: &Request| {
+        let topic: Box<str> = req.body().into();
+        async move {
+            match topic.is_empty() {
+                true => Ok::<StreamResponse, RuntimeError>(
+                    Response::json(400, &serde_json::json!({"error": "empty topic"}))?.into(),
+                ),
+                false => {
+                    let (response, writer) = StreamResponse::sse();
+                    writer.event("topic", &topic).await?;
+                    Ok(response)
+                }
+            }
+        }
+    });
+    router.get_stream("/plain", |_: &Request| async {
+        Response::text(429, "wait")
+            .unwrap()
+            .with_header("Retry-After", "3")
+    });
+    router.get_stream("/fallible", |_: &Request| async {
+        Response::text(503, "later")
+    });
+    router.get_stream("/converted", |_: &Request| async {
+        StreamResponse::from(Response::text(400, "bad").unwrap()).with_header("X-Converted", "kept")
+    });
+    router
+}
+
+#[test]
+fn mixed_stream_handlers_preserve_buffered_and_sse_metadata() {
+    common::test_runtime()
+        .run(|| {
+            let server = crate::http::reserve_transfer_owner().serve(mixed_response_routes());
+            assert_posted_branches(server.addr());
+            assert_buffered_answers(server.addr());
+            assert_head_suppressed(server.addr());
+            server.shutdown_bounded(SOURCE_FAILURE_BOUND).unwrap();
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+/// One POST route answers buffered JSON or a feed, chosen from the request.
+fn assert_posted_branches(addr: SocketAddr) {
+    for (path, body, status, content_type, expected) in [
+        (
+            "/choose",
+            b"buffered".as_slice(),
+            200,
+            "application/json",
+            b"{\"ready\":true}".as_slice(),
+        ),
+        (
+            "/choose",
+            b"stream".as_slice(),
+            200,
+            "text/event-stream",
+            b"data: ready\n\n".as_slice(),
+        ),
+        (
+            "/validate",
+            b"".as_slice(),
+            400,
+            "application/json",
+            b"{\"error\":\"empty topic\"}".as_slice(),
+        ),
+        (
+            "/validate",
+            b"jobs".as_slice(),
+            200,
+            "text/event-stream",
+            b"event: topic\ndata: jobs\n\n".as_slice(),
+        ),
+    ] {
+        let response =
+            crate::http::request(addr, "POST", path, &[], body, SOURCE_FAILURE_BOUND).unwrap();
+        assert_eq!(response.status, status, "{path}");
+        assert_eq!(response.header("content-type"), Some(content_type));
+        assert_eq!(response.body.as_ref(), expected);
+        assert_buffered_framing(&response, content_type == "application/json");
+        assert_eq!(response.header("x-projected"), Some("applied"));
+        assert_eq!(
+            response.header_values("set-cookie").as_ref(),
+            ["first=1", "second=2"]
+        );
+    }
+}
+
+/// Buffered answers from stream routes keep their status, body, and headers.
+fn assert_buffered_answers(addr: SocketAddr) {
+    for (path, status, body, converted_header) in [
+        ("/plain", 429, "wait", None),
+        ("/fallible", 503, "later", None),
+        ("/converted", 400, "bad", Some("kept")),
+    ] {
+        let response =
+            crate::http::request(addr, "GET", path, &[], &[], SOURCE_FAILURE_BOUND).unwrap();
+        assert_eq!(response.status, status);
+        assert_eq!(response.body.as_ref(), body.as_bytes());
+        assert_eq!(response.header("x-projected"), Some("applied"));
+        assert_eq!(response.header("x-converted"), converted_header);
+        assert_buffered_framing(&response, true);
+    }
+}
+
+/// A `HEAD` answer keeps its head and carries no body framing.
+fn assert_head_suppressed(addr: SocketAddr) {
+    let head =
+        crate::http::request(addr, "HEAD", "/plain", &[], &[], SOURCE_FAILURE_BOUND).unwrap();
+    assert_eq!(head.status, 429);
+    assert_eq!(head.header("retry-after"), Some("3"));
+    assert!(head.body.is_empty());
+    assert_eq!(head.header("transfer-encoding"), None);
+    assert_eq!(head.header("content-length"), None);
+}
+
+/// A buffered branch declares its exact length; a feed stays chunked.
+///
+/// The length is what an ordinary buffered route declares for the same body,
+/// so a stream route's buffered answer is framed as that route's would be.
+fn assert_buffered_framing(response: &HttpResponse, buffered: bool) {
+    let declared = response.body.len().to_string();
+    match buffered {
+        true => {
+            assert_eq!(response.header("content-length"), Some(declared.as_str()));
+            assert_eq!(response.header("transfer-encoding"), None);
+        }
+        false => {
+            assert_eq!(response.header("content-length"), None);
+            assert_eq!(response.header("transfer-encoding"), Some("chunked"));
+        }
+    }
+}
+
+fn mapped_stream_routes(
+    mapped: &Arc<AtomicUsize>,
+    entered_id: &Arc<Mutex<Option<camber::http::RequestId>>>,
+    invalid_header: bool,
+) -> Router {
+    let counted = Arc::clone(mapped);
+    let entered_id = Arc::clone(entered_id);
+    let mut router = Router::new()
+        .download_budget(
+            TransferBudget::bounded(1, Duration::from_secs(30), Duration::from_secs(30)).unwrap(),
+        )
+        .rejection_mapper(move |rejection: &Rejection, context: &RejectionContext| {
+            counted.fetch_add(1, Ordering::AcqRel);
+            Response::text(rejection.status(), "mapped response").map(|response| {
+                response
+                    .with_header("X-Mapped", "once")
+                    .with_header("X-Mapped-Method", context.method())
+                    .with_header("X-Mapped-Id", &context.request_id().to_string())
+            })
+        });
+    router.get_stream("/failure", move |req: &Request| {
+        *entered_id.lock().unwrap() = Some(req.request_id());
+        async move {
+            match invalid_header {
+                true => Response::text(200, "invalid")
+                    .map(|response| response.with_header("bad\nname", "value")),
+                false => Err(RuntimeError::BadRequest("declined".into())),
+            }
+        }
+    });
+    router
+}
+
+#[test]
+fn mixed_stream_errors_map_once_before_commit_and_keep_delivery_policy() {
+    use camber::http::mock::{ResponseCommit, ResponseOrigin};
+    common::test_runtime()
+        .run(|| {
+            for (invalid_header, method, status, body) in [
+                (false, "GET", 400, "mapped response"),
+                (true, "GET", 500, "mapped response"),
+                (false, "HEAD", 400, ""),
+                (true, "HEAD", 500, ""),
+            ] {
+                let mapped = Arc::new(AtomicUsize::new(0));
+                let entered_id = Arc::new(Mutex::new(None));
+                let server = crate::http::reserve_committed_answer().serve(mapped_stream_routes(
+                    &mapped,
+                    &entered_id,
+                    invalid_header,
+                ));
+                let before = mapped.load(Ordering::Acquire);
+                let response = crate::http::request(
+                    server.addr(),
+                    method,
+                    "/failure",
+                    &[],
+                    &[],
+                    SOURCE_FAILURE_BOUND,
+                )
+                .unwrap();
+                assert_eq!(response.status, status);
+                assert_eq!(response.header("x-mapped"), Some("once"));
+                assert_eq!(response.body.as_ref(), body.as_bytes());
+                assert_eq!(response.header("x-mapped-method"), Some(method));
+                let request_id = entered_id.lock().unwrap().unwrap().to_string();
+                assert_eq!(response.header("x-mapped-id"), Some(request_id.as_str()));
+                assert_eq!(mapped.load(Ordering::Acquire), before + 1);
+                let committed = server.controller().commitment.observed();
+                assert_eq!(committed.commits, 1);
+                assert_eq!(
+                    committed.committed,
+                    Some(ResponseCommit::Head(ResponseOrigin::Framework))
+                );
+                server.shutdown_bounded(SOURCE_FAILURE_BOUND).unwrap();
+            }
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn mixed_stream_invalid_mapped_head_uses_fallback_without_remapping() {
+    common::test_runtime()
+        .run(|| {
+            let mapped = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&mapped);
+            let mut router =
+                Router::new().rejection_mapper(move |_: &Rejection, _: &RejectionContext| {
+                    counted.fetch_add(1, Ordering::AcqRel);
+                    Ok(Response::text(400, "mapped")
+                        .unwrap()
+                        .with_header("bad\nname", "value"))
+                });
+            router.get_stream("/fallback", |_: &Request| async {
+                Err::<StreamResponse, _>(RuntimeError::BadRequest("declined".into()))
+            });
+            let server = crate::http::reserve_committed_answer().serve(router);
+            let before = mapped.load(Ordering::Acquire);
+            let response = crate::http::request(
+                server.addr(),
+                "GET",
+                "/fallback",
+                &[],
+                &[],
+                SOURCE_FAILURE_BOUND,
+            )
+            .unwrap();
+            assert_eq!(response.status, 500);
+            assert!(!response.body.is_empty());
+            assert_eq!(mapped.load(Ordering::Acquire), before + 1);
+            assert_eq!(server.controller().commitment.observed().commits, 1);
+            server.shutdown_bounded(SOURCE_FAILURE_BOUND).unwrap();
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
+#[test]
+fn mixed_stream_buffered_body_keeps_download_enforcement() {
+    common::test_runtime()
+        .run(|| {
+            let budget =
+                TransferBudget::bounded(3, Duration::from_secs(30), Duration::from_secs(30))
+                    .unwrap();
+            let mut router = Router::new().download_budget(budget);
+            router.get_stream("/large", |_: &Request| async {
+                Response::text(200, "too large")
+            });
+            let server = crate::http::reserve_transfer_owner().serve(router);
+            let response = crate::http::request(
+                server.addr(),
+                "GET",
+                "/large",
+                &[],
+                &[],
+                SOURCE_FAILURE_BOUND,
+            );
+            assert!(
+                response.is_err(),
+                "the crossing buffered frame cannot complete"
+            );
+            let observed = settled_download(server.controller(), "buffered stream limit");
+            assert_eq!(
+                observed.download.terminal,
+                Some(InboundTerminal::TransferBytes)
+            );
+            assert_eq!(observed.download.releases, 1);
+            server.shutdown_bounded(SOURCE_FAILURE_BOUND).unwrap();
+            runtime::request_shutdown();
+        })
+        .unwrap();
+}
+
 /// Wait until this listener's download owner fixed a terminal and released.
 ///
 /// The release alone is [`crate::stream_support::released_download`]; this is
