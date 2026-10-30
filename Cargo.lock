@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "camber"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "allocation-counter",
  "arc-swap",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "camber-cli"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "camber",
  "clap",
