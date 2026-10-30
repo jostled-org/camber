@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/jostled-org/camber/compare/camber-v0.14.3...camber-v0.15.0) - 2026-10-30
+
+### Added
+
+- [**breaking**] add turns, policy inspection, and cross-origin redirects
+
 ## [0.14.3](https://github.com/jostled-org/camber/compare/camber-v0.14.2...camber-v0.14.3) - 2026-10-23
 
 ### Added
