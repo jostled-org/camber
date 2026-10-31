@@ -47,6 +47,8 @@ mod body_admission;
 mod certificate_management;
 #[path = "focused_api_contracts/channel_errors.rs"]
 mod channel_errors;
+#[path = "focused_api_contracts/child_spawn.rs"]
+mod child_spawn;
 #[path = "focused_api_contracts/client_egress.rs"]
 mod client_egress;
 #[path = "focused_api_contracts/client_failures.rs"]

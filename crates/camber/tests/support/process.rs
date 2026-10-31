@@ -383,11 +383,43 @@ impl Drop for ChildGuard {
 /// after. A sibling thread that spawns inside that gap hands its child the
 /// write end, and the reader then waits for that sibling to exit, not this
 /// child. One spawn at a time closes the gap for every guarded child.
+///
+/// On Linux, exec refuses a file another process holds open for writing. A
+/// sibling thread that forks while a fixture writes a script hands its child
+/// that write end until the child execs, and no lock here can stop a fork that
+/// does not take it. That window closes on its own, so a spawn refused as
+/// busy is retried.
 fn spawn_alone(command: &mut Command) -> io::Result<Child> {
     static SPAWN: Mutex<()> = Mutex::new(());
     // The lock guards no data, so a poisoned lock still serializes correctly.
     let _alone = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
-    command.spawn()
+    retry_busy(BUSY_ATTEMPTS, BUSY_PAUSE, || command.spawn())
+}
+
+/// The most spawns one guarded child makes while its program is busy, and
+/// the pause between two of them: half a second in all.
+const BUSY_ATTEMPTS: u32 = 50;
+const BUSY_PAUSE: Duration = Duration::from_millis(10);
+
+/// Run `attempt` until it returns anything but `ExecutableFileBusy`, at most
+/// `attempts` times, pausing `pause` between two attempts.
+///
+/// Every other failure, and the last busy one, is returned as it is.
+pub fn retry_busy<T>(
+    attempts: u32,
+    pause: Duration,
+    mut attempt: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    let mut remaining = attempts;
+    loop {
+        match attempt() {
+            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy && remaining > 1 => {
+                remaining -= 1;
+                std::thread::sleep(pause);
+            }
+            outcome => return outcome,
+        }
+    }
 }
 
 fn capture_output<R: Read>(
