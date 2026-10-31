@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2](https://github.com/jostled-org/camber/compare/camber-v0.15.1...camber-v0.15.2) - 2026-10-31
+
+### Added
+
+- *(http)* trust an added root certificate on the client
+
+### Other
+
+- retry a child spawn refused as text-file-busy
+- *(deps)* update async-nats to 0.51 and refresh the lockfile
+
 ## [0.15.1](https://github.com/jostled-org/camber/compare/camber-v0.15.0...camber-v0.15.1) - 2026-10-30
 
 ### Added
