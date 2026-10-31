@@ -48,9 +48,9 @@ pub use replay::{RetryPolicy, client_retryable_failure};
 pub use request::{ClientRequest, client_header_sensitivity};
 pub use response::ClientResponse;
 pub use reusable::{
-    Client, client, client_dns_edge, client_test_root, client_transport_is_built, delete,
-    delete_with_body, get, head, options, patch, patch_form, patch_json, post, post_form,
-    post_json, put, put_form, put_json,
+    Client, client, client_dns_edge, client_transport_is_built, delete, delete_with_body, get,
+    head, options, patch, patch_form, patch_json, post, post_form, post_json, put, put_form,
+    put_json,
 };
 pub use stream::ClientStreamResponse;
 pub(in crate::http) use stream::StreamMetrics;

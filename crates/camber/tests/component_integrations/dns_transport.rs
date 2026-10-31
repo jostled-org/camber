@@ -470,6 +470,8 @@ fn directory_and_roots_are_validated() -> Row {
         refused(AcmeDns01::new("camber", ["app.example.com"]).add_root_certificate(pem))
     };
     let pki = Pki::new("camber valid root")?;
+    let key = rcgen::KeyPair::generate().map_err(|error| format!("key: {error}"))?;
+    let with_key = format!("{}{}", pki.root_pem(), key.serialize_pem());
     all([
         expect_eq(
             "a plain HTTP directory",
@@ -497,6 +499,11 @@ fn directory_and_roots_are_validated() -> Row {
             Some(INVALID_DIRECTORY),
         ),
         expect_eq("an empty root", root(b""), Some(INVALID_DIRECTORY)),
+        expect_eq(
+            "a root beside a private key",
+            root(with_key.as_bytes()),
+            Some(INVALID_DIRECTORY),
+        ),
         expect_eq("a PEM root", root(pki.root_pem().as_bytes()), None),
     ])
 }

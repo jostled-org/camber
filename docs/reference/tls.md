@@ -113,7 +113,7 @@ Neither the provider nor the copy borrows the caller. Dropping the returned futu
 | `directory_url(url)` | Let's Encrypt | an absolute `https` URL with a host, no credentials, and no fragment |
 | `add_root_certificate(pem)` | platform roots | adds roots for this instance only |
 
-Setters for bounds are checked at admission. `directory_url` and `add_root_certificate` return an error at once. Added roots join the platform roots. They never turn off certificate or hostname checks. Every ACME request waits at most 10 seconds and never past the order's deadline.
+Setters for bounds are checked at admission. `directory_url` and `add_root_certificate` return an error at once. `add_root_certificate` refuses a PEM that holds anything but certificates, such as a private key. Added roots join the platform roots. They never turn off certificate or hostname checks. Every ACME request waits at most 10 seconds and never past the order's deadline.
 
 The order uses the account in `account.json` only when that account is registered on the configured directory. If the file names a different directory, or no directory, the order registers a new account on the configured directory and replaces the file. Thus a change to `directory_url` or `staging` takes effect at the next order.
 

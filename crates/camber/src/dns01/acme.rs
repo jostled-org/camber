@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use instant_acme::LetsEncrypt;
 use rustls::pki_types::CertificateDer;
-use rustls::pki_types::pem::PemObject;
 use rustls::sign::CertifiedKey;
 
 use super::cache::{read_cached, renewal_needed};
@@ -21,7 +20,7 @@ use crate::error::valid_duration;
 use crate::integration_lifecycle::integration;
 use crate::runtime_state::LifecycleSignals;
 use crate::task::AsyncJoinHandle;
-use crate::tls::CertStore;
+use crate::tls::{CertStore, parse_pem_roots};
 use crate::{IntegrationOperation, RuntimeError};
 
 /// The default bound on one whole order.
@@ -124,10 +123,11 @@ impl AcmeDns01 {
     ///
     /// # Errors
     ///
-    /// `Provision` with `InvalidConfig` when `pem` holds no certificate or
-    /// one that does not parse.
+    /// `Provision` with `InvalidConfig` when `pem` holds no certificate, a
+    /// section that is not a certificate, such as a private key, or a
+    /// certificate that does not parse.
     pub fn add_root_certificate(mut self, pem: &[u8]) -> Result<Self, RuntimeError> {
-        let parsed = parse_roots(pem).ok_or_else(invalid_config)?;
+        let parsed = parse_pem_roots(pem).ok_or_else(invalid_config)?;
         self.roots = self
             .roots
             .iter()
@@ -394,19 +394,4 @@ fn valid_directory(url: &str) -> bool {
             && url.host_str().is_some_and(|host| !host.is_empty())
             && transport::anonymous(&url)
     })
-}
-
-/// Every certificate in `pem`, or `None` when it holds none or one does not
-/// parse as X.509.
-fn parse_roots(pem: &[u8]) -> Option<Box<[CertificateDer<'static>]>> {
-    let roots = CertificateDer::pem_slice_iter(pem)
-        .collect::<Result<Box<[_]>, _>>()
-        .ok()?;
-    let parsed = roots
-        .iter()
-        .all(|root| x509_parser::parse_x509_certificate(root.as_ref()).is_ok());
-    match (roots.is_empty(), parsed) {
-        (false, true) => Some(roots),
-        _ => None,
-    }
 }

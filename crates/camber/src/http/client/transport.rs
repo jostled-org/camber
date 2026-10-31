@@ -76,9 +76,9 @@ pub(super) struct TransportSettings {
     pub(super) connect_timeout: Duration,
     /// The quiet interval, or `None` to arm no read timer.
     pub(super) idle: Option<Duration>,
-    /// The one local trust root a test added. It adds trust and removes no
+    /// The roots added to the platform's. They add trust and remove no
     /// check.
-    pub(super) test_root: Option<Arc<reqwest::Certificate>>,
+    pub(super) roots: Arc<[reqwest::Certificate]>,
 }
 
 /// The transport one operation sends through.
@@ -233,7 +233,7 @@ pub(super) fn build_client(
         .no_brotli()
         .no_deflate()
         .no_zstd()
-        .tls_certs_merge(settings.test_root.as_deref().cloned());
+        .tls_certs_merge(settings.roots.iter().cloned());
     let builder = match settings.idle {
         Some(idle) => builder.read_timeout(idle),
         None => builder,

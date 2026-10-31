@@ -14,6 +14,39 @@ pub fn generate_cert_with_san(san: &str) -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+/// When a generated leaf is valid.
+#[derive(Clone, Copy, Debug)]
+pub enum Validity {
+    /// Valid now: rcgen's default window, 1975 to 4096.
+    Current,
+    /// Valid only in 2000.
+    Expired,
+    /// Valid only in 2090.
+    NotYetValid,
+}
+
+/// A self-signed leaf for `sans`, marked `CA:FALSE`, and its key, as PEM.
+///
+/// This is the usual local test fixture: no issuer but itself, and no
+/// authority to issue another certificate.
+pub fn generate_leaf(sans: &[&str], validity: Validity) -> (Vec<u8>, Vec<u8>) {
+    let names: Vec<String> = sans.iter().map(|name| (*name).to_owned()).collect();
+    let mut params = rcgen::CertificateParams::new(names).unwrap();
+    params.is_ca = rcgen::IsCa::ExplicitNoCa;
+    let window = match validity {
+        Validity::Current => None,
+        Validity::Expired => Some((2000, 2001)),
+        Validity::NotYetValid => Some((2090, 2091)),
+    };
+    if let Some((from, until)) = window {
+        params.not_before = rcgen::date_time_ymd(from, 1, 1);
+        params.not_after = rcgen::date_time_ymd(until, 1, 1);
+    }
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = params.self_signed(&key).unwrap();
+    (cert.pem().into_bytes(), key.serialize_pem().into_bytes())
+}
+
 pub fn certified_key_from_pem(cert_pem: &[u8], key_pem: &[u8]) -> rustls::sign::CertifiedKey {
     let (certs, key) = parse_pem(cert_pem, key_pem);
     let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key).unwrap();

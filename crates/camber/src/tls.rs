@@ -1,6 +1,7 @@
 use crate::RuntimeError;
 use crate::net::TlsStream;
-use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::{PemObject, SectionKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -69,6 +70,25 @@ pub fn parse_certified_key(cert_pem: &[u8], key_pem: &[u8]) -> Result<CertifiedK
         RuntimeError::Tls(format!("TLS private key does not match certificate: {error}").into())
     })?;
     Ok(certified_key)
+}
+
+/// Every certificate in `pem`, read as trust roots, or `None` when `pem`
+/// holds no certificate, holds a section that is not a certificate, or holds
+/// one rustls cannot read as a root.
+///
+/// A key or any other section in a bundle of roots is refused rather than
+/// skipped: it is almost always the wrong file. A self-signed leaf is a root
+/// like any other, whatever its `CA` constraint says.
+pub(crate) fn parse_pem_roots(pem: &[u8]) -> Option<Box<[CertificateDer<'static>]>> {
+    let roots = <(SectionKind, Vec<u8>)>::pem_slice_iter(pem)
+        .map(|section| match section {
+            Ok((SectionKind::Certificate, der)) => Some(CertificateDer::from(der)),
+            _ => None,
+        })
+        .collect::<Option<Box<[_]>>>()?;
+    let mut store = rustls::RootCertStore::empty();
+    let readable = roots.iter().all(|root| store.add(root.clone()).is_ok());
+    (!roots.is_empty() && readable).then_some(roots)
 }
 
 /// Load a `CertifiedKey` from PEM file paths.

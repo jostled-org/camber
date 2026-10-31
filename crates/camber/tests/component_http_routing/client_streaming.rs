@@ -93,7 +93,6 @@ use crate::untrusted_tls::named_tls_peer;
 use bytes::Bytes;
 use camber::__private::ClientBodyObservation;
 use camber::__private::ClientDnsEdge;
-use camber::__private::client_test_root;
 use camber::__private::client_transport_is_built;
 use camber::RuntimeError;
 use camber::http;
@@ -1269,7 +1268,8 @@ async fn assert_tls_stream_is_read() {
     let (cert_pem, key_pem) = generate_cert_with_san("127.0.0.1");
     let mut peer = named_tls_peer(&cert_pem, &key_pem, closing_answer(SECURE_BODY)).await;
     let port = peer.addr().port();
-    let client: Client = client_test_root(http::client(), &cert_pem)
+    let client: Client = http::client()
+        .add_root_certificate(&cert_pem)
         .unwrap_or_else(|error| panic!("{row}: the test root was refused: {error:?}"));
 
     let head: StreamHead = sent(row, &client, &format!("https://127.0.0.1:{port}{PATH}")).await;
@@ -2006,7 +2006,8 @@ async fn assert_restricted_stream_authenticates_the_name(row: &str, presented: &
     let port = peer.addr().port();
     let edge = ClientDnsEdge::new();
     edge.answer(&[V4]);
-    let client: Client = client_test_root(restricted(secure_policy(row, port), &edge), &cert_pem)
+    let client: Client = restricted(secure_policy(row, port), &edge)
+        .add_root_certificate(&cert_pem)
         .unwrap_or_else(|error| panic!("{row}: the test root was refused: {error:?}"));
 
     let head: StreamHead = sent(row, &client, &format!("{}{PATH}", at(SECURE_FETCH, port))).await;

@@ -5,7 +5,6 @@
 //! Removing `retry::never()` from Camber's factory must fail every Camber row.
 
 use crate::tls_support::{build_server_config, generate_cert_with_san};
-use camber::__private::client_test_root;
 use camber::RuntimeError;
 use camber::http::{ClientError, EgressPolicy, client};
 use std::net::{IpAddr, Ipv4Addr};
@@ -89,7 +88,10 @@ async fn calibrate_protocol_refusal() {
 
 async fn camber_refuses_hidden_retry(restricted: bool, streaming: bool) {
     let peer = Peer::new().await;
-    let client = client_test_root(client().retries(0), &peer.certificate).unwrap();
+    let client = client()
+        .retries(0)
+        .add_root_certificate(&peer.certificate)
+        .unwrap();
     let client = match restricted {
         true => client.egress_policy(
             EgressPolicy::public_internet()

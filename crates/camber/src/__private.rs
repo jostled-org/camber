@@ -70,16 +70,14 @@ pub use crate::http::client::client_header_sensitivity;
 /// client and owns nothing.
 pub use crate::http::client::client_transport_is_built;
 
-/// The controlled inputs of the outbound client's two unstable edges: the
-/// answer of a name lookup, and one local trust root.
+/// The controlled input of the outbound client's unstable lookup edge: the
+/// answer of a name lookup.
 ///
-/// Exported because no local test can change what the system resolver answers
-/// or which authorities the platform trusts. Each supplies an input to the
-/// production path and reads a count. An edge's addresses are read by the
-/// production visit bound, policy decision, and pinned transport. A test root
-/// is merged by the production transport factory and disables no check.
-/// Neither can admit a destination or accept a certificate.
-pub use crate::http::client::{ClientDnsEdge, client_dns_edge, client_test_root};
+/// Exported because no local test can change what the system resolver
+/// answers. The edge supplies an input to the production path and reads a
+/// count. Its addresses are read by the production visit bound, policy
+/// decision, and pinned transport. It cannot admit a destination.
+pub use crate::http::client::{ClientDnsEdge, client_dns_edge};
 
 /// The component driver of the outbound client's body engine.
 ///

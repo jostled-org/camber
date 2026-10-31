@@ -5,8 +5,8 @@ use super::super::policy_value::clamped_duration;
 use super::super::transfer_budget::TransferBudget;
 use super::dns_edge::ClientDnsEdge;
 use super::egress::{EgressPolicy, egress_refused};
+use super::error::ClientError;
 use super::policy::OperationPolicy;
-use super::projection::client_error_projection;
 use super::redirect::RedirectPolicy;
 use super::replay::RetryPolicy;
 use super::request::ClientRequest;
@@ -15,6 +15,7 @@ use super::transport::{
     BuiltClient, Dialer, Profile, TransportCache, TransportSettings, build_client,
 };
 use crate::RuntimeError;
+use crate::tls::parse_pem_roots;
 use reqwest::header::HeaderValue;
 use reqwest::{Method, Url};
 use std::sync::{Arc, LazyLock};
@@ -153,25 +154,6 @@ pub fn client_dns_edge(mut client: Client, edge: &ClientDnsEdge) -> Client {
     client
 }
 
-/// Add one local trust root, in PEM, to every transport `client` builds.
-///
-/// The root is merged with the roots the transport already trusts, through the
-/// factory every transport is built by. It adds trust and removes no check:
-/// the certificate chain, its validity, and the requested name are still
-/// verified. A second call replaces the first root. A root the TLS backend
-/// cannot read fails the build of the transport, and each call through the
-/// client then returns `ClientError::Configuration`.
-///
-/// Semver-unsupported.
-#[doc(hidden)]
-pub fn client_test_root(mut client: Client, pem: &[u8]) -> Result<Client, RuntimeError> {
-    let root = reqwest::Certificate::from_pem(pem)
-        .map_err(|error| RuntimeError::Client(client_error_projection(&error)))?;
-    client.test_root = Some(Arc::new(root));
-    client.discard_transport();
-    Ok(client)
-}
-
 /// Create a reusable client with the default timeout, retry, and response
 /// configuration.
 ///
@@ -187,7 +169,7 @@ pub fn client() -> Client {
         total_timeout: DEFAULT_TOTAL_TIMEOUT,
         egress: EgressPolicy::unrestricted(),
         dns_edge: None,
-        test_root: None,
+        roots: Arc::from([]),
         cached: TransportCache::default(),
     }
 }
@@ -202,6 +184,7 @@ impl std::fmt::Debug for Client {
             .field("backoff", &self.backoff)
             .field("redirect", &self.redirect)
             .field("egress", &self.egress)
+            .field("added_roots", &self.roots.len())
             .finish()
     }
 }
@@ -309,9 +292,9 @@ pub struct Client {
     egress: EgressPolicy,
     /// The lookup answers a test chose, in place of the system resolver's.
     dns_edge: Option<ClientDnsEdge>,
-    /// The one local trust root a test added to every transport. Shared, so
-    /// an operation's settings copy no certificate.
-    test_root: Option<Arc<reqwest::Certificate>>,
+    /// The roots added to every transport's trust, in addition to the
+    /// platform's. Shared, so an operation's settings copy no certificate.
+    roots: Arc<[reqwest::Certificate]>,
     /// The reusable transports, one for each terminal. Only a call whose
     /// policy pins no address sends through one.
     cached: TransportCache,
@@ -545,6 +528,41 @@ impl Client {
         self
     }
 
+    /// Trust every certificate in `pem` as a root, in addition to the
+    /// platform's roots.
+    ///
+    /// Use this to reach a local TLS server in a test, or a private mirror or
+    /// proxy that an organisation's own authority signed. A self-signed leaf
+    /// is a root like any other, whatever its `CA` constraint says.
+    ///
+    /// Roots add trust and remove no check: the certificate chain, its
+    /// validity window, and the requested name are still verified. A second
+    /// call adds to the roots of the first. The roots apply to every
+    /// transport this client builds, buffered or streamed, pinned by an
+    /// egress policy or not, and to every hop of a redirect, including one to
+    /// another origin.
+    ///
+    /// `pem` is read here. Adding a root discards the transport this client
+    /// built, so the next call trusts it.
+    ///
+    /// # Errors
+    ///
+    /// `ClientError::Configuration` when `pem` holds no certificate, a
+    /// section that is not a certificate, such as a private key, or a
+    /// certificate that does not parse. The client is consumed either way.
+    pub fn add_root_certificate(mut self, pem: &[u8]) -> Result<Self, RuntimeError> {
+        let configuration = || RuntimeError::Client(ClientError::Configuration);
+        let added = parse_pem_roots(pem)
+            .ok_or_else(configuration)?
+            .iter()
+            .map(|root| reqwest::Certificate::from_der(root))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| configuration())?;
+        self.roots = self.roots.iter().cloned().chain(added).collect();
+        self.discard_transport();
+        Ok(self)
+    }
+
     /// Describe one request with any HTTP method.
     ///
     /// Nothing is sent. The method and the target are validated here, and the
@@ -582,7 +600,7 @@ impl Client {
                 Profile::Buffered => self.response.idle(),
                 Profile::Streaming => None,
             },
-            test_root: self.test_root.clone(),
+            roots: Arc::clone(&self.roots),
         }
     }
 

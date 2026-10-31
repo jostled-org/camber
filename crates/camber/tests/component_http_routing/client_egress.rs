@@ -32,9 +32,8 @@
 //! name every host answers with loopback, so the production lookup runs and
 //! its answer is what the policy reads.
 //!
-//! `client_test_root(client, pem)` adds one local trust root to the transport
-//! the production factory builds, and returns `Result<Client, RuntimeError>`.
-//! It adds trust. It removes no check.
+//! The TLS rows trust their peer's certificate through the public
+//! `Client::add_root_certificate(pem)`. It adds trust and removes no check.
 //!
 //! # Clause, row, and the mutation that bounds it
 //!
@@ -69,7 +68,6 @@ use crate::untrusted_tls::{NamedTlsEvent, TlsPeerEvent, named_tls_peer};
 
 use camber::__private::ClientDnsEdge;
 use camber::__private::client_dns_edge;
-use camber::__private::client_test_root;
 use camber::__private::client_transport_is_built;
 use camber::RuntimeError;
 use camber::http;
@@ -1243,7 +1241,8 @@ async fn restricted_calls_go_direct() {
     let (plain_port, secure_port) = (plain.addr().port(), secure.addr().port());
     let edge = ClientDnsEdge::new();
     let policy = direct_policy(row, plain_port, secure_port);
-    let client: Client = client_test_root(restricted(policy, &edge), &cert_pem)
+    let client: Client = restricted(policy, &edge)
+        .add_root_certificate(&cert_pem)
         .unwrap_or_else(|error| panic!("{row}: the test root was refused: {error:?}"));
 
     edge.answer(&[V4]);
@@ -1489,7 +1488,8 @@ async fn run_tls_case(case: &TlsCase) {
     let port = peer.addr().port();
     let edge = ClientDnsEdge::new();
     edge.answer(&[V4]);
-    let client: Client = client_test_root(restricted(secure_policy(row, port), &edge), root_pem)
+    let client: Client = restricted(secure_policy(row, port), &edge)
+        .add_root_certificate(root_pem)
         .unwrap_or_else(|error| panic!("{row}: the test root was refused: {error:?}"));
 
     let result = within_watchdog(get(&client, &target(SECURE_FETCH, port))).await;
@@ -1600,7 +1600,9 @@ async fn scheme_only_policy_keeps_private_access() {
     let mut peer = named_tls_peer(&cert_pem, &key_pem, closing_answer(SECURE_BODY)).await;
     let port = peer.addr().port();
     let policy = EgressPolicy::unrestricted().https_only();
-    let client: Client = client_test_root(http::client().egress_policy(policy), &cert_pem)
+    let client: Client = http::client()
+        .egress_policy(policy)
+        .add_root_certificate(&cert_pem)
         .unwrap_or_else(|error| panic!("{row}: the test root was refused: {error:?}"));
 
     let result = within_watchdog(get(&client, &format!("https://127.0.0.1:{port}{ANSWER}"))).await;
@@ -1812,7 +1814,8 @@ async fn cross_origin_https_downgrade_is_refused_even_when_allowlisted() {
             .unwrap()
             .allow_destination(&second.url(""), V4)
             .unwrap();
-        let client = client_test_root(restricted(policy, &edge), &cert)
+        let client = restricted(policy, &edge)
+            .add_root_certificate(&cert)
             .unwrap()
             .redirect_policy(RedirectPolicy::cross_origin(2, [&second.url("")]).unwrap());
         let result = within_watchdog(client_answer(
@@ -1879,7 +1882,8 @@ async fn cross_origin_https_chain_never_downgrades_on_a_later_hop() {
             .unwrap()
             .allow_destination(&third_origin, V4)
             .unwrap();
-        let client = client_test_root(restricted(policy, &edge), &cert)
+        let client = restricted(policy, &edge)
+            .add_root_certificate(&cert)
             .unwrap()
             .redirect_policy(
                 RedirectPolicy::cross_origin(3, [&second_origin, &third_origin]).unwrap(),
@@ -1919,7 +1923,8 @@ fn any_https_client(admitted: &[&str], edge: &ClientDnsEdge, cert: &[u8]) -> Cli
         EgressPolicy::public_internet().https_only(),
         |policy, origin| policy.allow_destination(origin, V4).unwrap(),
     );
-    client_test_root(restricted(policy, edge), cert)
+    restricted(policy, edge)
+        .add_root_certificate(cert)
         .unwrap()
         .redirect_policy(RedirectPolicy::cross_origin_https(2).unwrap())
 }
@@ -2158,7 +2163,8 @@ async fn cross_origin_retains_tls_trust_at_the_checked_destination() {
             .unwrap()
             .allow_destination(&second_origin, V4)
             .unwrap();
-        let client = client_test_root(restricted(policy, &edge), &cert)
+        let client = restricted(policy, &edge)
+            .add_root_certificate(&cert)
             .unwrap()
             .redirect_policy(RedirectPolicy::cross_origin(1, [&second_origin]).unwrap());
         let result = within_watchdog(client_answer(

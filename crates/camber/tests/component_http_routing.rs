@@ -71,6 +71,8 @@ mod client_response;
 mod client_streaming;
 #[path = "component_http_routing/client_timeouts.rs"]
 mod client_timeouts;
+#[path = "component_http_routing/client_trust.rs"]
+mod client_trust;
 #[path = "component_http_routing/connection_persistence.rs"]
 mod connection_persistence;
 #[path = "component_http_routing/framework_rejections.rs"]

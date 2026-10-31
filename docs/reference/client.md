@@ -117,6 +117,38 @@ work starts no request.
 A mock registered with `http::mock` answers without a lookup. The scheme check
 still runs. A mocked answer is no evidence of where a connection would go.
 
+### Trusted Roots
+
+By default, a client trusts the platform's roots. Use `add_root_certificate`
+to trust one more authority as well. Typical uses are a local TLS server in a
+test, and a private mirror or proxy that your organisation's own authority
+signed.
+
+```rust
+use camber::http;
+
+let pem = std::fs::read("certs/internal-ca.pem")?;
+let client = http::client().add_root_certificate(&pem)?;
+```
+
+An added root adds trust and removes no check. The certificate chain, its
+validity window, and the requested name are still verified. A self-signed
+leaf is a root like any other, even when it is marked `CA:FALSE`, so the usual
+local test certificate works as it is.
+
+- `pem` can hold several certificates. A second call adds to the roots of the
+  first.
+- The method reads `pem` at once. It returns `ClientError::Configuration` when
+  `pem` holds no certificate, a certificate that does not parse, or a section
+  that is not a certificate. A private key in a bundle of roots is refused,
+  not skipped.
+- The roots apply to every transport the client builds: buffered or
+  streamed, pinned by a destination policy or not. They apply to every hop of
+  a redirect, including a hop to another origin.
+- Adding a root discards the transport the client built, so the next call
+  trusts it. `Client` does not implement `Clone`, so no other client shares
+  the change.
+
 ## Describing A Request
 
 `Client::request` describes one request with any method. Nothing is sent until
@@ -556,7 +588,7 @@ and it has no source.
 
 | Failure | `ClientError` |
 | --- | --- |
-| The client could not be constructed | `Configuration` |
+| The client could not be constructed, or an added root was refused | `Configuration` |
 | The request description was refused | `InvalidRequest(ClientInput)` |
 | The request JSON did not serialize | `Encode` |
 | The name did not resolve | `Dns` |
